@@ -379,12 +379,18 @@ fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), Stri
 /// configs the schema accepts today (see #955). Emitted from `spawn`, which has
 /// a logger and which every caller reaches, so the JSON and programmatic paths
 /// both hear it from one site.
+///
+/// Uses [`Logger::warning_line`], not `log_line`: it is the only sink both
+/// paths actually read. `log_line` lands in the console/debug buffer, which
+/// `mxc_engine::spawn` never folds into `Output::warnings` and which
+/// `lxc-exec` prints only on an error path (and only under `--debug`, onto
+/// stdout, where it would interleave with the workload's own output).
 fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Logger) {
     let targets = plan.allowed_v6_targets();
     if targets.is_empty() {
         return;
     }
-    logger.log_line(&format!(
+    logger.warning_line(&format!(
         "WARNING: Bubblewrap allows {} IPv6 destination(s) ({}), but the sandbox \
          namespace has no IPv6 connectivity: slirp4netns is launched without \
          '--enable-ipv6', so these rules install and are never traversed. The \
@@ -1423,7 +1429,7 @@ mod tests {
 
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
-        let out = logger.get_buffer().to_string();
+        let out = logger.warnings().join("\n");
         assert!(
             out.contains("2001:db8::1"),
             "must name the v6 target: {out}"
@@ -1431,6 +1437,12 @@ mod tests {
         assert!(
             !out.contains("203.0.113.5"),
             "must not name the reachable v4 target: {out}"
+        );
+        // The retained-warning channel is the point: the debug buffer is not
+        // read back by `mxc_engine::spawn`, so a warning left there is silent.
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
         );
 
         // Nothing unreachable, nothing to say.
@@ -1441,7 +1453,7 @@ mod tests {
             network_rules::EgressPlan::for_request(&v4_only).expect("a v4 literal is enforceable");
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
-        assert!(logger.get_buffer().is_empty(), "no v6 allow, no warning");
+        assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
     }
 
     #[test]
@@ -1467,7 +1479,7 @@ mod tests {
             .expect_err("the combination is refused");
         assert!(
             err.error_message
-                .contains(wxc_common::error::BWRAP_PROXY_WITH_FIREWALL_MSG),
+                .contains(bwrap_command::BWRAP_PROXY_WITH_FIREWALL),
             "expected the parser's proxy/firewall message, got: {}",
             err.error_message
         );

@@ -68,13 +68,3 @@ pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
     "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
      Remove the host list(s) and rely on network.defaultPolicy (allow / block) or a \
      proxy instead.";
-
-/// Shared by the parser and the Bubblewrap runner's `validate`, which reject
-/// this combination independently: only JSON configs reach the parser, and only
-/// one string can keep the two paths from drifting apart.
-pub const BWRAP_PROXY_WITH_FIREWALL_MSG: &str =
-    "Bubblewrap: network.proxy cannot be combined with \
-     network.enforcementMode='firewall' or 'both'. They are competing \
-     enforcement paths for the same egress posture: the cooperative env-var \
-     proxy filters hosts at the proxy layer, while firewall mode filters by \
-     address with iptables. Choose one.";

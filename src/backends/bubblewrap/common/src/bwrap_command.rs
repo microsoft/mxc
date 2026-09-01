@@ -395,6 +395,17 @@ pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
      'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
      or remove the host policy.";
 
+/// Rejection text for a proxy combined with firewall enforcement.
+///
+/// Duplicated (verbatim) from the parser's pre-existing check of the same
+/// combination, exactly as [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] is. The parser
+/// keeps its copy for JSON configs; this one covers callers who hand a runner
+/// an `ExecutionRequest` directly. Keep the two strings identical.
+pub const BWRAP_PROXY_WITH_FIREWALL: &str = "Bubblewrap: network.proxy cannot be combined with \
+     network.enforcementMode='firewall' or 'both'. The cooperative \
+     env-var proxy enforces hosts at the proxy layer; iptables-based \
+     enforcement requires privilege and is mutually exclusive.";
+
 /// Rejection text for a proxy combined with a directional egress rule set.
 ///
 /// Distinct from [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] because the two describe
@@ -465,16 +476,21 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
 /// Validate-time twin of the parser's proxy + firewall-enforcement rejection.
 ///
 /// [`ResolvedNetworkMode::from_request`] tests the proxy first and returns
-/// `ProxyOnly`, so `enforcementMode` is never consulted on that path and a
-/// programmatic caller's explicit field is discarded in silence. Not
-/// schema-gated, matching the parser.
+/// `ProxyOnly`, so `enforcementMode` is never consulted on that path: without
+/// this gate the runner silently discards an explicitly-set, security-relevant
+/// field. Every *public* entry point reaches the runner through the parser
+/// today -- `mxc_engine::build_request*` maps a policy to wire JSON and runs
+/// `config_parser` over it, and `SandboxRequest`'s inner `ExecutionRequest` is
+/// `pub(crate)` -- so this is layer parity plus defense in depth for an in-tree
+/// caller holding an `ExecutionRequest`, not a live bypass. Not schema-gated,
+/// matching the parser.
 pub fn proxy_with_firewall_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let conflicts = request.policy.network_proxy.is_enabled()
         && matches!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         );
-    conflicts.then_some(wxc_common::error::BWRAP_PROXY_WITH_FIREWALL_MSG)
+    conflicts.then_some(BWRAP_PROXY_WITH_FIREWALL)
 }
 
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
@@ -721,6 +737,7 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
@@ -1189,9 +1206,11 @@ mod tests {
         assert!(external_proxy_host_rules_rejection(&r).is_none());
     }
 
-    /// The parser refuses this pairing; the runner did not, and could not:
-    /// `from_request` returns `ProxyOnly` before `enforcementMode` is read, so
-    /// a programmatic caller's explicit field was dropped without a word.
+    /// The parser refuses this pairing, and every public entry point reaches
+    /// the runner through the parser -- so this pins the runner's own twin
+    /// rather than a live bypass. Without it, `from_request` returns
+    /// `ProxyOnly` before `enforcementMode` is read, and an in-tree caller
+    /// holding an `ExecutionRequest` has the field dropped without a word.
     #[test]
     fn a_proxy_with_firewall_enforcement_is_rejected() {
         let mut r = base_request();
@@ -1204,7 +1223,7 @@ mod tests {
             r.policy.network_enforcement_mode = mode.clone();
             assert_eq!(
                 proxy_with_firewall_rejection(&r),
-                Some(wxc_common::error::BWRAP_PROXY_WITH_FIREWALL_MSG),
+                Some(BWRAP_PROXY_WITH_FIREWALL),
                 "{mode:?} must be refused with the parser's own message"
             );
         }
@@ -1223,6 +1242,43 @@ mod tests {
         r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
         r.policy.network_proxy.address = None;
         assert!(proxy_with_firewall_rejection(&r).is_none());
+    }
+
+    /// The runner's copy of the message must stay identical to the parser's.
+    ///
+    /// [`BWRAP_PROXY_WITH_FIREWALL`] is hand-duplicated from a string literal
+    /// inside `config_parser`, so nothing at the type level keeps the two in
+    /// step. Rather than compare against a second hardcoded copy -- which would
+    /// just move the drift -- this drives the real parser and asserts its
+    /// emitted message *is* the constant, so editing either side alone fails
+    /// here.
+    #[test]
+    fn the_parser_and_the_runner_reject_with_the_same_message() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let mut logger = Logger::new(Mode::Buffer);
+        let error = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+            .expect_err("the parser refuses proxy + firewall enforcement");
+        // Assert on the variant too: a message match would otherwise still pass
+        // if the config started failing for an unrelated reason.
+        let wxc_common::config_parser::ParseError::OneShot(inner) = &error else {
+            panic!("expected a one-shot conversion failure, got: {error:?}");
+        };
+        let message = format!("{inner}");
+
+        assert!(
+            message.contains(BWRAP_PROXY_WITH_FIREWALL),
+            "the parser's message has drifted from BWRAP_PROXY_WITH_FIREWALL.\n\
+             parser: {message}\n runner: {BWRAP_PROXY_WITH_FIREWALL}"
+        );
     }
 
     /// A directional runtime proxy must not trip the legacy host-list guard.
