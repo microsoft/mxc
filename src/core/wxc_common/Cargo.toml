@@ -32,7 +32,12 @@ mxc_schema_support = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true, features = ["Win32_Globalization"] }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }

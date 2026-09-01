@@ -80,36 +80,16 @@ struct Cli {
     /// revoke here. See docs/telemetry/telemetry-consent-design.md.
     #[arg(long = "telemetry-consent-status")]
     telemetry_consent_status: bool,
-
-    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
-    #[arg(long = "telemetry-consent-grant")]
-    telemetry_consent_grant: bool,
-
-    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
-    #[arg(long = "telemetry-consent-revoke")]
-    telemetry_consent_revoke: bool,
-
-    /// Legacy companion tombstone for the removed grant/revoke flow.
-    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
-    telemetry_consent_source: Option<String>,
 }
 
 /// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
 /// mirrors. On Linux, `wxc_common::telemetry::consent` always reports
-/// `NotApplicable`; legacy state-changing flags return the same non-mutating
-/// maintenance-JSON migration error as every other executor.
 /// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
 /// this fast path can't drift from `wxc-exec`/`mxc-exec-mac`. The shared
 /// handler returns the outcome as data; terminating the process is this
 /// binary's job, not the foundation crate's.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) =
-        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
-            status: cli.telemetry_consent_status,
-            grant: cli.telemetry_consent_grant,
-            revoke: cli.telemetry_consent_revoke,
-            source: cli.telemetry_consent_source.as_deref(),
-        })
+    let Some(outcome) = telemetry::consent_cli::handle_consent_status(cli.telemetry_consent_status)
     else {
         return false;
     };

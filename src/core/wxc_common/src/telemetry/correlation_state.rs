@@ -29,6 +29,8 @@ use super::correlation_vector::{is_relayable, seed, spin};
 const RECORD_EXTENSION: &str = "cv";
 const STALE_RECORD_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const STALE_TMP_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const STORE_LOCK_RETRY_COUNT: usize = 200;
+const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 const PRUNE_DELETE_LIMIT: usize = 256;
 
 /// Pre-dispatch correlation vector for a state-aware phase. `provision` always
@@ -42,10 +44,17 @@ pub fn pre_dispatch_vector(active: bool, is_provision: bool, sandbox_id: Option<
     if !active {
         return String::new();
     }
-    prune_stale_records();
     match sandbox_id {
-        Some(id) if !is_provision => phase_vector(id),
-        _ => seed(),
+        Some(id) if !is_provision => {
+            // Load and refresh the active lifecycle before sweeping abandoned
+            // records. Otherwise a valid sandbox whose last phase was over the
+            // retention threshold ago would delete its own root here.
+            phase_vector(id)
+        }
+        _ => {
+            prune_stale_records(None);
+            seed()
+        }
     }
 }
 
@@ -99,7 +108,7 @@ fn should_forget_after_deprovision(outcome: &Result<DispatchOutcome, MxcError>) 
 /// Recall the persisted lifecycle root for `sandbox_id` and spin a child off
 /// it. Seeds a fresh, disconnected vector if no valid record exists.
 fn phase_vector(sandbox_id: &str) -> String {
-    match with_store(|store| store.load(sandbox_id)) {
+    match with_store(|store| store.load_and_prune(sandbox_id)) {
         Some(root) if is_relayable(&root) => spin(&root),
         _ => seed(),
     }
@@ -139,8 +148,8 @@ fn record_key(sandbox_id: &str) -> String {
     encoded
 }
 
-fn prune_stale_records() {
-    with_store(|store| store.prune_stale());
+fn prune_stale_records(protected_sandbox_id: Option<&str>) {
+    with_store(|store| store.prune_stale(protected_sandbox_id));
 }
 
 fn with_store<R>(f: impl FnOnce(&dyn CorrelationStore) -> R) -> R {
@@ -156,12 +165,54 @@ fn with_store<R>(f: impl FnOnce(&dyn CorrelationStore) -> R) -> R {
 pub(crate) trait CorrelationStore: Send + Sync {
     fn persist(&self, sandbox_id: &str, root: &str);
     fn load(&self, sandbox_id: &str) -> Option<String>;
+    fn load_and_prune(&self, sandbox_id: &str) -> Option<String> {
+        let root = self.load(sandbox_id);
+        self.prune_stale(Some(sandbox_id));
+        root
+    }
     fn forget(&self, sandbox_id: &str);
-    fn prune_stale(&self);
+    fn prune_stale(&self, protected_sandbox_id: Option<&str>);
 }
 
 struct FilesystemCorrelationStore {
     dir: Option<PathBuf>,
+}
+
+struct StoreOperationLock {
+    _file: fs::File,
+}
+
+#[cfg(unix)]
+fn try_lock_file(file: &fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: `file` owns a valid descriptor for the duration of this call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+#[cfg(windows)]
+fn try_lock_file(file: &fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows::Win32::System::IO::OVERLAPPED;
+
+    // SAFETY: the handle remains valid for the lock's lifetime because the
+    // returned guard owns `file`; the zeroed OVERLAPPED selects byte offset 0.
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    unsafe {
+        LockFileEx(
+            HANDLE(file.as_raw_handle()),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            None,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+        .is_ok()
+    }
 }
 
 impl FilesystemCorrelationStore {
@@ -191,8 +242,49 @@ impl FilesystemCorrelationStore {
         })
     }
 
+    fn operation_lock(&self) -> Option<StoreOperationLock> {
+        let dir = self.dir.as_ref()?;
+        if fs::create_dir_all(dir).is_err() {
+            return None;
+        }
+        let path = dir.join(".store-lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+        for _ in 0..STORE_LOCK_RETRY_COUNT {
+            if try_lock_file(&file) {
+                return Some(StoreOperationLock { _file: file });
+            }
+            std::thread::sleep(STORE_LOCK_RETRY_DELAY);
+        }
+        None
+    }
+
     fn read_record(path: &Path) -> Option<String> {
         fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    }
+
+    fn refresh_record(path: &Path) {
+        let times = fs::FileTimes::new().set_modified(SystemTime::now());
+        if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
+            let _ = file.set_times(times);
+        }
+    }
+
+    fn load_unlocked(&self, sandbox_id: &str) -> Option<String> {
+        let path = self.record_path(sandbox_id)?;
+        if let Some(root) = Self::read_record(&path) {
+            if is_relayable(&root) {
+                Self::refresh_record(&path);
+                return Some(root);
+            }
+            let _ = fs::remove_file(&path);
+        }
+        None
     }
 
     fn write_record(&self, sandbox_id: &str, path: &Path, root: &str) {
@@ -244,39 +336,13 @@ impl FilesystemCorrelationStore {
             .map(|age| age > STALE_RECORD_MAX_AGE)
             .unwrap_or(false)
     }
-}
 
-impl CorrelationStore for FilesystemCorrelationStore {
-    fn persist(&self, sandbox_id: &str, root: &str) {
-        let Some(path) = self.record_path(sandbox_id) else {
-            return;
-        };
-        self.write_record(sandbox_id, &path, root);
-    }
-
-    fn load(&self, sandbox_id: &str) -> Option<String> {
-        let path = self.record_path(sandbox_id)?;
-        if let Some(root) = Self::read_record(&path) {
-            if is_relayable(&root) {
-                return Some(root);
-            }
-            let _ = fs::remove_file(&path);
-            return None;
-        }
-
-        None
-    }
-
-    fn forget(&self, sandbox_id: &str) {
-        if let Some(path) = self.record_path(sandbox_id) {
-            let _ = fs::remove_file(path);
-        }
-    }
-
-    fn prune_stale(&self) {
+    fn prune_stale_unlocked(&self, protected_sandbox_id: Option<&str>) {
         let Some(dir) = self.dir.as_ref() else {
             return;
         };
+        let protected_path =
+            protected_sandbox_id.and_then(|sandbox_id| self.record_path(sandbox_id));
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -294,11 +360,54 @@ impl CorrelationStore for FilesystemCorrelationStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some(RECORD_EXTENSION) {
                 continue;
             }
+            if protected_path.as_deref() == Some(path.as_path()) {
+                continue;
+            }
             if deleted < PRUNE_DELETE_LIMIT && Self::stale_record(&path, now) {
                 let _ = fs::remove_file(path);
                 deleted += 1;
             }
         }
+    }
+}
+
+impl CorrelationStore for FilesystemCorrelationStore {
+    fn persist(&self, sandbox_id: &str, root: &str) {
+        let Some(_lock) = self.operation_lock() else {
+            return;
+        };
+        let Some(path) = self.record_path(sandbox_id) else {
+            return;
+        };
+        self.write_record(sandbox_id, &path, root);
+    }
+
+    fn load(&self, sandbox_id: &str) -> Option<String> {
+        let _lock = self.operation_lock()?;
+        self.load_unlocked(sandbox_id)
+    }
+
+    fn load_and_prune(&self, sandbox_id: &str) -> Option<String> {
+        let _lock = self.operation_lock()?;
+        let root = self.load_unlocked(sandbox_id);
+        self.prune_stale_unlocked(Some(sandbox_id));
+        root
+    }
+
+    fn forget(&self, sandbox_id: &str) {
+        let Some(_lock) = self.operation_lock() else {
+            return;
+        };
+        if let Some(path) = self.record_path(sandbox_id) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn prune_stale(&self, protected_sandbox_id: Option<&str>) {
+        let Some(_lock) = self.operation_lock() else {
+            return;
+        };
+        self.prune_stale_unlocked(protected_sandbox_id);
     }
 }
 
@@ -406,7 +515,7 @@ mod tests {
                 .remove(sandbox_id);
         }
 
-        fn prune_stale(&self) {
+        fn prune_stale(&self, _protected_sandbox_id: Option<&str>) {
             *self.prune_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         }
     }
@@ -682,26 +791,55 @@ mod tests {
     }
 
     #[test]
-    fn stale_record_is_pruned_during_startup_sweep() {
+    fn requested_long_lived_record_is_refreshed_while_unrelated_stale_record_is_pruned() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
-        let sandbox_id = "wsb:stale000";
+        let sandbox_id = "wsb:active00";
+        let abandoned_id = "wsb:stale000";
         let root = seed();
         let base = root.split('.').next().unwrap().to_string();
         let store = FilesystemCorrelationStore::from_store_root(tmp.path().to_path_buf());
         let path = store.record_path(sandbox_id).unwrap();
+        let abandoned_path = store.record_path(abandoned_id).unwrap();
         fs::create_dir_all(tmp.path()).unwrap();
         fs::write(&path, &root).unwrap();
-        filetime::set_file_mtime(
-            &path,
-            FileTime::from_system_time(
-                SystemTime::now() - STALE_RECORD_MAX_AGE - Duration::from_secs(1),
-            ),
-        )
-        .unwrap();
+        fs::write(&abandoned_path, seed()).unwrap();
+        let stale_time = SystemTime::now() - STALE_RECORD_MAX_AGE - Duration::from_secs(1);
+        filetime::set_file_mtime(&path, FileTime::from_system_time(stale_time)).unwrap();
+        filetime::set_file_mtime(&abandoned_path, FileTime::from_system_time(stale_time)).unwrap();
+
         let spun = pre_dispatch_vector(true, false, Some(sandbox_id));
-        assert_ne!(spun.split('.').next().unwrap(), base);
-        assert!(!path.exists());
+        assert_eq!(spun.split('.').next().unwrap(), base);
+        assert!(path.exists());
+        assert!(
+            FilesystemCorrelationStore::file_age(&path, SystemTime::now()).unwrap()
+                < Duration::from_secs(10),
+            "successful load must refresh the active record's age"
+        );
+        assert!(!abandoned_path.exists());
+    }
+
+    #[test]
+    fn store_lock_excludes_a_second_file_handle_until_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".store-lock");
+        let first = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        assert!(try_lock_file(&first));
+        assert!(!try_lock_file(&second));
+        drop(first);
+        assert!(try_lock_file(&second));
     }
 
     #[test]
@@ -740,7 +878,14 @@ mod tests {
 
         let _ = pre_dispatch_vector(true, true, None);
 
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 10);
+        let remaining_records = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry.path().extension().and_then(|ext| ext.to_str()) == Some(RECORD_EXTENSION)
+            })
+            .count();
+        assert_eq!(remaining_records, 10);
     }
 
     #[test]

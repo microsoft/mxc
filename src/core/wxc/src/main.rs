@@ -114,20 +114,6 @@ struct Cli {
     #[arg(long = "telemetry-consent-status")]
     telemetry_consent_status: bool,
 
-    /// Legacy non-mutating tombstone. Returns a migration error directing the
-    /// caller to the typed JSON consent maintenance envelope.
-    #[arg(long = "telemetry-consent-grant")]
-    telemetry_consent_grant: bool,
-
-    /// Legacy non-mutating tombstone. Returns a migration error directing the
-    /// caller to JSON action `withdraw`.
-    #[arg(long = "telemetry-consent-revoke")]
-    telemetry_consent_revoke: bool,
-
-    /// Legacy companion tombstone for the removed grant/revoke flow.
-    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
-    telemetry_consent_source: Option<String>,
-
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
     /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
@@ -228,7 +214,7 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Handles the `--telemetry-consent-{status,grant,revoke}` fast paths.
+/// Handles the `--telemetry-consent-status` fast path.
 ///
 /// Returns `true` if one of the flags was handled (and the caller should
 /// exit immediately), `false` if none were passed and normal execution
@@ -242,13 +228,7 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
 /// job, not the foundation crate's. See
 /// `docs/telemetry/telemetry-consent-design.md`.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) =
-        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
-            status: cli.telemetry_consent_status,
-            grant: cli.telemetry_consent_grant,
-            revoke: cli.telemetry_consent_revoke,
-            source: cli.telemetry_consent_source.as_deref(),
-        })
+    let Some(outcome) = telemetry::consent_cli::handle_consent_status(cli.telemetry_consent_status)
     else {
         return false;
     };

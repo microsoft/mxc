@@ -13,19 +13,6 @@ use crate::wire;
 
 const PRESENTER_PROTOCOL_ENV: &str = "MXC_TELEMETRY_CONSENT_PRESENTER_PROTOCOL";
 
-/// Telemetry-consent CLI flags.
-#[derive(Debug, Clone, Copy)]
-pub struct ConsentCliFlags<'a> {
-    /// `--telemetry-consent-status`
-    pub status: bool,
-    /// `--telemetry-consent-grant`
-    pub grant: bool,
-    /// `--telemetry-consent-revoke`
-    pub revoke: bool,
-    /// `--telemetry-consent-source`; defaults to `"cli"` when absent.
-    pub source: Option<&'a str>,
-}
-
 /// Output and exit code for a handled consent command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentCliOutcome {
@@ -33,8 +20,7 @@ pub struct ConsentCliOutcome {
     pub stdout: Option<String>,
     /// Line to print to stderr, if any.
     pub stderr: Option<String>,
-    /// Process exit code: `0` on success, `64` (`EX_USAGE`) for mutually
-    /// exclusive flags, `1` for a failed write or serialization.
+    /// Process exit code: `0` on success, `1` for failed serialization.
     pub exit_code: i32,
 }
 
@@ -74,20 +60,10 @@ impl ConsentCliOutcome {
     }
 }
 
-/// Handle legacy consent flags. Returns `None` when no flag was supplied.
-pub fn handle_consent_flags(flags: &ConsentCliFlags<'_>) -> Option<ConsentCliOutcome> {
-    if !(flags.status || flags.grant || flags.revoke || flags.source.is_some()) {
+/// Handle the telemetry consent status flag. Returns `None` when absent.
+pub fn handle_consent_status(status: bool) -> Option<ConsentCliOutcome> {
+    if !status {
         return None;
-    }
-
-    if flags.grant || flags.revoke || flags.source.is_some() {
-        return Some(ConsentCliOutcome::failure(
-            "Error: --telemetry-consent-grant, --telemetry-consent-revoke, and \
-             --telemetry-consent-source no longer change consent. Use the typed \
-             telemetry-consent JSON maintenance envelope instead."
-                .to_string(),
-            64,
-        ));
     }
 
     Some(ConsentCliOutcome::json(&maintenance_response(
@@ -470,15 +446,6 @@ mod tests {
     use super::*;
     use crate::telemetry::consent_prompt::{ConsentPrompt, EN_US_CONSENT_PROMPT};
 
-    fn flags(status: bool, grant: bool, revoke: bool) -> ConsentCliFlags<'static> {
-        ConsentCliFlags {
-            status,
-            grant,
-            revoke,
-            source: None,
-        }
-    }
-
     fn prompt() -> ConsentPrompt {
         EN_US_CONSENT_PROMPT
     }
@@ -526,8 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn no_flags_is_a_noop() {
-        assert!(handle_consent_flags(&flags(false, false, false)).is_none());
+    fn absent_status_flag_is_a_noop() {
+        assert!(handle_consent_status(false).is_none());
     }
 
     fn assert_status_json(
@@ -545,20 +512,6 @@ mod tests {
         assert_eq!(value["effectiveState"], effective);
         assert_eq!(value["policy"], policy);
         assert_eq!(value["needsPrompt"], needs_prompt);
-    }
-
-    /// Previously unreachable in-process: this branch called
-    /// `std::process::exit(64)` and would have killed the test runner.
-    #[test]
-    fn legacy_state_changing_flags_return_a_migration_error() {
-        let outcome = handle_consent_flags(&flags(false, true, true)).expect("handled");
-        assert_eq!(outcome.exit_code, 64);
-        assert_eq!(outcome.stdout, None);
-        assert!(outcome
-            .stderr
-            .as_deref()
-            .unwrap()
-            .contains("JSON maintenance envelope"));
     }
 
     #[test]
@@ -662,9 +615,8 @@ mod tests {
     }
 
     /// The non-Windows contract every executor must honor: status is a
-    /// successful `not-applicable` report, and grant/revoke are refused
-    /// rather than silently accepted. MXC must never offer — or appear to
-    /// record — consent on a platform where it cannot collect telemetry.
+    /// successful `not-applicable` report. MXC must never offer — or appear
+    /// to record — consent on a platform where it cannot collect telemetry.
     ///
     /// Gated to non-Windows (rather than merged into the Windows tests)
     /// because it asserts the *stub* behavior; without it, Linux/macOS CI
@@ -675,7 +627,7 @@ mod tests {
 
         #[test]
         fn status_reports_not_applicable_and_succeeds() {
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_status(true).expect("handled");
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -686,37 +638,10 @@ mod tests {
             );
             assert_eq!(outcome.stderr, None);
         }
-
-        #[test]
-        fn grant_is_refused() {
-            let outcome = handle_consent_flags(&flags(false, true, false)).expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert!(outcome
-                .stderr
-                .as_deref()
-                .unwrap()
-                .contains("JSON maintenance envelope"));
-        }
-
-        #[test]
-        fn revoke_is_refused() {
-            let outcome = handle_consent_flags(&flags(false, false, true)).expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert!(outcome
-                .stderr
-                .as_deref()
-                .unwrap()
-                .contains("JSON maintenance envelope"));
-        }
     }
 
-    /// End-to-end coverage of the `handle_consent_flags` paths (grant,
-    /// revoke, status, and a forced write failure) against an isolated
-    /// consent store — this is the same fast path all three executors
-    /// (`wxc-exec`, `lxc-exec`, `mxc-exec-mac`) delegate to, so exercising it
-    /// here covers the shared behavior for all three executors.
+    /// End-to-end coverage of the status path against an isolated consent
+    /// store. This is the same fast path all three executors delegate to.
     #[cfg(target_os = "windows")]
     mod windows_tests {
         use super::*;
@@ -731,45 +656,11 @@ mod tests {
         }
 
         #[test]
-        fn grant_flag_is_a_non_mutating_migration_tombstone() {
-            let tmp = tempfile::tempdir().unwrap();
-            let _guards = isolate(tmp.path());
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: true,
-                revoke: false,
-                source: Some("prompt"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert_eq!(consent::get_consent().as_str(), "undetermined");
-        }
-
-        #[test]
-        fn revoke_flag_is_a_non_mutating_migration_tombstone() {
-            let tmp = tempfile::tempdir().unwrap();
-            let _guards = isolate(tmp.path());
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: false,
-                revoke: true,
-                source: Some("settings-toggle"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert_eq!(consent::get_consent().as_str(), "undetermined");
-        }
-
-        #[test]
         fn status_flag_reports_current_state_without_mutating_it() {
             let tmp = tempfile::tempdir().unwrap();
             let _guards = isolate(tmp.path());
 
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_status(true).expect("handled");
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -791,32 +682,9 @@ mod tests {
             let env = isolate(tmp.path());
             env.set_policy_value(0);
 
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_status(true).expect("handled");
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(&outcome, "undetermined", "undetermined", "blocked", false);
-        }
-
-        /// A user may still record a decision while policy blocks collection;
-        /// it is honoured if the administrator later relaxes the policy. What
-        /// must not happen is the grant being treated as collectable.
-        #[test]
-        fn grant_tombstone_does_not_record_under_a_blocking_policy() {
-            let tmp = tempfile::tempdir().unwrap();
-            let env = isolate(tmp.path());
-            env.set_policy_value(0);
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: true,
-                revoke: false,
-                source: Some("cli"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(consent::get_consent(), consent::ConsentState::Undetermined);
-            assert!(!crate::telemetry::is_enabled(
-                &crate::models::TelemetryConfig::default()
-            ));
         }
 
         /// Previously unreachable in-process: this branch called
