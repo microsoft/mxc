@@ -131,11 +131,8 @@ $installerAuthoring = Get-Content (Join-Path $installerDir 'IsoSession.wxs') -Ra
 $clientManifestTemplate =
     Get-Content (Join-Path $installerDir 'IsoSessionClient.manifest.template') -Raw
 Assert-True (
-    $installerAuthoring.Contains('Source="$(var.BinDir)\IsoSessionCore.dll"')
-) 'MSI installs IsoSessionCore.dll required by IsoSessionServer.dll'
-Assert-True (
-    $installerAuthoring.Contains('<ComponentRef Id="Comp_IsoSessionCore" />')
-) 'MSI includes IsoSessionCore.dll in the Complete feature'
+    -not $installerAuthoring.Contains('IsoSessionCore.dll')
+) 'MSI leaves the IsoSessionCore compatibility boundary inbox'
 Assert-True (
     $installerAuthoring.Contains('Source="$(var.RuntimeManifestPath)"')
 ) 'MSI installs the generated IsoSession.manifest'
@@ -362,6 +359,11 @@ if (-not $dotnetAvailable) {
                 $null
             }
             Assert-True ($runtimeManifestName -eq 'IsoSession.manifest') "$arch MSI contains IsoSession.manifest"
+
+            $coreView = $db.OpenView(
+                "SELECT ``FileName`` FROM ``File`` WHERE ``File`` = 'IsoSessionCore.dll'")
+            $coreView.Execute()
+            Assert-True (-not $coreView.Fetch()) "$arch MSI leaves IsoSessionCore.dll inbox"
 
             $registryView = $db.OpenView(
                 "SELECT ``Key`` FROM ``Registry`` WHERE ``Name`` = 'InstallDir'")

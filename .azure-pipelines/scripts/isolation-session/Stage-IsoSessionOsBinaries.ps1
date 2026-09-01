@@ -34,7 +34,6 @@ if (-not (Test-Path -LiteralPath $DropRoot -PathType Container)) {
 
 $requiredBinaries = @(
     'IsoSessionServer.dll',
-    'IsoSessionCore.dll',
     'IsoSessionClient.dll',
     'IsoSessionApp.dll',
     'IsoSessionProxyStub.dll',

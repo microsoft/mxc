@@ -11,7 +11,6 @@ try {
     New-Item -ItemType Directory -Path $dropRoot | Out-Null
     $required = @(
         'IsoSessionServer.dll',
-        'IsoSessionCore.dll',
         'IsoSessionClient.dll',
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',

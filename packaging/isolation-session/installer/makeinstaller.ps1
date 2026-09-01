@@ -19,10 +19,10 @@
 #
 # Prerequisites:
 #   - .NET SDK (dotnet) on PATH — WiX v5 SDK + wixext packages restore via NuGet
-#   - The seven IsoSession binaries for the target architecture staged under -BinDir
-#     (IsoSessionServer.dll, IsoSessionCore.dll, IsoSessionClient.dll,
-#      IsoSessionApp.dll, IsoSessionProxyStub.dll, IsoSessionCli.exe,
-#      IsolationProxy.exe)
+#   - The six lifted IsoSession binaries for the target architecture staged
+#     under -BinDir (IsoSessionServer.dll, IsoSessionClient.dll,
+#     IsoSessionApp.dll, IsoSessionProxyStub.dll, IsoSessionCli.exe,
+#     IsolationProxy.exe). IsoSessionCore.dll remains inbox.
 #
 # Usage:
 #   powershell -File makeinstaller.ps1 -Arch x64 -BinDir C:\path\to\x64\bin
@@ -47,7 +47,7 @@ param(
         }
     ),
 
-    # Directory containing the seven IsoSession binaries for -Arch (see header).
+    # Directory containing the six lifted IsoSession binaries for -Arch (see header).
     # No fragile environment-variable-based default: the caller (CI or a dev)
     # must stage these explicitly, since they come from the separate OS binary
     # drop, not from this repo's own build.
@@ -105,7 +105,7 @@ if ($MonthId -notmatch '^\d{4}\.\d{2}$') {
 }
 
 if (-not $BinDir) {
-    Write-Error "-BinDir is required: it must point to a directory containing the seven IsoSession binaries built for '$Arch' (IsoSessionServer.dll, IsoSessionCore.dll, IsoSessionClient.dll, IsoSessionApp.dll, IsoSessionProxyStub.dll, IsoSessionCli.exe, IsolationProxy.exe)."
+    Write-Error "-BinDir is required: it must point to a directory containing the six lifted IsoSession binaries built for '$Arch' (IsoSessionServer.dll, IsoSessionClient.dll, IsoSessionApp.dll, IsoSessionProxyStub.dll, IsoSessionCli.exe, IsolationProxy.exe)."
     exit 1
 }
 
@@ -116,7 +116,6 @@ if (-not (Test-Path -LiteralPath $BinDir -PathType Container)) {
 
 $requiredBinaries = @(
     'IsoSessionServer.dll',
-    'IsoSessionCore.dll',
     'IsoSessionClient.dll',
     'IsoSessionApp.dll',
     'IsoSessionProxyStub.dll',

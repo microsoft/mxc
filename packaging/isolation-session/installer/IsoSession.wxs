@@ -114,12 +114,6 @@
               KeyPath="yes" />
       </Component>
 
-      <Component Id="Comp_IsoSessionCore">
-        <File Id="IsoSessionCore.dll"
-              Source="$(var.BinDir)\IsoSessionCore.dll"
-              KeyPath="yes" />
-      </Component>
-
       <Component Id="Comp_IsoSessionClient">
         <File Id="IsoSessionClient.dll"
               Source="$(var.BinDir)\IsoSessionClient.dll"
@@ -473,7 +467,6 @@
     <!-- ================================================================ -->
     <Feature Id="Complete" Title="IsolationSession Service ($(var.MonthId), $(var.Arch))" Level="1">
       <ComponentRef Id="Comp_IsoSessionServer" />
-      <ComponentRef Id="Comp_IsoSessionCore" />
       <ComponentRef Id="Comp_IsoSessionClient" />
       <ComponentRef Id="Comp_IsoSessionApp" />
       <ComponentRef Id="Comp_IsoSessionProxyStub" />

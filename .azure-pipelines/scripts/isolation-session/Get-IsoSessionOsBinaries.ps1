@@ -52,7 +52,6 @@ New-Item -ItemType Directory -Path $downloadRoot | Out-Null
 
 $filters = @(
     '/IsoSessionServer.dll',
-    '/IsoSessionCore.dll',
     '/IsoSessionClient.dll',
     '/IsoSessionApp.dll',
     '/IsoSessionProxyStub.dll',

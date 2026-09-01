@@ -36,14 +36,14 @@ if ($verb -eq 'get') {
     $filterIndex = [array]::IndexOf($args, '-r')
     $filters = if ($filterIndex -ge 0) { $args[$filterIndex + 1] } else { '' }
     if ($filters -notmatch '/windows\.ai\.isolationsession\.winmd' -or
-        $filters -notmatch '/windows\.ai\.isolationsession\.preview\.winmd') {
-        Write-Output 'WinMD filters were not requested.'
+        $filters -notmatch '/windows\.ai\.isolationsession\.preview\.winmd' -or
+        $filters -match '/IsoSessionCore\.dll') {
+        Write-Output 'Expected lifted payload filters were not requested.'
         exit 3
     }
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
     foreach ($name in @(
         'IsoSessionServer.dll',
-        'IsoSessionCore.dll',
         'IsoSessionClient.dll',
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
@@ -79,7 +79,7 @@ exit 9
     if ($manifest.dropName -ne 'wdg/test/arm64fre/BIN/newest') {
         throw "Resolver did not select the newest finalized drop: $($manifest.dropName)"
     }
-    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 9) {
+    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 8) {
         throw 'Download manifest did not contain the expected ARM64 payload.'
     }
     if (@($manifest.files | Where-Object { $_.kind -eq 'winmd' }).Count -ne 2) {
