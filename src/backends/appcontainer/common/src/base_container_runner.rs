@@ -39,7 +39,8 @@ use windows::Win32::System::Threading::{
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::base_container_helpers::{
-    build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
+    build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, psec_policy_compatible,
+    query_psec_support, requires_psec_networking, resolve_psec_support, PsecSupport,
 };
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -221,6 +222,7 @@ const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
 /// contract, which requires an AppContainer proxy peer identity that MXC does
 /// not yet provide.
 const SANDBOX_CAP_NETWORK_PROXY: u64 = 0x0000_0000_0000_0004;
+
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
 const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
@@ -228,6 +230,9 @@ const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
      QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; this OS \
      build does not support that policy, and the process-security-environment path \
      cannot fall back to AppContainer or host-DACL enforcement";
+const PSEC_NETWORK_INGRESS_UNSUPPORTED_MSG: &str = "network.ingress.hostLoopback='allow' requires \
+     QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_NETWORK_INGRESS; this OS \
+     build does not support host loopback";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
@@ -311,7 +316,9 @@ trait CaptureSessionFactory: Send + Sync {
 
 trait CapturePlatformSupport: Send + Sync {
     fn check_apis(&self, require_learning_mode: bool) -> Result<(), String>;
-    fn supports_deny_paths(&self) -> Result<bool, String>;
+    fn psec_support(&self) -> Result<PsecSupport, String> {
+        query_psec_support()
+    }
 }
 
 struct RealCaptureSessionFactory;
@@ -345,15 +352,56 @@ impl CapturePlatformSupport for RealCapturePlatformSupport {
         }
         Ok(())
     }
+}
 
-    fn supports_deny_paths(&self) -> Result<bool, String> {
-        SecurityEnvironmentApi::load()
-            .map_err(|error| format!("process security-environment API unavailable: {error}"))?
-            .supports_deny_paths()
-            .map_err(|error| {
-                format!("could not query process security-environment support: {error}")
-            })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PsecSelection {
+    selected: bool,
+    support: PsecSupport,
+    support_queried: bool,
+}
+
+fn select_psec(
+    request: &ExecutionRequest,
+    psec_usable: bool,
+    platform: &dyn CapturePlatformSupport,
+) -> Result<PsecSelection, String> {
+    if !psec_usable {
+        return Ok(PsecSelection {
+            selected: false,
+            support: PsecSupport::V1_0,
+            support_queried: false,
+        });
     }
+
+    if request.policy.capture_denials.is_some() {
+        #[cfg(test)]
+        let capture_apis_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
+            |_| platform.check_apis(true).is_ok(),
+            |forced| forced == "1",
+        );
+        #[cfg(not(test))]
+        let capture_apis_usable = platform.check_apis(true).is_ok();
+
+        if !capture_apis_usable {
+            return Ok(PsecSelection {
+                selected: false,
+                support: PsecSupport::V1_0,
+                support_queried: false,
+            });
+        }
+    }
+
+    let mut support_queried = false;
+    let support = resolve_psec_support(request, || {
+        support_queried = true;
+        platform.psec_support()
+    })?;
+    Ok(PsecSelection {
+        selected: psec_policy_compatible(request, support),
+        support,
+        support_queried,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,7 +466,12 @@ impl BaseContainerRunner {
 
     #[cfg(test)]
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        build_psec_spec(request)
+        let support = if request.policy.network_ingress.is_some() {
+            PsecSupport::V1_1
+        } else {
+            PsecSupport::V1_0
+        };
+        build_psec_spec(request, support)
     }
 
     #[cfg(test)]
@@ -563,7 +616,7 @@ impl BaseContainerRunner {
                 schema_version: "0.8.0-alpha".to_string(),
                 ..Default::default()
             };
-            let specification = build_psec_spec(&request);
+            let specification = build_psec_spec(&request, PsecSupport::V1_0);
             SecurityEnvironmentApi::load()
                 .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
                 .and_then(|environment| {
@@ -592,7 +645,7 @@ impl BaseContainerRunner {
             schema_version: "0.8.0-alpha".to_string(),
             ..Default::default()
         };
-        let specification = build_psec_spec(&request);
+        let specification = build_psec_spec(&request, PsecSupport::V1_0);
         SecurityEnvironmentApi::load()
             .and_then(|security_environment_api| {
                 CaptureSession::begin(
@@ -800,22 +853,13 @@ impl BaseContainerRunner {
         !is_api_not_implemented(err.0)
     }
 
+    #[cfg(test)]
     fn should_use_process_security_environment(
         request: &ExecutionRequest,
         psec_usable: bool,
-        psec_supports_deny_paths: bool,
+        support: PsecSupport,
     ) -> bool {
-        if !psec_usable {
-            return false;
-        }
-        Self::psec_policy_compatible(request, psec_supports_deny_paths)
-    }
-
-    fn psec_policy_compatible(request: &ExecutionRequest, psec_supports_deny_paths: bool) -> bool {
-        !request.policy.least_privilege_mode
-            && (!request.policy.network_proxy.is_enabled()
-                || request.policy.runtime_network_proxy_specified)
-            && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
+        psec_usable && psec_policy_compatible(request, support)
     }
 
     fn process_security_environment_usable(&self) -> bool {
@@ -826,78 +870,14 @@ impl BaseContainerRunner {
         Self::is_process_security_environment_usable()
     }
 
-    /// Whether a `captureDenials` request is eligible for the native
-    /// (PSEC + Learning Mode) capture path, given the effective PSEC usability
-    /// and a [`CapturePlatformSupport`] probe. Shared by the instance
-    /// ([`Self::uses_process_security_environment`], probing `self.capture_support`)
-    /// and static ([`Self::uses_native_capture_for_request`], probing
-    /// [`RealCapturePlatformSupport`]) eligibility checks so the two cannot drift.
-    fn native_capture_eligible(
-        request: &ExecutionRequest,
-        psec_usable: bool,
-        support: &dyn CapturePlatformSupport,
-    ) -> bool {
-        #[cfg(test)]
-        let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
-            |_| psec_usable && support.check_apis(true).is_ok(),
-            |forced| forced == "1",
-        );
-        #[cfg(not(test))]
-        let native_capture_usable = psec_usable && support.check_apis(true).is_ok();
-
-        request.policy.capture_denials.is_some()
-            && native_capture_usable
-            && Self::psec_policy_compatible(
-                request,
-                request.policy.denied_paths.is_empty()
-                    || support.supports_deny_paths().unwrap_or(false),
-            )
-    }
-
-    fn uses_process_security_environment(&self, request: &ExecutionRequest) -> bool {
-        if request.policy.capture_denials.is_some() {
-            return Self::native_capture_eligible(
-                request,
-                self.process_security_environment_usable(),
-                self.capture_support.as_ref(),
-            );
-        }
-        let supports_deny_paths = request.policy.denied_paths.is_empty()
-            || self.capture_support.supports_deny_paths().unwrap_or(false);
-        Self::should_use_process_security_environment(
-            request,
-            self.process_security_environment_usable(),
-            supports_deny_paths,
-        )
-    }
-
     pub(crate) fn is_usable_for_request(request: &ExecutionRequest) -> bool {
         #[cfg(test)]
         if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
             return forced == "1";
         }
         let psec_usable = Self::is_process_security_environment_usable();
-        if request.policy.capture_denials.is_some() {
-            if Self::uses_native_capture_for_request(request) {
-                return true;
-            }
-            if !Self::legacy_sbox_compatible_with_request(
-                request,
-                Self::query_sandbox_capabilities(),
-            ) {
-                return false;
-            }
-            return Self::is_legacy_base_container_usable();
-        }
-        let psec_supports_deny_paths = request.policy.denied_paths.is_empty()
-            || SecurityEnvironmentApi::load()
-                .and_then(|api| api.supports_deny_paths())
-                .unwrap_or(false);
-        if Self::should_use_process_security_environment(
-            request,
-            psec_usable,
-            psec_supports_deny_paths,
-        ) {
+        let platform = RealCapturePlatformSupport;
+        if select_psec(request, psec_usable, &platform).is_ok_and(|selection| selection.selected) {
             return true;
         }
         if !Self::legacy_sbox_compatible_with_request(request, Self::query_sandbox_capabilities()) {
@@ -907,19 +887,13 @@ impl BaseContainerRunner {
     }
 
     pub(crate) fn supports_deny_paths_for_request(request: &ExecutionRequest) -> bool {
-        let psec_supports_deny_paths = SecurityEnvironmentApi::load()
-            .and_then(|api| api.supports_deny_paths())
-            .unwrap_or(false);
-        let uses_native_capture = Self::uses_native_capture_for_request(request);
-        if uses_native_capture {
-            return true;
-        }
-        if request.policy.capture_denials.is_none()
-            && Self::should_use_process_security_environment(
-                request,
-                Self::is_process_security_environment_usable(),
-                psec_supports_deny_paths,
-            )
+        let platform = RealCapturePlatformSupport;
+        if select_psec(
+            request,
+            Self::is_process_security_environment_usable(),
+            &platform,
+        )
+        .is_ok_and(|selection| selection.selected)
         {
             return true;
         }
@@ -927,11 +901,18 @@ impl BaseContainerRunner {
     }
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
-        Self::native_capture_eligible(
-            request,
-            Self::is_process_security_environment_usable(),
-            &RealCapturePlatformSupport,
-        )
+        if request.policy.capture_denials.is_none() {
+            return false;
+        }
+        #[cfg(test)]
+        let psec_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
+            |_| Self::is_process_security_environment_usable(),
+            |forced| forced == "1",
+        );
+        #[cfg(not(test))]
+        let psec_usable = Self::is_process_security_environment_usable();
+        let platform = RealCapturePlatformSupport;
+        select_psec(request, psec_usable, &platform).is_ok_and(|selection| selection.selected)
     }
 
     /// Log the contents of a built sandbox spec FlatBuffer for debug verification.
@@ -1165,7 +1146,17 @@ impl BaseContainerRunner {
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
         let capture_denials = request.policy.capture_denials.clone();
-        let use_process_security_environment = self.uses_process_security_environment(&request);
+        let psec_selection = select_psec(
+            &request,
+            self.process_security_environment_usable(),
+            self.capture_support.as_ref(),
+        )
+        .map_err(|message| ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..ScriptResponse::error(&message)
+        })?;
+        let use_process_security_environment = psec_selection.selected;
+        let psec_support = psec_selection.support;
         Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
@@ -1180,11 +1171,12 @@ impl BaseContainerRunner {
         }
 
         let process_security_environment_spec =
-            use_process_security_environment.then(|| build_psec_spec(&request));
+            use_process_security_environment.then(|| build_psec_spec(&request, psec_support));
         if let Some(psec_spec) = process_security_environment_spec.as_ref() {
             let _ = writeln!(
                 logger,
-                "process security environment spec built (PSEC 1.0, {} bytes)",
+                "process security environment spec built (PSEC 1.{}, {} bytes)",
+                psec_support.schema_minor_for(&request.policy),
                 psec_spec.len()
             );
         }
@@ -2087,7 +2079,22 @@ impl SandboxBackend for BaseContainerRunner {
         if request.dry_run {
             return Ok(());
         }
-        let use_process_security_environment = self.uses_process_security_environment(request);
+        let psec_usable = self.process_security_environment_usable();
+        let psec_selection = select_psec(request, psec_usable, self.capture_support.as_ref())
+            .map_err(|message| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&message)
+            })?;
+        let use_process_security_environment = psec_selection.selected;
+        let psec_support = psec_selection.support;
+        let host_loopback_unsupported = psec_selection.support_queried
+            && !psec_support.supports_requested_host_loopback(&request.policy);
+        if host_loopback_unsupported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(PSEC_NETWORK_INGRESS_UNSUPPORTED_MSG)
+            });
+        }
         Self::validate_resolved_network_contract(request, use_process_security_environment)?;
         // BaseContainer's native PSEC/V2 capture seals its own ETL, so when it
         // is selected retainEtl is honored natively regardless of the guarded
@@ -2138,12 +2145,7 @@ impl SandboxBackend for BaseContainerRunner {
         // closed rather than silently dropping the deny policy.
         if !request.policy.denied_paths.is_empty() {
             let deny_supported = if use_process_security_environment {
-                self.capture_support
-                    .supports_deny_paths()
-                    .map_err(|message| ScriptResponse {
-                        failure_phase: FailurePhase::BackendUnavailable,
-                        ..ScriptResponse::error(&message)
-                    })?
+                psec_support.supports_deny_paths()
             } else {
                 crate::fallback_detector::base_container_supports_deny_paths()
             };
@@ -2972,7 +2974,6 @@ fn derive_sid_string_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_container_helpers::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
     use crate::job_object::to_job_object_uilimit_mask;
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
@@ -3063,10 +3064,16 @@ mod tests {
                 .map_or(Ok(()), |error| Err(error.to_string()))
         }
 
-        fn supports_deny_paths(&self) -> Result<bool, String> {
+        fn psec_support(&self) -> Result<PsecSupport, String> {
             self.deny_calls.fetch_add(1, Ordering::SeqCst);
-            self.deny_error
-                .map_or(Ok(self.deny_supported), |error| Err(error.to_string()))
+            self.deny_error.map_or(
+                Ok(if self.deny_supported {
+                    PsecSupport::V1_1_WITH_DENY_PATHS
+                } else {
+                    PsecSupport::V1_1
+                }),
+                |error| Err(error.to_string()),
+            )
         }
     }
 
@@ -3886,25 +3893,6 @@ mod tests {
     }
 
     #[test]
-    fn build_process_security_environment_spec_enables_host_loopback() {
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
-            default: NetworkAction::Deny,
-            host_loopback: NetworkAction::Allow,
-        });
-
-        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
-        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-        let network = spec.network_policy().expect("network policy");
-
-        assert_eq!(spec.capabilities(), Some(LOOPBACK_NETWORK_CAPABILITY));
-        assert_eq!(
-            network.allowed_appcontainer_peer(),
-            Some(LOOPBACK_NETWORK_PEER)
-        );
-    }
-
-    #[test]
     fn psec_proxy_and_direct_egress_forms_are_mutually_exclusive() {
         for runtime_proxy_specified in [false, true] {
             let mut request = ExecutionRequest::default();
@@ -4170,7 +4158,11 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                BaseContainerRunner::should_use_process_security_environment(&request, true, true),
+                BaseContainerRunner::should_use_process_security_environment(
+                    &request,
+                    true,
+                    PsecSupport::V1_1_WITH_DENY_PATHS,
+                ),
                 "PSEC should be preferred for schema version {version}"
             );
         }
@@ -4183,9 +4175,19 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+            BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                false,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
         );
     }
 
@@ -4203,9 +4205,19 @@ mod tests {
             host_loopback: NetworkAction::Allow,
         });
 
-        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+            BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                false,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
         );
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
@@ -4294,10 +4306,20 @@ mod tests {
 
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
         );
+        let selection = select_psec(
+            &request,
+            runner.process_security_environment_usable(),
+            runner.capture_support.as_ref(),
+        )
+        .unwrap();
         assert!(
-            !runner.uses_process_security_environment(&request),
+            !selection.selected,
             "proxy requests must build the legacy SBOX contract"
         );
     }
@@ -4321,8 +4343,14 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
 
+        let selection = select_psec(
+            &request,
+            runner.process_security_environment_usable(),
+            runner.capture_support.as_ref(),
+        )
+        .unwrap();
         assert!(
-            !runner.uses_process_security_environment(&request),
+            !selection.selected,
             "capture must not select PSEC when another requested policy is incompatible"
         );
         assert!(
@@ -4337,7 +4365,11 @@ mod tests {
         request.policy.least_privilege_mode = true;
 
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
         );
     }
 
@@ -4347,8 +4379,50 @@ mod tests {
         request.policy.denied_paths = vec![r"C:\secret".to_string()];
 
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, false)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1,
+            )
         );
+    }
+
+    #[test]
+    fn host_loopback_allow_requires_psec_network_ingress_support() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        assert!(
+            BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_1_WITH_DENY_PATHS,
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request,
+                true,
+                PsecSupport::V1_0_WITH_DENY_PATHS,
+            )
+        );
+    }
+
+    #[test]
+    fn ingress_default_remains_compatible_with_legacy_capability_lowering() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+
+        assert!(!requires_psec_networking(&request.policy));
+        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request, None,
+        ));
     }
 
     #[test]
@@ -4681,6 +4755,38 @@ mod tests {
         assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_capture_api_does_not_report_unqueried_ingress_support() {
+        let _guard = crate::test_env::lock();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: Some("missing CloseLearningModeTrace"),
+            deny_error: None,
+            deny_supported: false,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner =
+            BaseContainerRunner::with_capture_components(fake_capture_factory(), support.clone());
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("missing V2 API must use or require guarded capture");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(error
+            .error_message
+            .contains("resolved legacy SBOX contract"));
+        assert!(!error.error_message.contains("PSE_SUPPORT_NETWORK_INGRESS"));
+        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
