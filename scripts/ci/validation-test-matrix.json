@@ -391,9 +391,10 @@
     "weekly": [],
     "enabled": [
       {
-        "os": "macos-26",
+        "os": "windows-24h2",
         "backends": [
-          "seatbelt"
+          "process-t3",
+          "wslc"
         ]
       }
     ]
