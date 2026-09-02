@@ -368,7 +368,7 @@ fn select_backend_with_fallback(
     // otherwise uses the transitional SBOX contract. If neither BaseContainer
     // contract is usable, detection continues to the AppContainer tiers.
     let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
-    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
+    let uses_psec_capture = BaseContainerRunner::uses_psec_capture_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let decision = fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
@@ -377,7 +377,7 @@ fn select_backend_with_fallback(
         supports_deny_paths,
     )?;
     let guarded_capture_required = request.policy.capture_denials.is_some()
-        && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);
+        && (decision.tier != IsolationTier::BaseContainer || !uses_psec_capture);
     if guarded_capture_required && capture_factory.is_none() {
         return Err(DispatchError::CaptureDenialsUnsupported {
             tier: decision.tier,

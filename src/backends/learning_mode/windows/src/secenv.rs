@@ -54,6 +54,28 @@ const PROCESSMODEL_DLL: &str = "processmodel.dll";
 const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~securityenvironment";
 const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
     c"api-win-appmodel-processmodel~securityenvironment";
+const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
+
+/// Capabilities reported by `QueryProcessSecurityEnvironmentSupport`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecurityEnvironmentSupport {
+    flags: u64,
+}
+
+impl SecurityEnvironmentSupport {
+    /// Whether PSEC supports native filesystem deny paths.
+    #[must_use]
+    pub fn supports_deny_paths(self) -> bool {
+        self.flags & PSE_SUPPORT_FS_DENY != 0
+    }
+
+    /// Whether PSEC supports the 1.1 ingress policy table.
+    #[must_use]
+    pub fn supports_network_ingress(self) -> bool {
+        self.flags & PSE_SUPPORT_NETWORK_INGRESS != 0
+    }
+}
 
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
@@ -317,8 +339,8 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 /// `cacheable` records whether this surface was produced by the memoizing
 /// [`SecurityEnvironmentApi::load`] (the real, process-wide singleton) as opposed
 /// to a test fake. Only cacheable surfaces are allowed to populate the process-wide
-/// [`supports_deny_paths`](Self::supports_deny_paths) cache, so injected fakes can
-/// never poison it for the real API or for each other.
+/// support-query cache, so injected fakes can never poison it for the real API
+/// or for each other.
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
@@ -351,8 +373,7 @@ impl SecurityEnvironmentApi {
     /// not change while the process runs, so repeated probes would only repeat the
     /// same work and return the same answer. The cached error is cloned (see
     /// [`LearningModeError`]), preserving the original diagnostic on every call. The
-    /// cached surface is marked cacheable so its
-    /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
+    /// cached surface is marked cacheable so its support flags are memoized too.
     ///
     /// # Errors
     /// - [`LearningModeError::ApiSetUnavailable`] if the security-environment
@@ -408,8 +429,8 @@ impl SecurityEnvironmentApi {
 
     /// Construct an API surface directly from raw export pointers, bypassing the
     /// DLL load. Test-only: lets sibling modules inject fakes. The surface is marked
-    /// non-cacheable so its [`supports_deny_paths`](Self::supports_deny_paths) result
-    /// never populates the process-wide cache.
+    /// non-cacheable so its [`support`](Self::support) result never populates the
+    /// process-wide cache.
     #[cfg(test)]
     pub(crate) fn from_raw_parts(
         create: PfnCreateProcessSecurityEnvironment,
@@ -425,8 +446,8 @@ impl SecurityEnvironmentApi {
     }
 
     /// Like [`from_raw_parts`](Self::from_raw_parts) but marked cacheable, so the
-    /// memoization of [`supports_deny_paths`](Self::supports_deny_paths) can be
-    /// exercised host-independently. Test-only.
+    /// memoization of the support query can be exercised host-independently.
+    /// Test-only.
     #[cfg(test)]
     pub(crate) fn from_raw_parts_cacheable(
         create: PfnCreateProcessSecurityEnvironment,
@@ -441,26 +462,22 @@ impl SecurityEnvironmentApi {
         }
     }
 
-    /// Whether the official V2 API supports native deny paths.
+    /// Returns the capabilities supported by the official PSEC API.
     ///
-    /// The answer is a fixed host capability, so for the real (cacheable) API the
+    /// The flags are fixed host capabilities, so for the real (cacheable) API the
     /// result — including a typed error — is memoized once per process. Non-cacheable
     /// test fakes always query directly and never touch the process-wide cache.
-    pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
+    pub fn support(&self) -> Result<SecurityEnvironmentSupport, LearningModeError> {
         if self.cacheable {
-            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
-            CACHE
-                .get_or_init(|| self.query_deny_paths_support())
-                .clone()
+            static CACHE: OnceLock<Result<SecurityEnvironmentSupport, LearningModeError>> =
+                OnceLock::new();
+            CACHE.get_or_init(|| self.query_support()).clone()
         } else {
-            self.query_deny_paths_support()
+            self.query_support()
         }
     }
 
-    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
-    /// without consulting or populating the process-wide cache.
-    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
-        const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+    fn query_support(&self) -> Result<SecurityEnvironmentSupport, LearningModeError> {
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
         // `support_flags` is a valid out-pointer.
@@ -471,7 +488,9 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
-        Ok(support_flags & PSE_SUPPORT_FS_DENY != 0)
+        Ok(SecurityEnvironmentSupport {
+            flags: support_flags,
+        })
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -626,9 +645,6 @@ mod tests {
     static QUERY_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
     static QUERY_FLAGS: AtomicU64 = AtomicU64::new(0);
 
-    /// Native-deny-path support bit reported by `QueryProcessSecurityEnvironmentSupport`.
-    const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
-
     unsafe extern "system" fn fake_close(_: HANDLE) {
         CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
     }
@@ -770,23 +786,22 @@ mod tests {
     }
 
     #[test]
-    fn supports_deny_paths_reports_flag_state() {
+    fn support_flags_are_reported_independently() {
         let _guard = QUERY_LOCK.lock().unwrap();
         let api = fake_uncached_api();
 
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
-        assert!(api.supports_deny_paths().unwrap());
+        let support = api.support().unwrap();
+        assert!(support.supports_deny_paths());
+        assert!(!support.supports_network_ingress());
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
 
         reset_query_fakes();
-        QUERY_FLAGS.store(0, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
-
-        reset_query_fakes();
-        // Unrelated support bits must not be mistaken for deny-path support.
-        QUERY_FLAGS.store(0xFFFF_FFFF_FFFF_FFFE, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
+        QUERY_FLAGS.store(PSE_SUPPORT_NETWORK_INGRESS, Ordering::SeqCst);
+        let support = api.support().unwrap();
+        assert!(!support.supports_deny_paths());
+        assert!(support.supports_network_ingress());
     }
 
     #[test]
@@ -796,7 +811,7 @@ mod tests {
         QUERY_RESULT.store(E_FAIL.0, Ordering::SeqCst);
         let api = fake_uncached_api();
 
-        let error = api.supports_deny_paths().unwrap_err();
+        let error = api.support().unwrap_err();
         assert!(matches!(
             error,
             LearningModeError::HResultCall {
@@ -813,8 +828,8 @@ mod tests {
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         let api = fake_uncached_api();
 
-        assert!(api.supports_deny_paths().unwrap());
-        assert!(api.supports_deny_paths().unwrap());
+        assert!(api.support().unwrap().supports_deny_paths());
+        assert!(api.support().unwrap().supports_deny_paths());
         // A test fake must never be memoized: both calls hit the underlying query.
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 2);
     }
@@ -829,8 +844,8 @@ mod tests {
         let api =
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
 
-        let first = api.supports_deny_paths().unwrap();
-        let second = api.supports_deny_paths().unwrap();
+        let first = api.support().unwrap();
+        let second = api.support().unwrap();
         assert_eq!(first, second);
         // The result is memoized for the process: the query runs at most once.
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
