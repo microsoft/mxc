@@ -6,7 +6,8 @@
 
 .DESCRIPTION
     Installs the command-line tooling an MXC machine is expected to provide:
-    Chocolatey, Scoop, the Azure CLI, the GitHub CLI and the NuGet CLI.
+    Chocolatey, Scoop, the .NET SDK, the Azure CLI, the GitHub CLI and the
+    NuGet CLI.
 
     Everything is installed from an official installer or install script that
     is downloaded directly. The Windows Package Manager is deliberately not
@@ -15,10 +16,9 @@
     published as a packaged application is installed later, when the machine
     is running, rather than here.
 
-    The .NET SDK, Node.js, Python, PowerShell 7 and Git arrive with the image
-    from other provisioning artifacts rather than being installed here, but
-    they are still inventoried at the end so the image is reported on as a
-    whole.
+    Node.js, Python, PowerShell 7 and Git arrive with the image from other
+    provisioning artifacts rather than being installed here, but they are still
+    inventoried at the end so the image is reported on as a whole.
 
     Every step is best effort. Nothing here aborts the run and the script always
     exits 0; what the machine actually ended up with is printed in the summary
@@ -175,34 +175,135 @@ function Test-Tool {
     return [bool](Resolve-Tool -Candidates $Candidates)
 }
 
+# Windows Installer serializes machine-wide installs behind a single mutex and
+# hands 1618 to anyone who arrives while it is held. While an image is being
+# provisioned that is routine rather than exceptional, because other artifacts
+# install at the same time, so a 1618 is waited out and retried.
+$script:InstallerBusy = 1618
+
+function Test-WindowsInstallerBusy {
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting('Global\_MSIExecute')
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        # The mutex does not exist, so no installation is in progress.
+        return $false
+    } catch {
+        # Any other failure means the mutex exists but could not be opened,
+        # which still means an installation is in progress.
+        return $true
+    } finally {
+        if ($mutex) { $mutex.Dispose() }
+    }
+}
+
+function Wait-ForWindowsInstaller {
+    param([int]$TimeoutSeconds = 900)
+
+    if (-not (Test-WindowsInstallerBusy)) { return $true }
+
+    Write-Host '  another installation is in progress; waiting for it to finish...'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 10
+        if (-not (Test-WindowsInstallerBusy)) {
+            Write-Host '  the other installation finished.'
+            return $true
+        }
+    }
+
+    Write-Host "  still in progress after $TimeoutSeconds seconds; going ahead anyway."
+    return $false
+}
+
+# Launches a program, waits for it, and returns its exit code alongside whatever
+# it wrote. Everything goes through Start-Process rather than the call operator
+# because msiexec is a GUI-subsystem program: the call operator leaves
+# $LASTEXITCODE unset for it, which would read as success and turn a failed
+# install into a silent one.
+function Start-ProgramOnce {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $stdout = Join-Path $script:Scratch ('run-' + [Guid]::NewGuid().ToString('N') + '.out')
+    $stderr = [IO.Path]::ChangeExtension($stdout, 'err')
+    try {
+        if (-not (Test-Path -LiteralPath $script:Scratch)) {
+            New-Item -ItemType Directory -Path $script:Scratch -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $launch = @{
+            FilePath               = $FilePath
+            Wait                   = $true
+            PassThru               = $true
+            NoNewWindow            = $true
+            RedirectStandardOutput = $stdout
+            RedirectStandardError  = $stderr
+        }
+        if ($Arguments.Count -gt 0) { $launch['ArgumentList'] = $Arguments }
+
+        $process = Start-Process @launch
+
+        $written = @()
+        foreach ($file in @($stdout, $stderr)) {
+            if (Test-Path -LiteralPath $file) {
+                $written += @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)
+            }
+        }
+
+        return [pscustomobject]@{ Code = $process.ExitCode; Output = $written }
+    } catch {
+        # A launch failure embeds a position trace after the first line.
+        $reason = ($_.Exception.Message -split "`r?`n" | Select-Object -First 1).Trim()
+        Write-Host "  $reason"
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Runs a program and reports only whether it succeeded, keeping installer chatter
-# out of the transcript unless something goes wrong.
+# out of the transcript unless something goes wrong. Naming 1618 in RetryCodes
+# also makes every attempt wait for Windows Installer to go idle first, so the
+# common case is avoiding the collision rather than recovering from it.
 function Invoke-Program {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$Arguments = @(),
-        [int[]]$SuccessCodes = @(0)
+        [int[]]$SuccessCodes = @(0),
+        [int[]]$RetryCodes = @(),
+        [int]$MaxAttempts = 1
     )
 
-    try {
-        $output = & $FilePath @Arguments 2>&1
-        $code = $LASTEXITCODE
+    $serialized = $RetryCodes -contains $script:InstallerBusy
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        if ($serialized) { Wait-ForWindowsInstaller | Out-Null }
+
+        $result = Start-ProgramOnce -FilePath $FilePath -Arguments $Arguments
+        if ($null -eq $result) { return $false }
+
+        $code = $result.Code
         if ($null -eq $code) { $code = 0 }
-        if ($SuccessCodes -contains $code) {
-            return $true
+        if ($SuccessCodes -contains $code) { return $true }
+
+        if (($RetryCodes -contains $code) -and ($attempt -lt $MaxAttempts)) {
+            Write-Host "  exit code $code; retrying ($attempt of $($MaxAttempts - 1))."
+            continue
         }
-        $detail = ($output | Select-Object -Last 3 | Out-String).Trim()
+
+        $detail = ($result.Output | Select-Object -Last 3 | Out-String).Trim()
         if ($detail) {
             Write-Host "  $($detail -replace "`r?`n", "`n  ")"
         }
         Write-Host "  exit code $code"
         return $false
-    } catch {
-        # A native launch failure embeds a position trace after the first line.
-        $reason = ($_.Exception.Message -split "`r?`n" | Select-Object -First 1).Trim()
-        Write-Host "  $reason"
-        return $false
     }
+
+    return $false
 }
 
 function Get-Download {
@@ -233,7 +334,25 @@ function Install-Msi {
     if (-not (Get-Download -Uri $Uri -OutFile $package)) {
         return $false
     }
-    return (Invoke-Program -FilePath 'msiexec.exe' -Arguments @('/i', $package, '/quiet', '/norestart') -SuccessCodes @(0, 3010))
+    return (Invoke-Program -FilePath 'msiexec.exe' -Arguments @('/i', $package, '/quiet', '/norestart') `
+        -SuccessCodes @(0, 3010) -RetryCodes @($script:InstallerBusy) -MaxAttempts 3)
+}
+
+# Some installers ship as a WiX bundle rather than a bare MSI and so take their
+# own switches instead of msiexec's. A bundle still wraps MSIs underneath, so it
+# can report 1618 just the same.
+function Install-Bundle {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $package = Join-Path $script:Scratch $Name
+    if (-not (Get-Download -Uri $Uri -OutFile $package)) {
+        return $false
+    }
+    return (Invoke-Program -FilePath $package -Arguments @('/install', '/quiet', '/norestart') `
+        -SuccessCodes @(0, 3010) -RetryCodes @($script:InstallerBusy) -MaxAttempts 3)
 }
 
 # ---------------------------------------------------------------------------
@@ -373,6 +492,19 @@ Install-Tool -Name 'Scoop' -Candidates @('scoop') -PathCandidates @(
 # Tooling
 # ---------------------------------------------------------------------------
 
+Install-Tool -Name 'the .NET SDK' -Candidates @('dotnet') -PathCandidates @(
+    (Join-Path $env:ProgramFiles 'dotnet')
+) -Attempts @(
+    @{
+        Description = 'the official installer'
+        # The LTS channel link always points at the current long-term-support
+        # release, and there is a native build for each architecture.
+        Action      = {
+            Install-Bundle -Uri "https://aka.ms/dotnet/LTS/dotnet-sdk-win-$Architecture.exe" -Name 'dotnet-sdk.exe'
+        }
+    }
+)
+
 Install-Tool -Name 'the Azure CLI' -Candidates @('az') -PathCandidates @(
     (Join-Path $env:ProgramFiles 'Microsoft SDKs\Azure\CLI2\wbin'),
     (Join-Path ${env:ProgramFiles(x86)} 'Microsoft SDKs\Azure\CLI2\wbin')
@@ -387,7 +519,8 @@ Install-Tool -Name 'the Azure CLI' -Candidates @('az') -PathCandidates @(
         Description = 'Chocolatey'
         Action      = {
             if (-not (Test-Tool -Candidates @('choco'))) { return $false }
-            return (Invoke-Program -FilePath 'choco' -Arguments @('install', 'azure-cli', '-y', '--no-progress'))
+            return (Invoke-Program -FilePath 'choco' -Arguments @('install', 'azure-cli', '-y', '--no-progress') `
+                -RetryCodes @($script:InstallerBusy) -MaxAttempts 3)
         }
     }
 )
@@ -421,7 +554,8 @@ Install-Tool -Name 'the GitHub CLI' -Candidates @('gh') -PathCandidates @(
         Description = 'Chocolatey'
         Action      = {
             if (-not (Test-Tool -Candidates @('choco'))) { return $false }
-            return (Invoke-Program -FilePath 'choco' -Arguments @('install', 'gh', '-y', '--no-progress'))
+            return (Invoke-Program -FilePath 'choco' -Arguments @('install', 'gh', '-y', '--no-progress') `
+                -RetryCodes @($script:InstallerBusy) -MaxAttempts 3)
         }
     }
 )

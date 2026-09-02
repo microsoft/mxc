@@ -96,9 +96,12 @@ verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
 `winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
 Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
 duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
-platform's list can diverge. Every pool runs an image provisioned ahead of time
-by `scripts/ci/Setup.sh` / `Setup-rhel.sh` (Linux) and `scripts/ci/Setup.ps1`
-(Windows), so the whole list is normally present before a job starts. macOS
+platform's list can diverge. Every pool runs an image provisioned ahead of time,
+so the whole list is normally present before a job starts. The provisioning
+scripts are **not in this repository** — they live in the
+`validation-provision-artifacts` branch of the ADO repo as
+`ubuntu-debian-provision.sh` / `rhel-provision.sh` (Linux) and
+`windows-provision.ps1` (Windows). macOS
 verifies only; Linux first runs `install_workload_interpreters`, which re-runs
 the install as a top-up and is a no-op on a correctly built image (distribution
 repositories, plus Microsoft's feeds for `pwsh`/`az` and GitHub's for `gh`).
@@ -111,14 +114,27 @@ best-effort and can never fail the job —
 the inventory that follows reports the outcome. Its package-manager access goes
 through `resolve_package_manager` and `install_packages`, the same helpers the
 backend prerequisite installers use, so a new distribution family is one arm in
-`install_packages` rather than a branch in every installer. `Setup.ps1` installs
+`install_packages` rather than a branch in every installer. The Windows
+provisioning script installs
 no packaged application and never uses winget, because neither is available
 during image provisioning; it takes only `-Architecture` (`x64`/`arm64`, which
-selects the `gh` MSI — the Azure CLI has no ARM64 build and is used emulated)
-and `-ScoopRoot`. Its scope is `choco`, `scoop`, `az`, `gh` and `nuget`: the
-language runtimes (`dotnet`, `node`, `python`, `pwsh`, `git`) arrive from
-separate image artifacts, and `Setup.ps1` only inventories them. Windows
-therefore provisions
+selects the `gh` MSI and the .NET SDK bundle — the Azure CLI has no ARM64 build
+and is used emulated) and `-ScoopRoot`. It launches every installer through
+`Start-Process` rather
+than the call operator, because `msiexec` is a GUI-subsystem program for which
+the call operator leaves `$LASTEXITCODE` unset — which previously read as
+success and turned a failed install into a silent one. Windows Installer
+serializes machine-wide installs behind the `Global\_MSIExecute` mutex and
+returns 1618 to whoever arrives while another provisioning artifact holds it, so
+every MSI-touching call waits for that mutex to clear before each attempt and
+retries a 1618 up to three times. Its scope is the .NET SDK, `choco`, `scoop`,
+`az`, `gh` and `nuget`. The .NET SDK comes from the arch-matched
+`aka.ms/dotnet/LTS/dotnet-sdk-win-<arch>.exe` bundle rather than
+`dotnet-install.ps1`, because that script's only PATH write is to `$env:path` —
+it persists nothing, so an SDK it installs is on disk but resolves from nowhere
+in any later process. The remaining runtimes (`node`, `python`, `pwsh`, `git`)
+arrive from separate image artifacts, which it only inventories.
+Windows therefore provisions
 two entries at job time, also best-effort and also ahead of the inventory.
 `Repair-Winget`
 re-registers the App Installer package (`Add-AppxPackage -RegisterByFamilyName`)

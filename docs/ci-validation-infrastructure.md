@@ -32,8 +32,6 @@ the individual local test scripts are documented in
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the packaged-tooling install. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter top-up pass. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
-| `scripts/ci/Setup.sh` / `scripts/ci/Setup-rhel.sh` | Image-provisioning scripts. Run when the Linux images are built, not per job. |
-| `scripts/ci/Setup.ps1` | Image-provisioning script. Runs when the Windows image is built, not per job. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
@@ -318,7 +316,7 @@ mid-suite failure.
 | `git` | all | Latest | |
 | `node`, `npm`, `npx` | all | 24.x | `npm` and `npx` arrive with Node. |
 | `python`, `pip` | all | Latest | Windows tries `python` first, Unix `python3`. |
-| `dotnet` | all | Latest LTS | |
+| `dotnet` | all | Latest LTS | Currently 10.x, from the `LTS` channel — resolved at image-build time, not pinned. |
 | `az` | all | Latest | No ARM64 Windows build exists; ARM64 images get the x64 one under emulation. |
 | `gh` | all | Latest | |
 | `openssl` | all | Latest | On Windows, installed per job — see below. |
@@ -364,8 +362,8 @@ Every pool runs images pre-provisioned with programs installed by
 `ubuntu-debian-provision.sh` / `rhel-provision.sh` for Linux and 
 `windows-provision.ps1` for Windows. These scripts are located in the
 `validation-provision-artifacts` branch in the ADO repo. On Windows that
-script covers `choco`, `scoop`, `az`, `gh` and `nuget`; the language runtimes
-(`dotnet`, `node`, `python`, `pwsh`, `git`) come from separate image artifacts.
+script covers `dotnet`, `choco`, `scoop`, `az`, `gh` and `nuget`; the remaining
+runtimes (`node`, `python`, `pwsh`, `git`) come from separate image artifacts.
 
 During the start of a job, the installed programs are inventoried. Windows also
 installs OpenSSL and WinApp via the repaired WinGet. 
