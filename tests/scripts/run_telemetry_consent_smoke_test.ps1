@@ -15,35 +15,51 @@ if (-not (Test-Path $wxcExec)) {
 if ($wxcExec -match '\\release\\') {
     throw 'Release binaries are refused because consent isolation uses debug-only overrides.'
 }
+
+function Assert-ConsentParseExitCodes {
+    $executors = @($wxcExec)
+    foreach ($name in @('lxc-exec.exe', 'mxc-exec-mac.exe')) {
+        $candidate = Join-Path $BinDir $name
+        if (Test-Path $candidate) { $executors += $candidate }
+    }
+    foreach ($executor in $executors) {
+        & $executor --telemetry-consent invalid *> $null
+        if ($LASTEXITCODE -ne 64) {
+            throw "$executor returned $LASTEXITCODE for an invalid consent action; expected 64."
+        }
+        & $executor --telemetry-consent status --config missing.json *> $null
+        if ($LASTEXITCODE -ne 64) {
+            throw "$executor returned $LASTEXITCODE for a consent/config conflict; expected 64."
+        }
+
+        & $executor --unknown-flag -- --telemetry-consent=request *> $null
+        if ($LASTEXITCODE -ne 2) {
+            throw "$executor returned $LASTEXITCODE when consent-like text followed '--'; expected 2."
+        }
+    }
+}
+
 $expectedBody = @'
 Help improve MXC by sharing optional diagnostic data with Microsoft.
 If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
 You can change your choice at any time.
 '@ -replace "`r`n", "`n"
 
-function ConvertTo-Base64Json([object]$Value) {
-    $json = $Value | ConvertTo-Json -Compress -Depth 10
-    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-}
-
 function Invoke-Maintenance([string]$Action) {
-    $request = [pscustomobject]@{ command = 'telemetryConsent'; action = $Action }
-    $output = & $wxcExec --config-base64 (ConvertTo-Base64Json $request)
+    $output = & $wxcExec --telemetry-consent $Action
     if ($LASTEXITCODE -ne 0) { throw "$Action failed with exit code $LASTEXITCODE" }
     $output | ConvertFrom-Json
 }
 
 function Invoke-ConsentRequest([string]$Decision) {
-    $request = [pscustomobject]@{ command = 'telemetryConsent'; action = 'request'; locale = 'en-US' }
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wxcExec
-    $start.Arguments = "--config-base64 $(ConvertTo-Base64Json $request)"
+    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US --telemetry-consent-protocol stdio-v1'
     $start.UseShellExecute = $false
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
-    $start.Environment['MXC_TELEMETRY_CONSENT_PRESENTER_PROTOCOL'] = '1'
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
     [void]$start.Environment.Remove('MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
@@ -76,12 +92,49 @@ function Invoke-ConsentRequest([string]$Decision) {
         decision = $Decision
     }
     $process.StandardInput.WriteLine(($response | ConvertTo-Json -Compress))
+    $finalRead = $process.StandardOutput.ReadLineAsync()
+    if (-not $finalRead.Wait(5000)) {
+        $process.Kill()
+        throw 'Consent process waited for stdin EOF instead of accepting the decision line.'
+    }
+    $finalLine = $finalRead.Result
     $process.StandardInput.Close()
-    $finalLine = $process.StandardOutput.ReadLine()
     $stderr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
     if ($process.ExitCode -ne 0) { throw "Consent process failed: $stderr" }
     $finalLine | ConvertFrom-Json
+}
+
+function Assert-NonInteractiveRequestFails {
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $wxcExec
+    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.CreateNoWindow = $true
+    $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
+    [void]$start.Environment.Remove('MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $start
+    if (-not $process.Start()) { throw 'Failed to start non-interactive consent process.' }
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 1) {
+        throw "Non-interactive request exited $($process.ExitCode), expected 1: $stderr"
+    }
+    $response = $stdout | ConvertFrom-Json
+    if ($response.result -ne 'presentationUnavailable') {
+        throw "Non-interactive request returned an unexpected response: $stdout"
+    }
+    if (Test-Path $consentFile) {
+        throw 'Non-interactive request changed the consent store.'
+    }
 }
 
 function Assert-Status(
@@ -113,6 +166,8 @@ $policySubkey = "Software\MxcTelemetryConsentSmoke\$runId"
 $policyPath = "HKCU:\$policySubkey"
 
 try {
+    Assert-ConsentParseExitCodes
+
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
     New-Item -Path $policyPath -Force | Out-Null
     Set-Item "Env:$overrideName" $tempDir
@@ -139,6 +194,8 @@ try {
         }
     }
     Remove-Item $consentFile -Force
+
+    Assert-NonInteractiveRequestFails
 
     $fresh = Invoke-Maintenance 'status'
     Assert-Status $fresh 'undetermined' 'undetermined' 'unrestricted' $true 'fresh status'

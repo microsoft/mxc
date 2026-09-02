@@ -105,14 +105,46 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
-    /// Print the current persisted telemetry consent state as one-line JSON
-    /// and exit, without spawning a sandbox. The payload is the same typed
-    /// response as JSON maintenance action `status`. Windows-only: on
-    /// other platforms every field reports `not-applicable`/`false` and
-    /// nothing touches disk, since MXC does not collect telemetry there. See
-    /// `docs/telemetry/telemetry-consent-design.md`.
-    #[arg(long = "telemetry-consent-status")]
-    telemetry_consent_status: bool,
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "command",
+            "delete",
+            "containername",
+            "experimental",
+            "allow_testing_features",
+            "dry_run",
+            "setup_hyperlight",
+            "force",
+            "setup_wslc",
+            "image",
+            "storage_path",
+            "probe",
+            "force_reclaim"
+        ]
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        arg(conflicts_with_all = ["audit", "audit_verbose"])
+    )]
+    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
+
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
+
+    /// Private SDK presenter protocol.
+    #[arg(
+        long = "telemetry-consent-protocol",
+        requires = "telemetry_consent",
+        hide = true
+    )]
+    telemetry_consent_protocol: Option<telemetry::consent_cli::ConsentProtocol>,
 
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
@@ -151,6 +183,27 @@ impl Cli {
             }
         }
         self
+    }
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
     }
 }
 
@@ -214,7 +267,7 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Handles the `--telemetry-consent-status` fast path.
+/// Handles the dedicated `--telemetry-consent` fast path.
 ///
 /// Returns `true` if one of the flags was handled (and the caller should
 /// exit immediately), `false` if none were passed and normal execution
@@ -228,24 +281,14 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
 /// job, not the foundation crate's. See
 /// `docs/telemetry/telemetry-consent-design.md`.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) = telemetry::consent_cli::handle_consent_status(cli.telemetry_consent_status)
-    else {
+    let Some(action) = cli.telemetry_consent else {
         return false;
     };
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
-fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
-    let Some(json) = json else {
-        return false;
-    };
-    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
-        return false;
-    };
+    let outcome = telemetry::consent_cli::handle_consent_command(
+        action,
+        cli.telemetry_consent_locale.as_deref(),
+        cli.telemetry_consent_protocol,
+    );
     let code = outcome.emit();
     if code != 0 {
         std::process::exit(code);
@@ -254,10 +297,8 @@ fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
 }
 
 /// Read the request source (file path / base64 blob) once, returning the
-/// decoded JSON. Reused by the maintenance probe, `--probe`, and the normal
-/// request loader so a single source is only read once per invocation — a
-/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
-/// paths that are drained by the first read.
+/// decoded JSON. Reused by `--probe` and the normal request loader so a single
+/// source is only read once per invocation.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
     let (input, is_base64) = config_input(cli)?;
     Some(wxc_common::config_parser::decode_request_input(
@@ -702,10 +743,10 @@ fn install_dacl_ctrl_handler() {
 }
 
 fn main() {
-    let cli = Cli::parse().normalize_named_config_command();
+    let cli = parse_cli().normalize_named_config_command();
 
-    // --telemetry-consent-{status,grant,revoke}: administer the persisted
-    // consent flag and exit. Runs BEFORE `force_reclaim` env propagation and
+    // --telemetry-consent: administer the persisted consent state and exit.
+    // Runs BEFORE `force_reclaim` env propagation and
     // `recover_orphaned_state()` below: this is a read-only/local-file fast path with a 5-second
     // client-side timeout (Node's consent getter), so it must not be gated
     // behind unrelated recovery work that scans state files and may restore
@@ -716,27 +757,13 @@ fn main() {
     if handle_telemetry_consent_flags(&cli) {
         return;
     }
-    // Decode the request source (file path / base64) once, up front, so the
-    // maintenance probe and the normal request loader below share the same
-    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
-    // process-substitution paths that are drained by the first read.
+    // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
     let request_hint = decoded_config
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
-    if matches!(
-        request_hint.as_ref().map(|hint| hint.kind()),
-        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
-    ) && handle_telemetry_consent_input(
-        decoded_config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(String::as_str),
-    ) {
-        return;
-    }
 
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
@@ -1616,6 +1643,84 @@ mod tests {
                 .as_deref(),
             Some("python --version")
         );
+    }
+
+    #[test]
+    fn cli_parses_dedicated_telemetry_consent_request() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "--telemetry-consent",
+            "request",
+            "--telemetry-consent-locale",
+            "en-US",
+            "--telemetry-consent-protocol",
+            "stdio-v1",
+        ]);
+
+        assert_eq!(
+            cli.telemetry_consent,
+            Some(telemetry::consent_cli::ConsentAction::Request)
+        );
+        assert_eq!(cli.telemetry_consent_locale.as_deref(), Some("en-US"));
+        assert_eq!(
+            cli.telemetry_consent_protocol,
+            Some(telemetry::consent_cli::ConsentProtocol::StdioV1)
+        );
+    }
+
+    #[test]
+    fn cli_rejects_execution_config_with_telemetry_consent() {
+        let error = Cli::try_parse_from([
+            "wxc-exec",
+            "--telemetry-consent",
+            "status",
+            "--config",
+            "policy.json",
+        ])
+        .err()
+        .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_rejects_audit_with_telemetry_consent() {
+        for audit_option in ["--audit", "--audit-verbose"] {
+            let error =
+                Cli::try_parse_from(["wxc-exec", "--telemetry-consent", "status", audit_option])
+                    .err()
+                    .unwrap();
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn cli_rejects_consent_locale_without_action() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-locale", "en-US"])
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn cli_rejects_removed_telemetry_consent_status_flag() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-status"])
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn private_consent_protocol_is_hidden_from_help() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("--telemetry-consent-protocol"));
+        assert!(help.contains("--telemetry-consent"));
     }
 
     #[test]

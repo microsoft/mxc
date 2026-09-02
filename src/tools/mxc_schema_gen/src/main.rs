@@ -34,14 +34,11 @@ enum Command {
 #[derive(Debug, Args)]
 struct GenerateArgs {
     /// Exact registered contract version.
-    #[arg(long, conflicts_with_all = ["legacy_wire", "telemetry_consent"])]
+    #[arg(long, conflicts_with = "legacy_wire")]
     version: Option<String>,
     /// Generate from the rolling legacy wire model.
-    #[arg(long, conflicts_with_all = ["version", "telemetry_consent"])]
+    #[arg(long, conflicts_with = "version")]
     legacy_wire: bool,
-    /// Generate the telemetry-consent maintenance contract.
-    #[arg(long, conflicts_with_all = ["version", "legacy_wire"])]
-    telemetry_consent: bool,
     /// Output path. Omit to write the artifact to standard output.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -51,20 +48,15 @@ struct GenerateArgs {
 enum Target {
     LegacyWire,
     Contract(ContractVersion),
-    TelemetryConsent,
 }
 
 fn target(args: &GenerateArgs) -> Result<Target, String> {
-    match (&args.version, args.legacy_wire, args.telemetry_consent) {
-        (Some(version), false, false) => ContractVersion::parse_exact(version)
+    match (&args.version, args.legacy_wire) {
+        (Some(version), false) => ContractVersion::parse_exact(version)
             .map(Target::Contract)
             .ok_or_else(|| format!("unsupported exact contract version: {version}")),
-        (None, true, false) => Ok(Target::LegacyWire),
-        (None, false, true) => Ok(Target::TelemetryConsent),
-        (None, false, false) => Err(
-            "one of --version <exact>, --legacy-wire, or --telemetry-consent is required"
-                .to_string(),
-        ),
+        (None, true) => Ok(Target::LegacyWire),
+        (None, false) => Err("one of --version <exact> or --legacy-wire is required".to_string()),
         _ => unreachable!("clap rejects conflicting target options"),
     }
 }
@@ -108,10 +100,6 @@ fn schema_content(target: Target) -> Result<String, String> {
                 mxc_schema_support::render_root_ordered(root)
             ))
         }
-        Target::TelemetryConsent => Ok(format!(
-            "{}\n",
-            wxc_common::wire::generate_telemetry_consent_schema_json()
-        )),
     }
 }
 
@@ -125,7 +113,6 @@ fn types_content(target: Target) -> Result<String, String> {
                 version.as_str(),
             ))
         }
-        Target::TelemetryConsent => Ok(wxc_common::wire::generate_telemetry_consent_sdk_types_ts()),
     }
 }
 

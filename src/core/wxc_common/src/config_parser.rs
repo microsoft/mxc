@@ -64,8 +64,6 @@ impl ParseError {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(expecting = "a configuration object")]
 struct RequestDiscriminator<'a> {
-    #[serde(borrow, default)]
-    command: Option<&'a str>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
@@ -116,16 +114,15 @@ fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcEr
 /// Top-level decoded-request classification shared by the executor binaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
-    TelemetryConsent,
     OneShot,
     StateAware,
 }
 
 /// Borrowed parse hints extracted from the top level of a decoded request JSON.
 ///
-/// Executor binaries can parse this once, route telemetry-consent maintenance
-/// requests immediately, and pass the same hint into the normal loaders so
-/// one-shot requests do not pay a second discriminator parse.
+/// Executor binaries can parse this once and pass the same hint into the
+/// normal loaders so one-shot requests do not pay a second discriminator
+/// parse.
 #[derive(Debug, Clone)]
 pub struct RequestParseHint {
     kind: RequestKind,
@@ -150,9 +147,7 @@ pub fn parse_request_hint_from_json(json_str: &str) -> Result<RequestParseHint, 
                 .map(|raw| experimental_source_span(json_str, raw.get()))
                 .transpose()?;
             Ok(RequestParseHint {
-                kind: if discriminator.command == Some("telemetryConsent") {
-                    RequestKind::TelemetryConsent
-                } else if discriminator.phase.is_some() {
+                kind: if discriminator.phase.is_some() {
                     RequestKind::StateAware
                 } else {
                     RequestKind::OneShot
@@ -271,12 +266,6 @@ pub fn load_request_from_json_with_hint_and_options(
     let _ = opts.is_base64;
     let result = (|| {
         match hint.kind() {
-            RequestKind::TelemetryConsent => {
-                return Err(WxcError::ConfigParse(
-                    "expected an execution request, got telemetry consent maintenance request"
-                        .to_string(),
-                ));
-            }
             RequestKind::StateAware => {
                 return Err(WxcError::ConfigParse(
                     "expected a one-shot execution request, got a state-aware lifecycle request"
@@ -6806,6 +6795,17 @@ mod tests {
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_consent_maintenance_is_not_an_execution_request() {
+        let json = r#"{"command":"telemetryConsent","action":"status"}"#;
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `command`"),
+            "got {error:?}"
+        );
     }
 
     #[test]

@@ -74,12 +74,57 @@ struct Cli {
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
 
-    /// Report the persisted telemetry consent state and exit. MXC only
-    /// ever collects telemetry on Windows, so on Linux this always
-    /// reports "not-applicable" — there is no consent to grant or
-    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
-    #[arg(long = "telemetry-consent-status")]
-    telemetry_consent_status: bool,
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "delete",
+            "containername",
+            "experimental",
+            "allow_testing_features",
+            "dry_run",
+            "setup_hyperlight",
+            "force"
+        ]
+    )]
+    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
+
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
+
+    /// Private SDK presenter protocol.
+    #[arg(
+        long = "telemetry-consent-protocol",
+        requires = "telemetry_consent",
+        hide = true
+    )]
+    telemetry_consent_protocol: Option<telemetry::consent_cli::ConsentProtocol>,
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
+    }
 }
 
 /// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
@@ -89,10 +134,14 @@ struct Cli {
 /// handler returns the outcome as data; terminating the process is this
 /// binary's job, not the foundation crate's.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) = telemetry::consent_cli::handle_consent_status(cli.telemetry_consent_status)
-    else {
+    let Some(action) = cli.telemetry_consent else {
         return false;
     };
+    let outcome = telemetry::consent_cli::handle_consent_command(
+        action,
+        cli.telemetry_consent_locale.as_deref(),
+        cli.telemetry_consent_protocol,
+    );
     let code = outcome.emit();
     if code != 0 {
         std::process::exit(code);
@@ -100,25 +149,7 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
     true
 }
 
-fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
-    let Some(json) = json else {
-        return false;
-    };
-    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
-        return false;
-    };
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
-/// Read the request source (file path / base64 blob) once, returning the
-/// decoded JSON. Reused by the maintenance probe and the normal request
-/// loader so a single source is only read once per invocation — a
-/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
-/// paths that are drained by the first read.
+/// Read the request source (file path / base64 blob) once.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
     let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
         (input.clone(), true)
@@ -183,9 +214,9 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
-    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // --telemetry-consent: report/administer the
     // (always not-applicable on Linux) consent state and exit. Runs before
     // signal_cleanup::install():
     // this is a read-only/local-file fast path that never spawns a
@@ -195,28 +226,13 @@ fn main() {
     if handle_telemetry_consent_flags(&cli) {
         return;
     }
-    // Decode the request source (file path / base64) once, up front, so the
-    // maintenance probe and the normal request loader below share the same
-    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
-    // process-substitution paths that are drained by the first read.
+    // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
     let request_hint = decoded_config
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
-    if matches!(
-        request_hint.as_ref().map(|hint| hint.kind()),
-        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
-    ) && handle_telemetry_consent_input(
-        decoded_config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(String::as_str),
-    ) {
-        return;
-    }
-
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We

@@ -14,6 +14,7 @@
 pub mod consent;
 pub mod consent_cli;
 pub mod consent_prompt;
+mod consent_protocol;
 pub mod correlation_state;
 pub mod correlation_vector;
 pub mod events;

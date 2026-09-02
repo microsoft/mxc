@@ -182,6 +182,18 @@ Telemetry emission is gated by the per-run request, MXC-owned consent,
 administrative policy, and provider availability. See
 [`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md).
 
+Consent is managed through the dedicated executor control plane:
+
+```text
+wxc-exec --telemetry-consent status
+wxc-exec --telemetry-consent request
+wxc-exec --telemetry-consent withdraw
+```
+
+These actions are not MXC execution configurations and are never accepted
+through `--config` or `--config-base64`. The stable `telemetry.enabled`
+setting remains only the additional per-run opt-in.
+
 ## Privacy review status
 
 The version 1 `en-US` consent wording is approved for release review. The

@@ -59,29 +59,21 @@ function Get-TraceLoggingProviderGuid {
     return '{' + ([guid]::new($guidBytes)).ToString() + '}'
 }
 
-function ConvertTo-Base64Json {
-    param([Parameter(Mandatory)][object]$Value)
-    $json = $Value | ConvertTo-Json -Compress -Depth 10
-    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-}
-
 function Invoke-Status {
-    $output = & $wxcExe --telemetry-consent-status
+    $output = & $wxcExe --telemetry-consent status
     if ($LASTEXITCODE -ne 0) { throw "Consent status failed with exit code $LASTEXITCODE" }
     return ($output | ConvertFrom-Json)
 }
 
 function Invoke-CanonicalGrant {
-    $request = [pscustomobject]@{ command = 'telemetryConsent'; action = 'request'; locale = 'en-US' }
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wxcExe
-    $start.Arguments = "--config-base64 $(ConvertTo-Base64Json $request)"
+    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US --telemetry-consent-protocol stdio-v1'
     $start.UseShellExecute = $false
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
-    $start.Environment['MXC_TELEMETRY_CONSENT_PRESENTER_PROTOCOL'] = '1'
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
     [void]$start.Environment.Remove('MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey

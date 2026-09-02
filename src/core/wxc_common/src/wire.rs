@@ -111,175 +111,6 @@ pub struct MxcConfig {
     pub experimental: Option<Experimental>,
 }
 
-/// Telemetry-consent maintenance request.
-///
-/// This is a separate contract from [`MxcConfig`], even though executors use
-/// the same JSON input loader for both. Its explicit `command` discriminator
-/// lets the loader route maintenance without widening the execution schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[cfg_attr(
-    feature = "schema-gen",
-    schemars(title = "MXC Telemetry Consent Maintenance Request")
-)]
-#[serde(
-    rename_all = "camelCase",
-    deny_unknown_fields,
-    expecting = "a telemetry consent maintenance request"
-)]
-pub struct TelemetryConsentMaintenanceRequest {
-    /// Optional JSON Schema reference for editor validation.
-    #[serde(rename = "$schema")]
-    pub schema: Option<String>,
-    /// Fixed maintenance discriminator. Must be `"telemetryConsent"`.
-    pub command: TelemetryConsentCommand,
-    /// Consent operation to perform.
-    pub action: TelemetryConsentAction,
-    /// Preferred BCP 47 locale for the canonical prompt. Unsupported locales
-    /// fall back to `en-US`. Used only by `request`.
-    pub locale: Option<String>,
-}
-
-/// Fixed telemetry-consent maintenance command discriminator.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentCommand {
-    TelemetryConsent,
-}
-
-/// Telemetry-consent maintenance action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentAction {
-    /// Present the canonical prompt when consent may be requested.
-    Request,
-    /// Idempotently persist denied consent.
-    Withdraw,
-    /// Read status without mutation.
-    Status,
-}
-
-/// Typed result of a telemetry-consent maintenance action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentResult {
-    Status,
-    PresentationRequired,
-    Granted,
-    Denied,
-    Dismissed,
-    Withdrawn,
-    AlreadyGranted,
-    PolicyBlocked,
-    PresentationUnavailable,
-    NotApplicable,
-}
-
-/// Typed decision returned by a consent presenter.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentDecision {
-    Yes,
-    No,
-    Dismissed,
-}
-
-/// Private, session-bound presenter response consumed by the same executor
-/// process that emitted the challenge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentPresenterResponse {
-    pub challenge: String,
-    pub resource_version: u32,
-    pub decision: TelemetryConsentDecision,
-}
-
-/// Stable consent-state strings used by maintenance responses.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentState {
-    Granted,
-    Denied,
-    Undetermined,
-    NotApplicable,
-}
-
-/// Stable policy-state strings used by maintenance responses.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentPolicyState {
-    Unrestricted,
-    Allowed,
-    Blocked,
-    NotApplicable,
-}
-
-/// Why persisted consent is not currently effective.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentStatusReason {
-    NoRecord,
-    StoreUnreadable,
-    StoreMalformed,
-    ConsentSchemaUnsupported,
-    PromptVersionMissing,
-    PromptVersionUnsupported,
-    PolicyBlocked,
-    PresentationUnavailable,
-    NotApplicable,
-}
-
-/// One canonical prompt message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentMessage {
-    pub id: String,
-    pub text: String,
-}
-
-/// Canonical prompt data supplied to an SDK presenter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentPrompt {
-    pub resource_version: u32,
-    pub locale: String,
-    pub title: TelemetryConsentMessage,
-    pub body: TelemetryConsentMessage,
-    pub affirmative_label: TelemetryConsentMessage,
-    pub negative_label: TelemetryConsentMessage,
-    pub learn_more_label: TelemetryConsentMessage,
-    pub learn_more_url: String,
-}
-
-/// Typed telemetry-consent maintenance response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentMaintenanceResponse {
-    pub action: TelemetryConsentAction,
-    pub result: TelemetryConsentResult,
-    pub stored_state: TelemetryConsentState,
-    pub effective_state: TelemetryConsentState,
-    pub reason: Option<TelemetryConsentStatusReason>,
-    pub policy: TelemetryConsentPolicyState,
-    pub needs_prompt: bool,
-    /// Present only during the private SDK presenter handshake.
-    pub prompt: Option<TelemetryConsentPrompt>,
-    /// Opaque, single-request challenge for the private SDK presenter
-    /// handshake. Never persisted.
-    pub challenge: Option<String>,
-}
-
 /// State-aware lifecycle phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -900,18 +731,13 @@ pub struct IsolationSessionProvisionPhase {
 /// re-exported below as `generate_config_schema_json`.
 #[cfg(feature = "schema-gen")]
 mod schema_gen {
-    use super::{
-        MxcConfig, TelemetryConsentMaintenanceRequest, TelemetryConsentMaintenanceResponse,
-        TelemetryConsentPresenterResponse,
-    };
+    use super::MxcConfig;
     use schemars::JsonSchema;
 
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
     const SCHEMA_ID: &str =
         "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
-    const TELEMETRY_CONSENT_SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-telemetry-consent.schema.1.json";
 
     /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
     /// model. The schema is post-processed to (a) inject the canonical `$id`,
@@ -956,36 +782,7 @@ mod schema_gen {
         let value = schema_value();
         mxc_schema_support::emit_ts(&value)
     }
-
-    /// Generate the separate telemetry-consent maintenance request schema.
-    pub fn generate_telemetry_consent_schema_json() -> String {
-        let value =
-            schema_value_for::<TelemetryConsentMaintenanceRequest>(TELEMETRY_CONSENT_SCHEMA_ID);
-        if let serde_json::Value::Object(map) = &value {
-            return mxc_schema_support::render_root_ordered(map);
-        }
-        serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
-    }
-
-    #[derive(JsonSchema)]
-    #[allow(dead_code)]
-    struct TelemetryConsentMaintenanceTypes {
-        request: TelemetryConsentMaintenanceRequest,
-        response: TelemetryConsentMaintenanceResponse,
-        presenter_response: TelemetryConsentPresenterResponse,
-    }
-
-    /// Generate TypeScript wire types for both maintenance requests and
-    /// responses without adding them to the execution-config drift oracle.
-    pub fn generate_telemetry_consent_sdk_types_ts() -> String {
-        let value =
-            schema_value_for::<TelemetryConsentMaintenanceTypes>(TELEMETRY_CONSENT_SCHEMA_ID);
-        mxc_schema_support::emit_ts(&value)
-    }
 }
 
 #[cfg(feature = "schema-gen")]
-pub use schema_gen::{
-    generate_config_schema_json, generate_sdk_types_ts, generate_telemetry_consent_schema_json,
-    generate_telemetry_consent_sdk_types_ts,
-};
+pub use schema_gen::{generate_config_schema_json, generate_sdk_types_ts};
