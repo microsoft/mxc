@@ -2291,6 +2291,51 @@ request is parsed or built, never patched into it afterwards. The 7.1.1.0
 characterization tests passed unchanged across the refactor, which is the
 evidence that the CLI behavior was preserved.
 
+##### Phase 7a compatibility boundary
+
+**Adopted 2026-09-02.** Phase 7a preserves behavior for valid requests and for
+the ordinary path without a trailing CLI command. When a valid trailing command
+is supplied, MXC must resolve the request's quoting context, splice the command
+before parsing, and feed the resulting complete document through the normal
+typed parser. Successful requests must retain the same resolved command,
+containment, policy, and state-aware error-routing behavior as the previous
+post-parse override path.
+
+Exact historical precedence between independently invalid inputs is not a
+compatibility requirement. In particular, when both command preparation and an
+unrelated policy field are invalid, Phase 7a may report the command-preparation
+error before the typed policy error. The selected ordering must be deterministic
+and covered by tests, but Phase 7a does not perform a synthetic splice or a
+second typed parse solely to reproduce which invalid-input diagnostic happened
+to win before this rework.
+
+This boundary distinguishes semantic compatibility from diagnostic identity:
+ordinary typed validation remains authoritative for the effective document,
+while failures that prevent construction of that document are entry-point
+errors. Any resulting difference for multiply-invalid input is recorded as an
+intentional Phase 7 classification rather than repaired with another parser
+path.
+
+Diagnostics produced after a successful splice describe the effective document
+that the typed parser consumed. Replacing or inserting `process.commandLine`
+may therefore shift a later same-line column relative to the caller's original
+bytes. Phase 7a tests this behavior against an explicitly spliced document; it
+does not retain an edit map or translate locations back to the original source.
+
+Command preparation also precedes construction of the typed request that owns
+the experimental telemetry configuration. A failure to resolve, render, or
+splice the trailing command is consequently a pre-request failure and does not
+initialize policy-configured telemetry. This is an accepted entry-point
+classification, not a reason to add a partial telemetry parser or a synthetic
+typed-validation pass.
+
+The programmatic builder migration remains part of Phase 7a. CLI loading and
+`mxc_engine::policy` were the only two consumers of the missing-command
+relaxation; requiring the script in `build_request` and
+`build_request_with_containment` removes the second consumer and prevents the
+same parse-then-patch pattern from surviving through the Rust SDK and FFI. The
+two entry-point changes are therefore reviewed and landed atomically.
+
 Two lessons worth carrying into the remaining steps. First, `cargo doc` belongs
 in this phase's quality gate: `-D warnings` lives in `RUSTFLAGS` and rustdoc
 reads `RUSTDOCFLAGS`, so deleting a documented item breaks intra-doc links that
