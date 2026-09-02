@@ -1403,16 +1403,36 @@ impl PrivateNetworkUse {
 /// advisory call report support long after the tooling was removed, and would
 /// let it stand in for the fresh walk the runner promises to do at launch.
 pub fn probe_proxy_enforcement() -> Result<(), String> {
-    let deadline = Instant::now() + PRE_FLIGHT_BUDGET;
+    supervise_preflight(PRE_FLIGHT_BUDGET, || {
+        probe_dependencies_uncached(
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::total(PRE_FLIGHT_BUDGET),
+        )
+    })
+}
+
+/// Run `walk` on a worker and return by `budget` whatever it is doing.
+///
+/// The walk's own budget bounds each command it *waits* on, but not the spawn
+/// itself: a PATH lookup or exec can block on a stalled filesystem before any
+/// deadline is consulted.
+///
+/// On timeout the worker is **abandoned, not joined**. Joining would
+/// reintroduce exactly the unbounded wait this exists to remove; the cost is
+/// that a child the walk had in flight is left running and unreaped.
+///
+/// `walk` is a parameter so a test can supply one that never returns — the
+/// only way to prove this supervision does anything.
+fn supervise_preflight<F>(budget: Duration, walk: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let deadline = Instant::now() + budget;
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker = thread::Builder::new()
         .name("mxc-proxy-preflight".to_string())
         .spawn(move || {
-            let result = probe_dependencies_uncached(
-                PrivateNetworkUse::ProxyOnlyEgress,
-                ProbeBudget::total(PRE_FLIGHT_BUDGET),
-            );
-            let _ = sender.send(result);
+            let _ = sender.send(walk());
         });
     if let Err(error) = worker {
         return Err(format!(
@@ -1422,15 +1442,9 @@ pub fn probe_proxy_enforcement() -> Result<(), String> {
 
     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(result) => result,
-        // The walk's own budget bounds each command it *waits* on, but not the
-        // spawn itself: a PATH lookup or exec can block on a stalled filesystem
-        // before any deadline is consulted. This outer wait is what makes
-        // PRE_FLIGHT_BUDGET a real ceiling for the caller. The worker is
-        // abandoned rather than joined -- it is detached and will exit on its
-        // own, and blocking on it here would reintroduce the unbounded wait.
         Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
             "Bubblewrap: the host did not answer the proxy-enforcement dependency \
-             checks within {PRE_FLIGHT_BUDGET:?}"
+             checks within {budget:?}"
         )),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("Bubblewrap: the proxy-enforcement pre-flight probe stopped unexpectedly".into())
@@ -3256,10 +3270,55 @@ mod tests {
         }
     }
 
-    /// The per-command budget bounds what the walk *waits* on, not the spawn
-    /// itself — a PATH lookup can block before any deadline is consulted. The
-    /// outer worker is what makes `PRE_FLIGHT_BUDGET` a real ceiling, so assert
-    /// the advisory probe returns within it on any host.
+    /// The regression test for the supervision itself: delete the worker and
+    /// this hangs forever. A timing assertion against the live walk cannot do
+    /// that, since a real host answers well inside the budget either way.
+    #[test]
+    fn a_walk_that_never_returns_still_answers_at_the_budget() {
+        let budget = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let error = supervise_preflight(budget, move || {
+            // Stands in for a spawn blocked on a stalled filesystem: no
+            // deadline inside the walk is ever consulted.
+            thread::sleep(Duration::from_secs(120));
+            Ok(())
+        })
+        .expect_err("a walk that never returns must not report support");
+        let elapsed = started.elapsed();
+
+        // No slack multiplier: tolerating double the ceiling would not pin it.
+        assert!(
+            elapsed < budget + Duration::from_secs(1),
+            "supervision must return at the budget, took {elapsed:?}"
+        );
+        assert!(
+            elapsed >= budget,
+            "it must actually wait out the budget, took {elapsed:?}"
+        );
+        assert!(
+            error.contains(&format!("{budget:?}")),
+            "the timeout must name the budget that ran out, got: {error}"
+        );
+    }
+
+    /// A walk that answers inside the budget must have its verdict passed
+    /// through unchanged, in both directions — supervision must not swallow the
+    /// result or turn a refusal into a timeout.
+    #[test]
+    fn a_walk_that_answers_is_reported_verbatim() {
+        assert_eq!(
+            supervise_preflight(Duration::from_secs(5), || Ok(())),
+            Ok(())
+        );
+        assert_eq!(
+            supervise_preflight(Duration::from_secs(5), || Err("slirp4netns missing".into())),
+            Err("slirp4netns missing".to_string())
+        );
+    }
+
+    /// Smoke check only: the live walk is fast on a healthy host, so this
+    /// cannot substitute for the supervision test above.
     #[test]
     fn the_advisory_probe_returns_within_its_budget() {
         let started = Instant::now();

@@ -145,18 +145,11 @@ Cross-check `GetPlatformSupport()` and continue handling
 
 #### Bubblewrap proxy-only egress (Linux)
 
-Schema `0.8.0-alpha`+ `network.proxy` runs the sandbox in a private network
-namespace and default-drops everything except the proxy endpoint. That needs
-host tooling (`slirp4netns`, util-linux `unshare` and `nsenter`, the `iptables`
-family) plus unprivileged user and network namespaces the kernel will actually
-grant — see
-[`docs/bwrap-support/bubblewrap-backend.md`](../../docs/bwrap-support/bubblewrap-backend.md).
-There is deliberately no fallback to the weaker shared-host-network model, so a
-request the host cannot satisfy fails rather than silently degrading.
-
-Unlike the TypeScript and Rust SDKs — which surface this as a
-`bubblewrapNetwork` field on platform support — the C# SDK reports it through
-the backend array, as a capability plus its absence reason:
+Schema `0.8.0-alpha`+ `network.proxy` needs host tooling and kernel permissions
+that not every Linux host grants. Bubblewrap reports whether this host can
+enforce it as the `ProxyEnforcement` capability, and names what is missing in
+`Warnings` when it cannot. The TypeScript and Rust SDKs surface the same answer
+as a `bubblewrapNetwork` field; the C# SDK reports it through the backend array:
 
 ```csharp
 AvailableBackend? bubblewrap = MxcSandbox.GetAvailableBackends()
@@ -177,11 +170,15 @@ else
 }
 ```
 
-Reported **fail closed**: when the probe cannot run, the capability is absent
-with a warning, never reported as supported. The check is advisory rather than
-a gate — the runner probes again at launch, because a package can be removed in
-between — and not exhaustive, since a missing `nf_conntrack` module is only
-detectable once the rules are installed and so still surfaces at launch.
+The capability is **fail closed** — a probe that cannot run leaves it absent
+with a warning rather than reporting support — and advisory, since the runner
+probes again at launch. A request the host cannot satisfy fails rather than
+degrading to weaker isolation.
+
+Host requirements are in
+[`docs/bwrap-support/bubblewrap-backend.md`](../../docs/bwrap-support/bubblewrap-backend.md);
+the discovery API is in
+[`docs/backend-support-probe-api-plan.md`](../../docs/backend-support-probe-api-plan.md).
 
 ### Full requests and explicit containment
 

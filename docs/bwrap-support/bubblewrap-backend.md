@@ -714,7 +714,7 @@ From the command line:
 lxc-exec --available-backends
 ```
 
-This emits the available backends as JSON and exits without launching anything.
+This emits the available backends as JSON and exits without running the workload.
 Bubblewrap advertises a `proxyEnforcement` capability when the host can enforce
 proxy-only egress, and a `warnings` entry explaining why when it cannot:
 

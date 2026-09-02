@@ -184,16 +184,13 @@ layers can't drift (§4.2, step 2). Do **not** extend the existing `--probe` fla
 contract of this API.
 
    **Partially landed (Linux).** `lxc-exec --available-backends` serializes
-   `available_backends()` and exits, and it is handled immediately after argument parsing —
-   before any config load or container work — so it is read-only with respect to host state.
-   The SDK uses it on Linux to populate `PlatformSupport.bubblewrapNetwork`.
+   `available_backends()` and exits, handled immediately after argument parsing so it stays
+   read-only with respect to host state. The SDK uses it on Linux to populate
+   `PlatformSupport.bubblewrapNetwork`.
 
-   Two deliberate scope limits: the flag is **not** yet the transport for the rest of
-   `getPlatformSupport()` on Linux (the `lxc-ls` and `bwrap --version` checks still run in
-   TypeScript, so the drift risk in step 2 is not yet closed), and the Windows side is
-   untouched. The name `--available-backends` is used rather than `--probe` for the reason
-   above *and* because §2 reserves `--probe` for the per-backend **diagnostics** payload,
-   which has a different (object, not array) shape; one flag name must not carry two schemas.
+   Still open: it is not yet the transport for the rest of `getPlatformSupport()` on Linux,
+   so the drift risk in step 2 stands, and Windows is untouched.
+
 ---
 
 ## 7. Appendix - Decisions & Notes
