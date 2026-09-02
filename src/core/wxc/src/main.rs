@@ -138,14 +138,6 @@ struct Cli {
     #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
     telemetry_consent_locale: Option<String>,
 
-    /// Private SDK presenter protocol.
-    #[arg(
-        long = "telemetry-consent-protocol",
-        requires = "telemetry_consent",
-        hide = true
-    )]
-    telemetry_consent_protocol: Option<telemetry::consent_cli::ConsentProtocol>,
-
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
     /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
@@ -287,7 +279,6 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
     let outcome = telemetry::consent_cli::handle_consent_command(
         action,
         cli.telemetry_consent_locale.as_deref(),
-        cli.telemetry_consent_protocol,
     );
     let code = outcome.emit();
     if code != 0 {
@@ -1653,8 +1644,6 @@ mod tests {
             "request",
             "--telemetry-consent-locale",
             "en-US",
-            "--telemetry-consent-protocol",
-            "stdio-v1",
         ]);
 
         assert_eq!(
@@ -1662,10 +1651,6 @@ mod tests {
             Some(telemetry::consent_cli::ConsentAction::Request)
         );
         assert_eq!(cli.telemetry_consent_locale.as_deref(), Some("en-US"));
-        assert_eq!(
-            cli.telemetry_consent_protocol,
-            Some(telemetry::consent_cli::ConsentProtocol::StdioV1)
-        );
     }
 
     #[test]
@@ -1714,13 +1699,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn private_consent_protocol_is_hidden_from_help() {
-        let help = Cli::command().render_long_help().to_string();
-        assert!(!help.contains("--telemetry-consent-protocol"));
-        assert!(help.contains("--telemetry-consent"));
     }
 
     #[test]

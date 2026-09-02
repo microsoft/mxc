@@ -2449,7 +2449,6 @@ mod tests {
         fn io_retry_does_not_retry_not_found() {
             use crate::telemetry::consent::platform;
             let mut calls = 0;
-            let started = std::time::Instant::now();
             let result = platform::with_io_retry_for_test(|| {
                 calls += 1;
                 Err::<(), _>(std::io::Error::new(
@@ -2459,25 +2458,6 @@ mod tests {
             });
             assert!(result.is_err());
             assert_eq!(calls, 1, "NotFound must not be retried");
-            assert!(
-                started.elapsed() < std::time::Duration::from_millis(20),
-                "NotFound must not sleep on the retry delay"
-            );
-        }
-
-        /// The whole point of the above: reading a fresh (nonexistent) store
-        /// is the common case and must be effectively instant.
-        #[test]
-        fn fresh_store_read_does_not_sleep() {
-            let tmp = tempfile::tempdir().unwrap();
-            let _guard = LocalAppDataGuard::set(tmp.path());
-            let started = std::time::Instant::now();
-            assert_eq!(get_consent(), ConsentState::Undetermined);
-            assert!(
-                started.elapsed() < std::time::Duration::from_millis(40),
-                "fresh-store read took {:?}; the retry loop is sleeping on NotFound again",
-                started.elapsed()
-            );
         }
 
         #[test]

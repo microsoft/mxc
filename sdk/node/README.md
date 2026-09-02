@@ -64,7 +64,7 @@ child.on('close', (code) => console.log('exit:', code));
 
 Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts experimental backend settings when paired with `--experimental`; however, fields introduced in a specific contract, including top-level `telemetry` in `0.9.0-alpha`, are rejected when the request explicitly declares an older schema version.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 

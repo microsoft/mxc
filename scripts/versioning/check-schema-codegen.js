@@ -28,72 +28,65 @@ function fail(msg) {
 const schemaVer = JSON.parse(
   readFileSync(join(repoRoot, "schemas", "schema-version.json"), "utf8")
 );
-const configSchemaPath = join(
+const committedPath = join(
   repoRoot,
   "schemas",
   "dev",
   `mxc-config.schema.${schemaVer.devSchemaFile}.json`
 );
-const tmpDir = mkdtempSync(join(os.tmpdir(), "mxc-schema-gen-"));
-const tmpConfigOut = join(tmpDir, "generated-config.json");
+
+let committed;
 try {
+  committed = readFileSync(committedPath, "utf8");
+} catch (e) {
+  fail(`could not read committed schema ${committedPath}: ${e.message}`);
+}
+
+const tmpDir = mkdtempSync(join(os.tmpdir(), "mxc-schema-gen-"));
+const tmpOut = join(tmpDir, "generated.json");
+try {
+  // Build + run the generator. Quiet so only our diagnostics surface.
+  execFileSync(
+    "cargo",
+    [
+      "run",
+      "-q",
+      "-p",
+      "mxc_schema_gen",
+      "--",
+      "schema",
+      "--legacy-wire",
+      "--out",
+      tmpOut,
+    ],
+    { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
+  );
+  const generated = readFileSync(tmpOut, "utf8");
+
+  // Compare modulo line endings: the schema is committed with LF, but on a
+  // Windows checkout with core.autocrlf=true the working-tree copy has CRLF.
+  // The generator always writes LF, so normalize both sides to avoid a
+  // false-positive "stale" failure that only reproduces on Windows.
   const normalize = (s) => s.replace(/\r\n/g, "\n");
-
-  function compareGeneratedSchema({
-    committedPath,
-    generatedPath,
-    generatorArgs,
-    regenCommand,
-  }) {
-    let committed;
-    try {
-      committed = readFileSync(committedPath, "utf8");
-    } catch (e) {
-      fail(`could not read committed schema ${committedPath}: ${e.message}`);
-    }
-
-    execFileSync(
-      "cargo",
-      [
-        "run",
-        "-q",
-        "-p",
-        "mxc_schema_gen",
-        "--",
-        ...generatorArgs,
-        "--out",
-        generatedPath,
-      ],
-      { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
+  if (normalize(generated) !== normalize(committed)) {
+    // Find the first differing line for a helpful pointer.
+    const g = normalize(generated).split("\n");
+    const c = normalize(committed).split("\n");
+    let line = 0;
+    while (line < g.length && line < c.length && g[line] === c[line]) line++;
+    fail(
+      `committed schema is stale at ${committedPath}.\n` +
+        `    First difference at line ${line + 1}:\n` +
+        `      committed:  ${JSON.stringify(c[line])}\n` +
+        `      generated:  ${JSON.stringify(g[line])}\n` +
+        `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
+        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
     );
-
-    const generated = readFileSync(generatedPath, "utf8");
-    if (normalize(generated) !== normalize(committed)) {
-      const g = normalize(generated).split("\n");
-      const c = normalize(committed).split("\n");
-      let line = 0;
-      while (line < g.length && line < c.length && g[line] === c[line]) line++;
-      fail(
-        `committed schema is stale at ${committedPath}.\n` +
-          `    First difference at line ${line + 1}:\n` +
-          `      committed:  ${JSON.stringify(c[line])}\n` +
-          `      generated:  ${JSON.stringify(g[line])}\n` +
-          `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
-          `      ${regenCommand}`
-      );
-    }
   }
-
-  compareGeneratedSchema({
-    committedPath: configSchemaPath,
-    generatedPath: tmpConfigOut,
-    generatorArgs: ["schema", "--legacy-wire"],
-    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
-  });
 } finally {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
 console.log(
-  `Schema codegen OK: committed config schema matches generated output (${schemaVer.devSchemaFile}).`
+  `Schema codegen OK: committed dev schema matches the generated output (${schemaVer.devSchemaFile}).`
 );

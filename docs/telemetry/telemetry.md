@@ -183,20 +183,6 @@ Telemetry emission is gated by the per-run request, MXC-owned consent,
 administrative policy, and provider availability. See
 [`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md).
 
-## Consent control plane
-
-Consent is managed through the dedicated executor control plane:
-
-```text
-wxc-exec --telemetry-consent status
-wxc-exec --telemetry-consent request
-wxc-exec --telemetry-consent withdraw
-```
-
-These actions are not MXC execution configurations and are never accepted
-through `--config` or `--config-base64`. The stable `telemetry.enabled`
-setting remains only the additional per-run opt-in.
-
 ## Diagnosing "telemetry is on but I see no events"
 
 Every gate fails closed, so a suppressed run is otherwise indistinguishable
@@ -215,7 +201,7 @@ Two points that commonly cause confusion:
 - **The Windows diagnostic-data setting is not an input.** Turning on
   "Optional diagnostic data" does not grant MXC consent. MXC owns its own
   consent store and never reads or infers from the system setting, so
-  `--telemetry-consent-status` must report `effectiveState: "granted"`
+  `--telemetry-consent status` must report `effectiveState: "granted"`
   before anything is collected.
 - **A build without `MXC_TELEMETRY_PROVIDER_GROUP_GUID` never uploads.**
   Without the group GUID the `Microsoft.MXC` provider is a plain ETW
@@ -251,7 +237,6 @@ session:
 ```
 cargo test -p wxc_e2e_tests --test e2e_telemetry_etw -- --ignored
 ```
-
 
 ## Privacy review status
 

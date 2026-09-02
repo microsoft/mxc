@@ -273,17 +273,6 @@ required. Omitting any required gate (the default) turns telemetry off
 entirely. On non-Windows platforms all telemetry functions are no-ops and
 consent is not applicable.
 
-Consent is managed separately from execution config:
-
-```powershell
-wxc-exec.exe --telemetry-consent status
-wxc-exec.exe --telemetry-consent request
-wxc-exec.exe --telemetry-consent withdraw
-```
-
-`telemetry.enabled` cannot request, grant, or withdraw consent. Consent
-maintenance is not accepted through `--config` or `--config-base64`.
-
 #### What official builds send
 
 Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution` and `MXC.Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
