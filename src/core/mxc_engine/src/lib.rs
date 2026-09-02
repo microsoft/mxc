@@ -267,9 +267,12 @@ impl TelemetryProcess {
                 containment,
                 requested_sandbox_kind,
             } => {
+                #[cfg(target_os = "windows")]
                 let verbose_error =
                     emit_verbose_telemetry(true, containment, *requested_sandbox_kind, &response)
                         .err();
+                #[cfg(not(target_os = "windows"))]
+                let verbose_error = None;
                 telemetry::emit_sdk_completion_with_kind(
                     true,
                     containment,

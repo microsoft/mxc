@@ -16,6 +16,9 @@ use wxc_common::telemetry::{self, VerboseEvent};
 const MAX_CONTENT_BYTES: usize = 48 * 1024;
 /// The pretty-printed file is bounded separately from its compact form.
 const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
+/// Property names describe provider schemas, but values can contain
+/// workload-controlled object names and are never included in telemetry.
+const REDACTED_PROPERTY_VALUE: &str = "<redacted>";
 
 #[derive(Debug)]
 struct PreparedVerboseDocument {
@@ -121,6 +124,7 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
     if document.version != VerboseLoggingDocument::VERSION {
         return Err("verbose artifact uses an unsupported document version".to_string());
     }
+    let document = project_for_telemetry(document);
 
     let compact = serde_json::to_vec(&document)
         .map_err(|_| "could not compact the verbose artifact".to_string())?;
@@ -140,6 +144,15 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
         summary,
         chunks,
     })
+}
+
+fn project_for_telemetry(mut document: VerboseLoggingDocument) -> VerboseLoggingDocument {
+    for aggregate in &mut document.signatures {
+        for (_, value) in &mut aggregate.signature.properties {
+            REDACTED_PROPERTY_VALUE.clone_into(value);
+        }
+    }
+    document
 }
 
 fn chunk_signatures(document: &VerboseLoggingDocument) -> Result<Vec<String>, String> {
@@ -267,11 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn prepared_chunks_reconstruct_the_canonical_document() {
+    fn prepared_chunks_reconstruct_the_telemetry_projection() {
         let directory = tempfile::tempdir().unwrap();
         let denials_path = directory.path().join("denials.json");
         let verbose_path = verbose_logging_sibling_path(&denials_path).unwrap();
-        let doc = document(vec![aggregate(1, "one"), aggregate(2, "two")]);
+        let doc = document(vec![
+            aggregate(1, "customer-secret-one"),
+            aggregate(2, "customer-secret-two"),
+        ]);
         let mut pretty = Vec::new();
         learning_mode_core::write_verbose_logging_document(&mut pretty, &doc).unwrap();
         std::fs::write(&verbose_path, pretty).unwrap();
@@ -309,7 +325,14 @@ mod tests {
             format!("{:x}", Sha256::digest(&compact)),
             prepared.document_sha256
         );
-        assert_eq!(reconstructed, doc);
+        assert_eq!(reconstructed, project_for_telemetry(doc));
+        assert!(reconstructed.signatures.iter().all(|aggregate| {
+            aggregate
+                .signature
+                .properties
+                .iter()
+                .all(|(_, value)| value == REDACTED_PROPERTY_VALUE)
+        }));
     }
 
     #[test]

@@ -281,9 +281,10 @@ No PII is collected. Execution events contain metrics (duration, backend type,
 exit code) and a bounded error category (`error_type`). When `captureDenials`
 produces a verbose artifact, `MXC.VerboseDenials` can additionally contain
 sanitized provider/event identifiers, process IDs, access/resource
-classifications, bounded redacted properties, occurrence counts, and
-truncation state. MXC never emits commands, credentials, complete file paths,
-usernames, sandbox output, raw ETL, actionable denial documents, general
+classifications, property names with every property value replaced by the
+fixed `<redacted>` marker, occurrence counts, and truncation state. MXC never
+emits commands, credentials, complete file paths, usernames, workload-derived
+property values, sandbox output, raw ETL, actionable denial documents, general
 logger text, or free-form error text. The SDKs expose presenter-bound consent
 requests, typed consent status, and explicit withdrawal. SDK hosts render the
 canonical MXC consent resource through their native UI and return the user's

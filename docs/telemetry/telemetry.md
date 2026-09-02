@@ -133,9 +133,11 @@ Emitted on execution errors.
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
 versioned `*.verbose.json` sibling, validates it as a
-`VerboseLoggingDocument`, and reserializes it as compact JSON. The event never
-contains the actionable denials file, raw ETL, commands, sandbox output, or
-general logger text.
+`VerboseLoggingDocument`, replaces every workload-derived property value with
+the fixed `<redacted>` marker, and serializes that telemetry-specific
+projection as compact JSON. Property names are retained to identify provider
+schema compatibility patterns. The event never contains the actionable
+denials file, raw ETL, commands, sandbox output, or general logger text.
 
 One verbose document may require multiple ETW events. Every `mxc.content`
 value is an independently parseable compact JSON array of complete verbose
@@ -150,8 +152,8 @@ signature objects; MXC never splits a JSON object or UTF-8 code point.
 | `mxc.document_version` | uint32 | `VerboseLoggingDocument` schema version |
 | `mxc.chunk_index` | uint32 | Zero-based chunk index |
 | `mxc.chunk_count` | uint32 | Total number of chunks |
-| `mxc.document_bytes` | uint64 | Canonical compact document byte count |
-| `mxc.document_sha256` | string | SHA-256 of the canonical compact document |
+| `mxc.document_bytes` | uint64 | Compact telemetry-projection byte count |
+| `mxc.document_sha256` | string | SHA-256 of the compact telemetry projection |
 | `mxc.content` | string | Valid compact JSON array of complete verbose signatures |
 | `mxc.summary` | string | Valid compact JSON verbose-document summary |
 
@@ -295,12 +297,13 @@ MXC's optional diagnostic events contain:
   nor receive it.
 - Sanitized Learning Mode verbose signatures when `captureDenials` produces a
   verbose artifact: provider/event identifiers, PID, closed outcome reason,
-  access/resource classifications, bounded redacted properties, occurrence
-  counts, and truncation state.
+  access/resource classifications, property names with every property value
+  replaced by the fixed `<redacted>` marker, occurrence counts, and truncation
+  state.
 
 MXC does not emit commands, credentials, complete file paths, usernames,
-sandbox output, raw ETL, actionable denial documents, general logger text, or
-free-form error text.
+workload-derived property values, sandbox output, raw ETL, actionable denial
+documents, general logger text, or free-form error text.
 
 ### Review status
 
