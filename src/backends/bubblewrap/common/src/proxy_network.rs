@@ -1394,16 +1394,48 @@ impl PrivateNetworkUse {
 ///
 /// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
 /// caller answering "can this host do it?" before spawning cannot afford the
-/// sum of every per-command timeout.
+/// sum of every per-command timeout. The walk runs in a deadline-watched
+/// worker, so the ceiling holds even when a spawn itself blocks (a PATH lookup
+/// on a stalled filesystem is not covered by the per-command deadlines, which
+/// only bound what the walk *waits* on).
 ///
 /// Uncached in both directions. Sharing the launch cache would let one
 /// advisory call report support long after the tooling was removed, and would
 /// let it stand in for the fresh walk the runner promises to do at launch.
 pub fn probe_proxy_enforcement() -> Result<(), String> {
-    probe_dependencies_uncached(
-        PrivateNetworkUse::ProxyOnlyEgress,
-        ProbeBudget::total(PRE_FLIGHT_BUDGET),
-    )
+    let deadline = Instant::now() + PRE_FLIGHT_BUDGET;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("mxc-proxy-preflight".to_string())
+        .spawn(move || {
+            let result = probe_dependencies_uncached(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::total(PRE_FLIGHT_BUDGET),
+            );
+            let _ = sender.send(result);
+        });
+    if let Err(error) = worker {
+        return Err(format!(
+            "Bubblewrap: could not start the proxy-enforcement pre-flight probe: {error}"
+        ));
+    }
+
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        // The walk's own budget bounds each command it *waits* on, but not the
+        // spawn itself: a PATH lookup or exec can block on a stalled filesystem
+        // before any deadline is consulted. This outer wait is what makes
+        // PRE_FLIGHT_BUDGET a real ceiling for the caller. The worker is
+        // abandoned rather than joined -- it is detached and will exit on its
+        // own, and blocking on it here would reintroduce the unbounded wait.
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "Bubblewrap: the host did not answer the proxy-enforcement dependency \
+             checks within {PRE_FLIGHT_BUDGET:?}"
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Bubblewrap: the proxy-enforcement pre-flight probe stopped unexpectedly".into())
+        }
+    }
 }
 
 pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
@@ -3222,6 +3254,22 @@ mod tests {
                 "the refusal must name the flags it needs, got: {error}"
             );
         }
+    }
+
+    /// The per-command budget bounds what the walk *waits* on, not the spawn
+    /// itself — a PATH lookup can block before any deadline is consulted. The
+    /// outer worker is what makes `PRE_FLIGHT_BUDGET` a real ceiling, so assert
+    /// the advisory probe returns within it on any host.
+    #[test]
+    fn the_advisory_probe_returns_within_its_budget() {
+        let started = Instant::now();
+        let _ = probe_proxy_enforcement();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < PRE_FLIGHT_BUDGET * 2,
+            "the advisory probe must honor its budget, took {elapsed:?}"
+        );
     }
 
     /// The deadline tests cover the individual failure branches in isolation.
