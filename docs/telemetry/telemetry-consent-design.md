@@ -107,8 +107,6 @@ wxc-exec --telemetry-consent withdraw
 wxc-exec --telemetry-consent request
 ```
 
-`lxc-exec` and `mxc-exec-mac` expose the same command and return
-`notApplicable` domain outcomes because telemetry collection is Windows-only.
 `request` optionally accepts `--telemetry-consent-locale <BCP-47>`; missing or
 unsupported locales use the canonical `en-US` fallback. Interactive requests
 write the prompt to stderr, read `Y` or `N` from a terminal, and write one final
