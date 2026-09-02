@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.Versioning;
@@ -141,6 +143,7 @@ public sealed class MxcTelemetryTests
         private static readonly SemaphoreSlim Gate = new(1, 1);
 
         private readonly string? _originalLocalAppData;
+        private readonly string? _originalLocalAppDataOwnerPid;
         private readonly string? _originalPolicyKey;
         private readonly string? _originalPolicyOwnerPid;
         private readonly string _storeDir;
@@ -152,6 +155,8 @@ public sealed class MxcTelemetryTests
             try
             {
                 _originalLocalAppData = Environment.GetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE");
+                _originalLocalAppDataOwnerPid = Environment.GetEnvironmentVariable(
+                    "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID");
                 _originalPolicyKey = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE");
                 _originalPolicyOwnerPid = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID");
 
@@ -160,6 +165,9 @@ public sealed class MxcTelemetryTests
 
                 Registry.CurrentUser.CreateSubKey(_policySubkey)?.Dispose();
                 Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _storeDir);
+                Environment.SetEnvironmentVariable(
+                    "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
+                    GetParentProcessId().ToString());
                 Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _policySubkey);
                 Environment.SetEnvironmentVariable(
                     "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID",
@@ -175,6 +183,9 @@ public sealed class MxcTelemetryTests
         public void Dispose()
         {
             Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _originalLocalAppData);
+            Environment.SetEnvironmentVariable(
+                "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
+                _originalLocalAppDataOwnerPid);
             Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _originalPolicyKey);
             Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID", _originalPolicyOwnerPid);
 
@@ -198,6 +209,43 @@ public sealed class MxcTelemetryTests
             }
 
             Gate.Release();
+        }
+
+        private static int GetParentProcessId()
+        {
+            using var process = Process.GetCurrentProcess();
+            var status = NtQueryInformationProcess(
+                process.Handle,
+                processInformationClass: 0,
+                out var processInformation,
+                Marshal.SizeOf<ProcessBasicInformation>(),
+                out _);
+            if (status != 0)
+            {
+                throw new InvalidOperationException(
+                    $"NtQueryInformationProcess failed with NTSTATUS 0x{status:X8}");
+            }
+
+            return checked((int)processInformation.InheritedFromUniqueProcessId);
+        }
+
+        [DllImport("ntdll.dll", ExactSpelling = true)]
+        private static extern int NtQueryInformationProcess(
+            IntPtr processHandle,
+            int processInformationClass,
+            out ProcessBasicInformation processInformation,
+            int processInformationLength,
+            out int returnLength);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessBasicInformation
+        {
+            internal IntPtr Reserved1;
+            internal IntPtr PebBaseAddress;
+            internal IntPtr Reserved2_0;
+            internal IntPtr Reserved2_1;
+            internal IntPtr UniqueProcessId;
+            internal IntPtr InheritedFromUniqueProcessId;
         }
     }
 
