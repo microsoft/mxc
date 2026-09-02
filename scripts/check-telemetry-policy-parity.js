@@ -163,16 +163,24 @@ function parseTypeScriptUnion(name) {
   return new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]));
 }
 
-function parseRustEnum(name, rename) {
+function parseRustEnum(name) {
   const match = rustConsentProtocolSrc.match(
-    new RegExp(`enum\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`)
+    new RegExp(
+      `#\\[serde\\(rename_all = "([^"]+)"(?:,[^\\]]*)?\\)\\]\\s*` +
+      `pub\\(super\\)\\s+enum\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`
+    )
   );
   if (!match) {
-    console.error(`ERROR: could not find Rust enum \`${name}\``);
+    console.error(`ERROR: could not find serializable Rust enum \`${name}\``);
+    process.exit(1);
+  }
+  const rename = match[1];
+  if (rename !== "camelCase" && rename !== "kebab-case") {
+    console.error(`ERROR: unsupported Serde rename_all '${rename}' on Rust enum \`${name}\``);
     process.exit(1);
   }
   return new Set(
-    [...match[1].matchAll(/^\s*([A-Z][A-Za-z0-9_]*)\s*,/gm)].map((item) => {
+    [...match[2].matchAll(/^\s*([A-Z][A-Za-z0-9_]*)\s*,/gm)].map((item) => {
       const kebab = item[1].replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
       return rename === "camelCase"
         ? kebab.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
@@ -254,7 +262,14 @@ function functionReturnsSentinel(functionName, sentinel) {
   return body.includes(`return ${sentinel};`);
 }
 
-const terminalConsentResults = parseRustEnum("ConsentResult", "camelCase");
+const protocolPolicyStates = parseRustEnum("PolicyState");
+compareSets(
+  "Rust consent protocol PolicyState",
+  new Set(rustStates.keys()),
+  protocolPolicyStates
+);
+
+const terminalConsentResults = parseRustEnum("ConsentResult");
 terminalConsentResults.delete("status");
 terminalConsentResults.delete("presentationRequired");
 compareSets(
@@ -278,7 +293,7 @@ if (!functionReturnsSentinel(
   errors.push("C# unknown consent action results must return TelemetryConsentActionResult.Unknown");
 }
 
-const consentReasons = parseRustEnum("StatusReason", "kebab-case");
+const consentReasons = parseRustEnum("StatusReason");
 compareSets(
   "TypeScript TelemetryConsentStatusReason",
   consentReasons,

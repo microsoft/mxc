@@ -64,6 +64,17 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
+  it('accepts omitted and false telemetry as the same disabled value', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'windows_sandbox',
+      sandboxId: 'wsb:01234567',
+      telemetry: { enabled: false },
+      config: { telemetry: {} },
+    });
+    assert.deepEqual(env.telemetry, { enabled: false });
+  });
+
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',

@@ -359,6 +359,10 @@ public static class MxcLifecycle
                         try { disposeLateResult(t.Result); }
                         catch { /* best-effort cleanup */ }
                     }
+                    else if (t.IsFaulted)
+                    {
+                        _ = t.Exception;
+                    }
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,

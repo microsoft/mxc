@@ -274,6 +274,32 @@ public sealed class MxcTelemetryTestsReleaseSafe
         Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
     }
 
+    [Fact]
+    public void RequestConsent_UnknownWireReasonReturnsFailClosedSentinel()
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(1, presenter(ConsentPromptJson()));
+                return new(
+                    (int)ErrorCode.Success,
+                    """{"result":"granted","storedState":"granted","effectiveState":"granted","reason":"future-reason","policy":"allowed"}""");
+            },
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var outcome = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+
+        Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryConsentStatusReason.Unknown, outcome.Reason);
+        Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
+    }
+
     [Theory]
     [InlineData("policy-blocked", TelemetryConsentStatusReason.PolicyBlocked)]
     [InlineData("presentation-unavailable", TelemetryConsentStatusReason.PresentationUnavailable)]

@@ -553,7 +553,9 @@ public static class MxcTelemetry
         using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent outcome"));
         var root = document.RootElement;
         var result = ParseConsentActionResult(root.GetProperty("result").GetString());
-        if (result == TelemetryConsentActionResult.Unknown)
+        var reason = ParseConsentStatusReason(root.GetProperty("reason"), "ConsentOutcome");
+        if (result == TelemetryConsentActionResult.Unknown ||
+            reason == TelemetryConsentStatusReason.Unknown)
         {
             return new(
                 TelemetryConsentActionResult.Unknown,
@@ -566,7 +568,7 @@ public static class MxcTelemetry
             result,
             ParseConsentState(root.GetProperty("storedState").GetString(), "ConsentOutcome"),
             ParseConsentState(root.GetProperty("effectiveState").GetString(), "ConsentOutcome"),
-            ParseConsentStatusReason(root.GetProperty("reason"), "ConsentOutcome"),
+            reason,
             ParsePolicyState(root.GetProperty("policy").GetString(), "ConsentOutcome"));
     }
 

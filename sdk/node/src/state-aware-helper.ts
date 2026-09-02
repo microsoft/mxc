@@ -115,7 +115,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (
     telemetry !== undefined
     && configTelemetry !== undefined
-    && telemetry.enabled !== configTelemetry.enabled
+    && (telemetry.enabled ?? false) !== (configTelemetry.enabled ?? false)
   ) {
     throw mxcErrorFromCode(
       'malformed_request',

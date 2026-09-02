@@ -127,6 +127,7 @@ function defaultConsentRunner(args: readonly string[]): string {
     timeout: 5000,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 }
 
