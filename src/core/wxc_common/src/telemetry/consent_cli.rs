@@ -43,26 +43,6 @@ impl FromStr for ConsentAction {
     }
 }
 
-/// Optional private presenter protocol selected by SDK hosts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsentProtocol {
-    /// Newline-delimited JSON over the executor's standard streams.
-    StdioV1,
-}
-
-impl FromStr for ConsentProtocol {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "stdio-v1" => Ok(Self::StdioV1),
-            _ => Err(format!(
-                "invalid telemetry consent protocol '{value}'; expected stdio-v1"
-            )),
-        }
-    }
-}
-
 /// Whether an argv sequence invokes the dedicated consent command surface.
 ///
 /// Executor binaries use this to map clap failures involving consent options
@@ -82,8 +62,6 @@ where
                 || argument.starts_with("--telemetry-consent=")
                 || argument == "--telemetry-consent-locale"
                 || argument.starts_with("--telemetry-consent-locale=")
-                || argument == "--telemetry-consent-protocol"
-                || argument.starts_with("--telemetry-consent-protocol=")
         })
 }
 
@@ -141,11 +119,7 @@ impl ConsentCliOutcome {
 }
 
 /// Execute one dedicated telemetry-consent command.
-pub fn handle_consent_command(
-    action: ConsentAction,
-    locale: Option<&str>,
-    selected_protocol: Option<ConsentProtocol>,
-) -> ConsentCliOutcome {
+pub fn handle_consent_command(action: ConsentAction, locale: Option<&str>) -> ConsentCliOutcome {
     if action != ConsentAction::Request && locale.is_some() {
         return ConsentCliOutcome::failure(
             "Error: --telemetry-consent-locale is valid only with \
@@ -154,15 +128,6 @@ pub fn handle_consent_command(
             64,
         );
     }
-    if action != ConsentAction::Request && selected_protocol.is_some() {
-        return ConsentCliOutcome::failure(
-            "Error: --telemetry-consent-protocol is valid only with \
-             --telemetry-consent request"
-                .to_string(),
-            64,
-        );
-    }
-
     match action {
         ConsentAction::Status => ConsentCliOutcome::json(&consent_response(
             action,
@@ -184,10 +149,7 @@ pub fn handle_consent_command(
         ConsentAction::Request => {
             let mut presenter_failure_kind = None;
             let result = consent::request_consent(locale, |prompt| {
-                let presented = match selected_protocol {
-                    Some(ConsentProtocol::StdioV1) => present_over_stdio_protocol(action, prompt),
-                    None => present_on_terminal(prompt).map_err(ProtocolFailure::operational),
-                };
+                let presented = present_request(action, prompt);
                 presented.map_err(|failure| {
                     presenter_failure_kind = Some(failure.kind);
                     failure.message
@@ -221,6 +183,21 @@ pub fn handle_consent_command(
             }
         }
     }
+}
+
+fn present_request(
+    action: ConsentAction,
+    prompt: &consent_prompt::ConsentPrompt,
+) -> Result<consent::ConsentDecision, ProtocolFailure> {
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        return present_on_terminal(prompt).map_err(ProtocolFailure::operational);
+    }
+    if !std::io::stdin().is_terminal() && !std::io::stdout().is_terminal() {
+        return present_over_stdio(action, prompt);
+    }
+    Err(ProtocolFailure::operational(
+        "interactive telemetry consent presentation is unavailable",
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,10 +255,14 @@ fn present_on_terminal(
     let read = std::io::stdin()
         .read_line(&mut input)
         .map_err(|error| format!("failed to read telemetry consent response: {error}"))?;
-    if read == 0 {
-        return Ok(consent::ConsentDecision::Dismissed);
+    terminal_decision(read, &input)
+}
+
+fn terminal_decision(bytes_read: usize, input: &str) -> Result<consent::ConsentDecision, String> {
+    if bytes_read == 0 {
+        return Err("terminal closed without returning a telemetry consent decision".to_string());
     }
-    Ok(parse_terminal_decision(&input))
+    Ok(parse_terminal_decision(input))
 }
 
 fn parse_terminal_decision(input: &str) -> consent::ConsentDecision {
@@ -292,7 +273,7 @@ fn parse_terminal_decision(input: &str) -> consent::ConsentDecision {
     }
 }
 
-fn present_over_stdio_protocol(
+fn present_over_stdio(
     action: ConsentAction,
     prompt: &consent_prompt::ConsentPrompt,
 ) -> Result<consent::ConsentDecision, ProtocolFailure> {
@@ -629,7 +610,7 @@ mod tests {
 
     #[test]
     fn locale_is_rejected_for_non_request_actions() {
-        let outcome = handle_consent_command(ConsentAction::Status, Some("en-US"), None);
+        let outcome = handle_consent_command(ConsentAction::Status, Some("en-US"));
         assert_eq!(outcome.exit_code, 64);
         assert!(outcome.stderr.as_deref().unwrap().contains("valid only"));
     }
@@ -691,14 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_is_rejected_for_non_request_actions() {
-        let outcome = handle_consent_command(
-            ConsentAction::Withdraw,
-            None,
-            Some(ConsentProtocol::StdioV1),
-        );
-        assert_eq!(outcome.exit_code, 64);
-        assert!(outcome.stderr.as_deref().unwrap().contains("valid only"));
+    fn terminal_eof_is_a_presentation_failure() {
+        let error = terminal_decision(0, "").unwrap_err();
+        assert!(error.contains("closed without returning"));
     }
 
     fn assert_status_json(
@@ -845,21 +821,21 @@ mod tests {
             (
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-yes.json"
+                    "/../../../tests/fixtures/telemetry-consent/presenter-decision-yes.json"
                 )),
                 consent::ConsentDecision::Yes,
             ),
             (
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-no.json"
+                    "/../../../tests/fixtures/telemetry-consent/presenter-decision-no.json"
                 )),
                 consent::ConsentDecision::No,
             ),
             (
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-dismissed.json"
+                    "/../../../tests/fixtures/telemetry-consent/presenter-decision-dismissed.json"
                 )),
                 consent::ConsentDecision::Dismissed,
             ),
@@ -873,7 +849,7 @@ mod tests {
         }
         let invalid = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-unknown-field.json"
+            "/../../../tests/fixtures/telemetry-consent/presenter-decision-unknown-field.json"
         ));
         assert_eq!(
             parse_presenter_response(invalid, "request-a", 1)
@@ -896,7 +872,7 @@ mod tests {
 
         #[test]
         fn status_reports_not_applicable_and_succeeds() {
-            let outcome = handle_consent_command(ConsentAction::Status, None, None);
+            let outcome = handle_consent_command(ConsentAction::Status, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -929,7 +905,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let _guards = isolate(tmp.path());
 
-            let outcome = handle_consent_command(ConsentAction::Status, None, None);
+            let outcome = handle_consent_command(ConsentAction::Status, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -951,7 +927,7 @@ mod tests {
             let env = isolate(tmp.path());
             env.set_policy_value(0);
 
-            let outcome = handle_consent_command(ConsentAction::Status, None, None);
+            let outcome = handle_consent_command(ConsentAction::Status, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(&outcome, "undetermined", "undetermined", "blocked", false);
         }
@@ -967,7 +943,7 @@ mod tests {
             std::fs::write(tmp.path().join("mxc"), b"not a directory").unwrap();
             let _guards = isolate(tmp.path());
 
-            let outcome = handle_consent_command(ConsentAction::Withdraw, None, None);
+            let outcome = handle_consent_command(ConsentAction::Withdraw, None);
             assert_eq!(outcome.exit_code, 1);
             assert_eq!(outcome.stdout, None);
             assert!(outcome.stderr.as_deref().unwrap().starts_with("Error: "));

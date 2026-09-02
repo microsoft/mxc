@@ -54,7 +54,7 @@ function Invoke-Maintenance([string]$Action) {
 function Invoke-ConsentRequest([string]$Decision) {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wxcExec
-    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US --telemetry-consent-protocol stdio-v1'
+    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US'
     $start.UseShellExecute = $false
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
