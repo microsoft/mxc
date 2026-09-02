@@ -111,12 +111,18 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 /// To avoid leaking PII (paths, usernames, credentials embedded in error
 /// strings), MXC deliberately does **not** emit the free-form error message.
 /// The event carries only the bounded `error_type` category, the process
-/// `exit_code`, and the [`TelemetryContext`] attribution (backend, lifecycle
-/// phase, and correlation vector — the latter two empty for one-shot).
-pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code: i32) {
+/// `exit_code`, the caller-requested `sandbox_kind`, and the
+/// [`TelemetryContext`] attribution (backend, lifecycle phase, and correlation
+/// vector — the latter two empty for one-shot).
+pub fn log_error(
+    ctx: TelemetryContext<'_>,
+    sandbox_kind: &str,
+    error_type: FailureReason,
+    exit_code: i32,
+) {
     mxc_telemetry::log_error(
         ctx.backend,
-        super::sandbox_kind_for(ctx.backend, None),
+        sandbox_kind,
         error_type.as_str(),
         exit_code,
         ctx.phase,
@@ -124,7 +130,7 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
     );
 
     #[cfg(test)]
-    test_sink::record_error(ctx, error_type, exit_code);
+    test_sink::record_error(ctx, sandbox_kind, error_type, exit_code);
 }
 
 /// In-memory capture sink for the two ETW emit calls, so tests can assert the
@@ -155,6 +161,7 @@ pub(super) mod test_sink {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
         pub backend: String,
+        pub sandbox_kind: String,
         pub error_type: FailureReason,
         pub exit_code: i32,
         pub phase: String,
@@ -218,6 +225,7 @@ pub(super) mod test_sink {
 
     pub(super) fn record_error(
         ctx: TelemetryContext<'_>,
+        sandbox_kind: &str,
         error_type: FailureReason,
         exit_code: i32,
     ) {
@@ -229,6 +237,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedError {
                 backend: ctx.backend.to_owned(),
+                sandbox_kind: sandbox_kind.to_owned(),
                 error_type,
                 exit_code,
                 phase: ctx.phase.to_owned(),

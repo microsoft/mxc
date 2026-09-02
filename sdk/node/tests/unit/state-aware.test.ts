@@ -21,6 +21,33 @@ import { SandboxId } from '../../src/state-aware-types.js';
 import { fakeSpawn, testOptions, platformSkip } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
+  it('lifts telemetry to the top-level envelope', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'windows_sandbox',
+      sandboxId: 'wsb:01234567',
+      config: { telemetry: { enabled: true } },
+    });
+    assert.deepEqual(env.telemetry, { enabled: true });
+    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.experimental, undefined);
+  });
+
+  it('rejects telemetry with an explicitly older schema version', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'start',
+        backendKey: 'windows_sandbox',
+        sandboxId: 'wsb:01234567',
+        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes('telemetry requires schema version 0.9.0-alpha'),
+    );
+  });
+
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
@@ -94,12 +121,12 @@ describe('buildStateAwareEnvelope', () => {
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
-      config: { appId: 'Contoso.App_8wekyb3d8bbwe' },
+      config: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
       isolation_session: {
-        provision: { appId: 'Contoso.App_8wekyb3d8bbwe' },
+        provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
       },
     });
   });
@@ -154,6 +181,7 @@ describe('buildStateAwareEnvelope', () => {
       telemetry: { enabled: true },
     });
     assert.deepStrictEqual(env.telemetry, { enabled: true });
+    assert.strictEqual(env.version, '0.9.0-alpha');
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -265,7 +293,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
       'isolation_session',
       {
         network: { defaultPolicy: 'allow', allowLocalNetwork: true },
-        appId: 'Contoso.App_8wekyb3d8bbwe',
+        appId: 'example.app.id',
       },
       testOptions(),
     );
@@ -275,6 +303,11 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
+    // An unpackaged app may pass any string; it reaches the wire config verbatim.
+    const provisionConfig = (fake.captured.envelope?.experimental as {
+      isolation_session?: { provision?: { appId?: string } };
+    })?.isolation_session?.provision;
+    assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
       defaultPolicy: 'allow',
@@ -342,8 +375,9 @@ describe('startSandbox', { skip: platformSkip }, () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, undefined, testOptions({ telemetry: { enabled: true } }));
-    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: true });
+    await startSandbox(id, undefined, testOptions({ telemetry: { enabled: false } }));
+    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: false });
+    assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
     assert.strictEqual(fake.captured.envelope?.experimental, undefined);
   });
 

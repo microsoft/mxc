@@ -151,7 +151,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
                 return new ValueTask<TelemetryConsentDecision>(presenterCompletion.Task);
             },
             cancellationToken: cancellation.Token);
-        await presenterEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await presenterEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);

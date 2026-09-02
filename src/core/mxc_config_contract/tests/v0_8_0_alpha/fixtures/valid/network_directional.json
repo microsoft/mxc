@@ -1,0 +1,39 @@
+{
+  "version": "0.8.0-alpha",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "curl -sS https://api.github.com/zen"
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            { "cidr": "140.82.112.0/20", "except": ["140.82.113.0/24"] },
+            { "cidr": "2606:50c0::/32" }
+          ],
+          "ports": [
+            { "port": 443, "protocol": "tcp" },
+            { "port": 30000, "endPort": 30100, "protocol": "udp" }
+          ]
+        },
+        { "to": [{ "cidr": "198.51.100.0/24" }] },
+        { "ports": [{ "protocol": "icmp" }] }
+      ],
+      "deny": [{ "to": [{ "cidr": "10.0.0.0/8" }] }]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "allow"
+    }
+  },
+  "processContainer": {
+    "network": {
+      "allowedProxyPeer": "127.0.0.1"
+    }
+  }
+}

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { spawn } from 'child_process';
+import { parse as semverParse } from 'semver';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
@@ -17,11 +18,12 @@ export const STATE_AWARE_VERSION = '0.6.0-alpha';
 // backends were promoted independently, so WSLc carries its own later default.
 // See `DEFAULT_STATE_AWARE_VERSION`.
 export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
+export const TELEMETRY_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
+export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process', 'telemetry'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
@@ -92,7 +94,7 @@ export interface BuildEnvelopeArgs {
 /**
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
- * (filesystem, network, ui, process) to envelope top-level; nests any
+ * (filesystem, network, ui, process, telemetry) to envelope top-level; nests any
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
@@ -108,7 +110,18 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
-  const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || defaultVersion;
+  const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
+  const hasTelemetry = telemetry !== undefined || backendSpecific.telemetry !== undefined;
+  const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
+  if (hasTelemetry && suppliedVersion) {
+    const parsed = semverParse(suppliedVersion);
+    if (parsed && parsed.major === 0 && parsed.minor < 9) {
+      throw mxcErrorFromCode(
+        'malformed_request',
+        `telemetry requires schema version ${TELEMETRY_STATE_AWARE_VERSION} or later; got ${suppliedVersion}`,
+      );
+    }
+  }
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };
@@ -118,8 +131,9 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
   }
-  if (telemetry) {
+  if (telemetry !== undefined) {
     envelope.telemetry = telemetry;
+    delete backendSpecific.telemetry;
   }
 
   for (const field of CROSS_CUTTING_FIELDS) {

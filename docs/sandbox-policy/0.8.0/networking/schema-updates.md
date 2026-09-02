@@ -1,8 +1,9 @@
 # MXC network schema updates: 0.7 to 0.8
 
-The planned schema 0.8 update replaces the flat 0.7 network object with
-explicit egress and ingress policy. It also moves proxy runtime data outside
-the shared policy.
+Schema 0.8 adds explicit egress and ingress policy and moves proxy runtime data
+outside the shared policy. During the additive transition, a 0.8 request may
+use either the legacy fields or the new fields, but cannot mix both formats.
+Schemas before 0.8 cannot use the new fields.
 
 ## Field mapping
 
@@ -132,12 +133,14 @@ Backend-specific migration can require an additional acknowledgment without chan
 
 - Seatbelt cannot separate host loopback from other local inbound traffic, so `ingress.hostLoopback` must equal
   `ingress.default`; a differing pair is rejected.
-- Isolation Session cannot enforce any network restriction. A schema 0.7 unrestricted acknowledgment migrates to
-  `egress.default: "allow"`, `ingress.default: "allow"`, and `ingress.hostLoopback: "allow"`, with no egress rules or
-  runtime proxy. Every other schema 0.8 network posture is rejected.
+- Isolation Session cannot enforce any network restriction. Its directional
+  acknowledgment is reserved for the backend migration work; until that lands,
+  callers must continue using the legacy unrestricted acknowledgment
+  (`defaultPolicy: "allow"` plus `allowLocalNetwork: true`).
 
 ## Backend-specific schema 0.8 configuration
 
 | Backend | Configuration |
 |---|---|
 | ProcessContainer | [Schema 0.8 proxy configuration](../../../process-container/examples/0.8.0-schema.md) |
+| Seatbelt (macOS) | [Schema 0.8 configuration](../../../seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)

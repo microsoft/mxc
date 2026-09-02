@@ -225,7 +225,7 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 wxc-exec.exe --audit policy.json
 ```
 
-Successful non-dry-run audits require capture metadata, canonical denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the canonical JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
+Successful non-dry-run audits require capture metadata, actionable denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
@@ -273,6 +273,17 @@ required. Omitting any required gate (the default) turns telemetry off
 entirely. On non-Windows platforms all telemetry functions are no-ops and
 consent is not applicable.
 
+Consent is managed separately from execution config:
+
+```powershell
+wxc-exec.exe --telemetry-consent status
+wxc-exec.exe --telemetry-consent request
+wxc-exec.exe --telemetry-consent withdraw
+```
+
+`telemetry.enabled` cannot request, grant, or withdraw consent. Consent
+maintenance is not accepted through `--config` or `--config-base64`.
+
 #### What official builds send
 
 Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution` and `MXC.Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
@@ -301,7 +312,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
-| [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
+| [docs/seatbelt/seatbelt-backend.md](docs/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |

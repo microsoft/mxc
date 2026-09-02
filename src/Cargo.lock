@@ -84,7 +84,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "appcontainer_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flatbuffers",
  "getrandom 0.2.17",
@@ -214,10 +214,11 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bwrap_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lxc_common",
  "nix",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -297,6 +298,12 @@ dependencies = [
  "num-traits",
  "windows-link",
 ]
+
+[[package]]
+name = "cidr"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
 
 [[package]]
 name = "clap"
@@ -1012,9 +1019,10 @@ dependencies = [
 
 [[package]]
 name = "hyperlight_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "hyperlight-unikraft",
+ "windows",
  "wxc_common",
 ]
 
@@ -1177,7 +1185,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "isolation_session_bindings"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "semver",
  "windows",
@@ -1188,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "isolation_session_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "isolation_session_bindings",
@@ -1272,20 +1280,24 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "learning_mode_core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "same-file",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror",
 ]
 
 [[package]]
 name = "learning_mode_windows"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flatbuffers",
  "learning_mode_core",
  "process_security_environment_spec",
+ "sha2 0.10.9",
  "thiserror",
  "windows",
  "windows-core",
@@ -1376,7 +1388,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lxc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1391,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "lxc_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "mxc_pty",
@@ -1475,24 +1487,27 @@ dependencies = [
 
 [[package]]
 name = "mxc-sdk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "bwrap_common",
  "libc",
  "mxc_engine",
+ "serde_json",
  "wxc_common",
 ]
 
 [[package]]
 name = "mxc_build_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "mxc_config_contract"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -1500,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "mxc_darwin"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "mxc_build_common",
@@ -1510,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "mxc_diagnostic_console"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "mxc_build_common",
@@ -1523,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "mxc_engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
@@ -1546,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "mxc_ffi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
@@ -1558,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "mxc_pty"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "nix",
@@ -1566,14 +1581,26 @@ dependencies = [
 
 [[package]]
 name = "mxc_schema_gen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "clap",
+ "mxc_config_contract",
+ "mxc_schema_support",
+ "serde_json",
+ "tempfile",
  "wxc_common",
 ]
 
 [[package]]
+name = "mxc_schema_support"
+version = "0.8.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "mxc_telemetry"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "tracelogging",
  "uuid",
@@ -1581,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "nanvix_binaries"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nanvix_build_common",
  "nanvix_common",
@@ -1589,14 +1616,14 @@ dependencies = [
 
 [[package]]
 name = "nanvix_build_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nanvix_common",
 ]
 
 [[package]]
 name = "nanvix_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1604,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "nanvix_runner"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "nanvix_common",
@@ -1803,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "process_security_environment_spec"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flatbuffers",
 ]
@@ -2037,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox_spec"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flatbuffers",
 ]
@@ -2094,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "seatbelt_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "wxc_common",
@@ -2971,7 +2998,7 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
 name = "windows_sandbox_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "getrandom 0.2.17",
  "serde",
@@ -2982,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "windows_sandbox_lifecycle"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3134,7 +3161,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wslc_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3152,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "wxc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "appcontainer_common",
@@ -3173,13 +3200,15 @@ dependencies = [
 
 [[package]]
 name = "wxc_common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
+ "cidr",
  "filetime",
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
+ "mxc_schema_support",
  "mxc_telemetry",
  "nanvix_common",
  "schemars",
@@ -3201,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_e2e_tests"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "bwrap_common",
@@ -3211,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_host_prep"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "embed-manifest",
@@ -3227,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_test_driver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mxc_build_common",
@@ -3236,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_test_proxy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "clap",
@@ -3254,7 +3283,7 @@ version = "0.1.0"
 
 [[package]]
 name = "wxc_windows_sandbox_daemon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mxc_build_common",
@@ -3270,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_windows_sandbox_guest"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mxc_build_common",
@@ -3283,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_winhttp_proxy_shim"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "mxc_build_common",
@@ -3294,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "wxc_wslc_daemon"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mxc_build_common",

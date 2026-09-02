@@ -6,14 +6,15 @@
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
+ * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
+ * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
+ * API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
  */
 /**
  * BaseProcessContainer UI isolation settings.
@@ -143,7 +144,9 @@ export interface IsolationSession {
  */
 export interface IsolationSessionProvisionPhase {
   /**
-   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   * Optional identifier for the calling application.
+   * 
+   * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
   appId?: string | null;
   [k: string]: unknown;
@@ -203,13 +206,44 @@ export interface Network {
    */
   defaultPolicy?: NetworkPolicy | null;
   /**
+   * Outbound network policy.
+   */
+  egress?: NetworkEgress | null;
+  /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
+   * Inbound and host-loopback network policy.
+   */
+  ingress?: NetworkIngress | null;
+  /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * Allow or deny network action.
+ */
+export type NetworkAction = "allow" | "deny";
+
+/**
+ * Outbound network policy.
+ */
+export interface NetworkEgress {
+  /**
+   * Explicit allow rules.
+   */
+  allow?: NetworkRule[] | null;
+  /**
+   * Action used when no explicit rule matches. Defaults to `deny`.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Explicit deny rules. Deny rules take precedence over allow rules.
+   */
+  deny?: NetworkRule[] | null;
 }
 
 /**
@@ -218,9 +252,74 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * Inbound and host-loopback network policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Default action for LAN/private-network inbound traffic.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Bidirectional host-loopback connectivity action.
+   */
+  hostLoopback?: NetworkAction | null;
+}
+
+/**
+ * CIDR network peer.
+ */
+export interface NetworkPeer {
+  /**
+   * IPv4 or IPv6 CIDR.
+   */
+  cidr: string;
+  /**
+   * CIDRs excluded from this peer.
+   */
+  except?: string[] | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * Protocol and destination-port selector.
+ */
+export interface NetworkPort {
+  /**
+   * Inclusive end of a destination-port range. Requires `port`.
+   */
+  endPort?: number | null;
+  /**
+   * Destination port. Omission matches every port.
+   */
+  port?: number | null;
+  /**
+   * Transport protocol. Defaults to `any`.
+   */
+  protocol?: NetworkProtocol | null;
+}
+
+/**
+ * Transport protocol selector.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
+
+/**
+ * Outbound network rule.
+ */
+export interface NetworkRule {
+  /**
+   * Destination protocols and ports. Omission matches all.
+   */
+  ports?: NetworkPort[] | null;
+  /**
+   * Destination CIDRs. Omission matches both IP families.
+   */
+  to?: NetworkPeer[] | null;
+}
 
 /**
  * State-aware lifecycle phase.
@@ -289,9 +388,23 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
+   * ProcessContainer-specific network configuration.
+   */
+  network?: ProcessContainerNetwork | null;
+  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
+}
+
+/**
+ * ProcessContainer-specific network configuration.
+ */
+export interface ProcessContainerNetwork {
+  /**
+   * Installed package family name or AppContainer profile allowed to host the configured loopback proxy.
+   */
+  allowedProxyPeer?: string | null;
 }
 
 /**
@@ -310,6 +423,16 @@ export interface Proxy {
    * Proxy URL (parsed into host:port).
    */
   url?: string | null;
+}
+
+/**
+ * Runtime values supplied alongside, but separate from, sandbox policy.
+ */
+export interface RuntimeConfig {
+  /**
+   * HTTP/S loopback proxy URL.
+   */
+  networkProxy?: string | null;
 }
 
 /**
@@ -527,6 +650,10 @@ export interface MXCConfiguration {
    */
   processContainer?: ProcessContainer | null;
   /**
+   * Runtime values supplied alongside, but separate from, sandbox policy.
+   */
+  runtimeConfig?: RuntimeConfig | null;
+  /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */
   sandboxId?: string | null;
@@ -543,7 +670,7 @@ export interface MXCConfiguration {
    */
   ui?: Ui | null;
   /**
-   * MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+   * MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
    */
   version?: string | null;
 }

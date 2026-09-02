@@ -5,11 +5,15 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
+import { parse as semverParse } from 'semver';
 import { FileLogger } from './logger.js';
 import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
+import { mxcErrorFromCode } from './errors.js';
+
+const TELEMETRY_SCHEMA_VERSION = '0.9.0-alpha';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -208,6 +212,21 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  if (options.telemetry !== undefined) {
+    throw mxcErrorFromCode(
+      'malformed_request',
+      'SandboxSpawnOptions.telemetry is state-aware only; set ContainerConfig.telemetry for one-shot calls.',
+    );
+  }
+  if (config.telemetry !== undefined && config.version) {
+    const version = semverParse(config.version);
+    if (version && version.major === 0 && version.minor < 9) {
+      throw mxcErrorFromCode(
+        'malformed_request',
+        `telemetry requires schema version ${TELEMETRY_SCHEMA_VERSION} or later; got ${config.version}`,
+      );
+    }
+  }
   if (config.experimental && 'telemetry' in config.experimental) {
     throw new Error(
       "'experimental.telemetry' is no longer accepted; use top-level 'telemetry' instead.",
@@ -265,8 +284,11 @@ export function resolveExecutableAndArgs(
       effectiveContainment as ContainmentBackend
     );
     if (!isIntent && !isExperimental && !isAvailable) {
+      const unavailableReason =
+        platformSupport.unavailableReasons?.[effectiveContainment as ContainmentBackend];
       throw new Error(
         `Containment backend '${rawContainment}' is not available on this platform. ` +
+        (unavailableReason ? `${unavailableReason} ` : '') +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`
       );
     }
@@ -289,10 +311,7 @@ export function resolveExecutableAndArgs(
     );
   }
 
-  const executionConfig = options.telemetry === undefined
-    ? config
-    : { ...config, telemetry: options.telemetry };
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(executionConfig), options);
+  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
   if (usesBuiltinTestServer) {
     resolved.args.push('--allow-testing-features');
   }

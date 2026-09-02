@@ -3,7 +3,7 @@ name = "mxc-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
+description = "Importable library for starting MXC sandboxes in-process, with streaming stdio."
 
 [lib]
 name = "mxc_sdk"
@@ -14,14 +14,29 @@ default = []
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
-# Debug-only downstream test seam for telemetry consent/policy redirection.
-# Used by the .NET SDK integration tests through `mxc_ffi`; never enable it
-# for shipping Release builds.
-test-support = ["wxc_common/test-support"]
+# IsolationSession backend (Windows only, experimental).
+isolation_session = ["mxc_engine/isolation_session"]
 
 [dependencies]
 wxc_common.workspace = true
 mxc_engine = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# Manual operator driver for the in-process IsolationSession lifecycle. Gated on
+# the backend feature so `cargo build --examples` without it stays green.
+[[example]]
+name = "isolation_session_console"
+required-features = ["isolation_session"]
+
+[[example]]
+name = "sta_probe"
+required-features = ["isolation_session"]
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }
+
+# Skip gate for the Bubblewrap streaming tests.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+bwrap_common = { workspace = true }

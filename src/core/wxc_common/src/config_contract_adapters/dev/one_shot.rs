@@ -1,15 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::config_contract_adapters::dev::common::{
+    convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+};
 use crate::wire;
 use mxc_config_contract::dev as contract;
-use mxc_config_contract::ContractVersion;
-
-fn convert_version(value: contract::Version) -> &'static str {
-    match value {
-        contract::Version::V0_8_0Alpha => ContractVersion::V0_8_0Alpha.as_str(),
-    }
-}
 
 fn convert_containment(value: contract::OneShotContainment) -> wire::Containment {
     match value {
@@ -27,21 +23,6 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
     }
 }
 
-fn convert_process(value: contract::Process) -> wire::Process {
-    let contract::Process {
-        command_line,
-        cwd,
-        env,
-        timeout,
-    } = value;
-    wire::Process {
-        command_line: Some(command_line.into_inner()),
-        cwd: cwd.into_option(),
-        env: env.into_option(),
-        timeout: timeout.into_option(),
-    }
-}
-
 fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     let contract::Lifecycle {
         destroy_on_exit,
@@ -53,85 +34,12 @@ fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     }
 }
 
-fn convert_filesystem(value: contract::Filesystem) -> wire::Filesystem {
-    let contract::Filesystem {
-        readwrite_paths,
-        readonly_paths,
-        denied_paths,
-    } = value;
-    wire::Filesystem {
-        readwrite_paths: readwrite_paths.into_option(),
-        readonly_paths: readonly_paths.into_option(),
-        denied_paths: denied_paths.into_option(),
-    }
-}
-
 fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
     let contract::Fallback {
         allow_dacl_mutation,
     } = value;
     wire::Fallback {
         allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
-fn convert_default_network_policy(value: contract::DefaultNetworkPolicy) -> wire::NetworkPolicy {
-    match value {
-        contract::DefaultNetworkPolicy::Allow => wire::NetworkPolicy::Allow,
-        contract::DefaultNetworkPolicy::Block => wire::NetworkPolicy::Block,
-    }
-}
-
-fn convert_network_enforcement_mode(
-    value: contract::NetworkEnforcementMode,
-) -> wire::NetworkEnforcement {
-    match value {
-        contract::NetworkEnforcementMode::Capabilities => wire::NetworkEnforcement::Capabilities,
-        contract::NetworkEnforcementMode::Firewall => wire::NetworkEnforcement::Firewall,
-        contract::NetworkEnforcementMode::Both => wire::NetworkEnforcement::Both,
-    }
-}
-
-fn convert_network(value: contract::Network) -> wire::Network {
-    let contract::Network {
-        default_policy,
-        enforcement_mode,
-        allow_local_network,
-        allowed_hosts,
-        blocked_hosts,
-        proxy,
-    } = value;
-    wire::Network {
-        default_policy: default_policy
-            .into_option()
-            .map(convert_default_network_policy),
-        enforcement_mode: enforcement_mode
-            .into_option()
-            .map(convert_network_enforcement_mode),
-        allow_local_network: allow_local_network.into_option(),
-        allowed_hosts: allowed_hosts.into_option(),
-        blocked_hosts: blocked_hosts.into_option(),
-        proxy: proxy.into_option().map(convert_proxy),
-    }
-}
-
-fn convert_proxy(value: contract::NetworkProxy) -> wire::Proxy {
-    match value {
-        contract::NetworkProxy::Localhost(port) => wire::Proxy {
-            localhost: Some(port.get()),
-            builtin_test_server: None,
-            url: None,
-        },
-        contract::NetworkProxy::BuiltinTestServer(contract::True) => wire::Proxy {
-            localhost: None,
-            builtin_test_server: Some(true),
-            url: None,
-        },
-        contract::NetworkProxy::Url(url) => wire::Proxy {
-            localhost: None,
-            builtin_test_server: None,
-            url: Some(url),
-        },
     }
 }
 
@@ -184,13 +92,36 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities,
         capture_denials,
         ui,
+        network,
     } = value;
     wire::ProcessContainer {
         least_privilege: least_privilege.into_option(),
         learning_mode: learning_mode.into_option(),
-        capabilities: capabilities.into_option(),
+        capabilities: capabilities.into_option().map(|capabilities| {
+            capabilities
+                .into_iter()
+                .map(contract::ProcessContainerCapability::into_inner)
+                .collect()
+        }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
+        network: network.into_option().map(convert_process_container_network),
+    }
+}
+
+fn convert_process_container_network(
+    value: contract::ProcessContainerNetwork,
+) -> wire::ProcessContainerNetwork {
+    let contract::ProcessContainerNetwork { allowed_proxy_peer } = value;
+    wire::ProcessContainerNetwork {
+        allowed_proxy_peer: allowed_proxy_peer.into_option(),
+    }
+}
+
+fn convert_runtime_config(value: contract::RuntimeConfig) -> wire::RuntimeConfig {
+    let contract::RuntimeConfig { network_proxy } = value;
+    wire::RuntimeConfig {
+        network_proxy: network_proxy.into_option(),
     }
 }
 
@@ -327,13 +258,6 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
     }
 }
 
-fn convert_telemetry(value: contract::Telemetry) -> wire::Telemetry {
-    let contract::Telemetry { enabled } = value;
-    wire::Telemetry {
-        enabled: enabled.into_option(),
-    }
-}
-
 fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimental {
     let contract::OneShotExperimental {
         test,
@@ -349,7 +273,7 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
     }
 }
 
-pub(crate) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
+pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
     let contract::OneShotRequest {
         schema,
         comment,
@@ -365,6 +289,7 @@ pub(crate) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         process_container,
         ui,
         seatbelt,
+        runtime_config,
         telemetry,
         experimental,
     } = request;
@@ -385,9 +310,10 @@ pub(crate) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
+        runtime_config: runtime_config.into_option().map(convert_runtime_config),
+        telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        telemetry: telemetry.into_option().map(convert_telemetry),
         experimental: experimental.into_option().map(convert_experimental),
     }
 }

@@ -6,7 +6,7 @@ use crate::common::{assert_invalid, assert_valid};
 #[test]
 fn accepts_schema_string() {
     let json = r#"{
-        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json",
+        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         "version": "0.8.0-alpha",
         "process": {
             "commandLine": "echo"
@@ -62,7 +62,7 @@ fn accepts_all_json_comment_value_types() {
 #[test]
 fn accepts_schema_and_comment_together() {
     let json = r#"{
-        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json",
+        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         "_comment": "This is a comment",
         "version": "0.8.0-alpha",
         "process": {
@@ -76,8 +76,8 @@ fn accepts_schema_and_comment_together() {
 #[test]
 fn rejects_duplicate_schema_field() {
     let json = r#"{
-        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json",
-        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json",
+        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+        "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         "version": "0.8.0-alpha",
         "process": {
             "commandLine": "echo"
@@ -104,7 +104,7 @@ fn rejects_duplicate_comment_field() {
 #[test]
 fn rejects_unprefixed_schema_field() {
     let json = r#"{
-        "schema": "https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json",
+        "schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         "version": "0.8.0-alpha",
         "process": {
             "commandLine": "echo"

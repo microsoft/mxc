@@ -84,9 +84,24 @@ use std::path::{Path, PathBuf};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use hyperlight_unikraft::pyhl;
 use hyperlight_unikraft::{AllowList, BlockList, Preopen};
+
+// -- Availability probe -------------------------------------------------------
+
+/// WHP is delay-loaded; check before pyhl::install warms a VM.
+#[cfg(target_os = "windows")]
+pub fn is_whp_available() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::LibraryLoader::{LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+
+    // SAFETY: LOAD_LIBRARY_SEARCH_SYSTEM32 restricts to %SystemRoot%\system32.
+    let module =
+        unsafe { LoadLibraryExW(w!("winhvplatform.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) };
+    module.is_ok()
+}
 
 // -- Error classification ----------------------------------------------------
 
@@ -503,7 +518,9 @@ impl HyperlightScriptRunner {
 
 impl ScriptRunner for HyperlightScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        Self::validate_policies(request).map_err(|e| e.to_response())
+        Self::validate_policies(request).map_err(|e| e.to_response())?;
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {

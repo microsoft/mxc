@@ -34,16 +34,8 @@ const configSchemaPath = join(
   "dev",
   `mxc-config.schema.${schemaVer.devSchemaFile}.json`
 );
-const telemetryConsentSchemaPath = join(
-  repoRoot,
-  "schemas",
-  "dev",
-  "mxc-telemetry-consent.schema.1.json"
-);
-
 const tmpDir = mkdtempSync(join(os.tmpdir(), "mxc-schema-gen-"));
 const tmpConfigOut = join(tmpDir, "generated-config.json");
-const tmpTelemetryConsentOut = join(tmpDir, "generated-telemetry-consent.json");
 try {
   const normalize = (s) => s.replace(/\r\n/g, "\n");
 
@@ -62,7 +54,16 @@ try {
 
     execFileSync(
       "cargo",
-      ["run", "-q", "-p", "mxc_schema_gen", "--", ...generatorArgs, generatedPath],
+      [
+        "run",
+        "-q",
+        "-p",
+        "mxc_schema_gen",
+        "--",
+        ...generatorArgs,
+        "--out",
+        generatedPath,
+      ],
       { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
     );
 
@@ -86,21 +87,13 @@ try {
   compareGeneratedSchema({
     committedPath: configSchemaPath,
     generatedPath: tmpConfigOut,
-    generatorArgs: [],
-    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
-  });
-
-  compareGeneratedSchema({
-    committedPath: telemetryConsentSchemaPath,
-    generatedPath: tmpTelemetryConsentOut,
-    generatorArgs: ["--telemetry-consent"],
-    regenCommand:
-      "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --telemetry-consent schemas/dev/mxc-telemetry-consent.schema.1.json",
+    generatorArgs: ["schema", "--legacy-wire"],
+    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
   });
 } finally {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
 console.log(
-  `Schema codegen OK: committed config and telemetry consent schemas match generated output (${schemaVer.devSchemaFile}, telemetry consent v1).`
+  `Schema codegen OK: committed config schema matches generated output (${schemaVer.devSchemaFile}).`
 );

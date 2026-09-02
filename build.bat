@@ -91,6 +91,9 @@ echo Copying binaries into SDK package...
 for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     set "BIN_DIR=src\target\%%T\%BUILD_CONFIG%"
     if "%%T"=="x86_64-pc-windows-msvc" (set "SDK_ARCH=x64") else (set "SDK_ARCH=arm64")
+    set "COPY_WSLC_RUNTIME=0"
+    if "%BUILD_ALL%"=="1" set "COPY_WSLC_RUNTIME=1"
+    if "%%T"=="%BUILD_ARCH%" set "COPY_WSLC_RUNTIME=1"
     if exist "!BIN_DIR!\wxc-exec.exe" (
         if not exist "sdk\node\bin\!SDK_ARCH!" mkdir "sdk\node\bin\!SDK_ARCH!"
         copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
@@ -143,14 +146,19 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                 )
             )
         )
-        if "%WITH_WSLC%"=="1" (
-            if exist "!BIN_DIR!\wxc-wslc-daemon.exe" (
-                copy /Y "!BIN_DIR!\wxc-wslc-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-                echo   Copied !SDK_ARCH!\wxc-wslc-daemon.exe
-            )
-            if exist "!BIN_DIR!\wslcsdk.dll" (
-                copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
-                echo   Copied !SDK_ARCH!\wslcsdk.dll
+        if "!COPY_WSLC_RUNTIME!"=="1" (
+            if "%WITH_WSLC%"=="1" (
+                for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
+                    if not exist "!BIN_DIR!\%%B" (
+                        echo ERROR: WSLC-enabled Node runtime is missing !BIN_DIR!\%%B
+                        exit /b 1
+                    )
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+                    echo   Copied !SDK_ARCH!\%%B
+                )
+            ) else (
+                if exist "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe" del /Q "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe"
+                if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
             )
         )
     )
@@ -158,6 +166,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     :: Copy the C# SDK's native library (mxc_ffi) into its runtime assets so a
     :: NuGet pack picks it up as runtimes/<rid>/native/mxc_ffi.dll.
     if "%%T"=="x86_64-pc-windows-msvc" (set "RID=win-x64") else (set "RID=win-arm64")
+    if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_WSLC%"=="1" (
+        if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe"
+        if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll"
+    )
     if exist "!BIN_DIR!\mxc_ffi.dll" (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
         copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
@@ -165,6 +177,20 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
             echo   Copied !RID!\native\plm.exe
+        )
+        if "%WITH_WSLC%"=="1" if "!COPY_WSLC_RUNTIME!"=="1" (
+            for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
+                if not exist "!BIN_DIR!\%%B" (
+                    echo ERROR: WSLC-enabled C# runtime unit is missing !BIN_DIR!\%%B
+                    exit /b 1
+                )
+                copy /Y "!BIN_DIR!\%%B" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+                echo   Copied !RID!\native\%%B
+            )
+        )
+        if "!COPY_WSLC_RUNTIME!"=="1" (
+            >"sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\mxc-build-features.txt" echo isolation_session=%WITH_ISOLATION_SESSION%
+            >>"sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\mxc-build-features.txt" echo wslc=%WITH_WSLC%
         )
     )
 )

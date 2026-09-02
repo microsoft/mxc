@@ -251,6 +251,9 @@ fn relay_exec_to_stdio(handle: ExecHandle) -> Result<i32, MxcError> {
         stdin: _,
         waiter,
         terminator,
+        // This relay forwards no input, so the backend's stdin end is left to
+        // the backend's own teardown.
+        stdin_closer: _,
     } = handle;
 
     // Classify every stream before committing to anything. A null handle is an
@@ -326,13 +329,8 @@ fn relay_prepared_streams(
     // Drain what the child wrote before it exited. Bounded -- see `drain_pumps`.
     drain_pumps(pumps);
 
-    // `ExecOutcome::TimedOut` is not reachable here, and the mapping says so out
-    // loud rather than inventing an exit code for it. A backend serving
-    // `ExecConsumer::Executor` has already run the workload to completion by the
-    // time it returns, so it reports `Exited`; and the executor has nowhere to
-    // put a timeout anyway, since `ScriptResponse` carries an exit code and no
-    // timeout field. Surfacing a contract violation beats fabricating a number
-    // the CLI would then report as the workload's own.
+    // A backend serving `ExecConsumer::Executor` reports `Exited`, so a timeout
+    // here is a contract violation.
     match outcome {
         Ok(ExecOutcome::Exited(code)) => Ok(code),
         Ok(ExecOutcome::TimedOut) => Err(MxcError::backend_error(
@@ -1218,6 +1216,7 @@ mod tests {
     #[test]
     fn relay_with_null_handles_returns_waiter_exit_code() {
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1239,6 +1238,7 @@ mod tests {
     #[test]
     fn relay_refuses_a_timeout_rather_than_inventing_an_exit_code() {
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1258,6 +1258,7 @@ mod tests {
     #[test]
     fn relay_with_null_handles_propagates_waiter_error() {
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1296,6 +1297,7 @@ mod tests {
         drop(writer); // EOF, so the pump can finish
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&reader),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1366,6 +1368,7 @@ mod tests {
     fn relay_does_not_invoke_terminator_on_normal_completion() {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),

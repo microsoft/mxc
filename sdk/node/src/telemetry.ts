@@ -2,26 +2,71 @@
 // Licensed under the MIT License.
 
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import type {
-  TelemetryConsentDecision as WireConsentDecision,
-  TelemetryConsentMaintenanceRequest,
-  TelemetryConsentMaintenanceResponse,
-  TelemetryConsentPolicyState,
-  TelemetryConsentPrompt as WireConsentPrompt,
-  TelemetryConsentResult,
-  TelemetryConsentState,
-  TelemetryConsentStatusReason,
-} from './generated/telemetry-consent-wire.js';
 import { findWxcExecutable } from './platform.js';
 
-export type {
-  TelemetryConsentPolicyState as TelemetryPolicyState,
-  TelemetryConsentState,
-  TelemetryConsentStatusReason,
-};
-export type TelemetryConsentPrompt = WireConsentPrompt;
-export type TelemetryConsentDecision = WireConsentDecision;
-export type TelemetryConsentOutcome = TelemetryConsentMaintenanceResponse;
+export type TelemetryConsentState = 'granted' | 'denied' | 'undetermined' | 'not-applicable';
+export type TelemetryPolicyState = 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable';
+export type TelemetryConsentStatusReason =
+  | 'no-record'
+  | 'store-unreadable'
+  | 'store-malformed'
+  | 'consent-schema-unsupported'
+  | 'prompt-version-missing'
+  | 'prompt-version-unsupported'
+  | 'policy-blocked'
+  | 'presentation-unavailable'
+  | 'not-applicable';
+export type TelemetryConsentDecision = 'yes' | 'no' | 'dismissed';
+
+export interface TelemetryConsentMessage {
+  id: string;
+  text: string;
+}
+
+export interface TelemetryConsentPrompt {
+  resourceVersion: number;
+  locale: string;
+  title: TelemetryConsentMessage;
+  body: TelemetryConsentMessage;
+  affirmativeLabel: TelemetryConsentMessage;
+  negativeLabel: TelemetryConsentMessage;
+  learnMoreLabel: TelemetryConsentMessage;
+  learnMoreUrl: string;
+}
+
+export type TelemetryConsentResult =
+  | 'granted'
+  | 'denied'
+  | 'dismissed'
+  | 'withdrawn'
+  | 'alreadyGranted'
+  | 'policyBlocked'
+  | 'presentationUnavailable'
+  | 'notApplicable';
+
+export interface TelemetryConsentOutcome {
+  action: 'request' | 'withdraw';
+  result: TelemetryConsentResult;
+  storedState: TelemetryConsentState;
+  effectiveState: TelemetryConsentState;
+  reason?: TelemetryConsentStatusReason | null;
+  policy: TelemetryPolicyState;
+  needsPrompt: boolean;
+}
+
+type TelemetryConsentProtocolResult =
+  | TelemetryConsentResult
+  | 'status'
+  | 'presentationRequired';
+
+interface TelemetryConsentProtocolResponse
+  extends Omit<TelemetryConsentOutcome, 'action' | 'result'> {
+  action: ConsentAction;
+  result: TelemetryConsentProtocolResult;
+  prompt?: TelemetryConsentPrompt | null;
+  challenge?: string | null;
+}
+
 export type TelemetryConsentPresenter = (
   prompt: TelemetryConsentPrompt,
   signal?: AbortSignal,
@@ -32,7 +77,7 @@ export interface TelemetryConsentQuery {
   storedState: TelemetryConsentState;
   effectiveState: TelemetryConsentState;
   needsPrompt: boolean;
-  policy: TelemetryConsentPolicyState;
+  policy: TelemetryPolicyState;
   reason?: TelemetryConsentStatusReason;
   error?: string;
 }
@@ -43,36 +88,31 @@ type ConsentAction = 'request' | 'withdraw' | 'status';
 type ConsentProtocolRunner = (
   locale: string | undefined,
   presenter: TelemetryConsentPresenter,
-) => Promise<TelemetryConsentMaintenanceResponse>;
-type ConsentChildFactory = (locale: string | undefined) => ReturnType<typeof spawn>;
+) => Promise<TelemetryConsentOutcome>;
+type ConsentChildFactory = (args: readonly string[]) => ReturnType<typeof spawn>;
 
 const DEFAULT_CONSENT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_CONSENT_STDOUT_BYTES = 1024 * 1024;
 const MAX_CONSENT_STDERR_BYTES = 64 * 1024;
 const MAX_CONSENT_PROTOCOL_LINES = 16;
 let consentRequestTimeoutMs = DEFAULT_CONSENT_REQUEST_TIMEOUT_MS;
-const defaultConsentChildFactory: ConsentChildFactory = (locale) =>
-  spawn(executable(), maintenanceArgs('request', locale), {
-    env: { ...process.env, MXC_TELEMETRY_CONSENT_PRESENTER_PROTOCOL: '1' },
+const defaultConsentChildFactory: ConsentChildFactory = (args) =>
+  spawn(executable(), [...args], {
+    env: process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
 let consentChildFactory: ConsentChildFactory = defaultConsentChildFactory;
 
-function maintenanceRequest(
-  action: 'request' | 'withdraw' | 'status',
-  locale?: string,
-): TelemetryConsentMaintenanceRequest {
-  return {
-    command: 'telemetryConsent',
-    action,
-    ...(locale === undefined ? {} : { locale }),
-  };
-}
-
 function maintenanceArgs(action: 'request' | 'withdraw' | 'status', locale?: string): string[] {
-  const payload = Buffer.from(JSON.stringify(maintenanceRequest(action, locale)), 'utf8').toString('base64');
-  return ['--config-base64', payload];
+  const args = ['--telemetry-consent', action];
+  if (action === 'request') {
+    if (locale !== undefined) {
+      args.push(`--telemetry-consent-locale=${locale}`);
+    }
+    args.push('--telemetry-consent-protocol', 'stdio-v1');
+  }
+  return args;
 }
 
 function executable(): string {
@@ -115,9 +155,9 @@ function defaultConsentAsyncRunner(args: readonly string[]): Promise<string> {
 async function defaultConsentProtocolRunner(
   locale: string | undefined,
   presenter: TelemetryConsentPresenter,
-): Promise<TelemetryConsentMaintenanceResponse> {
+): Promise<TelemetryConsentOutcome> {
   return new Promise((resolve, reject) => {
-    const child = consentChildFactory(locale);
+    const child = consentChildFactory(maintenanceArgs('request', locale));
     const childStdin = child.stdin;
     const childStdout = child.stdout;
     const childStderr = child.stderr;
@@ -128,7 +168,7 @@ async function defaultConsentProtocolRunner(
     }
     let stdout = '';
     let stderr = '';
-    let finalResponse: TelemetryConsentMaintenanceResponse | undefined;
+    let finalResponse: TelemetryConsentOutcome | undefined;
     let settled = false;
     let timeout: NodeJS.Timeout | null = null;
     let timeoutStartedAt = 0;
@@ -192,7 +232,7 @@ async function defaultConsentProtocolRunner(
         return;
       }
       if (line.trim() === '') return;
-      let response: TelemetryConsentMaintenanceResponse;
+      let response: TelemetryConsentProtocolResponse;
       try {
         response = parseMaintenanceResponse(line, 'request');
       } catch (error) {
@@ -201,7 +241,7 @@ async function defaultConsentProtocolRunner(
       }
 
       if (response.result !== 'presentationRequired') {
-        finalResponse = response;
+        finalResponse = toConsentOutcome(response);
         return;
       }
       if (!response.prompt || !response.challenge) {
@@ -306,7 +346,7 @@ async function defaultConsentProtocolRunner(
         clearProtocolDeadline();
         if (stdout.trim() !== '') {
           try {
-            finalResponse = parseMaintenanceResponse(stdout, 'request');
+            finalResponse = toConsentOutcome(parseMaintenanceResponse(stdout, 'request'));
           } catch (error) {
             fail(error);
             return;
@@ -387,7 +427,7 @@ function isConsentState(value: unknown): value is TelemetryConsentState {
   return value === 'granted' || value === 'denied' || value === 'undetermined' || value === 'not-applicable';
 }
 
-function isPolicyState(value: unknown): value is TelemetryConsentPolicyState {
+function isPolicyState(value: unknown): value is TelemetryPolicyState {
   return value === 'unrestricted' || value === 'allowed' || value === 'blocked' || value === 'not-applicable';
 }
 
@@ -395,7 +435,7 @@ function isDecision(value: unknown): value is TelemetryConsentDecision {
   return value === 'yes' || value === 'no' || value === 'dismissed';
 }
 
-function isResult(value: unknown): value is TelemetryConsentResult {
+function isResult(value: unknown): value is TelemetryConsentProtocolResult {
   return [
     'status',
     'presentationRequired',
@@ -412,7 +452,7 @@ function isResult(value: unknown): value is TelemetryConsentResult {
 
 function isResultForAction(
   action: ConsentAction,
-  result: TelemetryConsentResult,
+  result: TelemetryConsentProtocolResult,
 ): boolean {
   switch (action) {
     case 'status':
@@ -436,7 +476,7 @@ function isResultForAction(
 function parseMaintenanceResponse(
   stdout: string,
   expectedAction: ConsentAction,
-): TelemetryConsentMaintenanceResponse {
+): TelemetryConsentProtocolResponse {
   const parsed: unknown = JSON.parse(stdout);
   if (parsed === null || typeof parsed !== 'object') {
     throw new Error('unrecognised telemetry consent output');
@@ -453,7 +493,26 @@ function parseMaintenanceResponse(
   ) {
     throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
   }
-  return parsed as TelemetryConsentMaintenanceResponse;
+  return parsed as TelemetryConsentProtocolResponse;
+}
+
+function toConsentOutcome(response: TelemetryConsentProtocolResponse): TelemetryConsentOutcome {
+  if (
+    response.action === 'status'
+    || response.result === 'status'
+    || response.result === 'presentationRequired'
+  ) {
+    throw new Error('unrecognised telemetry consent terminal output');
+  }
+  return {
+    action: response.action,
+    result: response.result,
+    storedState: response.storedState,
+    effectiveState: response.effectiveState,
+    ...(response.reason === undefined ? {} : { reason: response.reason }),
+    policy: response.policy,
+    needsPrompt: response.needsPrompt,
+  };
 }
 
 const reportedFailureCategories = new Set<string>();
@@ -476,7 +535,7 @@ export function _resetTelemetryFailureReporting(): void {
   reportedFailureCategories.clear();
 }
 
-function notApplicable(action: 'request' | 'withdraw' | 'status'): TelemetryConsentMaintenanceResponse {
+function notApplicable(action: 'request' | 'withdraw'): TelemetryConsentOutcome {
   return {
     action,
     result: 'notApplicable',
@@ -489,7 +548,7 @@ function notApplicable(action: 'request' | 'withdraw' | 'status'): TelemetryCons
 }
 
 function consentQueryFromResponse(
-  response: TelemetryConsentMaintenanceResponse,
+  response: TelemetryConsentProtocolResponse,
 ): TelemetryConsentQuery {
   return {
     state: response.effectiveState,
@@ -567,7 +626,7 @@ export function needsTelemetryConsentPrompt(): boolean {
 }
 
 /** Synchronous compatibility getter; may block for up to five seconds. */
-export function getTelemetryPolicy(): TelemetryConsentPolicyState {
+export function getTelemetryPolicy(): TelemetryPolicyState {
   return convenienceTelemetryConsentQuery().policy;
 }
 
@@ -604,7 +663,7 @@ export function withdrawTelemetryConsent(): TelemetryConsentOutcome {
       'withdraw',
     );
     invalidateConvenienceQueryCache();
-    return outcome;
+    return toConsentOutcome(outcome);
   } catch (error) {
     invalidateConvenienceQueryCache();
     throw new Error(
@@ -620,10 +679,10 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
   }
   invalidateConvenienceQueryCache();
   try {
-    return parseMaintenanceResponse(
+    return toConsentOutcome(parseMaintenanceResponse(
       await consentAsyncRunner(maintenanceArgs('withdraw')),
       'withdraw',
-    );
+    ));
   } catch (error) {
     throw new Error(
       `failed to withdraw telemetry consent: ${error instanceof Error ? error.message : String(error)}`,

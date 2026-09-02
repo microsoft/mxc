@@ -8,12 +8,8 @@ license.workspace = true
 microvm = ["dep:nanvix_common", "dep:uuid"]
 # Enables JSON Schema generation from the dedicated wire model. Off by default
 # so normal builds don't carry schemars.
-schema-gen = ["dep:schemars"]
-# Exposes the telemetry test harnesses (the policy-key redirector) outside this
-# crate's own unit tests, so downstream crates — notably `mxc_ffi` — can drive
-# exact administrative-policy states instead of asserting weak set membership
-# against whatever policy the host machine happens to have. Test-only: never
-# enable it for a shipping build.
+schema-gen = ["dep:mxc_schema_support", "dep:schemars"]
+# Exposes telemetry test harnesses to downstream integration tests.
 test-support = []
 
 [dependencies]
@@ -23,18 +19,25 @@ serde_path_to_error = { workspace = true }
 unicode-general-category = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
+cidr = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
 semver = "1"
-schemars = { version = "0.8", optional = true }
+schemars = { workspace = true, optional = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 mxc_config_contract = { workspace = true }
+mxc_schema_support = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true, features = ["Win32_Globalization"] }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }

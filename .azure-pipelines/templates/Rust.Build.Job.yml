@@ -17,6 +17,7 @@ jobs:
   - job: 'build_${{ item.arch }}_${{ item.component }}'
     displayName: 'Build (${{ item.arch }} ${{ item.component }})'
     dependsOn: []
+    timeoutInMinutes: 120
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       ${{ if eq(item.os, 'windows') }}:

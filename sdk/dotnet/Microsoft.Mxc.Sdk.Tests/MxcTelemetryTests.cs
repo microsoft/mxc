@@ -440,7 +440,8 @@ public sealed class MxcTelemetryTests : IDisposable
             prompt => ValueTask.FromResult(
                 prompt.Locale == "en-US"
                     ? TelemetryConsentDecision.Yes
-                    : TelemetryConsentDecision.Dismissed));
+                    : TelemetryConsentDecision.Dismissed),
+            cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
     }

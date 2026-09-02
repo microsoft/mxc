@@ -74,45 +74,74 @@ struct Cli {
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
 
-    /// Report the persisted telemetry consent state and exit. MXC only
-    /// ever collects telemetry on Windows, so on Linux this always
-    /// reports "not-applicable" — there is no consent to grant or
-    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
-    #[arg(long = "telemetry-consent-status")]
-    telemetry_consent_status: bool,
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "delete",
+            "containername",
+            "experimental",
+            "allow_testing_features",
+            "dry_run",
+            "setup_hyperlight",
+            "force"
+        ]
+    )]
+    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
 
-    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
-    #[arg(long = "telemetry-consent-grant")]
-    telemetry_consent_grant: bool,
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
 
-    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
-    #[arg(long = "telemetry-consent-revoke")]
-    telemetry_consent_revoke: bool,
+    /// Private SDK presenter protocol.
+    #[arg(
+        long = "telemetry-consent-protocol",
+        requires = "telemetry_consent",
+        hide = true
+    )]
+    telemetry_consent_protocol: Option<telemetry::consent_cli::ConsentProtocol>,
+}
 
-    /// Legacy companion tombstone for the removed grant/revoke flow.
-    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
-    telemetry_consent_source: Option<String>,
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
+    }
 }
 
 /// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
 /// mirrors. On Linux, `wxc_common::telemetry::consent` always reports
-/// `NotApplicable`; legacy state-changing flags return the same non-mutating
-/// maintenance-JSON migration error as every other executor.
 /// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
 /// this fast path can't drift from `wxc-exec`/`mxc-exec-mac`. The shared
 /// handler returns the outcome as data; terminating the process is this
 /// binary's job, not the foundation crate's.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) =
-        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
-            status: cli.telemetry_consent_status,
-            grant: cli.telemetry_consent_grant,
-            revoke: cli.telemetry_consent_revoke,
-            source: cli.telemetry_consent_source.as_deref(),
-        })
-    else {
+    let Some(action) = cli.telemetry_consent else {
         return false;
     };
+    let outcome = telemetry::consent_cli::handle_consent_command(
+        action,
+        cli.telemetry_consent_locale.as_deref(),
+        cli.telemetry_consent_protocol,
+    );
     let code = outcome.emit();
     if code != 0 {
         std::process::exit(code);
@@ -120,25 +149,7 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
     true
 }
 
-fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
-    let Some(json) = json else {
-        return false;
-    };
-    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
-        return false;
-    };
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
-/// Read the request source (file path / base64 blob) once, returning the
-/// decoded JSON. Reused by the maintenance probe and the normal request
-/// loader so a single source is only read once per invocation — a
-/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
-/// paths that are drained by the first read.
+/// Read the request source (file path / base64 blob) once.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
     let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
         (input.clone(), true)
@@ -167,6 +178,19 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     }
 }
 
+/// Surface warnings the run recorded (e.g. Bubblewrap reporting an IPv6 allow
+/// the sandbox namespace cannot reach).
+///
+/// The logger only retains these rather than writing them itself, so that
+/// `mxc_engine` embedders don't get unannounced writes to a terminal they own.
+/// `lxc-exec` *does* own its terminal, so it opts in here — matching wxc-exec.
+/// stderr, not stdout: stdout carries the workload's own output.
+fn emit_warnings(logger: &Logger) {
+    for warning in logger.warnings() {
+        eprintln!("{warning}");
+    }
+}
+
 fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
     use lxc_common::lxc_bindings::LxcContainer;
 
@@ -190,9 +214,9 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
-    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // --telemetry-consent: report/administer the
     // (always not-applicable on Linux) consent state and exit. Runs before
     // signal_cleanup::install():
     // this is a read-only/local-file fast path that never spawns a
@@ -202,28 +226,13 @@ fn main() {
     if handle_telemetry_consent_flags(&cli) {
         return;
     }
-    // Decode the request source (file path / base64) once, up front, so the
-    // maintenance probe and the normal request loader below share the same
-    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
-    // process-substitution paths that are drained by the first read.
+    // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
     let request_hint = decoded_config
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
-    if matches!(
-        request_hint.as_ref().map(|hint| hint.kind()),
-        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
-    ) && handle_telemetry_consent_input(
-        decoded_config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(String::as_str),
-    ) {
-        return;
-    }
-
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We
@@ -240,6 +249,16 @@ fn main() {
     if cli.setup_hyperlight {
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
+            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            #[cfg(target_os = "windows")]
+            if !hyperlight_common::is_whp_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot."
+                );
+                process::exit(1);
+            }
+
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {
@@ -344,12 +363,16 @@ fn main() {
         .as_ref()
         .map(|c| telemetry::init(c, &mut logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -368,10 +391,12 @@ fn main() {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e.message);
+            emit_warnings(&logger);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -380,6 +405,9 @@ fn main() {
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
+    // Emitted before the dry-run branch below, which exits the process.
+    emit_warnings(&logger);
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
@@ -387,9 +415,10 @@ fn main() {
     display_script_results(&response, &mut logger);
 
     // ── Telemetry emit ──────────────────────────────────────────────
-    telemetry::emit_completion(
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

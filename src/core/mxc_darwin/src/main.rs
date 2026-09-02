@@ -62,61 +62,72 @@ struct Cli {
     #[arg(long = "log-file")]
     log_file: Option<String>,
 
-    /// Report the persisted telemetry consent state and exit. MXC only
-    /// ever collects telemetry on Windows, so on macOS this always
-    /// reports "not-applicable" — there is no consent to grant or
-    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
-    #[arg(long = "telemetry-consent-status")]
-    telemetry_consent_status: bool,
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "experimental",
+            "allow_testing_features",
+            "dry_run"
+        ]
+    )]
+    telemetry_consent: Option<wxc_common::telemetry::consent_cli::ConsentAction>,
 
-    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
-    #[arg(long = "telemetry-consent-grant")]
-    telemetry_consent_grant: bool,
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
 
-    /// Not supported on macOS; always fails. Present for CLI-surface
-    /// parity with wxc-exec.exe.
-    #[arg(long = "telemetry-consent-revoke")]
-    telemetry_consent_revoke: bool,
+    /// Private SDK presenter protocol.
+    #[arg(
+        long = "telemetry-consent-protocol",
+        requires = "telemetry_consent",
+        hide = true
+    )]
+    telemetry_consent_protocol: Option<wxc_common::telemetry::consent_cli::ConsentProtocol>,
+}
 
-    /// Optional source associated with a legacy grant/revoke flag.
-    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
-    telemetry_consent_source: Option<String>,
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                wxc_common::telemetry::consent_cli::invocation_uses_consent_options(
+                    std::env::args_os(),
+                );
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
+    }
 }
 
 /// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
 /// mirrors. On macOS, `wxc_common::telemetry::consent` always reports
-/// `NotApplicable`; legacy state-changing flags return the same non-mutating
-/// maintenance-JSON migration error as every other executor.
 /// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
 /// this fast path can't drift from `wxc-exec`/`lxc-exec`. The shared handler
 /// returns the outcome as data; terminating the process is this binary's
 /// job, not the foundation crate's.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) = wxc_common::telemetry::consent_cli::handle_consent_flags(
-        &wxc_common::telemetry::consent_cli::ConsentCliFlags {
-            status: cli.telemetry_consent_status,
-            grant: cli.telemetry_consent_grant,
-            revoke: cli.telemetry_consent_revoke,
-            source: cli.telemetry_consent_source.as_deref(),
-        },
-    ) else {
+    let Some(action) = cli.telemetry_consent else {
         return false;
     };
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
-fn handle_telemetry_consent_input(config_json: Option<&str>) -> bool {
-    let Some(input) = config_json else {
-        return false;
-    };
-    let Some(outcome) = wxc_common::telemetry::consent_cli::handle_maintenance_input_json(input)
-    else {
-        return false;
-    };
+    let outcome = wxc_common::telemetry::consent_cli::handle_consent_command(
+        action,
+        cli.telemetry_consent_locale.as_deref(),
+        cli.telemetry_consent_protocol,
+    );
     let code = outcome.emit();
     if code != 0 {
         std::process::exit(code);
@@ -125,12 +136,6 @@ fn handle_telemetry_consent_input(config_json: Option<&str>) -> bool {
 }
 
 /// Decode the config input source (base64 arg / file path) exactly once.
-///
-/// The maintenance-consent probe and the normal request loader both need the
-/// decoded JSON. Named pipes, `/dev/stdin`, and process-substitution paths
-/// are drained by the first read, so reading them twice fails or blocks;
-/// regular files pay duplicate I/O for no reason. This helper reads the
-/// source a single time and returns the JSON text (or a load error).
 ///
 /// Returns `None` if the CLI provided no config source at all — the caller
 /// then reports the appropriate missing-config error for its mode.
@@ -164,35 +169,20 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
-    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // --telemetry-consent: report/administer the
     // (always not-applicable on macOS) consent state and exit.
     if handle_telemetry_consent_flags(&cli) {
         return;
     }
-    // Decode the config source once so the maintenance probe and the normal
-    // request loader below share the same JSON — necessary for named pipes,
-    // `/dev/stdin`, and process-substitution paths that are drained by the
-    // first read.
+    // Decode the config source once for normal request loading.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
     let request_hint = decoded_config
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
-    if matches!(
-        request_hint.as_ref().map(|hint| hint.kind()),
-        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
-    ) && handle_telemetry_consent_input(
-        decoded_config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(String::as_str),
-    ) {
-        return;
-    }
-
     // Determine config input.
     let config_json = match decoded_config {
         Some(Ok(json)) => json,
@@ -261,12 +251,16 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
         .as_ref()
         .map(|c| telemetry::init(c, logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -292,9 +286,10 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     display_script_results(&response, logger);
 
     // ── Telemetry emit ──────────────────────────────────────────────
-    telemetry::emit_completion(
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

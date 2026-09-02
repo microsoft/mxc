@@ -71,16 +71,15 @@ describe('telemetry consent', () => {
     assert.strictEqual(getTelemetryPolicy(), 'allowed');
   });
 
-  it('passes status through the typed JSON maintenance envelope', () => {
+  it('queries status through the dedicated consent command', () => {
     let args: readonly string[] = [];
     _setTelemetryConsentRunner((value) => {
       args = value;
       return status('undetermined', 'unrestricted', true);
     });
     assert.strictEqual(needsTelemetryConsentPrompt(), true);
-    assert.strictEqual(args[0], '--config-base64');
-    const request = JSON.parse(Buffer.from(args[1]!, 'base64').toString('utf8'));
-    assert.deepStrictEqual(request, { command: 'telemetryConsent', action: 'status' });
+    assert.deepStrictEqual(args, ['--telemetry-consent', 'status']);
+    assert.ok(!args.includes('--config-base64'));
   });
 
   it('coalesces convenience getters for one turn without caching explicit queries', async () => {
@@ -222,7 +221,7 @@ describe('telemetry consent', () => {
     );
   });
 
-  it('withdraws through the typed JSON maintenance envelope', () => {
+  it('withdraws through the dedicated consent command', () => {
     let args: readonly string[] = [];
     _setTelemetryConsentRunner((value) => {
       args = value;
@@ -237,16 +236,17 @@ describe('telemetry consent', () => {
     });
     const outcome = withdrawTelemetryConsent();
     assert.strictEqual(outcome.result, 'withdrawn');
-    const request = JSON.parse(Buffer.from(args[1]!, 'base64').toString('utf8'));
-    assert.deepStrictEqual(request, { command: 'telemetryConsent', action: 'withdraw' });
+    assert.deepStrictEqual(args, ['--telemetry-consent', 'withdraw']);
+    assert.ok(!args.includes('--config-base64'));
   });
 
   it('queries and withdraws through the non-blocking runner', async () => {
     const actions: string[] = [];
     _setTelemetryConsentAsyncRunner(async (args) => {
-      const request = JSON.parse(Buffer.from(args[1]!, 'base64').toString('utf8'));
-      actions.push(request.action);
-      return request.action === 'status'
+      assert.deepStrictEqual(args.slice(0, 1), ['--telemetry-consent']);
+      const action = args[1]!;
+      actions.push(action);
+      return action === 'status'
         ? status('granted', 'allowed')
         : JSON.stringify({
           action: 'withdraw',

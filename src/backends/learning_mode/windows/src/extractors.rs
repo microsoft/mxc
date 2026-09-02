@@ -20,31 +20,40 @@
 //!
 //! The learning-mode ETL carries a set of event IDs that map onto the
 //! resource types we surface. This list grows as more denial sources are
-//! decoded; unknown event IDs are discarded. The IDs handled today:
+//! decoded; event IDs outside this vocabulary are excluded rather than
+//! extracted, and (for the known providers below) that exclusion is
+//! aggregated into [`learning_mode_core::VerboseLoggingSummary`] rather than
+//! silently dropped. The IDs handled today:
 //!
 //! - **14 / 4907 — access check** — the primary denial event
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
 //!   resource type: `File` → [`ResourceType::File`], `Key` →
 //!   [`ResourceType::Other`] (registry), and an **empty** `ObjectType` is a
-//!   brokered-capability check → [`ResourceType::Capability`]. Any other
-//!   object type (Section, Process, Thread, ...) is dropped (not actionable
-//!   via sandbox policy). The [`AccessType`] is derived from the
+//!   brokered-capability check → [`ResourceType::Capability`]. Only positively
+//!   classified registry reads are actionable; writes and unknown registry
+//!   access are retained only as verbose diagnostics. Named Section,
+//!   SymbolicLink, and Timer objects are likewise verbose-only because MXC has
+//!   no corresponding policy grants.
+//!   Other object types are dropped until their access-mask vocabulary is
+//!   understood. The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
 //!   learning modes (`block` → `Mode="Normal"`, `allow` →
 //!   `Mode="Permissive"`).
 //! - **27 — `LearningModeViolation`** — UI-surface denials →
 //!   [`ResourceType::Ui`]. Carries no usable access mask, so the access type
 //!   stays [`AccessType::Unknown`].
-//! - **28 — capability denial** — a compact capability-access-manager
-//!   record (`Denied` / `PackageSid` / `ProcessId`), emitted under
-//!   `block`; `allow` folds the same information into the
-//!   empty-`ObjectType` event 14 above. Mapped to [`ResourceType::Capability`].
-//!   The capability *name* is resolved from the `PackageSid` capability SID
-//!   via [`crate::capability_names`] (well-known SID → friendly name; custom
-//!   hashed capabilities fall back to the SID string). Records without a
-//!   decoded identifier are omitted.
+//! - **28 — schema-dependent denial** — either a UI violation carrying
+//!   `Category` / `Detail` / `Denied`, or a compact capability-access-manager
+//!   record (`Denied` / `PackageSid` / `ProcessId`). UI violations map to
+//!   [`ResourceType::Ui`]. Capability records map to
+//!   [`ResourceType::Capability`], with the capability name resolved from the
+//!   capability SID via [`crate::capability_names`] (well-known SID → friendly
+//!   name; custom hashed capabilities fall back to the SID string).
 
-use learning_mode_core::{AccessType, ResourceType};
+use learning_mode_core::{
+    AccessType, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
+};
+use sha2::{Digest, Sha256};
 use windows::core::GUID;
 
 /// Microsoft-Windows-Kernel-General provider.
@@ -103,23 +112,101 @@ pub struct RawDenial {
     pub filetime: u64,
     /// Originating ETW event ID (kept for diagnostics).
     pub event_id: u16,
+    /// Symbolic category of the originating provider, for verbose logging
+    /// aggregation. Never a raw provider GUID.
+    pub provider: VerboseLoggingProvider,
+    /// Bounded sensitive-value-redacted properties retained for verbose logging signatures.
+    pub verbose_logging_properties: Vec<(String, String)>,
 }
 
 /// Routes a decoded event to the matching extractor by its event ID.
 ///
-/// Returns `None` for events that are not learning-mode denials or that
-/// carry an object type we don't surface.
-pub fn extract_denial(parts: &DecodedEventParts, pid: u32, filetime: u64) -> Option<RawDenial> {
+/// Returns `Err` with a closed [`VerboseLoggingOutcomeReason`] for events that
+/// are not learning-mode denials, that carry an object type we don't
+/// surface, or that otherwise fail extraction. Callers aggregate the
+/// returned reason into [`learning_mode_core::VerboseLoggingSummary`] rather than
+/// discarding it, except when a fallback extractor (e.g.
+/// [`crate::capability_dacl`]) recovers an equivalent denial from the same
+/// event.
+pub fn extract_denial(
+    parts: &DecodedEventParts,
+    pid: u32,
+    filetime: u64,
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
+    // Callers on the real trace path gate on `is_learning_mode_event` before
+    // decoding via TDH at all, so this branch only matters for direct/test
+    // callers that skip that gate.
+    let provider = verbose_logging_provider_for_guid(parts.provider)
+        .ok_or(VerboseLoggingOutcomeReason::UnsupportedEventSchema)?;
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        return None;
+        return Err(VerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
+
     match parts.event_id {
         ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
-            build_denial_from_access_check(parts, pid, filetime)
+            build_denial_from_access_check(parts, pid, filetime, provider)
         }
-        LEARNING_MODE_VIOLATION_EVENT_ID => build_denial_from_learning_mode(parts, pid, filetime),
-        CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime),
-        _ => None,
+        LEARNING_MODE_VIOLATION_EVENT_ID => {
+            build_denial_from_learning_mode(parts, pid, filetime, provider)
+        }
+        CAPABILITY_DENIAL_EVENT_ID if is_ui_violation_schema(parts) => {
+            build_denial_from_learning_mode(parts, pid, filetime, provider)
+        }
+        CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime, provider),
+        _ => Err(VerboseLoggingOutcomeReason::UnsupportedEventSchema),
+    }
+}
+
+/// Returns typed denial classifications that can be determined independently
+/// of whether the event contains every property required for actionable output.
+pub(crate) fn verbose_logging_classification(
+    parts: &DecodedEventParts,
+) -> (Option<AccessType>, Option<ResourceType>) {
+    match parts.event_id {
+        ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
+            let Some(object_type) = find_prop(&parts.props, "ObjectType") else {
+                return (None, None);
+            };
+            match object_type.trim_matches('"') {
+                "File" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| access_type_from_mask(mask, false))
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::File),
+                ),
+                "Key" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| access_type_from_mask(mask, true))
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::Other),
+                ),
+                "Section" | "SymbolicLink" | "Timer" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| {
+                                named_object_access_type(object_type.trim_matches('"'), mask)
+                            })
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::Other),
+                ),
+                "" => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
+                _ => (None, None),
+            }
+        }
+        LEARNING_MODE_VIOLATION_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Ui)),
+        CAPABILITY_DENIAL_EVENT_ID if is_ui_violation_schema(parts) => {
+            (Some(AccessType::Unknown), Some(ResourceType::Ui))
+        }
+        CAPABILITY_DENIAL_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
+        _ => (None, None),
     }
 }
 
@@ -142,12 +229,391 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
     }
 }
 
-/// Builds a [`RawDenial`] from an access-check (event 14 / 4907) payload.
+pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
+    if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
+        effective_capability_event_pid(
+            find_prop(&parts.props, "ProcessId").map(std::string::String::as_str),
+        )
+    } else {
+        Some(header_pid)
+    }
+}
+
+fn is_ui_violation_schema(parts: &DecodedEventParts) -> bool {
+    parts.event_id == CAPABILITY_DENIAL_EVENT_ID
+        && find_prop(&parts.props, "Detail").is_some()
+        && find_prop(&parts.props, "Category").is_some()
+}
+
+pub(crate) fn effective_capability_event_pid(process_id: Option<&str>) -> Option<u32> {
+    process_id.and_then(parse_u32)
+}
+
+/// Maps a raw ETW provider GUID to its symbolic verbose logging category.
+///
+/// Returns `None` for providers outside the Learning Mode vocabulary; those
+/// events are ignored entirely (not aggregated), since they are unrelated
+/// host traffic rather than an excluded Learning Mode outcome.
+pub(crate) fn verbose_logging_provider_for_guid(provider: GUID) -> Option<VerboseLoggingProvider> {
+    if provider == KERNEL_GENERAL_PROVIDER {
+        Some(VerboseLoggingProvider::KernelGeneral)
+    } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
+        Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
+    } else {
+        None
+    }
+}
+
+/// Renders a symbolic verbose logging provider category as its raw ETW
+/// provider GUID, in stable uppercase braced form, for retention in a verbose
+/// logging signature. Provider GUIDs are stable component identifiers, not
+/// personal data, so unlike account/user values they are never redacted.
+pub(crate) fn verbose_logging_provider_guid(provider: VerboseLoggingProvider) -> String {
+    match provider {
+        VerboseLoggingProvider::KernelGeneral => {
+            format_guid_braced_uppercase(KERNEL_GENERAL_PROVIDER)
+        }
+        VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
+            format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
+        }
+    }
+}
+
+// Keep the serialized spelling independent of formatting changes in the
+// `windows` crate: verbose signatures require braces and uppercase hex.
+fn format_guid_braced_uppercase(guid: GUID) -> String {
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7],
+    )
+}
+
+// ---- verbose logging signature sanitization -------------------------------------
+//
+// A verbose logging signature retains identifiers useful for triage (SIDs,
+// capability names, PIDs, provider/object GUIDs) but must never leak a
+// human account/user name, a file path, an exact timestamp, or a free-form
+// decoder error message. These bounds apply uniformly to every decoded
+// property, in a fixed order: drop timestamp-like properties outright,
+// redact sensitive content, *then* bound the surviving property count and
+// value length — sanitizing always happens before truncation so a redaction
+// is never chopped in half by a length cap.
+
+/// Fixed replacement for any redacted username/account-name value.
+pub(crate) const REDACTED_USER: &str = "<redacted-user>";
+/// Fixed replacement for a complete file path.
+pub(crate) const REDACTED_PATH: &str = "<REDACTED>";
+/// Maximum number of `(name, value)` properties retained in one verbose logging
+/// signature. Bounds pathological/huge TDH property lists; sanitization
+/// (never raw decoding) determines which survive, via deterministic
+/// (sorted-by-name) truncation.
+pub(crate) const MAX_SIGNATURE_PROPERTIES: usize = 24;
+/// Maximum retained length (in `char`s) of one sanitized property value.
+pub(crate) const MAX_SIGNATURE_VALUE_LEN: usize = 256;
+const SHA256_HEX_LEN: usize = 64;
+const BOUNDED_VALUE_MARKER_LEN: usize = "...<sha256=".len() + SHA256_HEX_LEN + ">...".len();
+const _: () = assert!(MAX_SIGNATURE_VALUE_LEN > BOUNDED_VALUE_MARKER_LEN);
+const TIMESTAMP_PROPERTY_NAMES: &[&str] = &[
+    "time",
+    "timestamp",
+    "filetime",
+    "systemtime",
+    "eventtime",
+    "timecreated",
+    "creationtime",
+    "createtime",
+    "starttime",
+    "endtime",
+    "exittime",
+    "lastwritetime",
+];
+const RETAINED_IDENTIFIER_SUFFIXES: &[&str] = &["sid", "guid", "identifier", "id"];
+const IDENTITY_PROPERTY_NAMES: &[&str] = &["user", "account", "owner", "upn"];
+const IDENTITY_PROPERTY_SUFFIXES: &[&str] = &[
+    "username",
+    "accountname",
+    "ownername",
+    "principalname",
+    "account",
+    "upn",
+];
+
+#[derive(Clone, Copy)]
+struct NormalizedPropertyName<'a>(&'a str);
+
+impl<'a> NormalizedPropertyName<'a> {
+    fn bytes(self) -> impl DoubleEndedIterator<Item = u8> + Clone + 'a {
+        self.0
+            .bytes()
+            .filter(|byte| !matches!(byte, b'_' | b'-'))
+            .map(|byte| byte.to_ascii_lowercase())
+    }
+
+    fn equals(self, expected: &str) -> bool {
+        self.bytes().eq(expected.bytes())
+    }
+
+    fn ends_with(self, suffix: &str) -> bool {
+        let mut bytes = self.bytes().rev();
+        suffix
+            .bytes()
+            .rev()
+            .all(|expected| bytes.next() == Some(expected))
+    }
+}
+
+/// Returns whether `name` looks like it carries a timestamp, so it is
+/// dropped from a verbose logging signature entirely (never redacted or
+/// truncated) — exact timestamps must not prevent otherwise-identical
+/// events from deduplicating. These are trusted ETW schema property names, so
+/// matching is deliberately limited to known names and suffixes rather than
+/// fuzzy spellings that could discard unrelated properties.
+fn is_timestamp_like_property(name: &str) -> bool {
+    let normalized = NormalizedPropertyName(name);
+    TIMESTAMP_PROPERTY_NAMES
+        .iter()
+        .copied()
+        .any(|expected| normalized.equals(expected))
+        || normalized.ends_with("timestamp")
+        || normalized.ends_with("filetime")
+}
+
+/// Returns whether `name` is itself a standalone user/account-identity
+/// property (as opposed to a path that merely *contains* a username), so
+/// its value is replaced outright with [`REDACTED_USER`] regardless of
+/// content.
+fn is_identity_property(name: &str) -> bool {
+    let normalized = NormalizedPropertyName(name);
+    if RETAINED_IDENTIFIER_SUFFIXES
+        .iter()
+        .copied()
+        .any(|suffix| normalized.equals(suffix) || normalized.ends_with(suffix))
+    {
+        return false;
+    }
+    IDENTITY_PROPERTY_NAMES
+        .iter()
+        .copied()
+        .any(|expected| normalized.equals(expected))
+        || IDENTITY_PROPERTY_SUFFIXES
+            .iter()
+            .copied()
+            .any(|suffix| normalized.ends_with(suffix))
+}
+
+fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
+    let normalized = NormalizedPropertyName(name);
+    if normalized.ends_with("path") || normalized.ends_with("filename") {
+        return true;
+    }
+
+    if !normalized.equals("objectname") && !normalized.equals("resource") {
+        return false;
+    }
+    if object_type.is_some_and(|object_type| object_type.eq_ignore_ascii_case("File")) {
+        return true;
+    }
+
+    crate::path_norm::is_user_visible_absolute(value)
+        || looks_like_dos_device_filesystem_path(value)
+        || looks_like_nt_filesystem_path(value)
+}
+
+fn looks_like_dos_device_filesystem_path(value: &str) -> bool {
+    let rest = [r"\??\", r"\\?\", r"\\.\"]
+        .into_iter()
+        .find_map(|prefix| strip_prefix_ignore_ascii_case(value, prefix));
+    let Some(rest) = rest else {
+        return false;
+    };
+    if looks_like_drive_absolute_path(rest)
+        || strip_prefix_ignore_ascii_case(rest, r"UNC\").is_some()
+    {
+        return true;
+    }
+
+    let Some(volume) = strip_prefix_ignore_ascii_case(rest, "Volume{") else {
+        return false;
+    };
+    volume.contains(r"}\")
+}
+
+fn looks_like_drive_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+fn looks_like_nt_filesystem_path(value: &str) -> bool {
+    let Some(rest) = strip_prefix_ignore_ascii_case(value, r"\Device\") else {
+        return false;
+    };
+    let Some((device, _path)) = rest.split_once('\\') else {
+        return false;
+    };
+    if device.eq_ignore_ascii_case("Mup") || ends_with_ignore_ascii_case(device, "Redirector") {
+        return true;
+    }
+
+    let Some(volume_number) = strip_prefix_ignore_ascii_case(device, "HarddiskVolume") else {
+        return false;
+    };
+    !volume_number.is_empty() && volume_number.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .then(|| &value[prefix.len()..])
+}
+
+fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
+}
+
+/// Deterministically discards sorted properties after
+/// [`MAX_SIGNATURE_PROPERTIES`] and bounds retained values to
+/// [`MAX_SIGNATURE_VALUE_LEN`] characters.
+///
+/// Overlong values retain prefix and suffix context plus a digest of the full
+/// sanitized value. The digest prevents distinct values with a long shared
+/// prefix from collapsing into one verbose logging signature.
+///
+/// Callers must sanitize (redact) *before* calling this so neither the retained
+/// context nor the digest is derived from sensitive identity content.
+pub(crate) fn bound_properties(mut properties: Vec<(String, String)>) -> Vec<(String, String)> {
+    properties.truncate(MAX_SIGNATURE_PROPERTIES);
+    for (_, value) in &mut properties {
+        let char_count = value.chars().count();
+        if char_count > MAX_SIGNATURE_VALUE_LEN {
+            *value = bound_property_value(value, char_count);
+        }
+    }
+    properties
+}
+
+fn bound_property_value(value: &str, char_count: usize) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let marker = format!("...<sha256={digest:x}>...");
+    debug_assert_eq!(marker.len(), BOUNDED_VALUE_MARKER_LEN);
+    let context_len = MAX_SIGNATURE_VALUE_LEN - BOUNDED_VALUE_MARKER_LEN;
+    let prefix_len = context_len.div_ceil(2);
+    let suffix_len = context_len / 2;
+    let prefix = value.chars().take(prefix_len).collect::<String>();
+    let suffix = value
+        .chars()
+        .skip(char_count - suffix_len)
+        .collect::<String>();
+    format!("{prefix}{marker}{suffix}")
+}
+
+/// Produces the deterministic, sanitized, bounded property list for a verbose
+/// logging signature from one decoded event's raw TDH properties.
+///
+/// Never includes a free-form decoder error message (decode failures are
+/// recorded with an empty property list by the caller, before this
+/// function would ever run) and never includes a timestamp-like property,
+/// so exact-timestamp differences between otherwise-identical events don't
+/// prevent their signatures from deduplicating. SIDs, capability names,
+/// PIDs carried as properties, and GUID-shaped values are retained
+/// verbatim; account/user-identity content and complete file paths are
+/// redacted. Classification is schema-independent: newly decoded properties
+/// automatically pass through these name/value checks without requiring a new
+/// extractor branch.
+pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, String)> {
+    let usernames = props
+        .iter()
+        .filter(|(name, _)| is_identity_property(name))
+        .flat_map(|(_, value)| username_match_candidates(value.trim_matches('"')))
+        .collect::<Vec<_>>();
+    let object_type = props
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("ObjectType"))
+        .map(|(_, value)| value.trim_matches('"'));
+    let mut sanitized = std::collections::BTreeMap::new();
+    for (name, raw_value) in props {
+        if is_timestamp_like_property(name) {
+            continue;
+        }
+        let value = raw_value.trim_matches('"');
+        let sanitized_value = if is_identity_property(name) {
+            REDACTED_USER.to_string()
+        } else if looks_like_file_path_property(name, value, object_type) {
+            REDACTED_PATH.to_string()
+        } else {
+            redact_known_username_components(value, &usernames)
+        };
+        sanitized.insert(name.clone(), sanitized_value);
+    }
+
+    fn username_match_candidates(identity: &str) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let account = identity
+            .rsplit_once('\\')
+            .map_or(identity, |(_, account)| account);
+        for candidate in [
+            identity,
+            account,
+            account.split_once('@').map_or(account, |(name, _)| name),
+        ] {
+            if !candidate.is_empty()
+                && !candidates
+                    .iter()
+                    .any(|existing: &String| windows_paths_equal_ignore_case(existing, candidate))
+            {
+                candidates.push(candidate.to_string());
+            }
+        }
+        candidates
+    }
+
+    fn redact_known_username_components(value: &str, usernames: &[String]) -> String {
+        value
+            .split_inclusive(['\\', '/'])
+            .map(|component| {
+                let (segment, separator) = if component.ends_with('\\') || component.ends_with('/')
+                {
+                    component.split_at(component.len() - 1)
+                } else {
+                    (component, "")
+                };
+                if usernames
+                    .iter()
+                    .any(|username| windows_paths_equal_ignore_case(segment, username))
+                {
+                    format!("{REDACTED_USER}{separator}")
+                } else {
+                    component.to_string()
+                }
+            })
+            .collect()
+    }
+    bound_properties(sanitized.into_iter().collect())
+}
+
 ///
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
-/// brokered-capability check, and any other object type (Section, Process,
-/// Thread, ...) is dropped as not actionable via sandbox policy. An absent
+/// brokered-capability check, and the observed named-object types `Section`,
+/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Only registry
+/// reads are actionable; other registry access and those named-object types are
+/// excluded because MXC has no corresponding policy grants. Other object types
+/// are dropped until their access-mask vocabulary is understood. An absent
 /// `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
@@ -156,32 +622,58 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
 /// the type falls back to [`AccessType::Unknown`] so a decode gap never
 /// drops the denial itself. Capability checks carry a mask that is not a
 /// read/write/execute verb, so their access type is left `Unknown`.
+///
+/// # Errors
+///
+/// Returns the closed [`VerboseLoggingOutcomeReason`] describing why no denial
+/// could be built: a missing `ObjectType` ([`VerboseLoggingOutcomeReason::MissingObjectType`]),
+/// an object type this model can't represent
+/// ([`VerboseLoggingOutcomeReason::UnsupportedObjectType`]), a missing/empty
+/// object name (registry/file:
+/// [`VerboseLoggingOutcomeReason::MissingObjectName`]; capability: an
+/// unidentified brokered check,
+/// [`VerboseLoggingOutcomeReason::UnresolvedCapability`] — [`crate::capability_dacl`]
+/// may still recover it from the event's DACL payload), or a self-access,
+/// non-read registry, or recognized named-object check that isn't actionable
+/// ([`VerboseLoggingOutcomeReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
-    let object_type = find_prop(&parts.props, "ObjectType")?;
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
+    let object_type = find_prop(&parts.props, "ObjectType")
+        .ok_or(VerboseLoggingOutcomeReason::MissingObjectType)?;
     let object_type_str = object_type.trim_matches('"');
 
     let resource_type = match object_type_str {
         "File" => ResourceType::File,
         "Key" => ResourceType::Other,
+        "Section" | "SymbolicLink" | "Timer" => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
-        _ => return None,
+        _ => return Err(VerboseLoggingOutcomeReason::UnsupportedObjectType),
     };
 
     let object_name = find_prop(&parts.props, "ObjectName")
         .map(|v| v.trim_matches('"').to_string())
-        .filter(|name| !name.is_empty())?;
+        .filter(|name| !name.is_empty());
+    let object_name = match (resource_type, object_name) {
+        // An unidentified brokered-capability check: the identifier may
+        // still be recoverable from the event's DACL payload.
+        (ResourceType::Capability, None) => {
+            return Err(VerboseLoggingOutcomeReason::UnresolvedCapability)
+        }
+        (_, None) => return Err(VerboseLoggingOutcomeReason::MissingObjectName),
+        (_, Some(name)) => name,
+    };
 
     if resource_type == ResourceType::File {
         let app_path = find_prop(&parts.props, "AppPath")
             .or_else(|| find_prop(&parts.props, "ApplicationPath"))
             .map(|value| value.trim_matches('"'));
         if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
-            return None;
+            return Err(VerboseLoggingOutcomeReason::NotActionable);
         }
     }
 
@@ -191,23 +683,31 @@ pub fn build_denial_from_access_check(
         // classifier over it.
         AccessType::Unknown
     } else {
-        // Registry keys and files share the standard/generic mask bits but
-        // assign different meanings to the object-specific low bits, so the
-        // classifier needs to know which vocabulary applies.
-        let is_registry = object_type_str == "Key";
         find_prop(&parts.props, "AccessMask")
             .and_then(|v| parse_u32(v))
-            .map(|mask| access_type_from_mask(mask, is_registry))
+            .map(|mask| match object_type_str {
+                "Key" => access_type_from_mask(mask, true),
+                "File" => access_type_from_mask(mask, false),
+                _ => named_object_access_type(object_type_str, mask),
+            })
             .unwrap_or(AccessType::Unknown)
     };
 
-    Some(RawDenial {
+    if (object_type_str == "Key" && access_type != AccessType::Read)
+        || matches!(object_type_str, "Section" | "SymbolicLink" | "Timer")
+    {
+        return Err(VerboseLoggingOutcomeReason::NotActionable);
+    }
+
+    Ok(RawDenial {
         pid,
         resource_type,
         object_name,
         access_type,
         filetime,
         event_id: parts.event_id,
+        provider,
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -264,26 +764,40 @@ fn strip_dos_namespace_prefix(path: &str) -> &str {
 /// These represent UI-surface denials. `Category` identifies the class and
 /// `Detail` identifies the concrete UI operation; `ProcessName` is the caller
 /// and must not be emitted as the denied resource.
+///
+/// # Errors
+///
+/// Returns [`VerboseLoggingOutcomeReason::MissingObjectType`] when `Category` is
+/// absent or unparseable, [`VerboseLoggingOutcomeReason::MissingObjectName`]
+/// when the required `Detail` is absent or unparseable, and
+/// [`VerboseLoggingOutcomeReason::NotActionable`] when the category/detail pair
+/// describes no violation (`Category == 0`).
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
-    let category = find_prop(&parts.props, "Category").and_then(|value| parse_u32(value))?;
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
+    let category = find_prop(&parts.props, "Category")
+        .and_then(|value| parse_u32(value))
+        .ok_or(VerboseLoggingOutcomeReason::MissingObjectType)?;
     let detail = match find_prop(&parts.props, "Detail") {
-        Some(value) => parse_u32(value)?,
+        Some(value) => parse_u32(value).ok_or(VerboseLoggingOutcomeReason::MissingObjectName)?,
         None if category == crate::ui::CONVERT_TO_GUI => 0,
-        None => return None,
+        None => return Err(VerboseLoggingOutcomeReason::MissingObjectName),
     };
-    let object_name = crate::ui::resource_name(category, detail)?;
+    let object_name = crate::ui::resource_name(category, detail)
+        .ok_or(VerboseLoggingOutcomeReason::NotActionable)?;
 
-    Some(RawDenial {
+    Ok(RawDenial {
         pid,
         resource_type: ResourceType::Ui,
         object_name,
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
+        provider,
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -295,19 +809,24 @@ pub fn build_denial_from_learning_mode(
 /// brokered checks) when present, else the header pid. The capability name
 /// comes from the `PackageSid` capability SID, resolved to its friendly
 /// policy name via [`crate::capability_names`] (custom hashed capabilities
-/// fall back to the SID string). Records without a decoded identifier are
-/// omitted.
+/// fall back to the SID string).
+///
+/// # Errors
+///
+/// Returns [`VerboseLoggingOutcomeReason::NotActionable`] when `Denied` is
+/// absent or not `true`, and [`VerboseLoggingOutcomeReason::UnresolvedCapability`]
+/// when no usable capability identifier could be decoded.
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
     // A partially decoded event must not become a policy recommendation.
-    if !find_prop(&parts.props, "Denied")?
-        .trim_matches('"')
-        .eq_ignore_ascii_case("true")
-    {
-        return None;
+    let denied = find_prop(&parts.props, "Denied")
+        .is_some_and(|value| value.trim_matches('"').eq_ignore_ascii_case("true"));
+    if !denied {
+        return Err(VerboseLoggingOutcomeReason::NotActionable);
     }
 
     let pid = find_prop(&parts.props, "ProcessId")
@@ -332,15 +851,18 @@ pub fn build_denial_from_capability(
                 && name != "<unsupported>"
                 && name != "<invalid SID>"
                 && name != "<malformed-sid>"
-        })?;
+        })
+        .ok_or(VerboseLoggingOutcomeReason::UnresolvedCapability)?;
 
-    Some(RawDenial {
+    Ok(RawDenial {
         pid,
         resource_type: ResourceType::Capability,
         object_name,
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
+        provider,
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -439,6 +961,37 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
     } else if mask & execute_bits != 0 {
         AccessType::Execute
     } else if mask & read_bits != 0 {
+        AccessType::Read
+    } else {
+        AccessType::Unknown
+    }
+}
+
+fn named_object_access_type(object_type: &str, mask: u32) -> AccessType {
+    let (read_bits, write_bits, execute_bits) = match object_type {
+        // ntifs.h SECTION_* rights.
+        "Section" => (0x0001 | 0x0004, 0x0002 | 0x0010, 0x0008 | 0x0020),
+        // ntifs.h SYMBOLIC_LINK_* rights.
+        "SymbolicLink" => (0x0001, 0x0002, 0),
+        // winnt.h TIMER_* rights.
+        "Timer" => (0x0001, 0x0002, 0),
+        _ => return AccessType::Unknown,
+    };
+
+    // Standard and generic rights are object-type independent.
+    const DELETE: u32 = 0x0001_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const WRITE_OWNER: u32 = 0x0008_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const GENERIC_EXECUTE: u32 = 0x2000_0000;
+    const GENERIC_ALL: u32 = 0x1000_0000;
+
+    if mask & (write_bits | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL) != 0 {
+        AccessType::Write
+    } else if mask & (execute_bits | GENERIC_EXECUTE) != 0 {
+        AccessType::Execute
+    } else if mask & (read_bits | GENERIC_READ) != 0 {
         AccessType::Read
     } else {
         AccessType::Unknown
@@ -555,7 +1108,10 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             );
-            assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
         }
     }
 
@@ -581,7 +1137,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -598,7 +1154,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -620,7 +1176,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -634,7 +1190,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -648,7 +1204,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -669,6 +1225,49 @@ mod tests {
     }
 
     #[test]
+    fn access_check_key_write_is_not_actionable() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+                // KEY_SET_VALUE.
+                ("AccessMask", "0x2"),
+            ],
+        );
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::NotActionable
+        );
+        assert_eq!(
+            verbose_logging_classification(&p),
+            (Some(AccessType::Write), Some(ResourceType::Other))
+        );
+    }
+
+    #[test]
+    fn access_check_key_unknown_access_is_not_actionable() {
+        for access_mask in [None, Some("not-a-mask"), Some("0x0")] {
+            let mut properties = vec![
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+            ];
+            if let Some(access_mask) = access_mask {
+                properties.push(("AccessMask", access_mask));
+            }
+            let p = parts(14, &properties);
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(AccessType::Unknown), Some(ResourceType::Other))
+            );
+        }
+    }
+
+    #[test]
     fn access_check_empty_capability_identifier_is_dropped() {
         // Permissive-mode capability check: present-but-empty ObjectType,
         // empty ObjectName, mask 0x1 (not a file read verb here).
@@ -681,7 +1280,10 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::UnresolvedCapability
+        );
     }
 
     #[test]
@@ -695,7 +1297,10 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             );
-            assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
+            assert_eq!(
+                extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::MissingObjectName
+            );
         }
     }
 
@@ -710,15 +1315,60 @@ mod tests {
     }
 
     #[test]
-    fn access_check_unknown_object_type_dropped() {
-        let p = parts(14, &[("ObjectType", "\"Section\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+    fn access_check_observed_named_object_types_are_not_actionable() {
+        for (object_type, object_name, mask, expected_access) in [
+            (
+                "Section",
+                r"\Sessions\1\BaseNamedObjects\shared-section",
+                "0x6",
+                AccessType::Write,
+            ),
+            ("SymbolicLink", r"\??\C:", "0x1", AccessType::Read),
+            (
+                "Timer",
+                r"\Sessions\1\BaseNamedObjects\deadline",
+                "0x1",
+                AccessType::Read,
+            ),
+        ] {
+            let p = parts(
+                14,
+                &[
+                    ("ObjectType", object_type),
+                    ("ObjectName", object_name),
+                    ("AccessMask", mask),
+                ],
+            );
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(expected_access), Some(ResourceType::Other))
+            );
+        }
+    }
+
+    #[test]
+    fn access_check_unrecognized_object_type_is_dropped() {
+        let p = parts(
+            14,
+            &[("ObjectType", "\"Process\""), ("ObjectName", "\"target\"")],
+        );
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::UnsupportedObjectType
+        );
     }
 
     #[test]
     fn access_check_absent_object_type_dropped() {
         let p = parts(14, &[("ObjectName", "\"x\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::MissingObjectType
+        );
     }
 
     // ---- event 27 UI ------------------------------------------------------
@@ -798,16 +1448,25 @@ mod tests {
     #[test]
     fn learning_mode_violation_rejects_invalid_required_numbers() {
         let invalid_category = parts(27, &[("Category", "not-a-number"), ("Detail", "4")]);
-        assert!(extract_denial(&invalid_category, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&invalid_category, 9999, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::MissingObjectType
+        );
 
         let invalid_detail = parts(27, &[("Category", "2"), ("Detail", "not-a-number")]);
-        assert!(extract_denial(&invalid_detail, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&invalid_detail, 9999, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::MissingObjectName
+        );
     }
 
     #[test]
     fn learning_mode_category_none_is_dropped() {
         let p = parts(27, &[("Category", "0"), ("Detail", "0")]);
-        assert!(extract_denial(&p, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 9999, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::NotActionable
+        );
     }
 
     // ---- event 28 capability denial ---------------------------------------
@@ -831,6 +1490,33 @@ mod tests {
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "internetClient");
+        assert_eq!(ev.provider, VerboseLoggingProvider::KernelGeneral);
+    }
+
+    #[test]
+    fn event_28_ui_violation_is_not_misclassified_as_capability() {
+        let p = parts(
+            28,
+            &[
+                ("ProcessName", "\"powershell.exe\""),
+                ("ProcessId", "0x1594"),
+                ("SequenceNumber", "302"),
+                ("Category", "2"),
+                ("Detail", "1"),
+                ("Denied", "false"),
+                ("UserSid", "S-1-5-21-1-2-3-1000"),
+                ("PackageSid", "S-1-15-2-1-2-3-4-5-6-7"),
+            ],
+        );
+
+        let denial = extract_denial(&p, 0x1594, FIXED_FILETIME).unwrap();
+        assert_eq!(denial.resource_type, ResourceType::Ui);
+        assert_eq!(denial.object_name, "Handles");
+        assert_eq!(denial.pid, 0x1594);
+        assert_eq!(
+            verbose_logging_classification(&p),
+            (Some(AccessType::Unknown), Some(ResourceType::Ui))
+        );
     }
 
     #[test]
@@ -871,13 +1557,28 @@ mod tests {
     #[test]
     fn capability_denial_not_denied_is_dropped() {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "false")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::NotActionable
+        );
     }
 
     #[test]
     fn capability_denial_without_denied_field_is_dropped() {
         let p = parts(28, &[("PackageSid", "S-1-15-3-1")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::NotActionable
+        );
+    }
+
+    #[test]
+    fn capability_denial_without_identifier_is_unresolved() {
+        let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "true")]);
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::UnresolvedCapability
+        );
     }
 
     #[test]
@@ -887,20 +1588,485 @@ mod tests {
             27,
             &[("Category", "2"), ("Detail", "4")],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema
+        );
+        assert!(verbose_logging_provider_for_guid(GUID::from_u128(
+            0x12345678_1234_1234_1234_1234567890ab
+        ))
+        .is_none());
     }
 
     #[test]
-    fn capability_denial_falls_back_to_header_pid() {
+    fn capability_denial_uses_supplied_effective_pid() {
         let p = parts(28, &[("Denied", "true"), ("PackageSid", "S-1-15-3-1")]);
         let ev = extract_denial(&p, 555, FIXED_FILETIME).unwrap();
         assert_eq!(ev.pid, 555);
     }
 
     #[test]
+    fn capability_event_requires_payload_pid_for_scoping() {
+        let missing = parts(28, &[("Denied", "true")]);
+        let malformed = parts(28, &[("ProcessId", "\"broker\"")]);
+        let valid = parts(28, &[("ProcessId", "42")]);
+
+        assert_eq!(effective_event_pid(&missing, 555), None);
+        assert_eq!(effective_event_pid(&malformed, 555), None);
+        assert_eq!(effective_event_pid(&valid, 555), Some(42));
+    }
+
+    #[test]
     fn unrelated_event_ignored() {
         let p = parts(9999, &[("Foo", "\"bar\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema
+        );
+    }
+
+    #[test]
+    fn known_provider_guid_maps_to_symbolic_pii_free_category() {
+        assert_eq!(
+            verbose_logging_provider_for_guid(KERNEL_GENERAL_PROVIDER),
+            Some(VerboseLoggingProvider::KernelGeneral)
+        );
+        assert_eq!(
+            verbose_logging_provider_for_guid(PRIVACY_LEARNING_MODE_PROVIDER),
+            Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
+        );
+        assert_eq!(verbose_logging_provider_for_guid(GUID::from_u128(0)), None);
+    }
+
+    #[test]
+    fn verbose_logging_provider_guid_has_stable_spelling() {
+        let kernel_guid = verbose_logging_provider_guid(VerboseLoggingProvider::KernelGeneral);
+        let privacy_guid = verbose_logging_provider_guid(
+            VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+        );
+        assert_ne!(kernel_guid, privacy_guid);
+        assert_eq!(
+            kernel_guid,
+            format_guid_braced_uppercase(KERNEL_GENERAL_PROVIDER)
+        );
+        assert_eq!(
+            privacy_guid,
+            format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
+        );
+        assert!(kernel_guid.starts_with('{') && kernel_guid.ends_with('}'));
+    }
+
+    // ---- verbose logging signature sanitization ----------------------------------
+
+    #[test]
+    fn file_path_detection_preserves_non_file_identifiers() {
+        assert!(looks_like_file_path_property(
+            "ObjectName",
+            r"C:\Users\jsmith\secret.txt",
+            None
+        ));
+        assert!(looks_like_file_path_property(
+            "FilePath",
+            r"\Device\HarddiskVolume3\secret.txt",
+            Some("Section")
+        ));
+        assert!(looks_like_file_path_property(
+            "ObjectName",
+            r"C:\Users\alice\secret.txt",
+            Some("Section")
+        ));
+        for path in [
+            r"\Device\HarddiskVolume3\Users\alice\secret.txt",
+            r"\device\mup\server\share\Users\alice\secret.txt",
+            r"\Device\LanmanRedirector\;Z:0000000000001234\server\share\secret.txt",
+            r"\??\C:\Users\alice\secret.txt",
+            r"\??\UNC\server\share\Users\alice\secret.txt",
+        ] {
+            assert!(looks_like_file_path_property(
+                "ObjectName",
+                path,
+                Some("Section")
+            ));
+        }
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\BaseNamedObjects\shared-cache",
+            Some("Section")
+        ));
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\REGISTRY\USER\S-1-5-21-1-2-3-1000\Software\Test",
+            Some("Key")
+        ));
+        assert!(!looks_like_file_path_property(
+            "resource",
+            "internetClient",
+            None
+        ));
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\Device\MountPointManager",
+            Some("Section")
+        ));
+        for identifier in [r"\??\FDC#GENERIC_FLOPPY_DRIVE", r"\\.\PhysicalDrive0"] {
+            assert!(!looks_like_file_path_property(
+                "ObjectName",
+                identifier,
+                Some("SymbolicLink")
+            ));
+        }
+    }
+
+    #[test]
+    fn sanitize_properties_drops_timestamp_like_properties() {
+        let props = vec![
+            ("ObjectName".to_string(), "\"C:\\a.txt\"".to_string()),
+            ("Timestamp".to_string(), "132847890123456789".to_string()),
+            (
+                "LastWriteTime".to_string(),
+                "132847890123456789".to_string(),
+            ),
+            ("RuntimePolicy".to_string(), "\"retain\"".to_string()),
+            ("Timeout".to_string(), "\"30\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        assert!(out
+            .iter()
+            .all(|(name, _)| name != "Timestamp" && name != "LastWriteTime"));
+        assert!(out.iter().any(|(name, _)| name == "ObjectName"));
+        assert!(out.iter().any(|(name, _)| name == "RuntimePolicy"));
+        assert!(out.iter().any(|(name, _)| name == "Timeout"));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_standalone_identity_properties() {
+        let props = vec![
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "AccountName".to_string(),
+                "\"DOMAIN\\\\jsmith\"".to_string(),
+            ),
+            ("PackageSid".to_string(), "\"S-1-15-3-1\"".to_string()),
+            ("UserSid".to_string(), "\"S-1-5-21-123\"".to_string()),
+            ("AccountId".to_string(), "\"42\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(value_for("UserName"), Some(REDACTED_USER));
+        assert_eq!(value_for("AccountName"), Some(REDACTED_USER));
+        // SIDs are retained identifiers, never redacted.
+        assert_eq!(value_for("PackageSid"), Some("S-1-15-3-1"));
+        assert_eq!(value_for("UserSid"), Some("S-1-5-21-123"));
+        assert_eq!(value_for("AccountId"), Some("42"));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_the_entire_file_path() {
+        let props = vec![
+            (
+                "ObjectName".to_string(),
+                "\"C:\\Users\\jsmith\\secret.txt\"".to_string(),
+            ),
+            (
+                "AppPath".to_string(),
+                "\"C:\\Users\\jsmith\\app.exe\"".to_string(),
+            ),
+            (
+                "ApplicationPath".to_string(),
+                "\"D:\\Profiles\\alice\\tool.exe\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out,
+            vec![
+                ("AppPath".to_string(), REDACTED_PATH.to_string()),
+                ("ApplicationPath".to_string(), REDACTED_PATH.to_string()),
+                ("ObjectName".to_string(), REDACTED_PATH.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_arbitrary_file_path() {
+        let props = vec![
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(value_for("UserName"), Some(REDACTED_USER));
+        assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_absolute_path_despite_non_file_object_type() {
+        for path in [
+            r"C:\Users\alice\secret.txt",
+            r"\Device\HarddiskVolume3\Users\alice\secret.txt",
+            r"\Device\Mup\server\share\Users\alice\secret.txt",
+        ] {
+            let props = vec![
+                ("ObjectType".to_string(), "\"Section\"".to_string()),
+                ("ObjectName".to_string(), format!("\"{path}\"")),
+            ];
+
+            let out = sanitize_properties(&props);
+            let value_for =
+                |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+            assert_eq!(value_for("ObjectType"), Some("Section"));
+        }
+    }
+
+    #[test]
+    fn sanitize_properties_still_redacts_username_in_non_file_identifier() {
+        let props = vec![
+            ("ObjectType".to_string(), "\"Section\"".to_string()),
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"\\BaseNamedObjects\\jsmith\\cache\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(
+            value_for("ObjectName"),
+            Some(r"\BaseNamedObjects\<redacted-user>\cache")
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_path_with_qualified_username() {
+        for (property_name, identity) in [
+            ("UserName", r"CONTOSO\jsmith"),
+            ("UserPrincipalName", "jsmith@example.com"),
+        ] {
+            let props = vec![
+                (property_name.to_string(), format!("\"{identity}\"")),
+                (
+                    "ObjectName".to_string(),
+                    "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+                ),
+            ];
+            let out = sanitize_properties(&props);
+            let value_for = |name: &str| {
+                out.iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                value_for("ObjectName").map(String::as_str),
+                Some(REDACTED_PATH)
+            );
+            assert_eq!(
+                value_for(property_name).map(String::as_str),
+                Some(REDACTED_USER)
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_standard_account_identity_fields() {
+        for (property_name, identity) in [
+            ("PrincipalName", "jsmith@example.com"),
+            ("TargetAccount", r"CONTOSO\jsmith"),
+            ("SubjectAccount", "jsmith"),
+        ] {
+            let props = vec![
+                (property_name.to_string(), format!("\"{identity}\"")),
+                (
+                    "ObjectName".to_string(),
+                    "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+                ),
+            ];
+            let out = sanitize_properties(&props);
+            let value_for = |name: &str| {
+                out.iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                value_for(property_name).map(String::as_str),
+                Some(REDACTED_USER)
+            );
+            assert_eq!(
+                value_for("ObjectName").map(String::as_str),
+                Some(REDACTED_PATH)
+            );
+        }
+    }
+
+    #[test]
+    fn identity_detection_does_not_match_embedded_name_fragments() {
+        let props = vec![
+            (
+                "AccountNamePolicy".to_string(),
+                "\"retain-this-value\"".to_string(),
+            ),
+            (
+                "ConsiderationUserName".to_string(),
+                "\"redact-this-value\"".to_string(),
+            ),
+        ];
+
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| {
+            out.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value_for("AccountNamePolicy"), Some("retain-this-value"));
+        assert_eq!(value_for("ConsiderationUserName"), Some(REDACTED_USER));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_unicode_username_case_variants() {
+        let props = vec![
+            ("UserName".to_string(), "\"JÖRG\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"D:\\profiles\\jörg\\secret.txt\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out.iter()
+                .find(|(name, _)| name == "ObjectName")
+                .map(|(_, value)| value.as_str()),
+            Some(REDACTED_PATH)
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_is_deterministically_sorted_by_name() {
+        let props = vec![
+            ("Zeta".to_string(), "\"z\"".to_string()),
+            ("Alpha".to_string(), "\"a\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out,
+            vec![
+                ("Alpha".to_string(), "a".to_string()),
+                ("Zeta".to_string(), "z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_never_carries_a_decoder_error_message() {
+        // Decode-failure signatures are built by the caller with an empty
+        // property list (there is no decoded payload to sanitize), so a
+        // free-form TDH error string can never reach `sanitize_properties`
+        // in the first place.
+        let props: Vec<(String, String)> = Vec::new();
+        assert!(sanitize_properties(&props).is_empty());
+    }
+
+    #[test]
+    fn bound_properties_preserves_redaction_within_count_and_value_limits() {
+        let long_value = format!(
+            r"C:\Users\{}\{}",
+            "jsmith",
+            "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2)
+        );
+        let mut props = vec![("ObjectName".to_string(), long_value)];
+        for i in 0..(MAX_SIGNATURE_PROPERTIES + 10) {
+            // `bound_properties` truncates in the given order (callers are
+            // expected to have already sorted deterministically); appending
+            // these after `ObjectName` keeps it within the retained prefix.
+            props.push((format!("Extra{i:03}"), "v".to_string()));
+        }
+        let sanitized: Vec<(String, String)> = props
+            .into_iter()
+            .map(|(name, value)| {
+                let value = if looks_like_file_path_property(&name, &value, None) {
+                    REDACTED_PATH.to_string()
+                } else {
+                    value
+                };
+                (name, value)
+            })
+            .collect();
+
+        let out = bound_properties(sanitized);
+
+        assert_eq!(out.len(), MAX_SIGNATURE_PROPERTIES);
+        let object_name = out
+            .iter()
+            .find(|(name, _)| name == "ObjectName")
+            .expect("ObjectName retained (sorted first)");
+        assert!(
+            object_name.1.contains(REDACTED_PATH),
+            "redaction must survive bounding: {}",
+            object_name.1
+        );
+        assert!(!object_name.1.contains("<sha256="));
+        assert_eq!(object_name.1, REDACTED_PATH);
+    }
+
+    #[test]
+    fn bound_properties_keeps_long_shared_prefixes_distinct() {
+        let common = "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2);
+        let first = bound_properties(vec![(
+            "ObjectName".to_string(),
+            format!("{common}\\first.db"),
+        )]);
+        let second = bound_properties(vec![(
+            "ObjectName".to_string(),
+            format!("{common}\\second.db"),
+        )]);
+
+        assert_ne!(first, second);
+        assert!(first[0].1.ends_with(r"\first.db"));
+        assert!(second[0].1.ends_with(r"\second.db"));
+        assert_eq!(first[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+        assert_eq!(second[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_before_bounding_and_hashing() {
+        let tail = "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2);
+        let alice = sanitize_properties(&[
+            ("UserName".to_string(), "\"alice\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                format!("\"C:\\Users\\alice\\{tail}\""),
+            ),
+        ]);
+        let bob = sanitize_properties(&[
+            ("UserName".to_string(), "\"bob\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                format!("\"C:\\Users\\bob\\{tail}\""),
+            ),
+        ]);
+
+        assert_eq!(alice, bob);
+        assert!(alice
+            .iter()
+            .all(|(_, value)| { !value.contains("alice") && !value.contains("bob") }));
+    }
+
+    #[test]
+    fn bound_properties_preserves_unicode_boundaries_and_short_values() {
+        let short = "unchanged".to_string();
+        let bounded_short = bound_properties(vec![("ObjectName".to_string(), short.clone())]);
+        assert_eq!(bounded_short[0].1, short);
+
+        let exact = "x".repeat(MAX_SIGNATURE_VALUE_LEN);
+        let bounded_exact = bound_properties(vec![("ObjectName".to_string(), exact.clone())]);
+        assert_eq!(bounded_exact[0].1, exact);
+
+        let long = format!("{}尾", "é".repeat(MAX_SIGNATURE_VALUE_LEN * 2));
+        let bounded_long = bound_properties(vec![("ObjectName".to_string(), long)]);
+        assert_eq!(bounded_long[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+        assert!(bounded_long[0].1.ends_with('尾'));
     }
 
     // ---- parse_u32 --------------------------------------------------------

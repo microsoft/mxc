@@ -29,6 +29,7 @@
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
 //!   `wxc_common`'s internal error type.
 
+pub mod configs;
 mod dispatch;
 mod error;
 #[cfg(target_os = "windows")]
@@ -46,13 +47,18 @@ pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
-    WslcSection,
+    user_profile_policy, Containment, FilesystemPolicyResult, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
+    NetworkRuleSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
+#[cfg(target_os = "windows")]
+pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
-pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
+pub use state_aware::{
+    exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
+};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
@@ -141,14 +147,14 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
 /// one terminal telemetry event before the provider reference is released:
 ///
 /// * [`SandboxProcess::wait`] — real completion / timeout / spawn error.
-/// * [`SandboxProcess::try_wait`] — same, on the poll that observes the exit
-///   or an error branch (a `Pending` poll leaves the invariant to a later
-///   `wait` / `kill` / `Drop`).
+/// * [`SandboxProcess::try_wait`] — emits when a poll observes an exit or a
+///   terminal timeout. A pending or otherwise failed poll leaves the invariant
+///   to a later successful `try_wait`, `wait`, `kill`, or `Drop`.
 /// * [`SandboxProcess::kill`] — cancellation event after the wrapped process
 ///   confirms the kill succeeded. A failed kill leaves the slot active for a
 ///   later `wait` / successful `try_wait`.
-/// * [`Drop`] — synthesised process-error event, so a wrapper dropped without
-///   `wait` never releases the provider without accounting for the run.
+/// * [`Drop`] — polls once for a completed child and emits its real exit code;
+///   only a still-running or unpollable child is reported as abandoned.
 ///
 /// `active` doubles as the exactly-once flag: it starts `true`, and every
 /// terminal path calls [`TelemetryProcess::emit`] which flips it to `false`
@@ -268,7 +274,7 @@ impl TelemetryProcess {
     }
 
     /// Emit a synthesised terminal event when no real completion result is
-    /// available (kill, poll-error, drop-without-wait). Routes through
+    /// available (drop-without-wait). Routes through
     /// [`Self::emit`] so it shares the exactly-once slot and the
     /// provider-release path with the natural exit paths.
     fn emit_synthetic(&mut self, kind: SyntheticTerminal) {
@@ -279,10 +285,6 @@ impl TelemetryProcess {
             SyntheticTerminal::Dropped => (
                 std::io::ErrorKind::Other,
                 "sandbox handle was dropped before completion",
-            ),
-            SyntheticTerminal::PollError => (
-                std::io::ErrorKind::Other,
-                "sandbox handle try_wait returned an error before completion",
             ),
         };
         // The Err path in `emit` classifies non-timeout errors as
@@ -337,18 +339,40 @@ impl TelemetryProcess {
 enum SyntheticTerminal {
     /// The wrapper was dropped without a preceding `wait` / successful `try_wait`.
     Dropped,
-    /// `SandboxProcess::try_wait` observed an underlying error.
-    PollError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropDisposition {
+    Exited(i32),
+    TimedOut,
+    Abandoned,
+}
+
+fn observe_before_drop(process: &mut dyn SandboxProcess) -> DropDisposition {
+    match process.try_wait() {
+        Ok(Some(exit_code)) => DropDisposition::Exited(exit_code),
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => DropDisposition::TimedOut,
+        Ok(None) | Err(_) => DropDisposition::Abandoned,
+    }
 }
 
 impl Drop for TelemetryProcess {
     fn drop(&mut self) {
         // If `wait` / `try_wait(Ok(Some))` / `kill` already emitted the
-        // terminal event, `active` is false and this is a no-op. Otherwise
-        // synthesise one so the "exactly-one terminal event" invariant holds
-        // for the drop-without-wait path as well. `emit` also releases the
-        // provider reference.
-        self.emit_synthetic(SyntheticTerminal::Dropped);
+        // terminal event, `active` is false and this is a no-op. Otherwise,
+        // preserve a completion that raced with Drop instead of misreporting a
+        // successful fire-and-forget run as abandonment.
+        if !self.active {
+            return;
+        }
+        match observe_before_drop(self.inner.as_mut()) {
+            DropDisposition::Exited(exit_code) => self.emit(&Ok(exit_code)),
+            DropDisposition::TimedOut => self.emit(&Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            ))),
+            DropDisposition::Abandoned => self.emit_synthetic(SyntheticTerminal::Dropped),
+        }
     }
 }
 
@@ -380,10 +404,14 @@ impl SandboxProcess for TelemetryProcess {
             Ok(Some(exit_code)) => self.emit(&Ok(*exit_code)),
             // Still running: leave the invariant to a later `wait` / `kill` / `Drop`.
             Ok(None) => {}
-            // Poll-error branch — emit a synthesised terminal event so the
-            // provider reference isn't released without accounting for the
-            // run, then return the error unchanged to the caller.
-            Err(_) => self.emit_synthetic(SyntheticTerminal::PollError),
+            // Backends use TimedOut only for a settled terminal timeout.
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                self.emit(&Err(std::io::Error::new(error.kind(), error.to_string())));
+            }
+            // A poll error does not prove termination. Preserve the slot and
+            // provider so a later wait, successful poll, kill, or Drop can
+            // report the actual terminal outcome.
+            Err(_) => {}
         }
         result
     }
@@ -417,7 +445,7 @@ impl SandboxProcess for TelemetryProcess {
     }
 }
 
-/// A streaming process paired with security warnings emitted during spawn.
+/// A streaming process paired with warnings emitted during spawn.
 pub(crate) struct ProcessWithWarnings {
     inner: Box<dyn SandboxProcess>,
     warnings: Vec<String>,
@@ -498,6 +526,7 @@ mod telemetry_process_tests {
     enum TryWaitResult {
         Running,
         Exited(i32),
+        TimedOut,
         Failed,
     }
 
@@ -524,6 +553,10 @@ mod telemetry_process_tests {
             match self.try_wait_result {
                 TryWaitResult::Running => Ok(None),
                 TryWaitResult::Exited(code) => Ok(Some(code)),
+                TryWaitResult::TimedOut => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out",
+                )),
                 TryWaitResult::Failed => Err(std::io::Error::other("poll failed")),
             }
         }
@@ -593,7 +626,16 @@ mod telemetry_process_tests {
 
         let mut poll_failed = wrapped(TryWaitResult::Failed);
         assert!(poll_failed.try_wait().is_err());
+        assert!(poll_failed.active);
+        assert_eq!(poll_failed.wait().unwrap(), 0);
         assert!(!poll_failed.active);
+
+        let mut timed_out = wrapped(TryWaitResult::TimedOut);
+        assert_eq!(
+            timed_out.try_wait().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(!timed_out.active);
     }
 
     #[test]
@@ -603,6 +645,43 @@ mod telemetry_process_tests {
         assert!(process.active);
         process.emit_synthetic(SyntheticTerminal::Dropped);
         assert!(!process.active);
+    }
+
+    #[test]
+    fn drop_observation_preserves_completed_exit_code() {
+        let mut exited = StubProcess {
+            try_wait_result: TryWaitResult::Exited(7),
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(observe_before_drop(&mut exited), DropDisposition::Exited(7));
+
+        let mut running = StubProcess {
+            try_wait_result: TryWaitResult::Running,
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(
+            observe_before_drop(&mut running),
+            DropDisposition::Abandoned
+        );
+
+        let mut failed = StubProcess {
+            try_wait_result: TryWaitResult::Failed,
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(observe_before_drop(&mut failed), DropDisposition::Abandoned);
+
+        let mut timed_out = StubProcess {
+            try_wait_result: TryWaitResult::TimedOut,
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(
+            observe_before_drop(&mut timed_out),
+            DropDisposition::TimedOut
+        );
     }
 
     #[test]

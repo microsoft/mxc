@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 // Validates telemetry policy, consent-result, and status-reason wire strings
-// across the Rust-generated TypeScript contract and the C# binding.
+// across the Rust implementation and the Node and C# bindings.
 //
 // Without this gate the three mappings drift silently: a new Rust variant
 // would be parsed as `Blocked` by the other bindings (they fail closed, which
@@ -38,8 +38,7 @@ const tsPath = join(
   "sdk",
   "node",
   "src",
-  "generated",
-  "telemetry-consent-wire.ts"
+  "telemetry.ts"
 );
 
 const errors = [];
@@ -132,11 +131,11 @@ if (!csharpMappings.has("blocked")) {
 // --- TypeScript: the exported union ---------------------------------------
 const tsSrc = readFileSync(tsPath, "utf8");
 const unionMatch = tsSrc.match(
-  /export type TelemetryConsentPolicyState\s*=\s*([^;]+);/
+  /export type TelemetryPolicyState\s*=\s*([^;]+);/
 );
 if (!unionMatch) {
   console.error(
-    "ERROR: could not find generated `TelemetryConsentPolicyState`"
+    "ERROR: could not find `TelemetryPolicyState` in telemetry.ts"
   );
   process.exit(1);
 }
@@ -148,7 +147,7 @@ for (const m of unionMatch[1].matchAll(/["']([^"']+)["']/g)) {
 function parseTypeScriptUnion(name) {
   const match = tsSrc.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
   if (!match) {
-    console.error(`ERROR: could not find generated \`${name}\``);
+    console.error(`ERROR: could not find TypeScript \`${name}\``);
     process.exit(1);
   }
   return new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]));
@@ -195,7 +194,7 @@ function compareMappings(label, expected, actual) {
   }
   for (const wire of actual.keys()) {
     if (!expected.has(wire)) {
-      errors.push(`C# ${label} handles '${wire}' with no matching generated wire value`);
+      errors.push(`C# ${label} handles '${wire}' with no matching TypeScript API value`);
     }
   }
 }
@@ -286,8 +285,8 @@ if (errors.length > 0) {
     console.error(`  - ${e}`);
   }
   console.error(
-    "\nUpdate the C# mappings to match the Rust policy strings and generated " +
-      "TypeScript consent wire contract."
+    "\nUpdate the C# mappings to match the Rust policy strings and " +
+      "TypeScript consent API contract."
   );
   process.exit(1);
 }

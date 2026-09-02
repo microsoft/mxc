@@ -98,6 +98,7 @@ mod tests {
         assert!(!can_generate_policy_preview(&AnalysisResult {
             denials: Vec::new(),
             denied_resources_truncated: true,
+            verbose_logging: Default::default(),
         }));
     }
 }

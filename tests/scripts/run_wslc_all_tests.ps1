@@ -97,17 +97,6 @@ if (-not $SkipSetup) {
     }
 }
 
-# Helper: StrictMode-safe property read; returns $null when the property (or the
-# object) is absent. Lets the optional-config-field reads below work under the
-# Set-StrictMode -Version Latest that run_ci_backend_tests.ps1 imposes.
-function Get-JsonProperty {
-    param($Object, [Parameter(Mandatory)][string]$Name)
-    if ($null -eq $Object) { return $null }
-    $prop = $Object.PSObject.Properties[$Name]
-    if ($null -eq $prop) { return $null }
-    return $prop.Value
-}
-
 # Helper: run a single WSLC test config
 function Run-WslcTest {
     param(
@@ -125,12 +114,9 @@ function Run-WslcTest {
         return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
     }
 
-    # Skip if the config references a tar file that doesn't exist locally.
-    # Read the chain defensively: this suite inherits Set-StrictMode -Version
-    # Latest from run_ci_backend_tests.ps1, under which touching a missing
-    # property is a terminating error, and most configs have no wslc.imageTarPath.
+    # Skip if the config references a tar file that doesn't exist locally
     $configJson = Get-Content $configPath -Raw | ConvertFrom-Json
-    $tarPath = Get-JsonProperty (Get-JsonProperty (Get-JsonProperty $configJson 'experimental') 'wslc') 'imageTarPath'
+    $tarPath = $configJson.experimental.wslc.imageTarPath
     if ($tarPath -and -not (Test-Path $tarPath)) {
         Write-Host "  $ConfigFile ... " -NoNewline
         Write-Host "SKIP (tar not found: $tarPath)" -ForegroundColor Yellow
@@ -183,7 +169,7 @@ function Run-WslcTest {
     # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
     # and must return truthy. Use for externally-observable state assertions.
     if ($pass -and $PostExitCheck) {
-        $containerId = Get-JsonProperty $configJson 'containerId'
+        $containerId = $configJson.containerId
         try {
             $checkResult = & $PostExitCheck $containerId $output
             if (-not $checkResult) {

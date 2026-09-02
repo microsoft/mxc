@@ -12,8 +12,21 @@
 //! The parsing half is pure (no I/O), so it is unit-tested on every host; only
 //! [`probe_bwrap`] shells out.
 
+use std::ffi::OsStr;
 use std::fmt;
+use std::io::{self, Read};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::process::Child;
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
 ///
@@ -25,11 +38,92 @@ use std::process::{Command, Stdio};
 /// |--------------|-----------------------|
 /// | `--bind`, `--ro-bind`, `--dev`, `--proc`, `--tmpfs`, `--symlink`, `--chdir`, `--setenv`, `--unshare-*` | 0.1.0 |
 /// | `--ro-bind-try` (deny-by-default baseline mounts) | 0.3.1 |
+/// | `--die-with-parent` (descendants die with the sandbox) | 0.4.0 |
 /// | `--clearenv` (minimal sandbox environment) | **0.5.0** |
 ///
 /// `--clearenv` is therefore the flag that sets the floor. If the argument
 /// builder ever adopts a newer flag, raise this constant in the same change.
 pub const MIN_BWRAP_VERSION: BwrapVersion = BwrapVersion::new(0, 5, 0);
+
+/// Why [`MIN_BWRAP_VERSION`] is the compatibility floor.
+pub const MIN_BWRAP_VERSION_REASON: &str = "the sandbox uses `--clearenv`, added in bwrap 0.5.0";
+
+const BWRAP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BWRAP_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
+const INITIAL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+static CACHED_BWRAP_VERSION: OnceLock<BwrapVersion> = OnceLock::new();
+static CACHED_BWRAP_PROBE_GATE: OnceLock<ProbeGate> = OnceLock::new();
+static BWRAP_PROBE_GATE: OnceLock<ProbeGate> = OnceLock::new();
+
+fn cached_probe_gate() -> &'static ProbeGate {
+    CACHED_BWRAP_PROBE_GATE.get_or_init(ProbeGate::default)
+}
+
+fn probe_gate() -> &'static ProbeGate {
+    BWRAP_PROBE_GATE.get_or_init(ProbeGate::default)
+}
+
+#[derive(Debug, Default)]
+struct ProbeGate {
+    in_flight: Mutex<bool>,
+    available: Condvar,
+}
+
+#[derive(Debug)]
+struct ProbeGatePermit<'a> {
+    gate: &'a ProbeGate,
+}
+
+impl Drop for ProbeGatePermit<'_> {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+impl ProbeGate {
+    fn acquire_until(&self, deadline: Instant) -> bool {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+
+            if !*in_flight {
+                *in_flight = true;
+                return true;
+            }
+
+            let (next, wait_result) = self
+                .available
+                .wait_timeout(in_flight, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            in_flight = next;
+            if wait_result.timed_out() {
+                return false;
+            }
+        }
+    }
+
+    fn release(&self) {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *in_flight = false;
+        self.available.notify_all();
+    }
+
+    fn acquire_permit_until(&self, deadline: Instant) -> Option<ProbeGatePermit<'_>> {
+        self.acquire_until(deadline)
+            .then_some(ProbeGatePermit { gate: self })
+    }
+}
 
 /// A `major.minor.patch` Bubblewrap version.
 ///
@@ -65,14 +159,13 @@ impl fmt::Display for BwrapVersion {
 /// `validate` and the engine's platform probe) share one message source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BwrapUnavailable {
-    /// `bwrap` could not be found — the spawn failed with
-    /// [`std::io::ErrorKind::NotFound`].
+    /// No `bwrap` executable was found on `PATH`.
     NotFound,
-    /// `bwrap` was found but `bwrap --version` did not complete successfully
-    /// (e.g. a permissions problem, a dynamic-loader failure, or a non-zero
-    /// exit). Distinct from [`Self::NotFound`] so the reported remediation is
-    /// not the misleading "install the package", and so the underlying cause is
-    /// preserved rather than discarded.
+    /// The `bwrap --version` probe failed to start or did not complete
+    /// successfully (e.g. a permissions problem or a non-zero exit). Distinct
+    /// from [`Self::NotFound`] so observed failures preserve their underlying
+    /// cause. An executable found on `PATH` with a missing loader or shebang
+    /// target maps here rather than to [`Self::NotFound`].
     ProbeFailed {
         /// Exit status of `bwrap --version`, when the process ran at all.
         status: Option<i32>,
@@ -96,7 +189,10 @@ impl fmt::Display for BwrapUnavailable {
                  Version {MIN_BWRAP_VERSION} or newer is required."
             ),
             Self::ProbeFailed { status, detail } => {
-                write!(f, "Bubblewrap (bwrap) is present but `bwrap --version` ")?;
+                write!(
+                    f,
+                    "The Bubblewrap (bwrap) availability probe `bwrap --version` "
+                )?;
                 match status {
                     Some(code) => write!(f, "exited with status {code}")?,
                     // Covers both a spawn failure and termination by a signal,
@@ -108,8 +204,8 @@ impl fmt::Display for BwrapUnavailable {
                 }
                 write!(
                     f,
-                    ". Version {MIN_BWRAP_VERSION} or newer is required; fix the \
-                     installation before using the Bubblewrap backend."
+                    ". Version {MIN_BWRAP_VERSION} or newer is required; check \
+                     PATH and the installation before using the Bubblewrap backend."
                 )
             }
             Self::UnrecognizedVersion(output) => write!(
@@ -121,7 +217,7 @@ impl fmt::Display for BwrapUnavailable {
             Self::TooOld(found) => write!(
                 f,
                 "Bubblewrap (bwrap) {found} is too old: version {MIN_BWRAP_VERSION} or newer is \
-                 required (the sandbox uses `--clearenv`, added in bwrap 0.5.0). \
+                 required ({MIN_BWRAP_VERSION_REASON}). \
                  Upgrade the bubblewrap package."
             ),
         }
@@ -133,26 +229,557 @@ impl std::error::Error for BwrapUnavailable {}
 /// Probe the host for a usable `bwrap`.
 ///
 /// Runs `bwrap --version` and validates the reported version against
-/// [`MIN_BWRAP_VERSION`]. Returns the detected version on success.
+/// [`MIN_BWRAP_VERSION`]. Successful advisory probes are cached.
 pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
-    let output = Command::new("bwrap")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| match err.kind() {
-            // `ENOENT` covers both an absent binary and a present-but-unusable
-            // one (missing ELF interpreter / shebang target), so confirm the
-            // binary is really absent before blaming the package manager.
-            std::io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
-            _ => BwrapUnavailable::ProbeFailed {
-                status: None,
-                detail: err.to_string(),
-            },
-        })?;
+    probe_bwrap_cached(
+        &CACHED_BWRAP_VERSION,
+        cached_probe_gate(),
+        BWRAP_VERSION_TIMEOUT,
+        probe_bwrap_uncached_until,
+    )
+}
 
-    if !output.status.success() {
+fn probe_bwrap_cached<F>(
+    cache: &OnceLock<BwrapVersion>,
+    gate: &ProbeGate,
+    timeout: Duration,
+    probe: F,
+) -> Result<BwrapVersion, BwrapUnavailable>
+where
+    F: FnOnce(Instant, Duration) -> Result<BwrapVersion, BwrapUnavailable>,
+{
+    if let Some(version) = cache.get() {
+        return Ok(*version);
+    }
+
+    let deadline = Instant::now() + timeout;
+    let Some(_permit) = gate.acquire_permit_until(deadline) else {
+        return Err(probe_timeout(timeout));
+    };
+    if let Some(version) = cache.get() {
+        return Ok(*version);
+    }
+
+    let version = probe(deadline, timeout)?;
+    let _ = cache.set(version);
+    Ok(version)
+}
+
+/// Probe immediately without consulting the advisory success cache.
+///
+/// Execution validation uses this so a prior platform-support query cannot
+/// approve a different executable after `PATH` or its contents change.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn probe_bwrap_uncached() -> Result<BwrapVersion, BwrapUnavailable> {
+    probe_bwrap_uncached_until(
+        Instant::now() + BWRAP_VERSION_TIMEOUT,
+        BWRAP_VERSION_TIMEOUT,
+    )
+}
+
+fn probe_bwrap_uncached_until(
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<BwrapVersion, BwrapUnavailable> {
+    probe_bwrap_uncached_with(|| run_bwrap_version_until(deadline, timeout))
+}
+
+fn probe_bwrap_uncached_with<F>(run: F) -> Result<BwrapVersion, BwrapUnavailable>
+where
+    F: FnOnce() -> Result<ProbeOutput, BwrapUnavailable>,
+{
+    let output = run()?;
+    check_probe_output(output)
+}
+
+#[derive(Debug)]
+struct ProbeOutput {
+    success: bool,
+    status: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn run_bwrap_version_until(
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<ProbeOutput, BwrapUnavailable> {
+    let gate = probe_gate();
+    let Some(gate_permit) = gate.acquire_permit_until(deadline) else {
+        return Err(probe_timeout(timeout));
+    };
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("bwrap-probe".to_string())
+        .spawn(move || {
+            let _gate_permit = gate_permit;
+            let result =
+                run_version_command_until(Path::new("bwrap"), &["--version"], deadline, timeout);
+            let _ = sender.send(result);
+        });
+    if let Err(err) = worker {
         return Err(BwrapUnavailable::ProbeFailed {
-            status: output.status.code(),
+            status: None,
+            detail: format!("failed to start the `bwrap --version` probe: {err}"),
+        });
+    }
+
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(probe_timeout(timeout)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(probe_internal_error(
+            "`bwrap --version` probe worker disconnected",
+        )),
+    }
+}
+
+fn probe_timeout(timeout: Duration) -> BwrapUnavailable {
+    BwrapUnavailable::ProbeFailed {
+        status: None,
+        detail: format!("timed out after {}ms", timeout.as_millis()),
+    }
+}
+
+#[cfg(all(test, unix))]
+fn run_version_command_with_timeout(
+    executable: &std::path::Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<ProbeOutput, BwrapUnavailable> {
+    run_version_command_until(executable, args, Instant::now() + timeout, timeout)
+}
+
+fn run_version_command_until(
+    executable: &Path,
+    args: &[&str],
+    deadline: Instant,
+    timeout: Duration,
+) -> Result<ProbeOutput, BwrapUnavailable> {
+    if Instant::now() >= deadline {
+        return Err(probe_timeout(timeout));
+    }
+
+    // The public probe runs this entire operation in a deadline-watched worker,
+    // so PATH lookup and spawn are bounded without assuming a fixed `env` path.
+    // A dedicated process group handles wrappers and inherited probe pipes. On
+    // timeout/failure paths this worker waits for child reaping before it
+    // returns, so the single-flight gate stays held until cleanup completes.
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|err| classify_spawn_failure(executable, err))?;
+    let process_group = child.id();
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| probe_internal_error("stdout pipe was not captured"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| probe_internal_error("stderr pipe was not captured"))?;
+    let (stdout_reader, stdout_rx) = match spawn_reader(stdout, deadline) {
+        Ok(reader) => reader,
+        Err(err) => {
+            let _ = terminate_probe_tree(&mut child, process_group);
+            let _ = child.wait();
+            return Err(probe_internal_error(&format!(
+                "failed to start stdout reader: {err}"
+            )));
+        }
+    };
+    let (stderr_reader, stderr_rx) = match spawn_reader(stderr, deadline) {
+        Ok(reader) => reader,
+        Err(err) => {
+            let _ = terminate_probe_tree(&mut child, process_group);
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(probe_internal_error(&format!(
+                "failed to start stderr reader: {err}"
+            )));
+        }
+    };
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+    #[cfg(target_os = "linux")]
+    let mut group_cleanup_error: Option<io::Error> = None;
+    #[cfg(target_os = "linux")]
+    let mut leader_exited = false;
+    let mut poll_interval = INITIAL_WAIT_POLL_INTERVAL;
+    loop {
+        if let Err(err) = receive_reader(&stdout_rx, &mut stdout, timeout)
+            .and_then(|_| receive_reader(&stderr_rx, &mut stderr, timeout))
+        {
+            let _ = terminate_probe_tree(&mut child, process_group);
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(err);
+        }
+
+        #[cfg(target_os = "linux")]
+        if status.is_none() && !leader_exited {
+            match child_exited_without_reaping(&child) {
+                Ok(true) => {
+                    // Keep the exited leader unreaped until both readers have
+                    // closed. Its reserved PID keeps the process-group ID from
+                    // being recycled while descendant cleanup is still possible.
+                    group_cleanup_error = terminate_probe_group(process_group).err();
+                    leader_exited = true;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = terminate_probe_tree(&mut child, process_group);
+                    let _ = child.wait();
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                    return Err(BwrapUnavailable::ProbeFailed {
+                        status: None,
+                        detail: format!("failed while waiting for `bwrap --version`: {err}"),
+                    });
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if leader_exited && stdout.is_some() && stderr.is_some() {
+            match child.wait() {
+                Ok(exit_status) => status = Some(exit_status),
+                Err(err) => {
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                    return Err(BwrapUnavailable::ProbeFailed {
+                        status: None,
+                        detail: format!("failed while reaping `bwrap --version`: {err}"),
+                    });
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => status = Some(exit_status),
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = terminate_probe_tree(&mut child, process_group);
+                    let _ = child.wait();
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                    return Err(BwrapUnavailable::ProbeFailed {
+                        status: None,
+                        detail: format!("failed while waiting for `bwrap --version`: {err}"),
+                    });
+                }
+            }
+        }
+
+        if status.is_some() && stdout.is_some() && stderr.is_some() {
+            let status = status.take().expect("checked above");
+            let stdout = stdout.take().expect("checked above");
+            let stderr = stderr.take().expect("checked above");
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            #[cfg(target_os = "linux")]
+            let cleanup_error = group_cleanup_error.take();
+            #[cfg(not(target_os = "linux"))]
+            let cleanup_error = None;
+            return finish_probe(status, stdout, stderr, cleanup_error);
+        }
+
+        if Instant::now() < deadline {
+            thread::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())));
+            poll_interval = poll_interval.saturating_mul(2).min(MAX_WAIT_POLL_INTERVAL);
+            continue;
+        }
+
+        let kill_error = terminate_probe_tree(&mut child, process_group).err();
+        let _ = child.wait();
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+        #[cfg(target_os = "linux")]
+        let kill_error = kill_error.or(group_cleanup_error);
+        let suffix = kill_error
+            .map(|err| format!("; failed to terminate it: {err}"))
+            .unwrap_or_default();
+        return Err(BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: format!("timed out after {}ms{suffix}", timeout.as_millis()),
+        });
+    }
+}
+
+fn finish_probe(
+    status: std::process::ExitStatus,
+    stdout: CapturedOutput,
+    stderr: CapturedOutput,
+    _cleanup_error: Option<io::Error>,
+) -> Result<ProbeOutput, BwrapUnavailable> {
+    // A completed version command is authoritative. Some setuid bwrap
+    // installations reject signalling their post-exit process group with
+    // EPERM; that cleanup diagnostic must not turn a valid version into an
+    // unavailable backend.
+    if stdout.truncated || stderr.truncated {
+        return Err(BwrapUnavailable::ProbeFailed {
+            status: status.code(),
+            detail: format!(
+                "`bwrap --version` output exceeded the {} byte limit",
+                MAX_BWRAP_VERSION_OUTPUT_BYTES
+            ),
+        });
+    }
+    Ok(ProbeOutput {
+        success: status.success(),
+        status: status.code(),
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
+}
+
+fn classify_spawn_failure(executable: &Path, err: io::Error) -> BwrapUnavailable {
+    if err.kind() != io::ErrorKind::NotFound {
+        return BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: err.to_string(),
+        };
+    }
+
+    if executable_mentions_path(executable) {
+        return if executable.exists() {
+            BwrapUnavailable::ProbeFailed {
+                status: None,
+                detail: format!(
+                    "`{}` was found but could not be executed ({err}); check for a missing interpreter or loader",
+                    executable.display()
+                ),
+            }
+        } else {
+            BwrapUnavailable::NotFound
+        };
+    }
+
+    if command_is_on_path(executable) {
+        return BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: format!(
+                "`{}` was found on PATH but could not be executed ({err}); check for a missing interpreter or loader",
+                executable.display()
+            ),
+        };
+    }
+    BwrapUnavailable::NotFound
+}
+
+fn executable_mentions_path(executable: &Path) -> bool {
+    executable.is_absolute() || executable.components().count() > 1
+}
+
+fn command_is_on_path(executable: &Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| path_contains_executable(executable, &path))
+        .unwrap_or(false)
+}
+
+fn path_contains_executable(executable: &Path, path: &OsStr) -> bool {
+    std::env::split_paths(path).any(|entry| entry.join(executable).is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    match waitid(Id::Pid(Pid::from_raw(child.id() as i32)), flags) {
+        Ok(WaitStatus::StillAlive) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(err) => Err(io::Error::from_raw_os_error(err as i32)),
+    }
+}
+
+#[cfg(any(not(unix), test))]
+fn read_bounded(mut reader: impl Read) -> io::Result<CapturedOutput> {
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_BWRAP_VERSION_OUTPUT_BYTES.saturating_sub(bytes.len());
+        let retained = read.min(remaining);
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    Ok(CapturedOutput { bytes, truncated })
+}
+
+#[cfg(unix)]
+fn spawn_reader(
+    reader: impl Read + AsRawFd + Send + 'static,
+    deadline: Instant,
+) -> io::Result<(
+    thread::JoinHandle<()>,
+    mpsc::Receiver<io::Result<CapturedOutput>>,
+)> {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("bwrap-probe-reader".to_string())
+        .spawn(move || {
+            let _ = sender.send(read_bounded_until(reader, deadline));
+        })?;
+    Ok((handle, receiver))
+}
+
+#[cfg(not(unix))]
+fn spawn_reader(
+    reader: impl Read + Send + 'static,
+    _deadline: Instant,
+) -> io::Result<(
+    thread::JoinHandle<()>,
+    mpsc::Receiver<io::Result<CapturedOutput>>,
+)> {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("bwrap-probe-reader".to_string())
+        .spawn(move || {
+            let _ = sender.send(read_bounded(reader));
+        })?;
+    Ok((handle, receiver))
+}
+
+#[cfg(unix)]
+fn read_bounded_until(
+    mut reader: impl Read + AsRawFd,
+    deadline: Instant,
+) -> io::Result<CapturedOutput> {
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "probe output remained open past the deadline",
+            ));
+        }
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut descriptor = nix::libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR,
+            revents: 0,
+        };
+        // SAFETY: `descriptor` points to one initialized pollfd for this call.
+        let result = unsafe { nix::libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "probe output remained open past the deadline",
+            ));
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining_capacity = MAX_BWRAP_VERSION_OUTPUT_BYTES.saturating_sub(bytes.len());
+        let retained = read.min(remaining_capacity);
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    Ok(CapturedOutput { bytes, truncated })
+}
+
+fn receive_reader(
+    receiver: &mpsc::Receiver<io::Result<CapturedOutput>>,
+    output: &mut Option<CapturedOutput>,
+    timeout: Duration,
+) -> Result<(), BwrapUnavailable> {
+    if output.is_none() {
+        match receiver.try_recv() {
+            Ok(result) => {
+                *output = Some(result.map_err(|err| {
+                    if err.kind() == io::ErrorKind::TimedOut {
+                        BwrapUnavailable::ProbeFailed {
+                            status: None,
+                            detail: format!("timed out after {}ms", timeout.as_millis()),
+                        }
+                    } else {
+                        probe_internal_error(&format!("failed reading probe output: {err}"))
+                    }
+                })?);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(probe_internal_error("probe output reader disconnected"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_probe_tree(child: &mut std::process::Child, process_group: u32) -> io::Result<()> {
+    let child_result = child.kill();
+    let group_result = terminate_probe_group(process_group);
+    match (child_result, group_result) {
+        (_, Err(err)) | (Err(err), Ok(())) => Err(err),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+fn terminate_probe_group(process_group: u32) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(process_group as i32), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(err) => Err(io::Error::from_raw_os_error(err as i32)),
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_probe_tree(child: &mut std::process::Child, _process_group: u32) -> io::Result<()> {
+    child.kill()
+}
+
+fn probe_internal_error(detail: &str) -> BwrapUnavailable {
+    BwrapUnavailable::ProbeFailed {
+        status: None,
+        detail: detail.to_string(),
+    }
+}
+
+fn check_probe_output(output: ProbeOutput) -> Result<BwrapVersion, BwrapUnavailable> {
+    if !output.success {
+        return Err(BwrapUnavailable::ProbeFailed {
+            status: output.status,
             detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
@@ -223,18 +850,6 @@ fn parse_version(output: &str) -> Option<BwrapVersion> {
         return None;
     }
     Some(BwrapVersion::new(major, minor, patch))
-}
-
-/// Whether a `bwrap` candidate exists anywhere on `PATH`.
-///
-/// Linux returns `ENOENT` both for a genuinely absent binary and for one that
-/// exists but cannot be executed (a missing ELF interpreter or script shebang
-/// target), so the spawn error alone cannot tell [`BwrapUnavailable::NotFound`]
-/// from [`BwrapUnavailable::ProbeFailed`]. A candidate on `PATH` means the
-/// package is installed and the failure is a broken install.
-fn bwrap_exists_on_path() -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("bwrap").exists()))
 }
 
 /// Parse the leading run of ASCII digits of `component`, ignoring any suffix
@@ -457,5 +1072,428 @@ mod tests {
             message.contains("os error 13"),
             "OS error should survive: {message}"
         );
+    }
+
+    #[test]
+    fn bounded_reader_drains_but_does_not_retain_excess_output() {
+        let input = vec![b'x'; MAX_BWRAP_VERSION_OUTPUT_BYTES + 17];
+        let captured = read_bounded(std::io::Cursor::new(input)).unwrap();
+        assert_eq!(captured.bytes.len(), MAX_BWRAP_VERSION_OUTPUT_BYTES);
+        assert!(captured.truncated);
+    }
+
+    #[test]
+    fn probe_gate_serializes_callers_within_their_deadline() {
+        let gate = std::sync::Arc::new(ProbeGate::default());
+        assert!(gate.acquire_until(Instant::now() + Duration::from_secs(1)));
+
+        let waiting_gate = std::sync::Arc::clone(&gate);
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            waiting_tx.send(()).unwrap();
+            let acquired = waiting_gate.acquire_until(Instant::now() + Duration::from_secs(5));
+            if acquired {
+                waiting_gate.release();
+            }
+            acquired
+        });
+
+        waiting_rx.recv().unwrap();
+        gate.release();
+        assert!(waiter.join().unwrap());
+    }
+
+    #[test]
+    fn probe_gate_does_not_create_a_retry_after_the_deadline() {
+        let gate = ProbeGate::default();
+        assert!(gate.acquire_until(Instant::now() + Duration::from_millis(25)));
+        assert!(!gate.acquire_until(Instant::now() + Duration::from_millis(10)));
+        gate.release();
+    }
+
+    #[test]
+    fn probe_gate_permit_releases_on_panic() {
+        let gate = std::sync::Arc::new(ProbeGate::default());
+        let panicking_gate = std::sync::Arc::clone(&gate);
+        let worker = thread::spawn(move || {
+            let _permit = panicking_gate
+                .acquire_permit_until(Instant::now() + Duration::from_millis(50))
+                .expect("permit should be acquired");
+            panic!("simulated panic while probe is in-flight");
+        });
+        assert!(worker.join().is_err());
+
+        assert!(
+            gate.acquire_until(Instant::now() + Duration::from_millis(50)),
+            "panic should release the gate"
+        );
+        gate.release();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_binary_spawn_failure_is_classified_as_not_found() {
+        // A spawn failure with ENOENT means the binary is absent from PATH.
+        // Regression: when the probe used `/usr/bin/env bwrap`, a missing
+        // `/usr/bin/env` (e.g. NixOS) produced ProbeFailed instead of NotFound.
+        let error = run_version_command_with_timeout(
+            std::path::Path::new("this-binary-does-not-exist-on-any-path"),
+            &["--version"],
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error, BwrapUnavailable::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_deadline_does_not_launch_the_probe_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        let marker = dir.path().join("launched");
+        std::fs::write(&script, "#!/bin/sh\nprintf launched > \"$1\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let marker_arg = marker.to_string_lossy();
+        let timeout = Duration::from_millis(50);
+        let error = run_version_command_until(
+            &script,
+            &[marker_arg.as_ref()],
+            Instant::now() - Duration::from_millis(1),
+            timeout,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, probe_timeout(timeout));
+        assert!(
+            !marker.exists(),
+            "an expired worker launched the probe command after the caller returned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_interpreter_is_classified_as_probe_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        std::fs::write(&script, "#!/this/interpreter/does/not/exist\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let error =
+            run_version_command_with_timeout(&script, &["--version"], Duration::from_secs(1))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            BwrapUnavailable::ProbeFailed { status: None, detail }
+                if detail.contains("missing interpreter or loader")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_probe_preserves_reader_results_until_all_are_ready() {
+        for _ in 0..50 {
+            let output = run_version_command_with_timeout(
+                std::path::Path::new("/bin/sh"),
+                &["-c", "printf 'bubblewrap 0.5.0\\n'"],
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(check_probe_output(output), Ok(MIN_BWRAP_VERSION));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_probe_times_out_and_terminates_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        std::fs::write(&script, "#!/bin/sh\nwhile true; do :; done\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let error =
+            run_version_command_with_timeout(&script, &["--version"], Duration::from_millis(250))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            BwrapUnavailable::ProbeFailed {
+                status: None,
+                detail,
+            } if detail.contains("timed out after 250ms")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reader_times_out_when_the_writer_stays_open() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let error =
+            read_bounded_until(reader, Instant::now() + Duration::from_millis(100)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("remained open"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn subprocess_probe_terminates_a_descendant_holding_the_pipes_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(while true; do :; done) &\necho 'bubblewrap 0.5.0'\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let started = Instant::now();
+        let output =
+            run_version_command_with_timeout(&script, &["--version"], Duration::from_millis(30))
+                .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(check_probe_output(output), Ok(MIN_BWRAP_VERSION));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn subprocess_probe_terminates_a_descendant_with_closed_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        let pid_file = dir.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(while true; do :; done) >/dev/null 2>&1 &\necho \"$!\" > \"$1\"\necho 'bubblewrap 0.5.0'\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let pid_file_arg = pid_file.to_string_lossy();
+        let output = run_version_command_with_timeout(
+            &script,
+            &[pid_file_arg.as_ref()],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(check_probe_output(output), Ok(MIN_BWRAP_VERSION));
+
+        let pid: u32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let poll_deadline = Instant::now() + Duration::from_secs(1);
+        let terminated = loop {
+            let terminated = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => {
+                    stat.rfind(") ")
+                        .and_then(|index| stat[index + 2..].chars().next())
+                        == Some('Z')
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => true,
+                Err(err) => panic!("failed to inspect probe descendant {pid}: {err}"),
+            };
+            if terminated || Instant::now() >= poll_deadline {
+                break terminated;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(terminated, "probe descendant {pid} is still running");
+    }
+
+    #[test]
+    fn uncached_probe_maps_injected_process_outcomes() {
+        let version = probe_bwrap_uncached_with(|| {
+            Ok(ProbeOutput {
+                success: true,
+                status: Some(0),
+                stdout: b"bubblewrap 0.5.0\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(version, MIN_BWRAP_VERSION);
+
+        let failure = BwrapUnavailable::ProbeFailed {
+            status: Some(126),
+            detail: "permission denied".to_string(),
+        };
+        assert_eq!(
+            probe_bwrap_uncached_with(|| Err(failure.clone())),
+            Err(failure)
+        );
+    }
+
+    #[test]
+    fn probe_output_preserves_nonzero_status_and_stderr() {
+        let error = check_probe_output(ProbeOutput {
+            success: false,
+            status: Some(126),
+            stdout: Vec::new(),
+            stderr: b"permission denied".to_vec(),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BwrapUnavailable::ProbeFailed {
+                detail,
+                ..
+            } if detail == "permission denied"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_probe_ignores_post_exit_group_cleanup_failure() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = finish_probe(
+            std::process::ExitStatus::from_raw(0),
+            CapturedOutput {
+                bytes: b"bubblewrap 0.5.0\n".to_vec(),
+                truncated: false,
+            },
+            CapturedOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            Some(io::Error::from_raw_os_error(nix::libc::EPERM)),
+        )
+        .unwrap();
+        assert_eq!(check_probe_output(output), Ok(MIN_BWRAP_VERSION));
+    }
+
+    #[test]
+    fn successful_probe_result_is_cached() {
+        let cache = OnceLock::new();
+        let gate = ProbeGate::default();
+        let first = probe_bwrap_cached(&cache, &gate, Duration::from_secs(1), |_, _| {
+            Ok(MIN_BWRAP_VERSION)
+        })
+        .unwrap();
+        assert_eq!(first, MIN_BWRAP_VERSION);
+
+        let second = probe_bwrap_cached(&cache, &gate, Duration::from_secs(1), |_, _| {
+            panic!("successful probe should be reused from the cache")
+        })
+        .unwrap();
+        assert_eq!(second, MIN_BWRAP_VERSION);
+    }
+
+    #[test]
+    fn expired_probe_gate_deadline_does_not_start_probe() {
+        let gate = ProbeGate::default();
+        assert!(gate
+            .acquire_permit_until(Instant::now() - Duration::from_millis(1))
+            .is_none());
+        assert!(!*gate
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()));
+    }
+
+    #[test]
+    fn failed_probe_result_is_not_cached() {
+        let cache = OnceLock::new();
+        let gate = ProbeGate::default();
+        assert_eq!(
+            probe_bwrap_cached(&cache, &gate, Duration::from_secs(1), |_, _| {
+                Err(BwrapUnavailable::NotFound)
+            }),
+            Err(BwrapUnavailable::NotFound)
+        );
+        assert_eq!(
+            probe_bwrap_cached(&cache, &gate, Duration::from_secs(1), |_, _| {
+                Ok(MIN_BWRAP_VERSION)
+            }),
+            Ok(MIN_BWRAP_VERSION)
+        );
+    }
+
+    #[test]
+    fn concurrent_cached_callers_reuse_the_first_success() {
+        let cache = std::sync::Arc::new(OnceLock::new());
+        let gate = std::sync::Arc::new(ProbeGate::default());
+        let (started_tx, started_rx) = mpsc::channel();
+        let synchronization = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_cache = std::sync::Arc::clone(&cache);
+        let first_gate = std::sync::Arc::clone(&gate);
+        let first_synchronization = std::sync::Arc::clone(&synchronization);
+        let first = thread::spawn(move || {
+            probe_bwrap_cached(&first_cache, &first_gate, Duration::from_secs(1), |_, _| {
+                started_tx.send(()).unwrap();
+                first_synchronization.wait();
+                Ok(MIN_BWRAP_VERSION)
+            })
+        });
+
+        started_rx.recv().unwrap();
+        let second_cache = std::sync::Arc::clone(&cache);
+        let second_gate = std::sync::Arc::clone(&gate);
+        let second_synchronization = std::sync::Arc::clone(&synchronization);
+        let second = thread::spawn(move || {
+            second_synchronization.wait();
+            probe_bwrap_cached(
+                &second_cache,
+                &second_gate,
+                Duration::from_secs(1),
+                |_, _| panic!("queued advisory caller should reuse the first success"),
+            )
+        });
+
+        assert_eq!(first.join().unwrap(), Ok(MIN_BWRAP_VERSION));
+        assert_eq!(second.join().unwrap(), Ok(MIN_BWRAP_VERSION));
+    }
+
+    #[test]
+    fn concurrent_cached_callers_remain_deadline_bounded_after_failure() {
+        let cache = std::sync::Arc::new(OnceLock::new());
+        let gate = std::sync::Arc::new(ProbeGate::default());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_cache = std::sync::Arc::clone(&cache);
+        let first_gate = std::sync::Arc::clone(&gate);
+        let first = thread::spawn(move || {
+            probe_bwrap_cached(&first_cache, &first_gate, Duration::from_secs(1), |_, _| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(BwrapUnavailable::NotFound)
+            })
+        });
+
+        started_rx.recv().unwrap();
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        let second = probe_bwrap_cached(&cache, &gate, timeout, |_, _| {
+            panic!("caller whose cache wait expired must not start a probe")
+        });
+        assert_eq!(second, Err(probe_timeout(timeout)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cache wait exceeded its deadline by an unreasonable margin"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Err(BwrapUnavailable::NotFound));
     }
 }

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::DeniedResource;
+use crate::verbose_logging::{VerboseLoggingAggregate, VerboseLoggingSummary};
 
 /// Result of decoding a capture source into bounded, de-duplicated denials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +28,9 @@ pub struct AnalysisResult {
     /// Whether additional unique denials were observed after the result bound
     /// was reached.
     pub denied_resources_truncated: bool,
+    /// Username-redacted signatures for actionable and diagnostic outcomes.
+    #[serde(default)]
+    pub verbose_logging: VerboseLoggingSummary,
 }
 
 /// Inclusive process-lifetime window used to scope a host-wide capture.
@@ -61,8 +65,132 @@ impl AnalysisResult {
         Self {
             denials,
             denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary::default(),
         }
     }
+
+    /// Trims verbose logging signatures so the complete compact JSON
+    /// serialization is no larger than `max_bytes`.
+    ///
+    /// Returns `false` when the actionable denials and empty verbose logging
+    /// envelope alone exceed `max_bytes`; actionable denials are never discarded.
+    pub fn fit_verbose_logging_within_serialized_bytes(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<bool, serde_json::Error> {
+        if serde_json::to_vec(self)?.len() <= max_bytes {
+            return Ok(true);
+        }
+
+        let base_len =
+            serialized_analysis_len(self, &[], self.verbose_logging.signatures.as_slice())?;
+        if base_len > max_bytes {
+            return Ok(false);
+        }
+
+        let original = std::mem::take(&mut self.verbose_logging.signatures);
+        let mut retained_bytes = 0usize;
+        const ENVELOPE_HEADROOM: usize = 4 * 1024;
+        let signature_budget = max_bytes
+            .saturating_sub(base_len)
+            .saturating_sub(ENVELOPE_HEADROOM);
+        let mut original = original;
+        original.sort_by_key(|aggregate| !aggregate.signature.reason.is_actionable());
+        for aggregate in original {
+            let aggregate_len = serde_json::to_vec(&aggregate)?.len().saturating_add(1);
+            if retained_bytes.saturating_add(aggregate_len) <= signature_budget {
+                retained_bytes += aggregate_len;
+                self.verbose_logging.signatures.push(aggregate);
+            } else {
+                self.verbose_logging.move_to_overflow(aggregate);
+            }
+        }
+
+        let mut retained = std::mem::take(&mut self.verbose_logging.signatures);
+        let serialized_len = |retained_count: usize| {
+            serialized_analysis_len(
+                self,
+                &retained[..retained_count],
+                &retained[retained_count..],
+            )
+        };
+        let mut low = 0usize;
+        let mut high = retained.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if serialized_len(middle)? <= max_bytes {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let removed = retained.split_off(low);
+        self.verbose_logging.signatures = retained;
+        for aggregate in removed {
+            self.verbose_logging.move_to_overflow(aggregate);
+        }
+        self.verbose_logging
+            .signatures
+            .sort_by(|left, right| left.signature.cmp(&right.signature));
+        Ok(serde_json::to_vec(self)?.len() <= max_bytes)
+    }
+}
+
+fn serialized_analysis_len(
+    analysis: &AnalysisResult,
+    retained: &[VerboseLoggingAggregate],
+    removed: &[VerboseLoggingAggregate],
+) -> Result<usize, serde_json::Error> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AnalysisView<'a> {
+        denials: &'a [DeniedResource],
+        denied_resources_truncated: bool,
+        verbose_logging: VerboseLoggingView<'a>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct VerboseLoggingView<'a> {
+        signatures: &'a [VerboseLoggingAggregate],
+        total_occurrences: u64,
+        overflow_occurrences: u64,
+        actionable_overflow_occurrences: u64,
+        aggregate_groups_truncated: bool,
+        processed_events_truncated: bool,
+        actionable_limit_reached: bool,
+    }
+
+    let removed_occurrences = removed.iter().fold(0u64, |total, aggregate| {
+        total.saturating_add(aggregate.count)
+    });
+    let removed_actionable_occurrences = removed
+        .iter()
+        .filter(|aggregate| aggregate.signature.reason.is_actionable())
+        .fold(0u64, |total, aggregate| {
+            total.saturating_add(aggregate.count)
+        });
+    let view = AnalysisView {
+        denials: &analysis.denials,
+        denied_resources_truncated: analysis.denied_resources_truncated,
+        verbose_logging: VerboseLoggingView {
+            signatures: retained,
+            total_occurrences: analysis.verbose_logging.total_occurrences,
+            overflow_occurrences: analysis
+                .verbose_logging
+                .overflow_occurrences
+                .saturating_add(removed_occurrences),
+            actionable_overflow_occurrences: analysis
+                .verbose_logging
+                .actionable_overflow_occurrences
+                .saturating_add(removed_actionable_occurrences),
+            aggregate_groups_truncated: analysis.verbose_logging.aggregate_groups_truncated
+                || !removed.is_empty(),
+            processed_events_truncated: analysis.verbose_logging.processed_events_truncated,
+            actionable_limit_reached: analysis.verbose_logging.actionable_limit_reached,
+        },
+    };
+    serde_json::to_vec(&view).map(|bytes| bytes.len())
 }
 
 /// Failure modes when analysing a capture source into denials.
@@ -108,6 +236,10 @@ pub trait DenialAnalyzer {
 mod tests {
     use super::*;
     use crate::model::{AccessType, ResourceType};
+    use crate::verbose_logging::{
+        VerboseLoggingAggregate, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
+        VerboseLoggingSignature,
+    };
 
     /// A trivial analyzer returning a fixed set, proving the trait is
     /// object-safe and usable behind a `dyn` reference.
@@ -132,6 +264,14 @@ mod tests {
         let got = analyzer.analyze(Path::new("ignored.etl")).unwrap();
         assert_eq!(got.denials, denials);
         assert!(!got.denied_resources_truncated);
+        assert!(got.verbose_logging.is_empty());
+    }
+
+    #[test]
+    fn analysis_payload_without_verbose_logging_defaults_summary() {
+        let payload = br#"{"denials":[],"deniedResourcesTruncated":false}"#;
+        let result: AnalysisResult = serde_json::from_slice(payload).unwrap();
+        assert!(result.verbose_logging.is_empty());
     }
 
     #[test]
@@ -159,5 +299,165 @@ mod tests {
         assert!(!lifetime.contains(42, 99));
         assert!(!lifetime.contains(42, 201));
         assert!(!lifetime.contains(43, 150));
+    }
+
+    #[test]
+    fn serialized_size_limit_moves_verbose_logging_groups_to_overflow() {
+        let signature = |pid| VerboseLoggingAggregate {
+            signature: VerboseLoggingSignature {
+                provider: VerboseLoggingProvider::KernelGeneral,
+                provider_guid: "provider".to_string(),
+                event_id: 14,
+                reason: VerboseLoggingOutcomeReason::Actionable,
+                pid,
+                access_type: Some(AccessType::Read),
+                resource_type: Some(ResourceType::File),
+                properties: vec![("ObjectName".to_string(), "x".repeat(4_096))],
+            },
+            count: 3,
+        };
+        let mut result = AnalysisResult {
+            denials: vec![DeniedResource {
+                resource: "actionable".repeat(512),
+                resource_type: ResourceType::File,
+                access_type: AccessType::Read,
+                pid: 1,
+                filetime: 2,
+            }],
+            denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary {
+                signatures: vec![signature(1), signature(2)],
+                total_occurrences: 6,
+                ..Default::default()
+            },
+        };
+        let original_len = serde_json::to_vec(&result).unwrap().len();
+
+        assert!(result
+            .fit_verbose_logging_within_serialized_bytes(original_len - 1)
+            .unwrap());
+        assert!(serde_json::to_vec(&result).unwrap().len() < original_len);
+        assert!(result.verbose_logging.aggregate_groups_truncated);
+        assert_eq!(result.verbose_logging.total_occurrences, 6);
+        assert!(result.verbose_logging.overflow_occurrences > 0);
+    }
+
+    #[test]
+    fn serialized_size_limit_saturates_overflow_counters() {
+        let mut result = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary {
+                signatures: vec![VerboseLoggingAggregate {
+                    signature: VerboseLoggingSignature {
+                        provider: VerboseLoggingProvider::KernelGeneral,
+                        provider_guid: "provider".to_string(),
+                        event_id: 14,
+                        reason: VerboseLoggingOutcomeReason::Actionable,
+                        pid: 1,
+                        access_type: Some(AccessType::Read),
+                        resource_type: Some(ResourceType::File),
+                        properties: vec![("ObjectName".to_string(), "x".repeat(4_096))],
+                    },
+                    count: 3,
+                }],
+                total_occurrences: u64::MAX,
+                overflow_occurrences: u64::MAX - 1,
+                actionable_overflow_occurrences: u64::MAX - 1,
+                ..Default::default()
+            },
+        };
+        let original_len = serde_json::to_vec(&result).unwrap().len();
+
+        assert!(result
+            .fit_verbose_logging_within_serialized_bytes(original_len - 1)
+            .unwrap());
+        assert_eq!(result.verbose_logging.overflow_occurrences, u64::MAX);
+        assert_eq!(
+            result.verbose_logging.actionable_overflow_occurrences,
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn serialized_size_limit_never_discards_actionable_denials() {
+        let mut result = AnalysisResult {
+            denials: vec![DeniedResource {
+                resource: "actionable".repeat(512),
+                resource_type: ResourceType::File,
+                access_type: AccessType::Read,
+                pid: 1,
+                filetime: 2,
+            }],
+            denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary {
+                signatures: vec![VerboseLoggingAggregate {
+                    signature: VerboseLoggingSignature {
+                        provider: VerboseLoggingProvider::KernelGeneral,
+                        provider_guid: "provider".to_string(),
+                        event_id: 14,
+                        reason: VerboseLoggingOutcomeReason::Actionable,
+                        pid: 1,
+                        access_type: Some(AccessType::Read),
+                        resource_type: Some(ResourceType::File),
+                        properties: vec![("ObjectName".to_string(), "value".to_string())],
+                    },
+                    count: 1,
+                }],
+                total_occurrences: 1,
+                ..Default::default()
+            },
+        };
+        let original = result.clone();
+
+        assert!(!result
+            .fit_verbose_logging_within_serialized_bytes(1)
+            .unwrap());
+        assert_eq!(result, original);
+        assert!(result
+            .fit_verbose_logging_within_serialized_bytes(
+                serde_json::to_vec(&original).unwrap().len()
+            )
+            .unwrap());
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn serialized_size_limit_handles_maximum_signature_count() {
+        let signatures = (0..crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS)
+            .map(|pid| VerboseLoggingAggregate {
+                signature: VerboseLoggingSignature {
+                    provider: VerboseLoggingProvider::KernelGeneral,
+                    provider_guid: "provider".to_string(),
+                    event_id: 14,
+                    reason: VerboseLoggingOutcomeReason::MissingObjectName,
+                    pid: u32::try_from(pid).unwrap(),
+                    access_type: Some(AccessType::Read),
+                    resource_type: Some(ResourceType::File),
+                    properties: vec![("ObjectName".to_string(), "x".repeat(256))],
+                },
+                count: 1,
+            })
+            .collect();
+        let mut result = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary {
+                signatures,
+                total_occurrences: crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS as u64,
+                ..Default::default()
+            },
+        };
+
+        assert!(result
+            .fit_verbose_logging_within_serialized_bytes(64 * 1024)
+            .unwrap());
+        assert!(serde_json::to_vec(&result).unwrap().len() <= 64 * 1024);
+        assert!(!result.verbose_logging.signatures.is_empty());
+        assert_eq!(
+            result.verbose_logging.signatures.len() as u64
+                + result.verbose_logging.overflow_occurrences,
+            crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS as u64
+        );
     }
 }

@@ -105,28 +105,46 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
-    /// Print the current persisted telemetry consent state as one-line JSON
-    /// and exit, without spawning a sandbox. The payload is the same typed
-    /// response as JSON maintenance action `status`. Windows-only: on
-    /// other platforms every field reports `not-applicable`/`false` and
-    /// nothing touches disk, since MXC does not collect telemetry there. See
-    /// `docs/telemetry/telemetry-consent-design.md`.
-    #[arg(long = "telemetry-consent-status")]
-    telemetry_consent_status: bool,
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "command",
+            "delete",
+            "containername",
+            "experimental",
+            "allow_testing_features",
+            "dry_run",
+            "setup_hyperlight",
+            "force",
+            "setup_wslc",
+            "image",
+            "storage_path",
+            "probe",
+            "force_reclaim"
+        ]
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        arg(conflicts_with_all = ["audit", "audit_verbose"])
+    )]
+    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
 
-    /// Legacy non-mutating tombstone. Returns a migration error directing the
-    /// caller to the typed JSON consent maintenance envelope.
-    #[arg(long = "telemetry-consent-grant")]
-    telemetry_consent_grant: bool,
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
 
-    /// Legacy non-mutating tombstone. Returns a migration error directing the
-    /// caller to JSON action `withdraw`.
-    #[arg(long = "telemetry-consent-revoke")]
-    telemetry_consent_revoke: bool,
-
-    /// Legacy companion tombstone for the removed grant/revoke flow.
-    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
-    telemetry_consent_source: Option<String>,
+    /// Private SDK presenter protocol.
+    #[arg(
+        long = "telemetry-consent-protocol",
+        requires = "telemetry_consent",
+        hide = true
+    )]
+    telemetry_consent_protocol: Option<telemetry::consent_cli::ConsentProtocol>,
 
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
@@ -165,6 +183,27 @@ impl Cli {
             }
         }
         self
+    }
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
     }
 }
 
@@ -228,7 +267,7 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Handles the `--telemetry-consent-{status,grant,revoke}` fast paths.
+/// Handles the dedicated `--telemetry-consent` fast path.
 ///
 /// Returns `true` if one of the flags was handled (and the caller should
 /// exit immediately), `false` if none were passed and normal execution
@@ -242,30 +281,14 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
 /// job, not the foundation crate's. See
 /// `docs/telemetry/telemetry-consent-design.md`.
 fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(outcome) =
-        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
-            status: cli.telemetry_consent_status,
-            grant: cli.telemetry_consent_grant,
-            revoke: cli.telemetry_consent_revoke,
-            source: cli.telemetry_consent_source.as_deref(),
-        })
-    else {
+    let Some(action) = cli.telemetry_consent else {
         return false;
     };
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
-fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
-    let Some(json) = json else {
-        return false;
-    };
-    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
-        return false;
-    };
+    let outcome = telemetry::consent_cli::handle_consent_command(
+        action,
+        cli.telemetry_consent_locale.as_deref(),
+        cli.telemetry_consent_protocol,
+    );
     let code = outcome.emit();
     if code != 0 {
         std::process::exit(code);
@@ -274,10 +297,8 @@ fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
 }
 
 /// Read the request source (file path / base64 blob) once, returning the
-/// decoded JSON. Reused by the maintenance probe, `--probe`, and the normal
-/// request loader so a single source is only read once per invocation — a
-/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
-/// paths that are drained by the first read.
+/// decoded JSON. Reused by `--probe` and the normal request loader so a single
+/// source is only read once per invocation.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
     let (input, is_base64) = config_input(cli)?;
     Some(wxc_common::config_parser::decode_request_input(
@@ -371,6 +392,11 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
         .as_ref()
         .map(|c| telemetry::init(c, logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
     // MXC — no caller supplies or relays one. `provision` seeds a fresh
@@ -391,7 +417,7 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
     // backtrace still prints) and is panic-free.
     if telemetry_active {
         if let Some(containment) = resolved_backend.as_ref() {
-            telemetry::set_process_context(containment);
+            telemetry::set_process_context_with_kind(containment, requested_sandbox_kind);
         }
         telemetry::set_process_phase(phase);
         // Stash this phase's correlation vector so out-of-band events
@@ -426,8 +452,9 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
 
     // Emit lifecycle telemetry (and shut the provider down) before flushing the
     // diagnostic buffer / envelope. Terminal path — safe to shutdown here.
-    telemetry::emit_state_aware(
+    telemetry::emit_state_aware_with_kind(
         telemetry_active,
+        requested_sandbox_kind,
         telemetry::TelemetryContext {
             backend,
             phase,
@@ -716,10 +743,10 @@ fn install_dacl_ctrl_handler() {
 }
 
 fn main() {
-    let cli = Cli::parse().normalize_named_config_command();
+    let cli = parse_cli().normalize_named_config_command();
 
-    // --telemetry-consent-{status,grant,revoke}: administer the persisted
-    // consent flag and exit. Runs BEFORE `force_reclaim` env propagation and
+    // --telemetry-consent: administer the persisted consent state and exit.
+    // Runs BEFORE `force_reclaim` env propagation and
     // `recover_orphaned_state()` below: this is a read-only/local-file fast path with a 5-second
     // client-side timeout (Node's consent getter), so it must not be gated
     // behind unrelated recovery work that scans state files and may restore
@@ -730,27 +757,13 @@ fn main() {
     if handle_telemetry_consent_flags(&cli) {
         return;
     }
-    // Decode the request source (file path / base64) once, up front, so the
-    // maintenance probe and the normal request loader below share the same
-    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
-    // process-substitution paths that are drained by the first read.
+    // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
     let request_hint = decoded_config
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
-    if matches!(
-        request_hint.as_ref().map(|hint| hint.kind()),
-        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
-    ) && handle_telemetry_consent_input(
-        decoded_config
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .map(String::as_str),
-    ) {
-        return;
-    }
 
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
@@ -833,6 +846,13 @@ fn main() {
             output.probes.isolation_session_available = mxc_engine::isolation_session_available();
             output
         };
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(all(target_os = "windows", feature = "hyperlight", target_arch = "x86_64"))]
+        let output = {
+            let mut output = output;
+            output.probes.hyperlight_available = hyperlight_common::is_whp_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -877,6 +897,16 @@ fn main() {
     if cli.setup_hyperlight {
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
+            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            #[cfg(target_os = "windows")]
+            if !hyperlight_common::is_whp_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot."
+                );
+                process::exit(1);
+            }
+
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {
@@ -1093,13 +1123,17 @@ fn main() {
         .as_ref()
         .map(|c| telemetry::init(c, &mut logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints (also satisfying the "always emit a diagnostic" contract for the
     // panic case). The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -1113,9 +1147,10 @@ fn main() {
         Err(e) => {
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -1140,9 +1175,10 @@ fn main() {
     if cli.audit {
         if let Err(message) = validate_audit_request(&request) {
             eprintln!("Error: {message}");
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -1152,9 +1188,10 @@ fn main() {
             Ok(context) => context,
             Err(message) => {
                 eprintln!("Error: {message}");
-                telemetry::emit_early_exit(
+                telemetry::emit_early_exit_with_kind(
                     telemetry_active,
                     &request.containment,
+                    requested_sandbox_kind,
                     telemetry::FailureReason::ConfigError,
                 );
                 process::exit(1);
@@ -1176,9 +1213,10 @@ fn main() {
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
         eprint!("{}", logger.get_buffer());
-        telemetry::emit_early_exit(
+        telemetry::emit_early_exit_with_kind(
             telemetry_active,
             &request.containment,
+            requested_sandbox_kind,
             telemetry::FailureReason::ConfigError,
         );
         process::exit(1);
@@ -1270,9 +1308,10 @@ fn main() {
         Err(e) => {
             eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -1293,18 +1332,25 @@ fn main() {
     #[cfg(target_os = "windows")]
     if let Some(context) = audit_context.as_ref() {
         if !cli.dry_run {
-            if let Err(error) = audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose)
-            {
-                let message = format!("audit finalization failed: {error}");
-                let _ = writeln!(logger, "[audit] {message}");
-                eprintln!("error: {message}");
-                response.exit_code = -1;
-                response.error_message = match response.error_message.is_empty() {
-                    true => message,
-                    false => format!("{}; {message}", response.error_message),
-                };
-            } else {
-                eprintln!("[audit] artifacts written to {}", context.log_dir.display());
+            match audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose) {
+                Ok(cleanup_warnings) => {
+                    for warning in cleanup_warnings {
+                        let message = format!("[audit] warning: {warning}");
+                        let _ = writeln!(logger, "{message}");
+                        eprintln!("{message}");
+                    }
+                    eprintln!("[audit] artifacts written to {}", context.log_dir.display());
+                }
+                Err(error) => {
+                    let message = format!("audit finalization failed: {error}");
+                    let _ = writeln!(logger, "[audit] {message}");
+                    eprintln!("error: {message}");
+                    response.exit_code = -1;
+                    response.error_message = match response.error_message.is_empty() {
+                        true => message,
+                        false => format!("{}; {message}", response.error_message),
+                    };
+                }
             }
         }
     }
@@ -1334,9 +1380,10 @@ fn main() {
         eprintln!("{warning}");
     }
 
-    telemetry::emit_completion(
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );
@@ -1596,6 +1643,84 @@ mod tests {
                 .as_deref(),
             Some("python --version")
         );
+    }
+
+    #[test]
+    fn cli_parses_dedicated_telemetry_consent_request() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "--telemetry-consent",
+            "request",
+            "--telemetry-consent-locale",
+            "en-US",
+            "--telemetry-consent-protocol",
+            "stdio-v1",
+        ]);
+
+        assert_eq!(
+            cli.telemetry_consent,
+            Some(telemetry::consent_cli::ConsentAction::Request)
+        );
+        assert_eq!(cli.telemetry_consent_locale.as_deref(), Some("en-US"));
+        assert_eq!(
+            cli.telemetry_consent_protocol,
+            Some(telemetry::consent_cli::ConsentProtocol::StdioV1)
+        );
+    }
+
+    #[test]
+    fn cli_rejects_execution_config_with_telemetry_consent() {
+        let error = Cli::try_parse_from([
+            "wxc-exec",
+            "--telemetry-consent",
+            "status",
+            "--config",
+            "policy.json",
+        ])
+        .err()
+        .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_rejects_audit_with_telemetry_consent() {
+        for audit_option in ["--audit", "--audit-verbose"] {
+            let error =
+                Cli::try_parse_from(["wxc-exec", "--telemetry-consent", "status", audit_option])
+                    .err()
+                    .unwrap();
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn cli_rejects_consent_locale_without_action() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-locale", "en-US"])
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn cli_rejects_removed_telemetry_consent_status_flag() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-status"])
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn private_consent_protocol_is_hidden_from_help() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("--telemetry-consent-protocol"));
+        assert!(help.contains("--telemetry-consent"));
     }
 
     #[test]

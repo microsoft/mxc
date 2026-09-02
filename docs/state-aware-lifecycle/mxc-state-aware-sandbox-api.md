@@ -796,28 +796,25 @@ consumer branches on; `message` is the human-readable description, and for a fai
 raised by an underlying platform API it is that API's own message, passed through
 verbatim rather than concatenated with the other fields.
 
-The three optional named fields describe a failure that originated in an underlying
-platform API:
+The three optional named fields carry structured failure detail. `operation` and
+`nativeCode` describe an underlying platform call; `remediation` describes the failure:
 
 | Field | Meaning |
 |---|---|
 | `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. **Best-effort diagnostic, not a versioned contract** — see below. |
 | `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
-| `remediation` | The API's actionable "how to fix it" hint, when it supplies one. |
+| `remediation` | An actionable "how to fix it" hint, when the failure has one. |
 
 **Availability.** These fields are currently populated only by **IsolationSession
-state-aware** operations. Windows Sandbox has no semantic error channel to derive them
-from, and the one-shot surface composes its full detail into `message` instead, so all
-three are uniformly absent there. Other backends may adopt them as they grow an
-equivalent channel — treat all three as optional on every backend, and branch program
-logic on `code` first.
+state-aware** operations. Other backends may adopt them — treat all three as optional on
+every backend, and branch program logic on `code` first.
 
 **Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 
 **Invariant:** `operation` marks that an API operation was in flight. A failure
 MXC raises before or outside any API call — a malformed request or id, a policy
-rejection, or an internal failure of MXC's own machinery — carries only `code`
-and `message`.
+rejection, or an internal failure of MXC's own machinery — carries neither
+`operation` nor `nativeCode`. It may still carry a `remediation`.
 
 **Which fields earn a place here.** A named top-level field is for a **backend-neutral**
 concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows
@@ -1220,11 +1217,16 @@ pub trait StatefulSandboxBackend {
     /// `Library` (the library / FFI streaming path) means the caller drives
     /// the streams itself, so an implementation must surface separate raw pipe
     /// handles, allocate no pseudo-console, and not touch the host console.
-    /// `Executor` (the executor path) means the handle is relayed to the
-    /// binary's own stdio, where a pseudo-console is legitimate — and where
-    /// stderr may therefore arrive merged into stdout, leaving
-    /// `ExecHandle::stderr` null. A backend that probes the host to decide how
-    /// to wire stdio must confine that probe to the `Executor` case.
+    /// `Executor` (the relay path) means the handle is relayed to **the calling
+    /// process's** own stdio, where a pseudo-console is legitimate and stderr may
+    /// therefore arrive merged into stdout, leaving `ExecHandle::stderr` null. A
+    /// backend that probes the host to decide how to wire stdio must confine that
+    /// probe to the `Executor` case, where the probing process is the relay
+    /// target.
+    ///
+    /// The variant names describe the caller each was written for, not the
+    /// rule. What separates them is who consumes the streams; "in-process" does
+    /// not imply `Library`.
     ///
     /// A backend that cannot serve `Library` at all — because it relays the
     /// workload's output to the *host process's* own stdio rather than
@@ -1330,9 +1332,11 @@ pub struct DeprovisionResult<M> {
 }
 
 pub struct ExecHandle {
-    /// Stdout pipe handle from the running process. Executor relays to its own stdout.
+    /// Stdout pipe handle from the running process. The relay path writes it to
+    /// the calling process's own stdout.
     pub stdout: PipeHandle,
-    /// Stderr pipe handle from the running process. Executor relays to its own stderr.
+    /// Stderr pipe handle from the running process. The relay path writes it to
+    /// the calling process's own stderr.
     pub stderr: PipeHandle,
     /// Stdin pipe handle. Not consumed by the executor relay, which forwards
     /// no input; the streaming path hands it to an in-process caller.
@@ -1344,6 +1348,9 @@ pub struct ExecHandle {
     /// caller that assumes a refused kill succeeded can block forever waiting
     /// on a process that is still running.
     pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+    /// Closes the backend's own stdin write end. `None` when the backend
+    /// exposes no stdin.
+    pub stdin_closer: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// How an exec finished, as distinct from why a wait failed. A timeout is an
@@ -1374,9 +1381,7 @@ dispatcher from `experimental.<backend>.<phase>` and passed as the `config` para
 platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
 descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` /
 `stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
-It does **not** write to `stdin`: forwarding input needs an ownership model
-`ExecHandle` does not have yet, since a pipe reaches EOF only once every write
-handle is closed and the relay can only duplicate the backend's handle.
+It does **not** write to `stdin`.
 
 `mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
@@ -1638,7 +1643,7 @@ wire `version` field) plus any cross-cutting fields the matrix marks as honored 
 that phase (for IsolationSession's `provision`, the required `network`
 acknowledgment). The Rust struct receives only what the wire's
 `experimental.isolation_session.provision` block carries —
-`{ "appId": "Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
+`{ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
 deserialises into `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
 the consumer Config into top-level wire fields (cross-cutting, `version`) and the
 experimental sub-block; Rust sees only the post-split shape.
@@ -1944,7 +1949,7 @@ calls (and the executor stops gating them behind `--experimental`). For example,
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "experimental": {
     "isolation_session": {
-      "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
+      "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
     }
   }
 }
@@ -1959,7 +1964,7 @@ to this shape after the backend's state-aware path graduates:
   "containment": "isolation_session",
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "isolation_session": {
-    "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
+    "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
   }
 }
 ```

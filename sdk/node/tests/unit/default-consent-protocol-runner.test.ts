@@ -6,6 +6,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 
@@ -73,9 +74,13 @@ function makeFakeChild(): FakeChild {
 
 // The runner types the factory as returning a `ChildProcess`. Our fake covers
 // only the subset the runner uses. Cast once here rather than everywhere.
-function installFakeChildFactory(): { current: FakeChild } {
-  const box: { current: FakeChild } = { current: null as unknown as FakeChild };
-  _setTelemetryConsentChildFactory(() => {
+function installFakeChildFactory(): { current: FakeChild; args: readonly string[] } {
+  const box: { current: FakeChild; args: readonly string[] } = {
+    current: null as unknown as FakeChild,
+    args: [],
+  };
+  _setTelemetryConsentChildFactory((args) => {
+    box.args = args;
     box.current = makeFakeChild();
     return box.current as unknown as ChildProcess;
   });
@@ -92,8 +97,12 @@ const prompt: TelemetryConsentPrompt = {
   learnMoreLabel: { id: 'telemetry.consent.learnMore', text: 'Learn more' },
   learnMoreUrl: 'https://example.microsoft.com/consent',
 };
+const yesDecisionFixture = JSON.parse(readFileSync(
+  new URL('../../../../../tests/fixtures/telemetry-consent/stdio-v1-decision-yes.json', import.meta.url),
+  'utf8',
+)) as Record<string, unknown>;
 
-function presentationLine(challenge = 'CHALLENGE-1'): string {
+function presentationLine(challenge = 'request-a'): string {
   return `${JSON.stringify({
     action: 'request',
     result: 'presentationRequired',
@@ -148,6 +157,13 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     const promise = requestTelemetryConsent(() => 'yes');
     await new Promise((r) => setImmediate(r));
     const child = box.current;
+    assert.deepStrictEqual(box.args, [
+      '--telemetry-consent',
+      'request',
+      '--telemetry-consent-protocol',
+      'stdio-v1',
+    ]);
+    assert.ok(!box.args.includes('--config-base64'));
 
     const line = presentationLine();
     // Split the line in three fragments; the runner must accumulate them.
@@ -160,13 +176,39 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     await waitFor(() => child.stdinEnded);
     const echo = JSON.parse(child.stdinChunks.join('').trim());
     assert.strictEqual(echo.decision, 'yes');
-    assert.strictEqual(echo.challenge, 'CHALLENGE-1');
-    assert.strictEqual(echo.resourceVersion, 1);
+    assert.deepStrictEqual(echo, yesDecisionFixture);
 
     child.writeStdout(grantedLine());
     child.emitClose(0);
     const outcome = await promise;
     assert.strictEqual(outcome.result, 'granted');
+    assert.strictEqual(Object.hasOwn(outcome, 'challenge'), false);
+    assert.strictEqual(Object.hasOwn(outcome, 'prompt'), false);
+  });
+
+  it('passes the requested locale only on the dedicated request command', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'dismissed', 'fr-FR');
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    assert.deepStrictEqual(box.args, [
+      '--telemetry-consent',
+      'request',
+      '--telemetry-consent-locale=fr-FR',
+      '--telemetry-consent-protocol',
+      'stdio-v1',
+    ]);
+    child.writeStdout(`${JSON.stringify({
+      action: 'request',
+      result: 'dismissed',
+      storedState: 'undetermined',
+      effectiveState: 'undetermined',
+      needsPrompt: true,
+      policy: 'unrestricted',
+    })}\n`);
+    child.emitClose(0);
+    assert.strictEqual((await promise).result, 'dismissed');
   });
 
   it('suspends the IO timeout while the presenter is thinking', async () => {
@@ -256,6 +298,21 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       throw new Error('UI unavailable');
     });
     const rejection = assert.rejects(promise, /UI unavailable/);
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(presentationLine());
+    await waitFor(() => child.killed);
+    child.emitClose(1);
+    await rejection;
+    assert.deepStrictEqual(child.stdinChunks, []);
+    assert.strictEqual(child.stdinEnded, false);
+  });
+
+  it('fails closed when a dynamically typed presenter returns an invalid decision', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'maybe' as unknown as 'yes');
+    const rejection = assert.rejects(promise, /invalid decision 'maybe'/);
     await new Promise((r) => setImmediate(r));
     const child = box.current;
 
