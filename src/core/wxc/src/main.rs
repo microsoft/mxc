@@ -434,6 +434,9 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
     if let Err(error) = &outcome {
         log_state_aware_dispatch_error(logger, error);
     }
+    for warning in logger.take_warnings() {
+        eprintln!("{warning}");
+    }
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();

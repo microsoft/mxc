@@ -209,12 +209,12 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 
     let activated = mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
     if !activated && cfg!(target_os = "windows") {
-        logger.retained_warning_line(
+        logger.warning_line(
             "telemetry: ETW provider registration failed; continuing without telemetry",
         );
     }
     if activated && !mxc_telemetry::IS_UTC_ROUTED {
-        logger.retained_warning_line(
+        logger.warning_line(
             "telemetry: events are emitted to local ETW only; this build has no provider group \
              GUID, so nothing is routed to the Microsoft pipeline (set \
              MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time for an internal build)",
@@ -835,11 +835,9 @@ fn plan_state_aware_with_kind<'a>(
                     exit_code: *exit_code,
                     outcome: if failed { "failure" } else { "success" },
                     duration_ms,
-                    // A non-zero guest exit is a faithfully propagated sandbox
-                    // exit code, not an MXC infrastructure error — leave the
-                    // reason unset and emit no Error (mirrors one-shot
-                    // emit_completion).
-                    failure_reason: None,
+                    // The sandbox exit is not an MXC infrastructure error, so
+                    // suppress Error while retaining the failure category.
+                    failure_reason: failed.then_some(FailureReason::ProcessError),
                     phase: ctx.phase,
                     correlation_vector: ctx.correlation_vector,
                 },
@@ -908,7 +906,7 @@ pub fn emit_state_aware_with_kind(
     if already_emitted() {
         return;
     }
-    emit_state_aware_event(&auth, ctx, outcome, elapsed, requested_sandbox_kind);
+    emit_state_aware_event(&auth, ctx, outcome, elapsed, requested_sandbox_kind, None);
     shutdown();
 }
 
@@ -918,13 +916,20 @@ fn emit_state_aware_event(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
     requested_sandbox_kind: Option<&str>,
+    failure_reason_override: Option<FailureReason>,
 ) {
     // The `_auth` parameter is the single authorization token for this
     // emission (see `EmissionAuthorization`). Both writes below execute under
     // it — there is no per-write reread of consent/policy state.
     let duration_ms = elapsed.as_millis() as u64;
     let sandbox_kind = sandbox_kind_for(ctx.backend, requested_sandbox_kind);
-    let plan = plan_state_aware_with_kind(ctx, outcome, duration_ms, sandbox_kind);
+    let mut plan = plan_state_aware_with_kind(ctx, outcome, duration_ms, sandbox_kind);
+    if outcome.is_err() {
+        if let Some(reason) = failure_reason_override {
+            plan.execution.failure_reason = Some(reason);
+            plan.error = Some(reason);
+        }
+    }
 
     log_execution(&plan.execution);
     if let Some(reason) = plan.error {
@@ -953,8 +958,35 @@ pub fn emit_sdk_state_aware_with_kind(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
 ) {
+    emit_sdk_state_aware_with_kind_and_failure(
+        active,
+        requested_sandbox_kind,
+        ctx,
+        outcome,
+        elapsed,
+        None,
+    );
+}
+
+/// Emit SDK state-aware telemetry with an optional terminal failure override.
+#[doc(hidden)]
+pub fn emit_sdk_state_aware_with_kind_and_failure(
+    active: bool,
+    requested_sandbox_kind: Option<&'static str>,
+    ctx: TelemetryContext<'_>,
+    outcome: &Result<DispatchOutcome, MxcError>,
+    elapsed: Duration,
+    failure_reason_override: Option<FailureReason>,
+) {
     emit_sdk_with_release(active, |auth| {
-        emit_state_aware_event(auth, ctx, outcome, elapsed, requested_sandbox_kind)
+        emit_state_aware_event(
+            auth,
+            ctx,
+            outcome,
+            elapsed,
+            requested_sandbox_kind,
+            failure_reason_override,
+        )
     });
 }
 
@@ -1688,7 +1720,10 @@ mod tests {
             assert_eq!(nonzero_plan.execution.correlation_vector, correlation);
             assert_eq!(nonzero_plan.execution.outcome, "failure");
             assert_eq!(nonzero_plan.execution.exit_code, 42);
-            assert!(nonzero_plan.execution.failure_reason.is_none());
+            assert_eq!(
+                nonzero_plan.execution.failure_reason,
+                Some(FailureReason::ProcessError)
+            );
             assert!(nonzero_plan.error.is_none());
 
             // MxcError → failure / exit 1 / classified Error.

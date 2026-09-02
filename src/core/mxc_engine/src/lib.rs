@@ -257,7 +257,8 @@ impl TelemetryProcess {
                         error.to_string(),
                     )),
                 };
-                telemetry::emit_sdk_state_aware_with_kind(
+                let failure_reason = Self::state_aware_wait_failure_reason(result);
+                telemetry::emit_sdk_state_aware_with_kind_and_failure(
                     true,
                     *requested_sandbox_kind,
                     telemetry::TelemetryContext {
@@ -267,10 +268,21 @@ impl TelemetryProcess {
                     },
                     &outcome,
                     self.started.elapsed(),
+                    failure_reason,
                 );
             }
         }
         self.active = false;
+    }
+
+    fn state_aware_wait_failure_reason(
+        result: &std::io::Result<i32>,
+    ) -> Option<telemetry::FailureReason> {
+        result
+            .as_ref()
+            .err()
+            .filter(|error| error.kind() == std::io::ErrorKind::TimedOut)
+            .map(|_| telemetry::FailureReason::Timeout)
     }
 
     /// Emit a synthesised terminal event when no real completion result is
@@ -636,6 +648,24 @@ mod telemetry_process_tests {
             std::io::ErrorKind::TimedOut
         );
         assert!(!timed_out.active);
+    }
+
+    #[test]
+    fn state_aware_wait_timeout_preserves_timeout_failure_reason() {
+        let timed_out = Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert_eq!(
+            TelemetryProcess::state_aware_wait_failure_reason(&timed_out),
+            Some(telemetry::FailureReason::Timeout)
+        );
+
+        let failed = Err(std::io::Error::other("failed"));
+        assert_eq!(
+            TelemetryProcess::state_aware_wait_failure_reason(&failed),
+            None
+        );
     }
 
     #[test]
