@@ -2336,6 +2336,15 @@ relaxation; requiring the script in `build_request` and
 same parse-then-patch pattern from surviving through the Rust SDK and FFI. The
 two entry-point changes are therefore reviewed and landed atomically.
 
+The trailing-command path retains separate phase-probe, raw command-source, and
+authoritative parser passes. Each owns a different contract: phase and output
+routing, duplicate-preserving backend selection and source editing, and typed
+structural plus semantic validation. Phase 7a consolidates backend selection
+with the raw edit pass but does not couple these remaining responsibilities
+without representative evidence that their startup cost is material. Further
+pass coalescing requires a benchmark against realistic large policies and must
+preserve the no-command parser path unchanged.
+
 Two lessons worth carrying into the remaining steps. First, `cargo doc` belongs
 in this phase's quality gate: `-D warnings` lives in `RUSTFLAGS` and rustdoc
 reads `RUSTDOCFLAGS`, so deleting a documented item breaks intra-doc links that
