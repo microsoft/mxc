@@ -37,6 +37,7 @@ const bwrapProbeScriptDirectory = fs.existsSync(
   : path.join(getSdkPackageRoot(), 'dist');
 let windowsSandboxAvailableCache: boolean | undefined;
 let wxcExecutableCache: string | null | undefined;
+let wxcExecutableVerifier = verifyWxcExecutable;
 
 /**
  * Check if Windows Sandbox feature is enabled via DISM.
@@ -743,7 +744,7 @@ export function findWxcExecutable(): string | null {
   // Allow override for bundled deployments (debugging/testing)
   if (process.env.MXC_BIN_DIR) {
     const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'wxc-exec.exe');
-    if (verifyWxcExecutable(overridePath)) {
+    if (wxcExecutableVerifier(overridePath)) {
       wxcExecutableCache = overridePath;
       return wxcExecutableCache;
     }
@@ -767,19 +768,25 @@ export function findWxcExecutable(): string | null {
   ];
 
   for (const wxcPath of possiblePaths) {
-    if (verifyWxcExecutable(wxcPath)) {
+    if (wxcExecutableVerifier(wxcPath)) {
       wxcExecutableCache = wxcPath;
       return wxcExecutableCache;
     }
   }
 
-  wxcExecutableCache = null;
-  return wxcExecutableCache;
+  return null;
 }
 
 /** @internal Test-only: clear the resolved executable path. */
 export function _resetWxcExecutableCache(): void {
   wxcExecutableCache = undefined;
+}
+
+/** @internal Test-only: override executable verification. */
+export function _setWxcExecutableVerifier(
+  verifier: ((execPath: string) => boolean) | null,
+): void {
+  wxcExecutableVerifier = verifier ?? verifyWxcExecutable;
 }
 
 /**

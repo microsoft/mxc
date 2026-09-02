@@ -48,6 +48,22 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
+  it('rejects conflicting telemetry in config and options', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'start',
+        backendKey: 'windows_sandbox',
+        sandboxId: 'wsb:01234567',
+        telemetry: { enabled: false },
+        config: { telemetry: { enabled: true } },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError
+        && error.code === 'malformed_request'
+        && error.message.includes('conflicting values'),
+    );
+  });
+
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',

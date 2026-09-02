@@ -111,7 +111,19 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
-  const hasTelemetry = telemetry !== undefined || backendSpecific.telemetry !== undefined;
+  const configTelemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
+  if (
+    telemetry !== undefined
+    && configTelemetry !== undefined
+    && telemetry.enabled !== configTelemetry.enabled
+  ) {
+    throw mxcErrorFromCode(
+      'malformed_request',
+      'telemetry was supplied with conflicting values in config and options',
+    );
+  }
+  const effectiveTelemetry = telemetry ?? configTelemetry;
+  const hasTelemetry = effectiveTelemetry !== undefined;
   const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
   if (hasTelemetry && suppliedVersion) {
     const parsed = semverParse(suppliedVersion);
@@ -131,8 +143,8 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
   }
-  if (telemetry !== undefined) {
-    envelope.telemetry = telemetry;
+  if (effectiveTelemetry !== undefined) {
+    envelope.telemetry = effectiveTelemetry;
     delete backendSpecific.telemetry;
   }
 

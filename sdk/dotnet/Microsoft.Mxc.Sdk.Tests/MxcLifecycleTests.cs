@@ -684,4 +684,24 @@ public class MxcLifecycleTests
         releaseOperation.Set();
         Assert.Equal(42, await cleanedUp.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
     }
+
+    [Fact]
+    public async Task RunBlockingOperationAsync_PreCancelledTokenDoesNotStartOperation()
+    {
+        var started = false;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => MxcLifecycle.RunBlockingOperationAsync(
+                () =>
+                {
+                    started = true;
+                    return 42;
+                },
+                _ => { },
+                cancellation.Token));
+
+        Assert.False(started);
+    }
 }

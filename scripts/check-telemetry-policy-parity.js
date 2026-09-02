@@ -26,6 +26,15 @@ const rustPath = join(
   "telemetry",
   "policy.rs"
 );
+const rustConsentProtocolPath = join(
+  repoRoot,
+  "src",
+  "core",
+  "wxc_common",
+  "src",
+  "telemetry",
+  "consent_protocol.rs"
+);
 const csharpPath = join(
   repoRoot,
   "sdk",
@@ -46,6 +55,7 @@ const errors = [];
 // --- Rust: the source of truth -------------------------------------------
 // `PolicyState::Unrestricted => "unrestricted",` inside `fn as_str`.
 const rustSrc = readFileSync(rustPath, "utf8");
+const rustConsentProtocolSrc = readFileSync(rustConsentProtocolPath, "utf8");
 const asStrBody = rustSrc.match(
   /fn as_str\(&self\)\s*->\s*&'static str\s*\{[\s\S]*?match self \{([\s\S]*?)\n\s*\}/
 );
@@ -153,6 +163,37 @@ function parseTypeScriptUnion(name) {
   return new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]));
 }
 
+function parseRustEnum(name, rename) {
+  const match = rustConsentProtocolSrc.match(
+    new RegExp(`enum\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`)
+  );
+  if (!match) {
+    console.error(`ERROR: could not find Rust enum \`${name}\``);
+    process.exit(1);
+  }
+  return new Set(
+    [...match[1].matchAll(/^\s*([A-Z][A-Za-z0-9_]*)\s*,/gm)].map((item) => {
+      const kebab = item[1].replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+      return rename === "camelCase"
+        ? kebab.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
+        : kebab;
+    })
+  );
+}
+
+function compareSets(label, expected, actual) {
+  for (const wire of expected) {
+    if (!actual.has(wire)) {
+      errors.push(`${label} is missing '${wire}'`);
+    }
+  }
+  for (const wire of actual) {
+    if (!expected.has(wire)) {
+      errors.push(`${label} has '${wire}' with no matching Rust variant`);
+    }
+  }
+}
+
 function expectedVariant(wire) {
   return wire
     .split("-")
@@ -213,9 +254,14 @@ function functionReturnsSentinel(functionName, sentinel) {
   return body.includes(`return ${sentinel};`);
 }
 
-const terminalConsentResults = parseTypeScriptUnion("TelemetryConsentResult");
+const terminalConsentResults = parseRustEnum("ConsentResult", "camelCase");
 terminalConsentResults.delete("status");
 terminalConsentResults.delete("presentationRequired");
+compareSets(
+  "TypeScript TelemetryConsentResult",
+  terminalConsentResults,
+  parseTypeScriptUnion("TelemetryConsentResult")
+);
 const consentResultMappings = parseCsharpSwitch(
   "ParseConsentActionResult",
   "TelemetryConsentActionResult"
@@ -232,7 +278,12 @@ if (!functionReturnsSentinel(
   errors.push("C# unknown consent action results must return TelemetryConsentActionResult.Unknown");
 }
 
-const consentReasons = parseTypeScriptUnion("TelemetryConsentStatusReason");
+const consentReasons = parseRustEnum("StatusReason", "kebab-case");
+compareSets(
+  "TypeScript TelemetryConsentStatusReason",
+  consentReasons,
+  parseTypeScriptUnion("TelemetryConsentStatusReason")
+);
 const reasonMappings = parseCsharpSwitch(
   "ParseConsentStatusReason",
   "TelemetryConsentStatusReason"

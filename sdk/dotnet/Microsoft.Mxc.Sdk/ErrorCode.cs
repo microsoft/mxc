@@ -60,8 +60,8 @@ public enum ErrorCode
     Panic = 102,
 
     /// <summary>
-    /// Telemetry consent could not be persisted, e.g. on a non-Windows host, or
-    /// because %LOCALAPPDATA% is unavailable/unwritable (FFI-local). MXC only
+    /// Telemetry consent could not be persisted because %LOCALAPPDATA% is
+    /// unavailable or unwritable (FFI-local). MXC only
     /// collects telemetry on Windows and only with persisted, explicit consent;
     /// see docs/telemetry/telemetry-consent-design.md.
     /// </summary>

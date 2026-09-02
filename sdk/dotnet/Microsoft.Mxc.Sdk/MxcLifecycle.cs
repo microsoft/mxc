@@ -143,10 +143,6 @@ public static class MxcLifecycle
         }
 
         ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
-        if (options?.User is { } user)
-        {
-            SetBackendConfig(envelope, backend, "provision", "user", SerializeToNode(user));
-        }
 
         return envelope;
     }
@@ -169,18 +165,6 @@ public static class MxcLifecycle
     {
         var envelope = BuildIdEnvelope("start", id, options?.Version);
         ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
-        if (options is StartSandboxOptions start)
-        {
-            var backend = ContainmentKey(ContainmentForId(id));
-            if (start.Size is { } size)
-            {
-                SetBackendConfig(envelope, backend, "start", "configurationId", size);
-            }
-            if (start.User is { } user)
-            {
-                SetBackendConfig(envelope, backend, "start", "user", SerializeToNode(user));
-            }
-        }
         return envelope;
     }
 
@@ -359,6 +343,7 @@ public static class MxcLifecycle
         Action<T> disposeLateResult,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var task = Task.Run(operation, CancellationToken.None);
         try
         {

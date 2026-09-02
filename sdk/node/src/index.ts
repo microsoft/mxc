@@ -149,6 +149,12 @@ export {
 
 // Export telemetry consent functions and types
 export {
+  TelemetryConfig,
+} from './types.js';
+
+export {
+  TelemetryConsentMessage,
+  TelemetryConsentResult,
   TelemetryConsentState,
   TelemetryConsentStatusReason,
   TelemetryConsentPrompt,

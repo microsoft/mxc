@@ -22,6 +22,7 @@ import {
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
   _resetWxcExecutableCache,
+  _setWxcExecutableVerifier,
 } from '../../src/platform.js';
 
 const isWindows = os.platform() === 'win32';
@@ -362,6 +363,7 @@ describe('findWxcExecutable failure modes', () => {
     } else {
       process.env.MXC_BIN_DIR = prevBinDir;
     }
+    _setWxcExecutableVerifier(null);
     _resetWxcExecutableCache();
   });
 
@@ -383,6 +385,18 @@ describe('findWxcExecutable failure modes', () => {
     process.env.MXC_BIN_DIR = '';
     const result = findWxcExecutable();
     assert.ok(result === null || typeof result === 'string');
+  });
+
+  it('does not cache a failed executable lookup', () => {
+    process.env.MXC_BIN_DIR = path.join(
+      os.tmpdir(),
+      `mxc-sdk-unit-no-such-dir-${process.pid}`,
+    );
+    _setWxcExecutableVerifier(() => false);
+    assert.strictEqual(findWxcExecutable(), null);
+
+    _setWxcExecutableVerifier((candidate) => candidate.startsWith(process.env.MXC_BIN_DIR!));
+    assert.ok(findWxcExecutable()?.startsWith(process.env.MXC_BIN_DIR));
   });
 });
 

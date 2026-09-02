@@ -110,7 +110,6 @@ function maintenanceArgs(action: 'request' | 'withdraw' | 'status', locale?: str
     if (locale !== undefined) {
       args.push(`--telemetry-consent-locale=${locale}`);
     }
-    args.push('--telemetry-consent-protocol', 'stdio-v1');
   }
   return args;
 }
@@ -244,7 +243,7 @@ async function defaultConsentProtocolRunner(
         finalResponse = toConsentOutcome(response);
         return;
       }
-      if (!response.prompt || !response.challenge) {
+      if (!isConsentPrompt(response.prompt) || !isChallenge(response.challenge)) {
         fail(new Error('telemetry consent presentation omitted its prompt or challenge'));
         return;
       }
@@ -435,6 +434,48 @@ function isDecision(value: unknown): value is TelemetryConsentDecision {
   return value === 'yes' || value === 'no' || value === 'dismissed';
 }
 
+function isStatusReason(value: unknown): value is TelemetryConsentStatusReason {
+  return [
+    'no-record',
+    'store-unreadable',
+    'store-malformed',
+    'consent-schema-unsupported',
+    'prompt-version-missing',
+    'prompt-version-unsupported',
+    'policy-blocked',
+    'presentation-unavailable',
+    'not-applicable',
+  ].includes(value as string);
+}
+
+function isConsentMessage(value: unknown): value is TelemetryConsentMessage {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const message = value as Record<string, unknown>;
+  return typeof message.id === 'string' && typeof message.text === 'string';
+}
+
+function isConsentPrompt(value: unknown): value is TelemetryConsentPrompt {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const prompt = value as Record<string, unknown>;
+  return Number.isSafeInteger(prompt.resourceVersion)
+    && (prompt.resourceVersion as number) > 0
+    && typeof prompt.locale === 'string'
+    && isConsentMessage(prompt.title)
+    && isConsentMessage(prompt.body)
+    && isConsentMessage(prompt.affirmativeLabel)
+    && isConsentMessage(prompt.negativeLabel)
+    && isConsentMessage(prompt.learnMoreLabel)
+    && typeof prompt.learnMoreUrl === 'string';
+}
+
+function isChallenge(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
 function isResult(value: unknown): value is TelemetryConsentProtocolResult {
   return [
     'status',
@@ -490,6 +531,17 @@ function parseMaintenanceResponse(
     || value.action !== expectedAction
     || !isResultForAction(expectedAction, value.result)
     || typeof value.needsPrompt !== 'boolean'
+    || (
+      value.reason !== undefined
+      && value.reason !== null
+      && !isStatusReason(value.reason)
+    )
+  ) {
+    throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
+  }
+  if (
+    value.result === 'presentationRequired'
+    && (!isConsentPrompt(value.prompt) || !isChallenge(value.challenge))
   ) {
     throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
   }

@@ -98,7 +98,7 @@ const prompt: TelemetryConsentPrompt = {
   learnMoreUrl: 'https://example.microsoft.com/consent',
 };
 const yesDecisionFixture = JSON.parse(readFileSync(
-  new URL('../../../../../tests/fixtures/telemetry-consent/stdio-v1-decision-yes.json', import.meta.url),
+  new URL('../../../../../tests/fixtures/telemetry-consent/presenter-decision-yes.json', import.meta.url),
   'utf8',
 )) as Record<string, unknown>;
 
@@ -160,8 +160,6 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     assert.deepStrictEqual(box.args, [
       '--telemetry-consent',
       'request',
-      '--telemetry-consent-protocol',
-      'stdio-v1',
     ]);
     assert.ok(!box.args.includes('--config-base64'));
 
@@ -196,8 +194,6 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       '--telemetry-consent',
       'request',
       '--telemetry-consent-locale=fr-FR',
-      '--telemetry-consent-protocol',
-      'stdio-v1',
     ]);
     child.writeStdout(`${JSON.stringify({
       action: 'request',
@@ -558,6 +554,49 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       effectiveState: 'undetermined',
       needsPrompt: true,
       policy: 'unrestricted',
+    })}\n`);
+    await waitFor(() => child.killed);
+    child.emitClose(1);
+    await rejection;
+  });
+
+  it('kills the child on a presentation with a malformed prompt', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    const rejection = assert.rejects(promise);
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(`${JSON.stringify({
+      action: 'request',
+      result: 'presentationRequired',
+      prompt: { ...prompt, title: { id: 1, text: 'invalid' } },
+      challenge: 'request-a',
+      storedState: 'undetermined',
+      effectiveState: 'undetermined',
+      needsPrompt: true,
+      policy: 'unrestricted',
+    })}\n`);
+    await waitFor(() => child.killed);
+    child.emitClose(1);
+    await rejection;
+  });
+
+  it('kills the child on an unknown status reason', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    const rejection = assert.rejects(promise);
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(`${JSON.stringify({
+      action: 'request',
+      result: 'policyBlocked',
+      storedState: 'undetermined',
+      effectiveState: 'undetermined',
+      needsPrompt: false,
+      reason: 'future-reason',
+      policy: 'blocked',
     })}\n`);
     await waitFor(() => child.killed);
     child.emitClose(1);

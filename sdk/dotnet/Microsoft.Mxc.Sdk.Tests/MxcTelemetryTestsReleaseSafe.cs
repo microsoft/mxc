@@ -300,7 +300,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         {
             GetConsentStatusImpl = () => new(
                 (int)ErrorCode.Success,
-                ConsentStatusJson("undetermined", "undetermined", "blocked", "future-reason")),
+                ConsentStatusJson("granted", "granted", "allowed", "future-reason")),
         };
 
         using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
@@ -309,6 +309,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         var status = MxcTelemetry.GetConsentStatus();
 
         Assert.Equal(TelemetryConsentStatusReason.Unknown, status.Reason);
+        Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
         Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
     }

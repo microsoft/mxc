@@ -78,26 +78,6 @@ public abstract class StateAwareProvisionOptions
     /// </summary>
     public bool? TelemetryEnabled { get; set; }
 
-    /// <summary>
-    /// Optional Entra credentials for a cloud-agent sandbox. Consumed by
-    /// backends that support it (currently IsolationSession); backends that do
-    /// not surface a <see cref="ErrorCode.BackendUnavailable"/> error.
-    /// </summary>
-    public SandboxUserCredentials? User { get; set; }
-}
-
-/// <summary>
-/// Optional Entra credentials for provisioning an IsolationSession cloud-agent
-/// sandbox. When supplied at provision, the same credentials must be supplied
-/// at start.
-/// </summary>
-public sealed class SandboxUserCredentials
-{
-    /// <summary>The user principal name (UPN).</summary>
-    public string Upn { get; set; } = string.Empty;
-
-    /// <summary>The WAM token authorising the identity.</summary>
-    public string WamToken { get; set; } = string.Empty;
 }
 
 /// <summary>IsolationSession provision options.</summary>
@@ -196,21 +176,10 @@ public class StateAwarePhaseOptions
 }
 
 /// <summary>
-/// Compatibility alias for <see cref="StateAwarePhaseOptions"/> used at start,
-/// with a legacy <c>Size</c> profile plus optional Entra credentials.
+/// Compatibility alias for <see cref="StateAwarePhaseOptions"/> used at start.
 /// </summary>
 public sealed class StartSandboxOptions : StateAwarePhaseOptions
 {
-    /// <summary>
-    /// Selected size profile — one of <c>small</c>, <c>medium</c>, <c>large</c>,
-    /// or <c>composable</c>. Emitted as the wire <c>configurationId</c>.
-    /// </summary>
-    public string? Size { get; set; }
-
-    /// <summary>
-    /// Optional Entra credentials (must match those supplied at provision).
-    /// </summary>
-    public SandboxUserCredentials? User { get; set; }
 }
 
 /// <summary>
