@@ -105,27 +105,6 @@ fn parse_cli() -> Cli {
     }
 }
 
-/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
-/// mirrors. On macOS, `wxc_common::telemetry::consent` always reports
-/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
-/// this fast path can't drift from `wxc-exec`/`lxc-exec`. The shared handler
-/// returns the outcome as data; terminating the process is this binary's
-/// job, not the foundation crate's.
-fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(action) = cli.telemetry_consent else {
-        return false;
-    };
-    let outcome = wxc_common::telemetry::consent_cli::handle_consent_command(
-        action,
-        cli.telemetry_consent_locale.as_deref(),
-    );
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
 /// Decode the config input source (base64 arg / file path) exactly once.
 ///
 /// Returns `None` if the CLI provided no config source at all — the caller
@@ -162,18 +141,16 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 fn main() {
     let cli = parse_cli();
 
-    // --telemetry-consent: report/administer the
-    // (always not-applicable on macOS) consent state and exit.
-    if handle_telemetry_consent_flags(&cli) {
-        return;
+    if let Some(action) = cli.telemetry_consent {
+        let outcome = wxc_common::telemetry::consent_cli::handle_consent_command(
+            action,
+            cli.telemetry_consent_locale.as_deref(),
+        );
+        process::exit(outcome.emit());
     }
     // Decode the config source once for normal request loading.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
-    let request_hint = decoded_config
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
     // Determine config input.
     let config_json = match decoded_config {
         Some(Ok(json)) => json,
@@ -201,16 +178,7 @@ fn main() {
         }
     }
 
-    let parsed_request = if let Some(hint) = request_hint.as_ref() {
-        wxc_common::config_parser::load_request_from_json_with_hint_and_options(
-            &config_json,
-            &mut logger,
-            wxc_common::config_parser::LoadOptions::default(),
-            hint,
-        )
-    } else {
-        load_request_from_json(&config_json, &mut logger)
-    };
+    let parsed_request = load_request_from_json(&config_json, &mut logger);
     let mut request = match parsed_request {
         Ok(r) => r,
         Err(_) => {

@@ -259,34 +259,6 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Handles the dedicated `--telemetry-consent` fast path.
-///
-/// Returns `true` if one of the flags was handled (and the caller should
-/// exit immediately), `false` if none were passed and normal execution
-/// should proceed. Never spawns a sandbox, never touches config parsing, and
-/// runs before COM/WinRT init — mirroring the `--probe` fast path.
-///
-/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler
-/// (identical across all three executors) so this fast path can't drift
-/// between `wxc-exec`, `lxc-exec`, and `mxc-exec-mac`. The shared handler
-/// returns the outcome as data; terminating the process is this binary's
-/// job, not the foundation crate's. See
-/// `docs/telemetry/telemetry-consent-design.md`.
-fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(action) = cli.telemetry_consent else {
-        return false;
-    };
-    let outcome = telemetry::consent_cli::handle_consent_command(
-        action,
-        cli.telemetry_consent_locale.as_deref(),
-    );
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
 /// Read the request source (file path / base64 blob) once, returning the
 /// decoded JSON. Reused by `--probe` and the normal request loader so a single
 /// source is only read once per invocation.
@@ -736,25 +708,16 @@ fn install_dacl_ctrl_handler() {
 fn main() {
     let cli = parse_cli().normalize_named_config_command();
 
-    // --telemetry-consent: administer the persisted consent state and exit.
-    // Runs BEFORE `force_reclaim` env propagation and
-    // `recover_orphaned_state()` below: this is a read-only/local-file fast path with a 5-second
-    // client-side timeout (Node's consent getter), so it must not be gated
-    // behind unrelated recovery work that scans state files and may restore
-    // host DACLs — that could both time out the query (suppressing the
-    // prompt) and let a plain status read unexpectedly mutate filesystem
-    // ACLs. Matches the Linux/macOS executors, where this fast path also
-    // runs unconditionally immediately after CLI parsing.
-    if handle_telemetry_consent_flags(&cli) {
-        return;
+    if let Some(action) = cli.telemetry_consent {
+        let outcome = telemetry::consent_cli::handle_consent_command(
+            action,
+            cli.telemetry_consent_locale.as_deref(),
+        );
+        process::exit(outcome.emit());
     }
     // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
-    let request_hint = decoded_config
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
 
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
@@ -1036,20 +999,11 @@ fn main() {
         is_base64: false,
         allow_missing_command: has_command_override,
     };
-    let parsed_request = if let Some(hint) = request_hint.as_ref() {
-        wxc_common::config_parser::load_mxc_request_from_json_with_hint_and_options(
-            &config_json,
-            &mut logger,
-            load_opts,
-            hint,
-        )
-    } else {
-        wxc_common::config_parser::load_mxc_request_from_json_with_options(
-            &config_json,
-            &mut logger,
-            load_opts,
-        )
-    };
+    let parsed_request = wxc_common::config_parser::load_mxc_request_from_json_with_options(
+        &config_json,
+        &mut logger,
+        load_opts,
+    );
     let request = match parsed_request {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {

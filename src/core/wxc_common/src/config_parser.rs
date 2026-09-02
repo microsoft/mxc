@@ -111,55 +111,6 @@ fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcEr
     Ok(())
 }
 
-/// Top-level decoded-request classification shared by the executor binaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestKind {
-    OneShot,
-    StateAware,
-}
-
-/// Borrowed parse hints extracted from the top level of a decoded request JSON.
-///
-/// Executor binaries can parse this once and pass the same hint into the
-/// normal loaders so one-shot requests do not pay a second discriminator
-/// parse.
-#[derive(Debug, Clone)]
-pub struct RequestParseHint {
-    kind: RequestKind,
-    experimental: Option<Box<str>>,
-    experimental_span: Option<(usize, usize)>,
-}
-
-impl RequestParseHint {
-    pub fn kind(&self) -> RequestKind {
-        self.kind
-    }
-}
-
-/// Parse the top-level request discriminator from an already-decoded JSON
-/// string.
-pub fn parse_request_hint_from_json(json_str: &str) -> Result<RequestParseHint, WxcError> {
-    config_deserialize::from_str::<RequestDiscriminator<'_>>(json_str)
-        .map_err(|error| WxcError::ConfigParse(error.to_string()))
-        .and_then(|discriminator| {
-            let experimental_span = discriminator
-                .experimental
-                .map(|raw| experimental_source_span(json_str, raw.get()))
-                .transpose()?;
-            Ok(RequestParseHint {
-                kind: if discriminator.phase.is_some() {
-                    RequestKind::StateAware
-                } else {
-                    RequestKind::OneShot
-                },
-                experimental: discriminator
-                    .experimental
-                    .map(|raw| raw.get().to_string().into_boxed_str()),
-                experimental_span,
-            })
-        })
-}
-
 // ---------- Public API ----------
 
 /// Options for [`load_mxc_request_with_options`].
@@ -251,30 +202,19 @@ pub(crate) fn load_request_from_json_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<ExecutionRequest, WxcError> {
-    let hint = parse_request_hint_from_json(json_str)?;
-    load_request_from_json_with_hint_and_options(json_str, logger, opts, &hint)
-}
-
-pub fn load_request_from_json_with_hint_and_options(
-    json_str: &str,
-    logger: &mut Logger,
-    opts: LoadOptions,
-    hint: &RequestParseHint,
-) -> Result<ExecutionRequest, WxcError> {
     // `is_base64` is meaningless on an already-decoded JSON string; the field
     // is kept in `LoadOptions` for signature parity with the from-input path.
     let _ = opts.is_base64;
     let result = (|| {
-        match hint.kind() {
-            RequestKind::StateAware => {
-                return Err(WxcError::ConfigParse(
-                    "expected a one-shot execution request, got a state-aware lifecycle request"
-                        .to_string(),
-                ));
-            }
-            RequestKind::OneShot => {}
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        if discriminator.phase.is_some() {
+            return Err(WxcError::ConfigParse(
+                "expected a one-shot execution request, got a state-aware lifecycle request"
+                    .to_string(),
+            ));
         }
-        reject_legacy_telemetry_raw(hint.experimental.as_deref())?;
+        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
@@ -382,21 +322,10 @@ pub fn load_mxc_request_from_json_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
-    let hint = parse_request_hint_from_json(json_str).map_err(ParseError::Decode)?;
-    load_mxc_request_from_json_with_hint_and_options(json_str, logger, opts, &hint)
-}
-
-pub fn load_mxc_request_from_json_with_hint_and_options(
-    json_str: &str,
-    logger: &mut Logger,
-    opts: LoadOptions,
-    hint: &RequestParseHint,
-) -> Result<MxcRequest, ParseError> {
     // `is_base64` is meaningless on an already-decoded JSON string; the field
     // is kept in `LoadOptions` for signature parity with the from-input path.
     let _ = opts.is_base64;
-    let result =
-        parse_mxc_request_json_with_hint(json_str, hint, logger, opts.allow_missing_command);
+    let result = parse_mxc_request_json(json_str, logger, opts.allow_missing_command);
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
@@ -413,17 +342,14 @@ fn parse_mxc_request_json(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<MxcRequest, ParseError> {
-    let hint = parse_request_hint_from_json(json_str).map_err(ParseError::Decode)?;
-    parse_mxc_request_json_with_hint(json_str, &hint, logger, allow_missing_command)
-}
-
-fn parse_mxc_request_json_with_hint(
-    json_str: &str,
-    hint: &RequestParseHint,
-    logger: &mut Logger,
-    allow_missing_command: bool,
-) -> Result<MxcRequest, ParseError> {
-    if hint.kind() == RequestKind::StateAware {
+    let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
+        .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
+    if discriminator.phase.is_some() {
+        let experimental = discriminator.experimental.map(|raw| raw.get());
+        let experimental_span = experimental
+            .map(|raw| experimental_source_span(json_str, raw))
+            .transpose()
+            .map_err(ParseError::Decode)?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
         validate_versioned_fields(&raw).map_err(|error| {
@@ -431,15 +357,16 @@ fn parse_mxc_request_json_with_hint(
         })?;
         convert_wire_state_aware(
             json_str,
-            hint.experimental.as_deref(),
-            hint.experimental_span,
+            experimental,
+            experimental_span,
             logger,
             allow_missing_command,
         )
         .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        reject_legacy_telemetry_raw(hint.experimental.as_deref()).map_err(ParseError::OneShot)?;
+        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
+            .map_err(ParseError::OneShot)?;
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
