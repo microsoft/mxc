@@ -389,14 +389,6 @@
       }
     ],
     "weekly": [],
-    "enabled": [
-      {
-        "os": "windows-25h2",
-        "backends": [
-          "process-t3",
-          "wslc"
-        ]
-      }
-    ]
+    "enabled": []
   }
 }

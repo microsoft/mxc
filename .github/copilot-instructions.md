@@ -101,21 +101,14 @@ so the whole list is normally present before a job starts. The provisioning
 scripts are **not in this repository** — they live in the
 `validation-provision-artifacts` branch of the ADO repo as
 `ubuntu-debian-provision.sh` / `rhel-provision.sh` (Linux) and
-`windows-provision.ps1` (Windows). macOS
-verifies only; Linux first runs `install_workload_interpreters`, which re-runs
-the install as a top-up and is a no-op on a correctly built image (distribution
-repositories, plus Microsoft's feeds for `pwsh`/`az` and GitHub's for `gh`).
-Microsoft splits those two: `packages-microsoft-prod`
-carries `powershell` everywhere and `azure-cli` on RPM only, while on apt the
-Azure CLI has its own codename-keyed feed added by `add_azure_cli_apt_feed`,
-which probes for the suite before writing it and falls back to the newest
-published one for the family (Debian 13 `trixie` is not published). That pass is
-best-effort and can never fail the job —
-the inventory that follows reports the outcome. Its package-manager access goes
-through `resolve_package_manager` and `install_packages`, the same helpers the
-backend prerequisite installers use, so a new distribution family is one arm in
-`install_packages` rather than a branch in every installer. The Windows
-provisioning script installs
+`windows-provision.ps1` (Windows). No job installs a workload interpreter on any
+platform: all three scripts verify and report only, and a missing one warns
+rather than failing (except `pwsh` on Windows). A backend's own prerequisites
+are separate and are still installed per job — `install_bubblewrap` /
+`install_lxc` in `prepare-linux-host.sh` reach the package manager through
+`resolve_package_manager` and `install_packages`, so a new distribution family
+is one arm in `install_packages` rather than a branch in every installer. The
+Windows provisioning script installs
 no packaged application and never uses winget, because neither is available
 during image provisioning; it takes only `-Architecture` (`x64`/`arm64`, which
 selects the `gh` MSI and the .NET SDK bundle — the Azure CLI has no ARM64 build

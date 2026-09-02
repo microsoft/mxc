@@ -46,8 +46,7 @@ resolve_package_manager() {
 
 # install_packages <package>...
 # Installs from the feeds the host already has configured, and returns the
-# package manager's own status so each caller decides what a failure means: a
-# missing backend prerequisite is fatal, a missing workload interpreter is not.
+# package manager's own status so each caller decides what a failure means.
 install_packages() {
     case "$package_manager" in
         apt-get)
@@ -64,18 +63,6 @@ install_packages() {
             return 1
             ;;
     esac
-}
-
-# Returns 0 when any of the comma-separated candidates is on PATH.
-have_command() {
-    local candidate
-    local IFS=','
-    for candidate in $1; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 1
 }
 
 # Red Hat ships no third-party content, so epel-release is not in RHEL's own
@@ -255,281 +242,11 @@ enable_bridge_netfilter() {
     done
 }
 
-# PowerShell, the Azure CLI, and the GitHub CLI are in no distribution's own
-# repositories, so each comes from its vendor's feed. A feed is added at most
-# once and a failure is remembered, so the second tool wanting a broken feed
-# does not retry it.
-microsoft_feed_state=""
-add_microsoft_feed() {
-    case "$microsoft_feed_state" in
-        added) return 0 ;;
-        failed) return 1 ;;
-    esac
-    microsoft_feed_state="failed"
-
-    local id="" version_id=""
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id="${ID:-}"
-        version_id="${VERSION_ID:-}"
-    fi
-    if [[ -z "$id" || -z "$version_id" ]]; then
-        echo "WARNING: could not read the distribution from /etc/os-release; skipping the Microsoft package feed." >&2
-        return 1
-    fi
-
-    if [[ "$package_manager" == "apt-get" ]]; then
-        local package="/tmp/packages-microsoft-prod.deb"
-        if ! curl -fsSL \
-            "https://packages.microsoft.com/config/${id}/${version_id}/packages-microsoft-prod.deb" \
-            -o "$package"; then
-            echo "WARNING: no Microsoft package feed published for ${id} ${version_id}." >&2
-            return 1
-        fi
-        if ! sudo dpkg -i "$package"; then
-            rm -f "$package"
-            echo "WARNING: could not install the Microsoft package feed." >&2
-            return 1
-        fi
-        rm -f "$package"
-        apt_update
-    else
-        # The RPM feed is keyed on the major version alone.
-        if ! install_packages \
-            "https://packages.microsoft.com/config/rhel/${version_id%%.*}/packages-microsoft-prod.rpm"; then
-            echo "WARNING: could not install the Microsoft package feed." >&2
-            return 1
-        fi
-    fi
-
-    microsoft_feed_state="added"
-}
-
-# On apt the Azure CLI is not in packages-microsoft-prod. It is published to a
-# repository of its own, keyed by distribution codename rather than version, so
-# adding the prod feed and then asking for azure-cli resolves nothing and fails
-# with "E: Unable to locate package azure-cli". The RPM side needs none of this:
-# the prod feed carries azure-cli directly, which is why only Debian-family
-# hosts were affected.
-azure_cli_feed_state=""
-add_azure_cli_apt_feed() {
-    case "$azure_cli_feed_state" in
-        added) return 0 ;;
-        failed) return 1 ;;
-    esac
-    azure_cli_feed_state="failed"
-
-    local id="" codename=""
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id="${ID:-}"
-        codename="${VERSION_CODENAME:-}"
-    fi
-    if [[ -z "$codename" ]] && command -v lsb_release >/dev/null 2>&1; then
-        codename="$(lsb_release -cs 2>/dev/null || true)"
-    fi
-    if [[ -z "$codename" ]]; then
-        echo "WARNING: could not read the distribution codename; skipping the Azure CLI package feed." >&2
-        return 1
-    fi
-
-    # The vendor publishes a suite per codename and lags new releases, so the
-    # host's own codename may not exist yet. An unpublished suite must never
-    # reach a source list: apt then fails every later refresh against it, which
-    # would cost this host the packages that were going to install fine. Probe
-    # first, and fall back to the newest suite the vendor does publish for the
-    # family. The package vendors its own Python interpreter, so it does not
-    # bind to the release it was built against.
-    local suites=("$codename")
-    case "$id" in
-        debian) [[ "$codename" == "bookworm" ]] || suites+=(bookworm) ;;
-        ubuntu) [[ "$codename" == "noble" ]] || suites+=(noble) ;;
-    esac
-
-    local suite="" candidate
-    for candidate in "${suites[@]}"; do
-        if curl -fsL --head -o /dev/null \
-            "https://packages.microsoft.com/repos/azure-cli/dists/$candidate/Release"; then
-            suite="$candidate"
-            break
-        fi
-        echo "The Azure CLI feed publishes no '$candidate' suite." >&2
-    done
-
-    if [[ -z "$suite" ]]; then
-        echo "WARNING: the Azure CLI feed publishes no suite usable on ${id:-this distribution} '$codename'." >&2
-        return 1
-    fi
-    if [[ "$suite" != "$codename" ]]; then
-        echo "WARNING: the Azure CLI feed has no '$codename' suite; using '$suite' instead." >&2
-    fi
-
-    local keyring="/etc/apt/keyrings/microsoft.gpg"
-    if ! sudo install -d -m 0755 /etc/apt/keyrings; then
-        echo "WARNING: could not create the apt keyring directory." >&2
-        return 1
-    fi
-    if ! curl -fsSL https://packages.microsoft.com/keys/microsoft.asc |
-        gpg --dearmor | sudo dd of="$keyring" status=none; then
-        echo "WARNING: could not install the Microsoft signing key." >&2
-        return 1
-    fi
-    if ! sudo chmod go+r "$keyring"; then
-        echo "WARNING: could not make the Microsoft signing key readable." >&2
-        return 1
-    fi
-    if ! echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://packages.microsoft.com/repos/azure-cli/ $suite main" |
-        sudo tee /etc/apt/sources.list.d/azure-cli.list >/dev/null; then
-        echo "WARNING: could not write the Azure CLI package source." >&2
-        return 1
-    fi
-    apt_update
-
-    azure_cli_feed_state="added"
-}
-
-add_github_feed() {
-    if [[ "$package_manager" == "apt-get" ]]; then
-        local keyring="/usr/share/keyrings/githubcli-archive-keyring.gpg"
-        if ! curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg |
-            sudo dd of="$keyring" status=none; then
-            echo "WARNING: could not download the GitHub CLI signing key." >&2
-            return 1
-        fi
-        if ! sudo chmod go+r "$keyring"; then
-            echo "WARNING: could not make the GitHub CLI signing key readable." >&2
-            return 1
-        fi
-        if ! echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" |
-            sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null; then
-            echo "WARNING: could not write the GitHub CLI package source." >&2
-            return 1
-        fi
-        apt_update
-        return 0
-    fi
-
-    # config-manager is a separate package on some releases and is what adds the
-    # feed, so it is requested before it is used.
-    install_packages "dnf-command(config-manager)" >/dev/null 2>&1 || true
-    if ! sudo "$package_manager" config-manager \
-        --add-repo https://cli.github.com/packages/rpm/gh-cli.repo; then
-        echo "WARNING: could not add the GitHub CLI package feed." >&2
-        return 1
-    fi
-}
-
-# Installs the workload interpreters the image did not already provide.
-#
-# Host preparation verifies rather than installs wherever it can, because a
-# missing backend prerequisite means the image is wrong for the job. The
-# workload interpreters are the exception: they are ordinary developer tools the
-# package manager can supply in one transaction, which is cheaper than losing a
-# suite's coverage to a tool the image happened not to bake.
-#
-# Every step here is best effort and none of them fails the job. What the host
-# actually ended up with is reported by assert_workload_interpreters below.
-install_workload_interpreters() {
-    if ! resolve_package_manager; then
-        echo "WARNING: no supported package manager on this host; skipping workload interpreter installation." >&2
-        return 0
-    fi
-
-    # name|command candidates|apt package(s)|rpm package(s)
-    # npx has no package of its own; it arrives with npm. pwsh, az, and gh need
-    # a vendor feed and are handled separately below.
-    local packaged=(
-        "git|git|git|git"
-        "openssl|openssl|openssl|openssl"
-        "node|node|nodejs|nodejs"
-        "npm|npm|npm|npm"
-        "python|python3,python|python3|python3"
-        "pip|pip3,pip|python3-pip|python3-pip"
-        "dotnet|dotnet|dotnet-sdk-8.0|dotnet-sdk-8.0"
-    )
-
-    local entry name candidates apt_packages rpm_packages
-    local wanted=()
-    for entry in "${packaged[@]}"; do
-        IFS='|' read -r name candidates apt_packages rpm_packages <<<"$entry"
-        if have_command "$candidates"; then
-            continue
-        fi
-        # Deliberately unquoted: an entry may name more than one package.
-        if [[ "$package_manager" == "apt-get" ]]; then
-            wanted+=($apt_packages)
-        else
-            wanted+=($rpm_packages)
-        fi
-    done
-
-    local need_pwsh="false" need_az="false" need_gh="false"
-    have_command pwsh || need_pwsh="true"
-    have_command az || need_az="true"
-    have_command gh || need_gh="true"
-
-    if [[ ${#wanted[@]} -eq 0 && "$need_pwsh" == "false" &&
-        "$need_az" == "false" && "$need_gh" == "false" ]]; then
-        echo "All workload interpreters are already present; nothing to install."
-        return 0
-    fi
-
-    if [[ "$package_manager" == "apt-get" ]]; then
-        apt_update
-    fi
-
-    if [[ "$need_pwsh" == "true" || "$need_az" == "true" || "$need_gh" == "true" ]]; then
-        # Every feed is fetched over HTTPS and verified against a signing key,
-        # so these have to be present before any of them can be added.
-        install_packages ca-certificates curl gnupg ||
-            echo "WARNING: could not install the prerequisites for adding vendor package feeds." >&2
-    fi
-
-    if [[ "$need_pwsh" == "true" ]] && add_microsoft_feed; then
-        wanted+=(powershell)
-    fi
-
-    # Two different feeds: the prod feed carries azure-cli on the RPM side, but
-    # on apt it lives in the Azure CLI's own repository.
-    if [[ "$need_az" == "true" ]]; then
-        if [[ "$package_manager" == "apt-get" ]]; then
-            if add_azure_cli_apt_feed; then
-                wanted+=(azure-cli)
-            fi
-        elif add_microsoft_feed; then
-            wanted+=(azure-cli)
-        fi
-    fi
-
-    if [[ "$need_gh" == "true" ]] && add_github_feed; then
-        wanted+=(gh)
-    fi
-
-    if [[ ${#wanted[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    echo "Installing workload interpreters: ${wanted[*]}"
-    if install_packages "${wanted[@]}"; then
-        return 0
-    fi
-
-    # A single unavailable package fails the whole transaction, so retry them
-    # one at a time rather than leaving the host with none of them.
-    echo "WARNING: the combined install failed; retrying each package on its own." >&2
-    local package
-    for package in "${wanted[@]}"; do
-        install_packages "$package" ||
-            echo "WARNING: could not install package '$package'." >&2
-    done
-}
-
-# Verifies the interpreters test suites drive inside the sandbox. This runs
-# after install_workload_interpreters and reports what the host ended up with,
-# so a tool that could not be installed stays visible instead of silently
-# absent.
+# Verifies the interpreters test suites drive inside the sandbox and reports
+# what the image actually provides, so a tool the image was built without stays
+# visible instead of silently absent. These are baked into the image rather
+# than installed here: unlike a backend's prerequisites, they are ordinary
+# developer tools that every job expects to find already in place.
 #
 # The check is suite-agnostic: it describes what a validation host is expected
 # to provide, not what any one suite consumes, so a future suite that shells out
@@ -584,7 +301,6 @@ assert_workload_interpreters() {
 chmod +x "$binary_directory/lxc-exec"
 
 # Run for every backend: this is host inventory, not a backend prerequisite.
-install_workload_interpreters
 assert_workload_interpreters
 
 case "$backend" in

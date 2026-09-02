@@ -30,7 +30,7 @@ the individual local test scripts are documented in
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the packaged-tooling install. |
-| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter top-up pass. |
+| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
@@ -288,8 +288,7 @@ package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
 holds the single `case` that knows how each one is invoked. Supporting a new
 distribution family is therefore one new arm in `install_packages`, not another
 branch in every installer. `install_packages` returns the package manager's own
-status rather than acting on it, which is what lets a backend prerequisite treat
-a failure as fatal while a workload interpreter only warns.
+status rather than acting on it, so each caller decides what a failure means.
 
 `prepare-macos-host.sh`:
 
@@ -365,8 +364,13 @@ Every pool runs images pre-provisioned with programs installed by
 script covers `dotnet`, `choco`, `scoop`, `az`, `gh` and `nuget`; the remaining
 runtimes (`node`, `python`, `pwsh`, `git`) come from separate image artifacts.
 
-During the start of a job, the installed programs are inventoried. Windows also
-installs OpenSSL and WinApp via the repaired WinGet. 
+During the start of a job, the installed programs are inventoried; no job
+installs a workload interpreter. Windows is the one exception, installing
+OpenSSL and WinApp via the repaired WinGet, because both are published as
+packaged applications.
+
+A backend's own prerequisites are separate and are still installed per job by
+`prepare-linux-host.sh` — see [Host preparation](#host-preparation).
 
 ## Log collection
 
@@ -452,7 +456,7 @@ passing a distinguishing argument later without touching the matrix.
    package manager and service layout. A new package-manager family needs one
    arm in `install_packages` and one entry in `resolve_package_manager`; a
    family whose package *names* differ also needs its column in the tables in
-   `install_lxc`, `install_bubblewrap`, and `install_workload_interpreters`.
+   `install_lxc` and `install_bubblewrap`.
 5. Add it to a plan's `triggers`, then resolve locally.
 
 ### Wire an unwired backend to a suite
