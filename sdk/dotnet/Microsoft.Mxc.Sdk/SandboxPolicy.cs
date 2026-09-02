@@ -66,8 +66,8 @@ public sealed class SandboxPolicy
 
     /// <summary>
     /// Convenience projection for <see cref="Telemetry"/>. Serializes through
-    /// the canonical nested <c>telemetry.enabled</c> field, not the legacy
-    /// top-level alias accepted by the native FFI for compatibility.
+    /// the canonical nested <c>telemetry.enabled</c> field. The native FFI
+    /// rejects the legacy top-level <c>telemetryEnabled</c> alias.
     /// </summary>
     [JsonIgnore]
     public bool? TelemetryEnabled
