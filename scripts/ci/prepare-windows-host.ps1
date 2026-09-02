@@ -286,15 +286,24 @@ function Repair-Winget {
     }
 }
 
-# Re-reads PATH from the registry so a directory an installer just published is
-# visible to this process, which otherwise keeps the PATH it started with.
+# Appends the registry PATH entries this process has not picked up yet, so a
+# directory an installer just published becomes visible to a process that
+# otherwise keeps the PATH it started with.
 function Update-ProcessPath {
-    $parts = foreach ($scope in 'Machine', 'User') {
-        $value = [Environment]::GetEnvironmentVariable('Path', $scope)
-        if ($value) { $value -split ';' }
-    }
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $env:Path = (($parts | Where-Object { $_ -and $seen.Add($_) }) -join ';')
+    foreach ($entry in $env:Path -split ';') {
+        if ($entry) { [void]$seen.Add($entry.TrimEnd('\')) }
+    }
+
+    foreach ($scope in 'Machine', 'User') {
+        $value = [Environment]::GetEnvironmentVariable('Path', $scope)
+        if (-not $value) { continue }
+        foreach ($entry in $value -split ';') {
+            if ($entry -and $seen.Add($entry.TrimEnd('\'))) {
+                $env:Path = "$env:Path;$entry"
+            }
+        }
+    }
 }
 
 # Resolves a command the way Assert-WorkloadInterpreters does, so a tool this

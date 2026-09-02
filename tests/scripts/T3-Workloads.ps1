@@ -858,7 +858,8 @@ catch {
     Write-Host ''
     Write-Host "ABORT: $_" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
-    exit 2
+    # ABORT = FAIL test.
+    Record-Workload -Id 'ABORT' -Name 'harness aborted' -Status 'fail' -ExitCode 2 -Detail "$_"
 }
 finally {
     Section 'Summary'
