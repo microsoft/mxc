@@ -15,7 +15,7 @@ Schemas before 0.8 cannot use the new fields.
 | IP/CIDR entries in `blockedHosts` | `egress.deny[].to[].cidr` | Deny overrides allow |
 | DNS names in `allowedHosts` or `blockedHosts` | No GA equivalent | Schema 0.8 accepts only IP/CIDR rules |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
-| `allowLocalNetwork` | `ingress.default` | Capability gate; outbound follows `egress` |
+| `allowLocalNetwork` | `ingress.default` | Inbound policy; outbound follows `egress` |
 | No equivalent | `ingress.hostLoopback` | New bidirectional host-loopback connectivity control |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
@@ -30,8 +30,9 @@ is available. Compatibility paths require `ingress.default: "allow"` to grant Wi
 
 This table maps the immutable 0.7 wire fields. In schema 0.7, `allowLocalNetwork` expresses inbound bind/listen
 permission and is honored by Seatbelt; ProcessContainer capabilities are separate. It maps only to
-`ingress.default` and must not change `egress.default`. Under schema 0.8, ProcessContainer uses that ingress value as
-the capability gate for private-network traffic, while outbound private destinations remain subject to `egress`.
+`ingress.default` and must not change `egress.default`. Under schema 0.8, ProcessContainer compatibility paths use
+that ingress value as the capability gate for private-network traffic, while outbound private destinations remain
+subject to `egress`.
 
 ## Direct egress
 

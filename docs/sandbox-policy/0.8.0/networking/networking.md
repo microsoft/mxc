@@ -413,7 +413,9 @@ either posture.
 
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
   with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
-  AppContainer proxy uses its profile name. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
+  AppContainer proxy uses its profile name. A runtime proxy always requires `ingress.default: "allow"`; on
+  compatibility paths that setting also grants the bidirectional `privateNetworkClientServer` capability. With
+  `allowedProxyPeer`, proxy reachability remains scoped to that peer and
   endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and requires
   OS ingress policy support plus `ingress.hostLoopback: "allow"`; it does not provide the strict
   host-loopback-closure guarantee.

@@ -25,7 +25,7 @@ section 2 and is not equivalent to these guarantees.
 
 The examples below use the schema 0.8 network shape.
 
-Newer Windows builds enforce `ingress` through the OS ingress policy and remove the policy-owned
+Hosts that report OS ingress policy support enforce `ingress` through that policy and omit the policy-owned
 `privateNetworkClientServer` capability. Compatibility paths retain the bidirectional capability mapping, with WFP
 narrowing outbound access where available. The AppContainer fallback rejects combinations that its capability mapping
 cannot preserve. `ingress.hostLoopback: "allow"` requires OS ingress policy support.
@@ -138,7 +138,8 @@ An unpackaged non-AppContainer proxy has no package family or AppContainer profi
 This deployment requires OS ingress policy support; compatibility paths reject `hostLoopback: "allow"`. MXC
 identifies the proxy only by the configured endpoint and enables bidirectional host-loopback access. This is the
 lowest-enforcement deployment option because common WFP endpoint scoping remains, but Windows cannot verify which
-host process owns that endpoint. It is intended primarily for development and debugging.
+host process owns that endpoint. It is intended primarily for development and debugging and requires an installer- or
+administrator-owned firewall rule scoped to the proxy executable and configured port.
 
 #### HTTP client guidance
 
@@ -156,7 +157,8 @@ proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Dir
 apply when `runtimeConfig.networkProxy` is present.
 
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
-applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
+applies WFP endpoint scoping, and applies the OS ingress policy or, on compatibility paths, the private-network
+capability selected by `ingress.default`.
 
 The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
 the package family or AppContainer profile and applies the OS ingress policy or the compatibility capability selected
@@ -179,17 +181,18 @@ middle rows provide different protections and are not ordered relative to each o
 
 | Proxy deployment | `allowedProxyPeer` | Additional OS enforcement |
 |---|---|---|
-| Packaged AppContainer | Package family name | **Best:** AppContainer isolation and package identity; package firewall rule when required |
-| Unpackaged AppContainer | AppContainer profile name | AppContainer isolation; administrator firewall rule when required |
-| Packaged non-AppContainer | Package family name | Package identity without AppContainer isolation; package firewall rule when required |
-| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; administrator firewall rule when required |
+| Packaged AppContainer | Package family name | **Best:** AppContainer isolation, package identity, package firewall |
+| Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
+| Packaged non-AppContainer | Package family name | Package identity and package firewall; no AppContainer isolation |
+| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; administrator firewall |
 
-Windows Firewall behavior depends on the installed Windows build. If the proxy's inbound connection is blocked, a
-packaged AppContainer proxy can use the package-owned firewall declaration shown in the
+Neither the scoped peer rule nor the private-network access granted to the MXC client container bypasses Windows
+Firewall's block-inbound-to-non-allowed-apps policy for the proxy process. A packaged AppContainer proxy uses the
+package-owned firewall declaration shown in the
 [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
-can use an installer- or administrator-owned rule scoped to the AppContainer profile SID, proxy executable, and
-configured port.
+requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
+executable, and configured port.
 See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
