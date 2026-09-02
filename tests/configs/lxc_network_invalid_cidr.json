@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-Network-Invalid-CIDR",
   "containment": "lxc",
   "process": {
-    "commandLine": "wget -qO- https://api.github.com/zen"
+    "commandLine": "true"
   },
   "lifecycle": {
     "destroyOnExit": true

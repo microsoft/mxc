@@ -1,0 +1,39 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Run a JS/Python build or test runner offline. Highlights two Seatbelt-specific behaviors: AF_UNIX sockets are governed by the FILESYSTEM policy (worker IPC keeps working with the network fully denied), and nestedPty must stay true for anything that spawns a shell or pty.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Offline build: UNIX-socket IPC + pty, no network'; echo '============================================================'; echo ''; python3 - <<'MXCEOF'\nimport errno, os, socket, sys\nrc = 0\ndef report(label, expect, got, detail):\n    global rc\n    ok = (got == expect)\n    if not ok:\n        rc = 1\n    print(\"  %-46s %s\" % (label, \"SUCCESS\" if ok else \"ERROR\"))\n    print(\"       expected %-14s got %s%s\" % (expect, got, detail))\ndef fs(path):\n    try:\n        os.listdir(path) if os.path.isdir(path) else open(path, \"rb\").read(1)\n        return \"READABLE\", \"\"\n    except OSError as e:\n        return errno.errorcode.get(e.errno, str(e.errno)), \"  (%s)\" % e.strerror\ndef tcp(host, port):\n    s = socket.socket(); s.settimeout(5)\n    try:\n        s.connect((host, port)); return \"CONNECTED\", \"\"\n    except OSError as e:\n        return errno.errorcode.get(e.errno, str(e.errno)), \"  (%s)\" % e.strerror\n    finally:\n        s.close()\n\nprint(\"UNIX sockets are governed by the FILESYSTEM policy, not the network\")\nprint(\"policy -- so worker IPC keeps working under a total network deny.\")\nprint(\"\")\nd = \"/tmp/mxc_build/ipc\"; os.makedirs(d, exist_ok=True); sp = d + \"/w.sock\"\nif os.path.exists(sp): os.unlink(sp)\ntry:\n    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(sp); srv.listen(1)\n    cli = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); cli.connect(sp)\n    cli.close(); srv.close(); got = \"OK\"; det = \"\"\nexcept OSError as e:\n    got = errno.errorcode.get(e.errno, str(e.errno)); det = \"  (%s)\" % e.strerror\nreport(\"AF_UNIX bind+connect in readwritePaths\", \"OK\", got, det)\ng, x = tcp(\"1.1.1.1\", 443)\nreport(\"but IP networking is blocked\", \"EPERM\", g, x)\nprint(\"\")\nprint(\"pty allocation is gated by seatbelt.nestedPty.\")\ntry:\n    m, s = os.openpty(); ok = os.isatty(s); os.close(m); os.close(s)\n    got, det = (\"OK\", \"\") if ok else (\"NOTATTY\", \"\")\nexcept OSError as e:\n    got = errno.errorcode.get(e.errno, str(e.errno)); det = \"  (%s)\" % e.strerror\nreport(\"openpty succeeds (set nestedPty:false to see EPERM)\", \"OK\", got, det)\nprint(\"\")\nprint(\"Environment: cleared, then process.env applied on top.\")\nreport(\"SSH_AUTH_SOCK did not leak from the host\", \"unset\",\n       \"leaked\" if os.environ.get(\"SSH_AUTH_SOCK\") else \"unset\", \"\")\nreport(\"CI=1 from process.env is visible\", \"1\", os.environ.get(\"CI\", \"<unset>\"), \"\")\nreport(\"PATH starts with the configured /opt/homebrew/bin\", \"yes\",\n       \"yes\" if os.environ.get(\"PATH\", \"\").startswith(\"/opt/homebrew/bin:\") else \"no\",\n       \"  (PATH=%s)\" % os.environ.get(\"PATH\", \"\"))\nsys.exit(rc)\nMXCEOF\nrc=$?; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Offline build test complete!'; else echo 'Offline build test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "env": [
+            "PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME=/tmp",
+            "CI=1"
+        ],
+        "timeout": 45000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "/opt/homebrew"
+        ],
+        "deniedPaths": [
+            "/opt/homebrew/Cellar"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "deny"
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    },
+    "seatbelt": {
+        "nestedPty": true
+    }
+}

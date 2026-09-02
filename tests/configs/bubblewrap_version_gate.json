@@ -1,0 +1,8 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-Bubblewrap-Version-Gate",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo VERSION_GATE_WORKLOAD_RAN"
+  }
+}

@@ -11,7 +11,8 @@ use std::collections::HashSet;
 
 use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
+    ProxyAddress,
 };
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
@@ -149,6 +150,20 @@ fn uses_private_network_contract(request: &ExecutionRequest) -> bool {
     schema_enforces_network_strictly(&request.schema_version)
 }
 
+/// Whether the policy carries the 0.8 directional shape.
+///
+/// Either section is enough: the parser fills both together, but checking only
+/// one would route an ingress-only policy into the legacy path, where its
+/// directional intent is silently discarded. Shared by every site that splits
+/// directional from legacy so the fail-closed reading cannot drift apart.
+///
+/// Distinct from `wxc_common::validator::directional_posture_supplied`, which
+/// also folds in `network_mode_specified` and the proxy; the two are not
+/// interchangeable.
+pub(crate) fn is_directional(policy: &ContainerPolicy) -> bool {
+    policy.network_egress.is_some() || policy.network_ingress.is_some()
+}
+
 impl ResolvedNetworkMode {
     /// Classify the internal request using the proxy's resolved runtime state.
     pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
@@ -166,11 +181,8 @@ impl ResolvedNetworkMode {
         // read a policy that never said either as `Isolated` and take the
         // sandbox offline with the requested rules programmed nowhere.
         //
-        // Either section makes it directional, matching `EgressPlan::for_request`.
-        // Keying on `egress` alone sent an ingress-only request to the legacy
-        // arm, where a leftover `defaultPolicy='allow'` resolves to `Shared` and
-        // programs no chain -- discarding both the ingress denial and the
-        // host-loopback drop. A missing egress defaults to deny, failing closed.
+        // Either section makes it directional (see `is_directional`); a missing
+        // egress defaults to deny, failing closed.
         //
         // Directional never selects `Shared`: the host namespace has no inbound
         // primitive, and `network_ingress` has no `_specified` twin, so a
@@ -179,7 +191,7 @@ impl ResolvedNetworkMode {
         // "allow all outbound" policy with it. The private namespace honors
         // both directions, so an open egress posture becomes an accept-all
         // chain rather than an unfiltered namespace.
-        if request.policy.network_egress.is_some() || request.policy.network_ingress.is_some() {
+        if is_directional(&request.policy) {
             // Off the 0.8 contract there is no private namespace to program.
             // Report the unfiltered truth and let `validate` refuse it rather
             // than pretending the posture was applied.
@@ -383,6 +395,17 @@ pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
      'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
      or remove the host policy.";
 
+/// Rejection text for a proxy combined with firewall enforcement.
+///
+/// Duplicated (verbatim) from the parser's pre-existing check of the same
+/// combination, exactly as [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] is. The parser
+/// keeps its copy for JSON configs; this one covers callers who hand a runner
+/// an `ExecutionRequest` directly. Keep the two strings identical.
+pub const BWRAP_PROXY_WITH_FIREWALL: &str = "Bubblewrap: network.proxy cannot be combined with \
+     network.enforcementMode='firewall' or 'both'. The cooperative \
+     env-var proxy enforces hosts at the proxy layer; iptables-based \
+     enforcement requires privilege and is mutually exclusive.";
+
 /// Rejection text for a proxy combined with a directional egress rule set.
 ///
 /// Distinct from [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] because the two describe
@@ -442,16 +465,32 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     // would refuse every directional runtime proxy -- the one posture the
     // parser already constrains to `egress.default='deny'` with no direct
     // rules, which *is* proxy-only egress and carries no host lists that could
-    // be silently dropped. Either directional section makes it non-legacy,
-    // matching `EgressPlan::for_request` and `ResolvedNetworkMode::from_request`;
-    // keying on `egress` alone refused an ingress-only request as though the
-    // defaulted `Block` had been asked for.
-    let legacy_shape =
-        request.policy.network_egress.is_none() && request.policy.network_ingress.is_none();
+    // be silently dropped.
+    let legacy_shape = !is_directional(&request.policy);
     let conflicts = has_host_rules
         || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block);
 
     conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
+}
+
+/// Validate-time twin of the parser's proxy + firewall-enforcement rejection.
+///
+/// [`ResolvedNetworkMode::from_request`] tests the proxy first and returns
+/// `ProxyOnly`, so `enforcementMode` is never consulted on that path: without
+/// this gate the runner silently discards an explicitly-set, security-relevant
+/// field. Every *public* entry point reaches the runner through the parser
+/// today -- `mxc_engine::build_request*` maps a policy to wire JSON and runs
+/// `config_parser` over it, and `SandboxRequest`'s inner `ExecutionRequest` is
+/// `pub(crate)` -- so this is layer parity plus defense in depth for an in-tree
+/// caller holding an `ExecutionRequest`, not a live bypass. Not schema-gated,
+/// matching the parser.
+pub fn proxy_with_firewall_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    let conflicts = request.policy.network_proxy.is_enabled()
+        && matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        );
+    conflicts.then_some(BWRAP_PROXY_WITH_FIREWALL)
 }
 
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
@@ -583,6 +622,13 @@ pub(crate) fn build_args_classified_with_mode(
             .map(String::from),
     );
 
+    // `--unshare-pid` alone does not make killing our `bwrap` handle tear the
+    // sandbox down: bwrap forks, so pid 1 of the new namespace is that child,
+    // not the process we spawned. Without this flag a backgrounded descendant
+    // outlives a timeout kill and keeps running after `run_teardown()` has
+    // removed the network enforcement it was sandboxed by.
+    args.push("--die-with-parent".into());
+
     // Network: full-block and proxy modes use a private namespace. Proxy mode
     // receives rootless connectivity from the runner's slirp supervisor.
     // Per-host firewall mode continues to share the host namespace.
@@ -691,6 +737,7 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
@@ -806,6 +853,15 @@ mod tests {
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--unshare-ipc".to_string()));
         assert!(args.contains(&"--unshare-uts".to_string()));
+    }
+
+    /// Dropping this flag silently reintroduces a real leak: a backgrounded
+    /// descendant survives the timeout kill and keeps running after teardown
+    /// has removed its network enforcement.
+    #[test]
+    fn basic_args_request_die_with_parent() {
+        let args = build_args(&base_request(), None);
+        assert!(args.contains(&"--die-with-parent".to_string()));
     }
 
     struct NetworkPlanCase {
@@ -1150,6 +1206,81 @@ mod tests {
         assert!(external_proxy_host_rules_rejection(&r).is_none());
     }
 
+    /// The parser refuses this pairing, and every public entry point reaches
+    /// the runner through the parser -- so this pins the runner's own twin
+    /// rather than a live bypass. Without it, `from_request` returns
+    /// `ProxyOnly` before `enforcementMode` is read, and an in-tree caller
+    /// holding an `ExecutionRequest` has the field dropped without a word.
+    #[test]
+    fn a_proxy_with_firewall_enforcement_is_rejected() {
+        let mut r = base_request();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
+
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
+            r.policy.network_enforcement_mode = mode.clone();
+            assert_eq!(
+                proxy_with_firewall_rejection(&r),
+                Some(BWRAP_PROXY_WITH_FIREWALL),
+                "{mode:?} must be refused with the parser's own message"
+            );
+        }
+
+        // `is_enabled()` covers both proxy flavors, so the builtin refuses too.
+        let mut builtin = base_request();
+        builtin.policy.network_proxy.builtin_test_server = true;
+        builtin.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        assert!(proxy_with_firewall_rejection(&builtin).is_some());
+
+        // Negative controls: the default mode never invokes iptables, and the
+        // gate must key on the proxy rather than on the mode alone.
+        r.policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
+        assert!(proxy_with_firewall_rejection(&r).is_none());
+
+        r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        r.policy.network_proxy.address = None;
+        assert!(proxy_with_firewall_rejection(&r).is_none());
+    }
+
+    /// The runner's copy of the message must stay identical to the parser's.
+    ///
+    /// [`BWRAP_PROXY_WITH_FIREWALL`] is hand-duplicated from a string literal
+    /// inside `config_parser`, so nothing at the type level keeps the two in
+    /// step. Rather than compare against a second hardcoded copy -- which would
+    /// just move the drift -- this drives the real parser and asserts its
+    /// emitted message *is* the constant, so editing either side alone fails
+    /// here.
+    #[test]
+    fn the_parser_and_the_runner_reject_with_the_same_message() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let mut logger = Logger::new(Mode::Buffer);
+        let error = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+            .expect_err("the parser refuses proxy + firewall enforcement");
+        // Assert on the variant too: a message match would otherwise still pass
+        // if the config started failing for an unrelated reason.
+        let wxc_common::config_parser::ParseError::OneShot(inner) = &error else {
+            panic!("expected a one-shot conversion failure, got: {error:?}");
+        };
+        let message = format!("{inner}");
+
+        assert!(
+            message.contains(BWRAP_PROXY_WITH_FIREWALL),
+            "the parser's message has drifted from BWRAP_PROXY_WITH_FIREWALL.\n\
+             parser: {message}\n runner: {BWRAP_PROXY_WITH_FIREWALL}"
+        );
+    }
+
     /// A directional runtime proxy must not trip the legacy host-list guard.
     ///
     /// `default_network_policy` is a legacy-shape field the directional path
@@ -1370,6 +1501,39 @@ mod tests {
             "the host namespace programs no chain, so the deny posture would be lost"
         );
         assert!(mode.uses_private_netns(), "{mode:?}");
+    }
+
+    /// The predicate is now shared by three call sites, so pin it directly:
+    /// a per-site test would let one drift without failing the others.
+    #[test]
+    fn either_directional_section_alone_marks_the_policy_directional() {
+        use wxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+
+        let cases = [
+            (None, None, false),
+            (Some(NetworkEgressPolicy::default()), None, true),
+            (None, Some(NetworkIngressPolicy::default()), true),
+            (
+                Some(NetworkEgressPolicy::default()),
+                Some(NetworkIngressPolicy::default()),
+                true,
+            ),
+        ];
+
+        for (egress, ingress, expected) in cases {
+            let policy = ContainerPolicy {
+                network_egress: egress.clone(),
+                network_ingress: ingress.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                is_directional(&policy),
+                expected,
+                "egress={:?} ingress={:?}",
+                egress.is_some(),
+                ingress.is_some()
+            );
+        }
     }
 
     /// Build a directional request: no legacy network field is touched, which

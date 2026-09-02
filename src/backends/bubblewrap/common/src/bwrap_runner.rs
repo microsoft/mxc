@@ -92,7 +92,107 @@ impl SandboxBackend for BubblewrapScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.validate_prepared(request).map(|_| ())
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        validate_common(request)?;
+        // Keep the plan validation derived so the firewall path installs
+        // exactly what was accepted instead of deriving it again.
+        let egress_plan = self.validate_prepared(request)?;
+        if let Some(plan) = egress_plan.as_ref() {
+            warn_unreachable_v6_targets(plan, logger);
+        }
+        // Tighten aliases of the same host object to the strictest intent
+        // (deny > ro > rw). Done here, close to mount, to minimize the TOCTOU
+        // window; an unresolvable path with deniedPaths present fails closed.
+        let normalized;
+        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+            &request.policy,
+            logger,
+        ) {
+            Ok(Some(policy)) => {
+                normalized = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &normalized
+            }
+            Ok(None) => request,
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
+        };
+        // Reject any policy path the invoking user cannot access, so the sandbox
+        // never gains access the caller lacks. Runs after object normalization
+        // so it sees the already-tightened intents.
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return Err(ScriptResponse::error(&msg));
+        }
+        // Resolve denied paths that traverse a symlink to their real host path
+        // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
+        // Only clones the request when a path needs rewriting (common case:
+        // none). See docs/bwrap-support/bubblewrap-backend.md.
+        let plan = match resolve_denied_paths(&request.policy, logger) {
+            Ok(plan) => plan,
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
+        };
+        let resolved;
+        let request = match plan.paths {
+            Some(denied_paths) => {
+                let mut policy = request.policy.clone();
+                policy.denied_paths = denied_paths;
+                resolved = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &resolved
+            }
+            None => request,
+        };
+        // The masks are built from the list above, not from the one the caller
+        // wrote, so the pin conflict has to be judged against it too.
+        if let Err(msg) = check_pin_against_denied_hosts(request) {
+            return Err(ScriptResponse::error(&msg));
+        }
+        let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
+        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+    }
+}
+
+impl BubblewrapScriptRunner {
+    /// `validate`, plus the egress plan it derived.
+    ///
+    /// Returning the plan lets `spawn` install exactly what validation
+    /// accepted instead of deriving it a second time on every spawn.
+    fn validate_prepared(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse> {
+        // Execution validation deliberately bypasses the advisory success
+        // cache: a prior platform-support query must not approve a different
+        // executable after `PATH` or its contents change.
+        self.validate_prepared_with_probe(request, bwrap_version::probe_bwrap_uncached)
+    }
+
+    /// `validate_prepared` with an injectable environment probe.
+    ///
+    /// Tests use this to assert that user-input validation runs *before* the
+    /// environmental `bwrap` probe, and to drive every probe failure without
+    /// depending on what the host happens to have installed.
+    fn validate_prepared_with_probe<F>(
+        &self,
+        request: &ExecutionRequest,
+        probe: F,
+    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse>
+    where
+        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+    {
         validate_network_policy_support(request, self.network_policy_support())?;
+
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -150,9 +250,18 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // This is the only layer that checks what Bubblewrap can enforce: the
         // parser validates structure, and it only sees JSON configs, while a
         // Rust caller can build an `ExecutionRequest` and reach the runner
-        // directly. (The external-proxy case is the exception — the parser has
-        // rejected that combination since before this backend gained its own
-        // validation, so both layers refuse it.)
+        // directly. (The two proxy cases below are the exception — the parser
+        // has rejected those combinations since before this backend gained its
+        // own validation, so both layers refuse them.)
+        //
+        // Order matches the parser's: a proxy with an explicit firewall mode is
+        // also caught by the external-proxy check below (a default policy of
+        // `Block` alone satisfies it), so checking that first would hand the
+        // caller a different message than the parser gives for the same
+        // request.
+        if let Some(reason) = bwrap_command::proxy_with_firewall_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
         if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
@@ -209,16 +318,19 @@ impl SandboxBackend for BubblewrapScriptRunner {
         let firewall_enforced =
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::FirewallEnforced;
-        if firewall_enforced {
-            if let Err(error) = network_rules::EgressPlan::for_request(request) {
-                return Err(ScriptResponse::error(&error));
+        let egress_plan = if firewall_enforced {
+            match network_rules::EgressPlan::for_request(request) {
+                Ok(plan) => Some(plan),
+                Err(error) => return Err(ScriptResponse::error(&error)),
             }
-        }
+        } else {
+            None
+        };
 
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
-        if let Err(err) = bwrap_version::probe_bwrap() {
+        if let Err(err) = probe() {
             return Err(ScriptResponse::error(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
@@ -235,73 +347,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
-        Ok(())
-    }
-
-    fn spawn(
-        &mut self,
-        request: &ExecutionRequest,
-        logger: &mut Logger,
-        stdio: StdioMode,
-    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        validate_common(request)?;
-        self.validate(request)?;
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw). Done here, close
-        // to mount — config_parser stays string-only and the TOCTOU window
-        // between check and mount is minimized. Only clone the request when an
-        // aliasing conflict actually needs tightening (the common case is none);
-        // an unresolvable path with deniedPaths present fails closed.
-        let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
-            &request.policy,
-            logger,
-        ) {
-            Ok(Some(policy)) => {
-                normalized = ExecutionRequest {
-                    policy,
-                    ..request.clone()
-                };
-                &normalized
-            }
-            Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
-        };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents (a path moved rw -> denied must not then require write access).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
-        // Resolve denied paths that traverse a symlink to their real host path
-        // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
-        // Only clones the request when a path needs rewriting (common case:
-        // none). See docs/bwrap-support/bubblewrap-backend.md.
-        let plan = match resolve_denied_paths(&request.policy, logger) {
-            Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
-        };
-        let resolved;
-        let request = match plan.paths {
-            Some(denied_paths) => {
-                let mut policy = request.policy.clone();
-                policy.denied_paths = denied_paths;
-                resolved = ExecutionRequest {
-                    policy,
-                    ..request.clone()
-                };
-                &resolved
-            }
-            None => request,
-        };
-        // The masks are built from the list above, not from the one the caller
-        // wrote, so the pin conflict has to be judged against it too.
-        if let Err(msg) = check_pin_against_denied_hosts(request) {
-            return Err(ScriptResponse::error(&msg));
-        }
-        let child = self.spawn_bwrap(request, &plan.files, logger, stdio)?;
-        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+        Ok(egress_plan)
     }
 }
 
@@ -327,6 +373,34 @@ fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), Stri
     }
 }
 
+/// Warn that an IPv6 allow rule installs but cannot carry traffic.
+///
+/// It fails closed, so this warns rather than rejects: refusing would break
+/// configs the schema accepts today (see #955). Emitted from `spawn`, which has
+/// a logger and which every caller reaches, so the JSON and programmatic paths
+/// both hear it from one site.
+///
+/// Uses [`Logger::warning_line`], not `log_line`: it is the only sink both
+/// paths actually read. `log_line` lands in the console/debug buffer, which
+/// `mxc_engine::spawn` never folds into `Output::warnings` and which
+/// `lxc-exec` prints only on an error path (and only under `--debug`, onto
+/// stdout, where it would interleave with the workload's own output).
+fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Logger) {
+    let targets = plan.allowed_v6_targets();
+    if targets.is_empty() {
+        return;
+    }
+    logger.warning_line(&format!(
+        "WARNING: Bubblewrap allows {} IPv6 destination(s) ({}), but the sandbox \
+         namespace has no IPv6 connectivity: slirp4netns is launched without \
+         '--enable-ipv6', so these rules install and are never traversed. The \
+         destination stays unreachable despite the rule. Use an IPv4 address, or \
+         network.proxy, if the workload needs to reach it.",
+        targets.len(),
+        targets.join(", ")
+    ));
+}
+
 impl BubblewrapScriptRunner {
     /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] wrapped
     /// by the [`SandboxProcess`] handle. With [`StdioMode::Pipes`] the child's
@@ -337,6 +411,7 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
         denied_files: &HashSet<String>,
+        egress_plan: Option<network_rules::EgressPlan>,
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
@@ -409,12 +484,19 @@ impl BubblewrapScriptRunner {
             // endpoint. There is no hostname to pin because rule addresses are
             // literals and CIDRs only.
             None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
-                let plan = match network_rules::EgressPlan::for_request(request) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                // Reuse the validated plan. It is derived from network policy
+                // only, which the filesystem normalization between the two
+                // points cannot touch. Recompute only if the resolved mode
+                // disagrees with validation's pre-spawn proxy reading.
+                let plan = match egress_plan {
+                    Some(plan) => plan,
+                    None => match network_rules::EgressPlan::for_request(request) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            proxy.stop(logger);
+                            return Err(ScriptResponse::error(&error));
+                        }
+                    },
                 };
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,
@@ -512,8 +594,8 @@ impl BubblewrapScriptRunner {
                     .stderr(Stdio::piped());
             }
             StdioMode::Inherit => {
-                // The child (bwrap, PID 1 of the sandbox) inherits the binary's
-                // stdio directly — a TTY when the binary has one.
+                // The child (bwrap) inherits the binary's stdio directly — a
+                // TTY when the binary has one.
                 command
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
@@ -523,9 +605,10 @@ impl BubblewrapScriptRunner {
         // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
         // can tree-kill it with a single `killpg` without touching the host's
         // group. Inherit mode keeps bwrap in the executor's group (so it retains
-        // the controlling terminal and can't be SIGTTIN-stopped reading it); it's
-        // PID 1 of the new pid namespace (`--unshare-pid`), so killing the root
-        // process alone tears the whole sandbox down.
+        // the controlling terminal and can't be SIGTTIN-stopped reading it);
+        // there, killing bwrap relies on `--die-with-parent` to take the
+        // sandbox down, since bwrap forks and is not itself PID 1 of the new
+        // pid namespace.
         let group = stdio == StdioMode::Pipes;
         if group {
             command.process_group(0);
@@ -638,7 +721,7 @@ struct BwrapChild {
     stderr_canceller: Option<ReadCanceller>,
     /// `true` when bwrap leads its own process group (`Pipes` mode), so
     /// termination signals the whole group; `false` for `Inherit` mode, where
-    /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
+    /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
     group: bool,
     proxy: UnixProxyCoordinator,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
@@ -730,8 +813,9 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         } else {
             // Inherit mode: bwrap shares the executor's group (no
             // `process_group(0)`), so a group-kill would hit the executor.
-            // bwrap is pid 1 of the sandbox pid namespace, so killing the root
-            // alone tears the whole namespace (every descendant) down.
+            // Killing bwrap alone suffices because `--die-with-parent` makes
+            // the sandbox die with it — bwrap is *not* pid 1 of the namespace
+            // (it forks), so without that flag descendants would survive.
             self.inner.child.kill()
         }
     }
@@ -751,8 +835,8 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             Err(WaitError::Timeout) => {
                 // Tree-kill so descendants die too and release any stdout/stderr
                 // pipe write-ends (else the drain threads below could block).
-                // `kill()` group-kills in Pipes mode, and in Inherit mode kills
-                // bwrap (pid 1 of the namespace), which tears the sandbox down.
+                // `kill()` group-kills in Pipes mode; in Inherit mode it kills
+                // bwrap, which `--die-with-parent` turns into a full teardown.
                 let _ = self.kill();
                 let _ = self.inner.child.wait();
                 Err(std::io::Error::new(
@@ -784,8 +868,8 @@ impl Drop for BubblewrapSandboxProcess {
         // Kill and reap the child *before* removing network enforcement —
         // otherwise an abandoned-but-running sandbox would keep egressing after
         // its iptables/proxy rules were torn down, and the child would leak as
-        // a zombie. `kill()` group-kills (bwrap is PID 1 of the pid namespace),
-        // then we reap.
+        // a zombie. `kill()` group-kills in `Pipes` mode and relies on
+        // `--die-with-parent` otherwise, then we reap.
         let _ = self.kill();
         let _ = self.inner.child.wait();
         self.run_teardown();
@@ -1336,6 +1420,72 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_allow_warns_that_it_cannot_carry_traffic() {
+        let mut req = base_request();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["2001:db8::1".into(), "203.0.113.5".into()];
+        let plan =
+            network_rules::EgressPlan::for_request(&req).expect("both literals are enforceable");
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_unreachable_v6_targets(&plan, &mut logger);
+        let out = logger.warnings().join("\n");
+        assert!(
+            out.contains("2001:db8::1"),
+            "must name the v6 target: {out}"
+        );
+        assert!(
+            !out.contains("203.0.113.5"),
+            "must not name the reachable v4 target: {out}"
+        );
+        // The retained-warning channel is the point: the debug buffer is not
+        // read back by `mxc_engine::spawn`, so a warning left there is silent.
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
+        );
+
+        // Nothing unreachable, nothing to say.
+        let mut v4_only = base_request();
+        v4_only.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        v4_only.policy.allowed_hosts = vec!["203.0.113.5".into()];
+        let plan =
+            network_rules::EgressPlan::for_request(&v4_only).expect("a v4 literal is enforceable");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_unreachable_v6_targets(&plan, &mut logger);
+        assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
+    }
+
+    #[test]
+    fn validate_reports_the_proxy_firewall_conflict_ahead_of_the_external_proxy_gate() {
+        // A bare programmatic request trips both gates: the default policy is
+        // `Block`, which on its own satisfies the external-proxy check. The
+        // parser reports the proxy/firewall conflict first, so the runner must
+        // too, or the two layers name different problems for one request.
+        let mut req = base_request();
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+
+        // Both gates must fire, or this asserts nothing about ordering.
+        assert!(bwrap_command::external_proxy_host_rules_rejection(&req).is_some());
+        assert!(bwrap_command::proxy_with_firewall_rejection(&req).is_some());
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner
+            .validate(&req)
+            .expect_err("the combination is refused");
+        assert!(
+            err.error_message
+                .contains(bwrap_command::BWRAP_PROXY_WITH_FIREWALL),
+            "expected the parser's proxy/firewall message, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
     fn validate_does_not_locally_gate_builtin_test_server() {
         // The builtinTestServer gate moved to `wxc_common::validator::validate_common`
         // (enforced centrally for every backend). The bwrap runner must therefore no
@@ -1349,7 +1499,9 @@ mod tests {
         req.testing_features_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        assert!(runner.validate(&req).is_ok());
+        assert!(runner
+            .validate_prepared_with_probe(&req, || Ok(bwrap_version::MIN_BWRAP_VERSION))
+            .is_ok());
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
@@ -1883,7 +2035,11 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("environment probe must not run for invalid input")
+            })
+            .unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
     }
 
@@ -1926,6 +2082,28 @@ mod tests {
             "the rejection leaked the password it was rejecting: {}",
             err.error_message
         );
+    }
+
+    #[test]
+    fn validate_surfaces_every_environment_probe_failure() {
+        let request = base_request();
+        let failures = [
+            bwrap_version::BwrapUnavailable::NotFound,
+            bwrap_version::BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
+            bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
+            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+        ];
+
+        for failure in failures {
+            let expected = failure.to_string();
+            let error = BubblewrapScriptRunner::new()
+                .validate_prepared_with_probe(&request, || Err(failure))
+                .unwrap_err();
+            assert_eq!(error.error_message, expected);
+        }
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
