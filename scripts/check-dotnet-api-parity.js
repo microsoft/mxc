@@ -206,22 +206,21 @@ function managedJsonFields(source, className) {
     });
 }
 
-// `legacyManagedOnly` lists managed JSON fields that intentionally have no Rust
-// counterpart because they are deprecated compatibility aliases. They must stay
-// serializable so legacy JSON round-trips, but the managed request path strips
-// them before the native layer sees them.
+// `managedOnly` lists managed JSON fields intentionally represented outside the
+// Rust policy builder. Compatibility aliases are stripped before native parsing;
+// telemetry is extracted by the FFI and applied through SandboxRequest.
 function compareStructFields(
   label,
   rustSource,
   rustName,
   managedSource,
   managedName,
-  legacyManagedOnly = []
+  managedOnly = []
 ) {
   compare(
     `${label} fields`,
     managedJsonFields(managedSource, managedName).filter(
-      (field) => !legacyManagedOnly.includes(field)
+      (field) => !managedOnly.includes(field)
     ),
     rustStructFields(rustSource, rustName)
   );
@@ -312,12 +311,18 @@ for (const [
   rustSource,
   rustName,
   managedName,
-  legacyManagedOnly,
+  managedOnly,
 ] of [
   // `captureDenials` is an obsolete managed-only alias (MXC0001, removed in
   // 1.0). Rust only accepts it under `containment.captureDenials`, and
   // MxcSandbox.PrepareRequest strips it from the policy before serialization.
-  ["sandbox policy", rustPolicy, "SandboxPolicy", "SandboxPolicy", ["captureDenials"]],
+  [
+    "sandbox policy",
+    rustPolicy,
+    "SandboxPolicy",
+    "SandboxPolicy",
+    ["captureDenials", "telemetry"],
+  ],
   ["filesystem policy", rustPolicy, "FilesystemSection", "FilesystemPolicy"],
   ["UI policy", rustPolicy, "UiSection", "UiPolicy"],
   ["network policy", rustNetworkPolicy, "NetworkSection", "NetworkPolicy"],
@@ -334,7 +339,7 @@ for (const [
     rustName,
     managedPolicy,
     managedName,
-    legacyManagedOnly
+    managedOnly
   );
 }
 const managedOneShot = [

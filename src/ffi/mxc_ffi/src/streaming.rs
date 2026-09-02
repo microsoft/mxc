@@ -998,11 +998,11 @@ mod tests {
         for (policy_json, expected) in [
             (r#"{"version":"0.8.0-alpha"}"#, None),
             (
-                r#"{"version":"0.8.0-alpha","telemetry":{"enabled":true}}"#,
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true}}"#,
                 Some(true),
             ),
             (
-                r#"{"version":"0.8.0-alpha","telemetry":{"enabled":false}}"#,
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false}}"#,
                 Some(false),
             ),
             (

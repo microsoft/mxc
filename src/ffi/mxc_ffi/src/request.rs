@@ -15,10 +15,37 @@ use mxc_sdk::{
 };
 use serde_json::Value;
 
+struct RequestPolicy {
+    policy: SandboxPolicy,
+    telemetry_enabled: Option<bool>,
+}
+
+impl RequestPolicy {
+    fn sdk_policy(&self) -> &SandboxPolicy {
+        &self.policy
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RequestPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+        let policy_json = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
+        let (policy, telemetry_enabled) =
+            crate::parse_policy_json(&policy_json).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            policy,
+            telemetry_enabled,
+        })
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RequestSpec {
-    policy: SandboxPolicy,
+    policy: RequestPolicy,
     command: String,
     #[serde(default)]
     containment: RequestContainment,
@@ -235,14 +262,20 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     let spec: RequestSpec = serde_json::from_value(value).map_err(malformed_request)?;
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&spec.policy, &containment, spec.container_name.as_deref())?;
+    let mut request = build_request_with_containment(
+        spec.policy.sdk_policy(),
+        &containment,
+        spec.container_name.as_deref(),
+    )?;
     request.set_script(spec.command);
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
     request.set_env(spec.environment);
     request.set_experimental(spec.experimental);
+    if let Some(enabled) = spec.policy.telemetry_enabled {
+        request.set_telemetry_enabled(enabled);
+    }
     Ok(request)
 }
 
@@ -268,9 +301,10 @@ mod tests {
             process_spec.environment.get("PARITY").map(String::as_str),
             Some("true")
         );
-        assert_eq!(process_spec.policy.timeout_ms, Some(30_000));
+        assert_eq!(process_spec.policy.sdk_policy().timeout_ms, Some(30_000));
         let filesystem = process_spec
             .policy
+            .sdk_policy()
             .filesystem
             .as_ref()
             .expect("filesystem policy is preserved");
@@ -280,6 +314,7 @@ mod tests {
         assert_eq!(filesystem.clear_policy_on_exit, Some(true));
         let ui = process_spec
             .policy
+            .sdk_policy()
             .ui
             .as_ref()
             .expect("UI policy is preserved");
@@ -288,6 +323,7 @@ mod tests {
         assert!(!ui.allow_input_injection);
         let authored_network = process_spec
             .policy
+            .sdk_policy()
             .network
             .as_ref()
             .expect("network policy is preserved");
@@ -344,6 +380,7 @@ mod tests {
         ));
         let network = network_spec
             .policy
+            .sdk_policy()
             .network
             .as_ref()
             .expect("directional network policy is preserved");
@@ -427,6 +464,45 @@ mod tests {
         assert!(error
             .message
             .contains("policy.captureDenials is not supported"));
+    }
+
+    #[test]
+    fn policy_telemetry_reaches_the_sdk_request() {
+        for enabled in [true, false] {
+            let request = build_request_from_json(&format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha",
+                        "telemetry": {{ "enabled": {enabled} }}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            ))
+            .expect("request with telemetry should build");
+
+            assert_eq!(request.telemetry_enabled(), Some(enabled));
+        }
+    }
+
+    #[test]
+    fn policy_telemetry_rejects_pre_09_schema() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.8.0-alpha",
+                    "telemetry": { "enabled": true }
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("canonical telemetry must honor the native schema boundary");
+
+        assert!(
+            error
+                .message
+                .contains("requires config schema version 0.9.0-alpha"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -401,10 +401,52 @@ fn telemetry_enabled_from_policy(policy: &FfiPolicyEnvelope) -> Result<Option<bo
     }
 }
 
+fn validate_canonical_telemetry_version(value: &serde_json::Value) -> Result<(), String> {
+    let Some(policy) = value.as_object() else {
+        return Ok(());
+    };
+    if !policy.contains_key("telemetry") {
+        return Ok(());
+    }
+    let Some(version) = policy.get("version").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Some(core) = version.split(['-', '+']).next() else {
+        return Ok(());
+    };
+    let mut components = core.split('.');
+    let (Some(major), Some(minor), Some(patch), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return Ok(());
+    };
+    let (Ok(major), Ok(minor), Ok(_patch)) = (
+        major.parse::<u64>(),
+        minor.parse::<u64>(),
+        patch.parse::<u64>(),
+    ) else {
+        return Ok(());
+    };
+    if major == 0 && minor < 9 {
+        return Err(
+            "failed to parse policy JSON: top-level 'telemetry' requires config schema version \
+             0.9.0-alpha or later"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_policy_json(
     policy_json: &str,
 ) -> Result<(SandboxPolicy, Option<bool>), String> {
-    let envelope: FfiPolicyEnvelope = serde_json::from_str(policy_json)
+    let value: serde_json::Value = serde_json::from_str(policy_json)
+        .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
+    validate_canonical_telemetry_version(&value)?;
+    let envelope: FfiPolicyEnvelope = serde_json::from_value(value)
         .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
     let telemetry_enabled = telemetry_enabled_from_policy(&envelope)?;
     Ok((envelope.policy, telemetry_enabled))
@@ -1045,11 +1087,19 @@ mod tests {
     #[test]
     fn policy_telemetry_switch_accepts_canonical_shape() {
         let (policy, telemetry_enabled) =
-            parse_policy_json(r#"{"version":"0.8.0-alpha","telemetry":{"enabled":true}}"#)
+            parse_policy_json(r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true}}"#)
                 .expect("policy should parse");
 
-        assert_eq!(policy.version, "0.8.0-alpha");
+        assert_eq!(policy.version, "0.9.0-alpha");
         assert_eq!(telemetry_enabled, Some(true));
+    }
+
+    #[test]
+    fn policy_telemetry_switch_rejects_canonical_shape_before_schema_09() {
+        let error = parse_policy_json(r#"{"version":"0.8.0-alpha","telemetry":{"enabled":true}}"#)
+            .expect_err("canonical telemetry must honor the native schema boundary");
+
+        assert!(error.contains("requires config schema version 0.9.0-alpha"));
     }
 
     #[test]
@@ -1073,7 +1123,7 @@ mod tests {
     #[test]
     fn policy_telemetry_switch_rejects_conflicting_shapes() {
         let error = parse_policy_json(
-            r#"{"version":"0.8.0-alpha","telemetry":{"enabled":false},"telemetryEnabled":true}"#,
+            r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false},"telemetryEnabled":true}"#,
         )
         .expect_err("conflicting telemetry fields must fail");
 
@@ -1085,11 +1135,11 @@ mod tests {
         for (policy_json, expected) in [
             (r#"{"version":"0.8.0-alpha"}"#, None),
             (
-                r#"{"version":"0.8.0-alpha","telemetry":{"enabled":true}}"#,
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true}}"#,
                 Some(true),
             ),
             (
-                r#"{"version":"0.8.0-alpha","telemetry":{"enabled":false}}"#,
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false}}"#,
                 Some(false),
             ),
             (
