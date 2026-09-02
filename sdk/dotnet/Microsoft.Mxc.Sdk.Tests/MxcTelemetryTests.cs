@@ -78,7 +78,7 @@ public sealed class MxcTelemetryTests
     }
 
     [Fact]
-    public void RequestConsentAsync_PreservesCallerSynchronizationContext_OnWindows()
+    public async Task RequestConsentAsync_PreservesCallerSynchronizationContext_OnWindows()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -100,10 +100,10 @@ public sealed class MxcTelemetryTests
                 Assert.Same(context, SynchronizationContext.Current);
                 Assert.Equal(callerThread, Environment.CurrentManagedThreadId);
                 return TelemetryConsentDecision.Yes;
-            });
+            }, cancellationToken: TestContext.Current.CancellationToken);
 
             context.RunUntilCompleted(request);
-            Assert.Equal(TelemetryConsentResult.Granted, request.GetAwaiter().GetResult().Result);
+            Assert.Equal(TelemetryConsentResult.Granted, (await request).Result);
         }
         finally
         {
