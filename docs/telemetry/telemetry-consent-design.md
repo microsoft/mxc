@@ -96,36 +96,6 @@ If the host never calls the request API, telemetry remains off. A presenter
 failure must be surfaced as an error to the host and must not create or alter a
 grant.
 
-## Executor consent command
-
-Consent maintenance is a dedicated executor control plane, not an MXC
-execution configuration:
-
-```text
-wxc-exec --telemetry-consent status
-wxc-exec --telemetry-consent withdraw
-wxc-exec --telemetry-consent request
-```
-
-`request` optionally accepts `--telemetry-consent-locale <BCP-47>`; missing or
-unsupported locales use the canonical `en-US` fallback. Interactive requests
-write the prompt to stderr, read `Y` or `N` from a terminal, and write one final
-JSON outcome to stdout. A request without terminal stdin and stderr fails
-without changing consent.
-
-When standard input and output are pipes, `request` uses the Node host
-presentation callback. Native MXC emits at most one `presentationRequired`
-JSON line followed by one final JSON line. The host returns exactly one JSON
-decision line containing the emitted challenge, prompt resource version, and
-`yes`, `no`, or `dismissed`. Input is limited to 64 KiB; malformed input,
-unknown fields, extra lines, challenge mismatch, and resource-version mismatch
-are rejected without persistence.
-
-Domain outcomes exit `0`. Invalid command/protocol input exits `64`.
-Operational failures such as a missing terminal, required-decision EOF, broken
-pipe, presenter failure, or persistence failure exit `1`. `status`,
-`withdraw`, and short-circuit request outcomes never invoke a presenter.
-
 ## State and persistence
 
 MXC stores consent per user at:
