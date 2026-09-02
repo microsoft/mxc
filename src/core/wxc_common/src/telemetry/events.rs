@@ -84,6 +84,25 @@ pub struct ExecutionEvent<'a> {
     pub correlation_vector: &'a str,
 }
 
+/// One independently parseable chunk of a Learning Mode verbose document.
+#[derive(Debug, Clone, Copy)]
+pub struct VerboseEvent<'a> {
+    pub backend: &'a str,
+    pub sandbox_kind: &'a str,
+    pub phase: &'a str,
+    pub correlation_vector: &'a str,
+    pub document_id: &'a str,
+    pub document_version: u32,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub document_bytes: u64,
+    pub document_sha256: &'a str,
+    /// Compact JSON array of complete `VerboseLoggingAggregate` objects.
+    pub content: &'a str,
+    /// Compact JSON `VerboseLoggingDocumentSummary` object.
+    pub summary: &'a str,
+}
+
 /// Log an Execution ETW event.
 ///
 /// Delegates to the `mxc_telemetry` provider which adds common fields
@@ -127,6 +146,29 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
     test_sink::record_error(ctx, error_type, exit_code);
 }
 
+/// Log one `MXC.VerboseDenials` ETW event.
+pub fn log_verbose(event: &VerboseEvent<'_>) -> u32 {
+    let status = mxc_telemetry::log_verbose(
+        event.backend,
+        event.sandbox_kind,
+        event.phase,
+        event.correlation_vector,
+        event.document_id,
+        event.document_version,
+        event.chunk_index,
+        event.chunk_count,
+        event.document_bytes,
+        event.document_sha256,
+        event.content,
+        event.summary,
+    );
+
+    #[cfg(test)]
+    test_sink::record_verbose(event);
+
+    status
+}
+
 /// In-memory capture sink for the two ETW emit calls, so tests can assert the
 /// records that the real emit glue (`emit_panic` / `emit_cancellation` /
 /// `emit_state_aware`) produces without an ETW consumer. Inert unless a test
@@ -134,7 +176,7 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
 /// `mxc_telemetry` call regardless.
 #[cfg(test)]
 pub(super) mod test_sink {
-    use super::{ExecutionEvent, FailureReason, TelemetryContext};
+    use super::{ExecutionEvent, FailureReason, TelemetryContext, VerboseEvent};
     use std::cell::Cell;
     use std::sync::Mutex;
 
@@ -161,6 +203,23 @@ pub(super) mod test_sink {
         pub correlation_vector: String,
     }
 
+    /// Owned copy of an `MXC.VerboseDenials` record as captured for a test.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CapturedVerbose {
+        pub backend: String,
+        pub sandbox_kind: String,
+        pub phase: String,
+        pub correlation_vector: String,
+        pub document_id: String,
+        pub document_version: u32,
+        pub chunk_index: u32,
+        pub chunk_count: u32,
+        pub document_bytes: u64,
+        pub document_sha256: String,
+        pub content: String,
+        pub summary: String,
+    }
+
     thread_local! {
         /// Per-thread capture flag. Thread-local (not a global `AtomicBool`) so a
         /// stray emit on another thread — e.g. a concurrent `#[should_panic]`
@@ -172,6 +231,7 @@ pub(super) mod test_sink {
 
     static EXECUTIONS: Mutex<Vec<CapturedExecution>> = Mutex::new(Vec::new());
     static ERRORS: Mutex<Vec<CapturedError>> = Mutex::new(Vec::new());
+    static VERBOSE: Mutex<Vec<CapturedVerbose>> = Mutex::new(Vec::new());
 
     /// Start capturing emitted records into the sink (and clear any leftovers).
     /// The caller must hold the telemetry `TEST_LOCK` for the capture window.
@@ -185,6 +245,7 @@ pub(super) mod test_sink {
         INSTALLED.with(|f| f.set(false));
         EXECUTIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        VERBOSE.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Drain and return the captured `Execution` records.
@@ -195,6 +256,11 @@ pub(super) mod test_sink {
     /// Drain and return the captured `Error` records.
     pub fn take_errors() -> Vec<CapturedError> {
         std::mem::take(&mut *ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Drain and return the captured `MXC.VerboseDenials` records.
+    pub fn take_verbose() -> Vec<CapturedVerbose> {
+        std::mem::take(&mut *VERBOSE.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub(super) fn record_execution(event: &ExecutionEvent<'_>) {
@@ -235,6 +301,29 @@ pub(super) mod test_sink {
                 correlation_vector: ctx.correlation_vector.to_owned(),
             });
     }
+
+    pub(super) fn record_verbose(event: &VerboseEvent<'_>) {
+        if !INSTALLED.with(|f| f.get()) {
+            return;
+        }
+        VERBOSE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(CapturedVerbose {
+                backend: event.backend.to_owned(),
+                sandbox_kind: event.sandbox_kind.to_owned(),
+                phase: event.phase.to_owned(),
+                correlation_vector: event.correlation_vector.to_owned(),
+                document_id: event.document_id.to_owned(),
+                document_version: event.document_version,
+                chunk_index: event.chunk_index,
+                chunk_count: event.chunk_count,
+                document_bytes: event.document_bytes,
+                document_sha256: event.document_sha256.to_owned(),
+                content: event.content.to_owned(),
+                summary: event.summary.to_owned(),
+            });
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +340,33 @@ mod tests {
         assert_eq!(FailureReason::InternalError.as_str(), "internal_error");
         assert_eq!(FailureReason::Cancelled.as_str(), "cancelled");
         assert_eq!(FailureReason::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn verbose_event_is_captured_with_parseable_json_fields() {
+        test_sink::install();
+        log_verbose(&VerboseEvent {
+            backend: "processcontainer",
+            sandbox_kind: "process",
+            phase: "",
+            correlation_vector: "",
+            document_id: "0123456789abcdef0123456789abcdef",
+            document_version: 2,
+            chunk_index: 0,
+            chunk_count: 1,
+            document_bytes: 64,
+            document_sha256: "abc",
+            content: "[]",
+            summary: r#"{"totalOccurrences":0}"#,
+        });
+
+        let captured = test_sink::take_verbose();
+        test_sink::clear();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&captured[0].content).unwrap(),
+            serde_json::json!([])
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&captured[0].summary).is_ok());
     }
 }

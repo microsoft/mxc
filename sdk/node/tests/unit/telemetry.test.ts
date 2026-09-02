@@ -23,7 +23,7 @@ import {
 const prompt: TelemetryConsentPrompt = {
   resourceVersion: 1,
   locale: 'en-US',
-  title: { id: 'telemetry.consent.title', text: 'Help improve Microsoft eXecution Container (MXC)' },
+  title: { id: 'telemetry.consent.title', text: 'Help improve Microsoft Products' },
   body: { id: 'telemetry.consent.body', text: 'canonical body' },
   affirmativeLabel: { id: 'telemetry.consent.yes', text: 'Yes' },
   negativeLabel: { id: 'telemetry.consent.no', text: 'No' },

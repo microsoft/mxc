@@ -92,7 +92,7 @@ generations, so missing or inconsistent membership notifications fail closed.
 Guarded capture tracks at most 4096 root-plus-descendant process generations
 per execution. Exceeding that bound fails capture teardown and emits no denial
 output rather than continuing with an incomplete process scope.
-The owner never supplies PID/time scopes. Only bounded canonical denial data
+The owner never supplies PID/time scopes. Only bounded actionable denial data
 returns; raw ETL does not cross into the SDK result. If no containment tier can
 honor the policy, or the guarded PLM helper is unavailable, the request fails
 as `backend_unavailable`.

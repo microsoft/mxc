@@ -105,9 +105,10 @@ stays enforced:
    hosts use native capture without PLM or UAC, while legacy or incompatible
    tiers use the session-scoped guarded-WPR fallback and elevate only its
    fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
-   relocates them to `denials.json` and `trace.etl`, and generates the source
-   snapshot and `Adjusted_*.json` from canonical denials without decoding ETL
-   again. Truncated analysis skips the adjusted config.
+   relocates the policy output, its verbose logging sibling, and the trace to
+   `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
+   source snapshot and `Adjusted_*.json` from the policy denials without decoding
+   ETL again. Truncated analysis skips the adjusted config.
 
    ```
    wxc-exec --audit --config <config>
@@ -171,8 +172,8 @@ ungranted access is handled while it is recorded:
 ### Output file the caller consumes
 
 After the sandboxed workload exits, MXC decodes the captured denials and writes
-them to a **single JSON file** — the deliverable a host application reads to
-regenerate its sandbox policy:
+the policy JSON deliverable a host application reads to regenerate its
+sandbox policy:
 
 ```json
 {
@@ -203,14 +204,19 @@ regenerate its sandbox policy:
 - `denials` is already de-duplicated per `(resource, accessType)`, so
   `summary.totalDenials` equals `denials.length`.
 - Analysis retains at most 10,000 unique denials and processes at most
-  1,000,000 ETW events. Reaching either bound stops further analysis and sets
-  `summary.deniedResourcesTruncated` to `true`.
+  1,000,000 ETW events. Reaching the unique-denial bound stops adding policy
+  entries but continues bounded diagnostic accounting; reaching either bound
+  sets `summary.deniedResourcesTruncated` to `true`.
 - `resource` is the user-visible identifier for the denied resource,
-  interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
+  interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
   and the raw resource identifier otherwise. Well-known capability SIDs are
   resolved to their policy name; custom (hashed) capability SIDs that can't be
-  reversed fall back to the `S-1-15-3-…` SID string.
+  reversed fall back to the `S-1-15-3-…` SID string. Named Section,
+  SymbolicLink, and Timer checks are verbose-only because the config has no
+  corresponding policy grants. Event 28 is
+  schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
+  resources instead of treating the package SID as a capability.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
   `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
   denials are recorded under `block`; current `allow` traces expose capability
@@ -218,6 +224,120 @@ regenerate its sandbox policy:
   not carry a stable capability identifier.
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
+
+### Verbose logging event signatures
+
+Every successful decode also writes a deterministic sibling file:
+`denials.<run-id>.json` produces `denials.<run-id>.verbose.json`. This verbose
+logging artifact is a bounded, sensitive-value-redacted superset containing
+policy denial occurrences plus diagnostic outcomes omitted from the policy file:
+
+```json
+{
+  "version": 2,
+  "signatures": [
+    {
+      "signature": {
+        "provider": "kernelGeneral",
+        "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
+        "eventId": 14,
+        "reason": "actionable",
+        "pid": 4321,
+        "accessType": "read",
+        "resourceType": "file",
+        "properties": [
+          ["PackageSid", "S-1-15-3-1"],
+          ["resource", "<REDACTED>"]
+        ]
+      },
+      "count": 37
+    }
+  ],
+  "summary": {
+    "totalOccurrences": 37,
+    "overflowOccurrences": 0,
+    "actionableOverflowOccurrences": 0,
+    "aggregateGroupsTruncated": false,
+    "processedEventsTruncated": false,
+    "actionableLimitReached": false
+  }
+}
+```
+
+Signatures are keyed by symbolic provider category, provider GUID,
+provider-scoped event ID, closed outcome reason, PID, and sorted sanitized
+properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
+non-file resource values are retained. Complete file paths are replaced with
+`<REDACTED>`; standalone user/account names remain replaced with
+`<redacted-user>`.
+Exact header timestamps and timestamp-like properties are omitted so otherwise
+identical events deduplicate, and free-form decoder errors are never serialized.
+
+Every valid actionable denial is classified as `actionable` in the verbose
+file, including its first occurrence, later duplicates, and candidates observed
+after the actionable file's unique-denial bound. Those occurrences deduplicate
+under the same signature and increment its count. `accessType` and
+`resourceType` are included when denial extraction determined them; diagnostic
+outcomes without those classifications omit the fields.
+
+Candidates excluded from the actionable output retain a closed diagnostic
+reason and their sanitized event properties:
+
+- `notActionable` includes registry writes, registry checks whose access mask
+  cannot be classified as a read, and recognized Section, SymbolicLink, and
+  Timer checks. MXC has no corresponding policy grants, so reporting them in
+  the actionable `captureDenials` file would not give the caller an action it
+  could take. They remain available in verbose logging with their classified
+  access type and sanitized resource.
+- `unusableResourcePath` means a File access-check resource could not be
+  converted to a safe absolute DOS or UNC path. For example,
+  `\Device\MountPointManager` is useful Devices-namespace evidence, but it is
+  not a directly authorable filesystem grant.
+- `unsupportedObjectType` means the event names a resource outside the
+  supported diagnostic model. Examples include `\BaseNamedObjects` as a
+  Directory, ALPC Ports such as
+  `ubpmtaskhostchannel`, and RPC Interface GUIDs.
+
+Property values longer than 256 characters retain bounded prefix and suffix
+context plus a SHA-256 digest of the complete sanitized value. This keeps long
+named-object resources individually identifiable when they share a prefix
+without exceeding the per-property bound. Redaction occurs before the digest is computed, so neither retained context nor
+a digest is derived from a sensitive value.
+
+Unknown event IDs from known Learning Mode providers are classified as
+`unsupportedEventSchema`; the real ETL path retains their provider GUID and
+PID without attempting an unsupported TDH payload decode.
+
+Per-event TDH failures use closed diagnostic reasons:
+`eventPayloadMalformed` means the payload conflicts with its declared schema,
+`decoderLimitReached` means a nesting/element/work safety bound stopped
+decoding, and `unsupportedPropertyEncoding` means the decoder cannot consume
+that property shape. When TDH exposes it, the schema-declared name is retained
+as the bounded `EventName` signature property. Free-form decoder errors are
+never serialized. Failure to obtain the event schema remains a fatal analysis
+error rather than being represented as a verbose logging signature.
+
+To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
+signatures, 24 sorted properties per signature, and 256 characters per property
+value. `overflowOccurrences` and `aggregateGroupsTruncated` indicate that
+additional diagnostic groups were omitted. `actionableOverflowOccurrences`
+counts omitted actionable-denial occurrences, while `processedEventsTruncated`
+indicates that the 1,000,000-event limit prevented complete accounting. The
+actionable file itself is never reduced to make room for verbose logging.
+
+The actionable and verbose logging files fail together: MXC stages both and reports
+capture failure unless both final artifacts are committed. The verbose logging path
+is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
+metadata; callers derive it from the actionable output path using the naming rule
+above.
+
+When stable telemetry is enabled and authorized, MXC may validate, compact, and
+send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
+event contains a valid JSON array of complete signatures and document
+reconstruction metadata. Before emission, MXC derives provider GUIDs from the
+closed provider enum and drops every verbose property name and value. MXC does
+not send the actionable denials file, workload-derived properties, or raw ETL
+through telemetry. See [MXC telemetry](../telemetry/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
@@ -232,8 +352,8 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 {"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 ```
 
-The pointer echoes the file's `summary`; the authoritative record is the file
-itself. In-process Rust callers receive the same information through
+The pointer echoes the policy file's `summary`; that file is the authoritative
+record of denials. In-process Rust callers receive the same summary information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
 `MxcSandboxProcess.OutputMetadata`.

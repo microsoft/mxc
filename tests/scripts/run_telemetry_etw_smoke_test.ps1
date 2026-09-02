@@ -33,9 +33,9 @@ if ($wxcExe -match '\\release\\') {
     throw 'Release binaries are refused: telemetry smoke isolation depends on debug-only test overrides.'
 }
 $expectedBody = @'
-Help improve MXC by sharing optional diagnostic data with Microsoft.
+Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
+
 If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
-You can change your choice at any time.
 '@ -replace "`r`n", "`n"
 
 $configFile = Join-Path $repoRoot 'tests\examples\28_telemetry_enabled.json'
@@ -100,9 +100,9 @@ function Invoke-CanonicalGrant {
     if ($presentation.result -ne 'presentationRequired' -or -not $presentation.challenge -or -not $presentation.prompt) {
         throw "Unexpected consent presentation: $presentationLine"
     }
-    if ($presentation.prompt.resourceVersion -ne 1 -or
+    if ($presentation.prompt.resourceVersion -ne 3 -or
         $presentation.prompt.locale -ne 'en-US' -or
-        $presentation.prompt.title.text -ne 'Help improve Microsoft eXecution Container (MXC)' -or
+        $presentation.prompt.title.text -ne 'Help improve Microsoft Products' -or
         $presentation.prompt.body.text -ne $expectedBody -or
         $presentation.prompt.affirmativeLabel.text -ne 'Yes' -or
         $presentation.prompt.negativeLabel.text -ne 'No' -or
@@ -168,7 +168,7 @@ try {
             consent = $seed
             source = 'etw-smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 1
+            promptResourceVersion = 3
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }

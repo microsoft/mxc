@@ -1274,8 +1274,11 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "learning_mode_core"
 version = "0.7.0"
 dependencies = [
+ "same-file",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1286,6 +1289,7 @@ dependencies = [
  "flatbuffers",
  "learning_mode_core",
  "process_security_environment_spec",
+ "sha2 0.10.9",
  "thiserror",
  "windows",
  "windows-core",
@@ -1527,6 +1531,7 @@ version = "0.7.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
+ "getrandom 0.2.17",
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
@@ -1537,6 +1542,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "windows",
  "windows_sandbox_lifecycle",

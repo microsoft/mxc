@@ -287,6 +287,62 @@ mod provider {
             str8("__TlgCV__", correlation_vector),
         );
     }
+
+    /// Emit one independently parseable chunk of a Learning Mode verbose
+    /// logging document.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_verbose(
+        backend: &str,
+        sandbox_kind: &str,
+        phase: &str,
+        correlation_vector: &str,
+        document_id: &str,
+        document_version: u32,
+        chunk_index: u32,
+        chunk_count: u32,
+        document_bytes: u64,
+        document_sha256: &str,
+        content: &str,
+        summary: &str,
+    ) -> u32 {
+        let state = match STATE.get() {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        let is_debug_build = cfg!(debug_assertions);
+
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.VerboseDenials",
+            level(Informational),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", &state.version),
+                str8("Channel", &state.channel),
+                bool8("IsDebugging", &is_debug_build),
+                bool8("UTCReplace_AppSessionGuid", &true),
+            }),
+            str8("mxc.backend", backend),
+            str8("mxc.sandbox_kind", sandbox_kind),
+            str8("mxc.phase", phase),
+            str8("__TlgCV__", correlation_vector),
+            str8("mxc.document_id", document_id),
+            u32("mxc.document_version", &document_version),
+            u32("mxc.chunk_index", &chunk_index),
+            u32("mxc.chunk_count", &chunk_count),
+            u64("mxc.document_bytes", &document_bytes),
+            str8("mxc.document_sha256", document_sha256),
+            str8("mxc.content", content),
+            str8("mxc.summary", summary),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +386,24 @@ mod provider {
         _correlation_vector: &str,
     ) {
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_verbose(
+        _backend: &str,
+        _sandbox_kind: &str,
+        _phase: &str,
+        _correlation_vector: &str,
+        _document_id: &str,
+        _document_version: u32,
+        _chunk_index: u32,
+        _chunk_count: u32,
+        _document_bytes: u64,
+        _document_sha256: &str,
+        _content: &str,
+        _summary: &str,
+    ) -> u32 {
+        0
+    }
 }
 
 pub use provider::*;
@@ -362,6 +436,10 @@ mod tests {
             provider_source.contains("\"MXC.Error\","),
             "error event identity changed"
         );
+        assert!(
+            provider_source.contains("\"MXC.VerboseDenials\","),
+            "verbose event identity changed"
+        );
         let error_section = provider_source
             .split("\"MXC.Error\",")
             .nth(1)
@@ -391,28 +469,28 @@ mod tests {
             provider_source
                 .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
                 .count(),
-            2,
+            3,
             "every MXC event must carry privacy product 11"
         );
         assert_eq!(
             provider_source
                 .matches("\"PartA_PrivacyDataCategory\"")
                 .count(),
-            2,
+            3,
             "every MXC event must carry a privacy data category"
         );
         assert_eq!(
             provider_source
                 .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
                 .count(),
-            2,
+            3,
             "every MXC event must use Client Diagnostic Data category 1"
         );
         assert_eq!(
             provider_source
                 .matches("u64(\"PartA_PrivTags\", &PDT_PRODUCT_AND_SERVICE_USAGE)")
                 .count(),
-            2,
+            3,
             "every MXC event must retain its approved privacy tag"
         );
     }
@@ -498,6 +576,27 @@ mod tests {
     }
 
     #[test]
+    fn log_verbose_after_init() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = init("0.0.0-test", "dev");
+        log_verbose(
+            "processcontainer",
+            "process",
+            "",
+            "",
+            "0123456789abcdef0123456789abcdef",
+            2,
+            0,
+            1,
+            64,
+            "abc",
+            "[]",
+            r#"{"totalOccurrences":0}"#,
+        );
+        shutdown();
+    }
+
+    #[test]
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         log_execution(
@@ -511,6 +610,7 @@ mod tests {
             "",
         );
         log_error("test_backend", "test_backend", "unknown", 1, "", "");
+        log_verbose("", "", "", "", "", 0, 0, 0, 0, "", "[]", "{}");
     }
 
     #[test]
@@ -544,6 +644,7 @@ mod tests {
         let _ = init("", "");
         log_execution("", "", 0, "", 0, "", "", "");
         log_error("", "", "", 0, "", "");
+        log_verbose("", "", "", "", "", 0, 0, 0, 0, "", "[]", "{}");
         shutdown();
     }
 

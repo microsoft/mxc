@@ -1,16 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Canonical Learning Mode analysis and compatibility views for `plm.exe`.
+//! Actionable Learning Mode analysis and compatibility views for `plm.exe`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use learning_mode_core::{
-    write_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary, DenialsDocument,
-    DeniedResource, ResourceType,
+    verbose_logging_sibling_path, write_document, write_paired_output_files,
+    write_verbose_logging_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary,
+    DenialsDocument, DeniedResource, ExistingOutputPolicy, ResourceType, VerboseLoggingDocument,
 };
 use learning_mode_windows::EtlDenialAnalyzer;
 
@@ -24,7 +24,8 @@ pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
         .with_context(|| format!("failed to analyze {}", trace_file.display()))
 }
 
-/// Write canonical denials JSON atomically and return the document that was written.
+/// Write actionable denials JSON and its verbose logging sibling, then return the
+/// actionable document.
 pub fn write_denials(
     output_path: &Path,
     analysis: &AnalysisResult,
@@ -40,20 +41,21 @@ pub fn write_denials(
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials.clone(), summary);
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("failed to create denials temp file in {}", parent.display()))?;
-    write_document(&mut temp, &document)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-    temp.flush()
-        .and_then(|_| temp.as_file().sync_all())
-        .with_context(|| format!("failed to flush {}", output_path.display()))?;
-    temp.persist(output_path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to replace {}", output_path.display()))?;
+    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
+    let verbose_logging_path = verbose_logging_sibling_path(output_path)
+        .with_context(|| format!("failed to derive sibling for {}", output_path.display()))?;
+    write_paired_output_files(
+        "plm stop",
+        output_path,
+        &verbose_logging_path,
+        ExistingOutputPolicy::Replace,
+        |writer| write_document(writer, &document),
+        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
+    )?;
     Ok(document)
 }
 
-/// Build the temporary legacy config-generator inputs from canonical denials.
+/// Build the temporary legacy config-generator inputs from actionable denials.
 ///
 /// The adjusted-config generator is removed in the regeneration work item.
 /// Until then, this adapter preserves its existing file/capability behavior
@@ -158,7 +160,7 @@ fn is_local_drive_path(path: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
-/// Print a concise human-readable view of canonical denials.
+/// Print a concise human-readable view of actionable denials.
 pub fn write_detection_summary(analysis: &AnalysisResult) {
     println!();
     println!("Detected denials ({}):", analysis.denials.len());
@@ -196,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_inputs_are_derived_only_from_canonical_file_and_capability_denials() {
+    fn legacy_inputs_are_derived_only_from_actionable_file_and_capability_denials() {
         let denials = [
             denial(r"C:\read.txt", ResourceType::File, AccessType::Read),
             denial(r"C:\write.txt", ResourceType::File, AccessType::Write),
@@ -286,19 +288,44 @@ mod tests {
     }
 
     #[test]
-    fn canonical_document_preserves_analysis_results() {
+    fn actionable_document_preserves_analysis_results() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("denials.json");
         let analysis = AnalysisResult {
             denials: vec![denial(r"C:\read.txt", ResourceType::File, AccessType::Read)],
             denied_resources_truncated: true,
+            verbose_logging: Default::default(),
         };
 
         write_denials(&path, &analysis, 7).unwrap();
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
+        let verbose_logging_document: learning_mode_core::VerboseLoggingDocument =
+            serde_json::from_slice(&std::fs::read(verbose_logging_path).unwrap()).unwrap();
         assert_eq!(document.denials, analysis.denials);
         assert_eq!(document.summary.exit_code, 7);
         assert!(document.summary.denied_resources_truncated);
+        assert_eq!(verbose_logging_document.summary.total_occurrences, 0);
+    }
+
+    #[test]
+    fn actionable_promotion_failure_removes_verbose_logging_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("denials.json");
+        std::fs::create_dir(&path).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
+        let analysis = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: Default::default(),
+        };
+
+        let error = write_denials(&path, &analysis, 0).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot replace non-file actionable"));
+        assert!(!verbose_logging_path.exists());
     }
 }

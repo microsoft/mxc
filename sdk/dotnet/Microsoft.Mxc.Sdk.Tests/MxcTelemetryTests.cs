@@ -199,7 +199,7 @@ public sealed class MxcTelemetryTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(
             path,
-            $$"""{"schemaVersion":2,"consent":"{{consent}}","source":"test","promptedMxcVersion":"0.0.0","promptResourceVersion":1,"promptLocale":"en-US","updatedAtEpoch":0}""");
+            $$"""{"schemaVersion":2,"consent":"{{consent}}","source":"test","promptedMxcVersion":"0.0.0","promptResourceVersion":3,"promptLocale":"en-US","updatedAtEpoch":0}""");
     }
 
     public void Dispose()
@@ -248,14 +248,14 @@ public sealed class MxcTelemetryTests : IDisposable
 
         var outcome = MxcTelemetry.RequestConsent(prompt =>
         {
-            Assert.Equal(1u, prompt.ResourceVersion);
+            Assert.Equal(3u, prompt.ResourceVersion);
             Assert.Equal("en-US", prompt.Locale);
-            Assert.Equal("Help improve Microsoft eXecution Container (MXC)", prompt.Title.Text);
+            Assert.Equal("Help improve Microsoft Products", prompt.Title.Text);
             Assert.Equal(
                 """
-                Help improve MXC by sharing optional diagnostic data with Microsoft.
+                Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
+
                 If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
-                You can change your choice at any time.
                 """.ReplaceLineEndings("\n"),
                 prompt.Body.Text);
             Assert.Equal("Yes", prompt.AffirmativeLabel.Text);

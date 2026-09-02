@@ -225,13 +225,13 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 wxc-exec.exe --audit policy.json
 ```
 
-Successful non-dry-run audits require capture metadata, canonical denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the canonical JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
+Successful non-dry-run audits require capture metadata, actionable denials JSON, its verbose diagnostic sibling, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json`, `denials.verbose.json`, and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps both JSON files and the ETL but has no source config to snapshot or adjust. Truncated analysis keeps both JSON files, the ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
 ## Telemetry
 
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution`, `MXC.Error`, and the sanitized Learning Mode artifact event `MXC.VerboseDenials`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
 Telemetry requires:
 1. Top-level `"telemetry": { "enabled": true }` in the JSON config
@@ -275,15 +275,21 @@ consent is not applicable.
 
 #### What official builds send
 
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution` and `MXC.Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution`, `MXC.Error`, and `MXC.VerboseDenials` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
-No PII is collected. Events contain only execution metrics (duration, backend
-type, exit code) and a bounded error category (`error_type`). Free-form error
-message text is never emitted, so paths, usernames, and credentials cannot
-leak through telemetry. The SDKs expose presenter-bound consent requests,
-typed consent status, and explicit withdrawal. SDK hosts render the canonical
-MXC consent resource through their native UI and return the user's decision;
-MXC owns persistence. See the normative
+No PII is collected. Execution events contain metrics (duration, backend type,
+exit code) and a bounded error category (`error_type`). When `captureDenials`
+produces a verbose artifact, `MXC.VerboseDenials` can additionally contain
+sanitized provider/event identifiers, process IDs, access/resource
+classifications, occurrence counts, and truncation state. The telemetry
+projection derives provider GUIDs from a closed provider enum and drops all
+verbose property names and values. MXC never emits commands, credentials,
+complete file paths, usernames, workload-derived properties, sandbox output,
+raw ETL, actionable denial documents, general logger text, or free-form error
+text. The SDKs expose presenter-bound consent
+requests, typed consent status, and explicit withdrawal. SDK hosts render the
+canonical MXC consent resource through their native UI and return the user's
+decision; MXC owns persistence. See the normative
 [SDK presenter requirements](docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.

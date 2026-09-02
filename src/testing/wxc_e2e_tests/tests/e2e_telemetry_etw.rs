@@ -41,6 +41,8 @@ const FAKE_GROUP_GUID: &str = "4d584354-0000-4000-8000-e2e7e57fa4e0";
 /// is the only handle an out-of-process collector has on the provider.
 const PROVIDER_GUID: &str = "{7f10def4-a258-5fea-510e-2c3bb976687f}";
 
+static ETW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Target directory for the instrumented build. Kept apart from `target/debug`
 /// so the group-joined binary can never be picked up by `find_binary` and so
 /// this build does not contend for the main target directory's lock.
@@ -190,7 +192,7 @@ fn seed_consent(local_app_data: &Path, state: &str) {
     std::fs::create_dir_all(&dir).expect("failed to create consent directory");
     let record = format!(
         r#"{{"schemaVersion":2,"consent":"{state}","source":"telemetry-etw-e2e",
-"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":1,
+"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":3,
 "promptLocale":"en-US","updatedAtEpoch":0}}"#
     );
     std::fs::write(dir.join("telemetry-consent.json"), record.replace('\n', ""))
@@ -221,6 +223,59 @@ fn run_traced_execution(exe: &Path, local_app_data: &Path) -> std::process::Outp
         .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
         .output()
         .expect("failed to run wxc-exec")
+}
+
+fn write_capture_config(workdir: &Path) -> PathBuf {
+    let config_path = workdir.join("capture-config.json");
+    let output_path = workdir.join("denials.json");
+    let config = serde_json::json!({
+        "version": "0.8.0-alpha",
+        "containerId": "TelemetryVerboseDenialsE2E",
+        "containment": "processcontainer",
+        "process": {
+            "commandLine": "cmd.exe /c type C:\\Windows\\System32\\config\\SAM >nul 2>&1 & exit /b 0"
+        },
+        "processContainer": {
+            "captureDenials": {
+                "mode": "block",
+                "outputPath": output_path
+            }
+        },
+        "telemetry": {
+            "enabled": true
+        }
+    });
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("failed to serialize capture config"),
+    )
+    .expect("failed to write capture config");
+    config_path
+}
+
+fn run_traced_config(
+    exe: &Path,
+    local_app_data: &Path,
+    config_path: &Path,
+) -> std::process::Output {
+    Command::new(exe)
+        .arg("--config")
+        .arg(config_path)
+        .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
+        .output()
+        .expect("failed to run wxc-exec capture config")
+}
+
+fn find_verbose_artifact(workdir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(workdir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("denials.") && name.ends_with(".verbose.json"))
+        })
 }
 
 /// Decodes an `.etl` to XML and returns the text, or `None` if it holds no
@@ -266,9 +321,32 @@ fn assert_events_recorded(dump: &str) {
     }
 }
 
+fn assert_verbose_event_recorded(dump: &str) {
+    assert!(
+        dump.contains("MXC.VerboseDenials"),
+        "no MXC.VerboseDenials event was recorded for a completed captureDenials run"
+    );
+    for field in [
+        "mxc.document_id",
+        "mxc.document_version",
+        "mxc.chunk_index",
+        "mxc.chunk_count",
+        "mxc.document_bytes",
+        "mxc.document_sha256",
+        "mxc.content",
+        "mxc.summary",
+    ] {
+        assert!(
+            dump.contains(field),
+            "recorded MXC.VerboseDenials event is missing the {field} field"
+        );
+    }
+}
+
 #[test]
 #[ignore] // Builds a second wxc-exec.exe and needs rights to create an ETW session.
 fn test_telemetry_emits_etw_events_when_consent_granted() {
+    let _etw_test_guard = ETW_TEST_LOCK.lock().expect("ETW test lock was poisoned");
     let exe = build_instrumented_wxc_exec();
 
     let provider_def = generated_provider_def();
@@ -334,6 +412,72 @@ fn test_telemetry_emits_etw_events_when_consent_granted() {
         assert!(
             !denied_dump.contains("Microsoft.MXC"),
             "telemetry was emitted despite consent being denied"
+        );
+    }
+}
+
+#[test]
+#[ignore] // Builds a second wxc-exec.exe and needs captureDenials plus ETW privileges.
+fn test_verbose_denials_etw_payload_honors_consent() {
+    let _etw_test_guard = ETW_TEST_LOCK.lock().expect("ETW test lock was poisoned");
+    let exe = build_instrumented_wxc_exec();
+    let workdir = build_target_dir().join("verbose-etw-e2e");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).expect("failed to create verbose ETW work directory");
+    let config_path = write_capture_config(&workdir);
+    let session_name = format!("MxcVerboseTelemetryE2E_{}", std::process::id());
+
+    let granted_store = workdir.join("granted");
+    seed_consent(&granted_store, "granted");
+    assert_effective_consent(&exe, &granted_store, "granted");
+
+    let granted_etl = workdir.join("granted.etl");
+    let Some(mut session) = EtwSession::start(&session_name, &granted_etl) else {
+        skip("could not create an ETW session for verbose telemetry");
+        return;
+    };
+    let granted_run = run_traced_config(&exe, &granted_store, &config_path);
+    session.stop();
+    if !granted_run.status.success() {
+        skip(&format!(
+            "captureDenials is unavailable on this host: {}",
+            String::from_utf8_lossy(&granted_run.stderr)
+        ));
+        return;
+    }
+
+    let verbose_path = find_verbose_artifact(&workdir)
+        .expect("captureDenials succeeded without publishing denials.verbose.json");
+    let verbose: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&verbose_path).expect("failed to read verbose artifact"),
+    )
+    .expect("verbose artifact was not valid JSON");
+    assert_eq!(verbose["version"], 2);
+
+    let granted_dump = decode_trace(&granted_etl, &workdir)
+        .expect("tracerpt produced no output for the verbose telemetry run");
+    assert_verbose_event_recorded(&granted_dump);
+
+    let denied_store = workdir.join("denied");
+    seed_consent(&denied_store, "denied");
+    assert_effective_consent(&exe, &denied_store, "denied");
+
+    let denied_etl = workdir.join("denied.etl");
+    let Some(mut denied_session) = EtwSession::start(&session_name, &denied_etl) else {
+        skip("could not create the denied-consent ETW session");
+        return;
+    };
+    let denied_run = run_traced_config(&exe, &denied_store, &config_path);
+    denied_session.stop();
+    assert!(
+        denied_run.status.success(),
+        "captureDenials failed under denied consent: {}",
+        String::from_utf8_lossy(&denied_run.stderr)
+    );
+    if let Some(denied_dump) = decode_trace(&denied_etl, &workdir) {
+        assert!(
+            !denied_dump.contains("MXC.VerboseDenials"),
+            "verbose telemetry was emitted despite consent being denied"
         );
     }
 }
