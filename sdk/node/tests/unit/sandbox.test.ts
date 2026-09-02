@@ -1296,12 +1296,7 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should forward egress allow/deny rules on macOS for native Seatbelt validation', () => {
-      // Seatbelt declares EGRESS_DEFAULT | INGRESS_DEFAULT | HOST_LOOPBACK |
-      // RUNTIME_PROXY but no EGRESS_RULES, so per-rule egress is rejected by
-      // the backend's own validate(). As with the legacy host lists above, the
-      // SDK forwards the request untouched and leaves that limitation to
-      // native validation rather than duplicating the capability matrix.
+    it('should forward egress allow/deny rules on macOS untouched, leaving their rejection to Seatbelt', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -1387,14 +1382,6 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should forward a hostLoopback that diverges from ingress.default on macOS', () => {
-      // Seatbelt can only enforce the container-to-host half of the
-      // bidirectional hostLoopback posture (an inbound filter scoped to
-      // loopback is either a no-op or breaks bind()), so
-      // validate_seatbelt_network_policy refuses a hostLoopback that differs
-      // from ingress.default. That invariant lives in the backend's own
-      // validate() — deliberately not in wxc_common's parser — so the SDK
-      // forwards the divergent pair verbatim and lets the backend report it
-      // rather than second-guessing a per-backend rule at authoring time.
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -1416,13 +1403,6 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should not synthesize a hostLoopback value when the caller omits it', () => {
-      // Regression guard for the open ambiguity in #1032: the spec reads
-      // hostLoopback as overriding `default` (absent => inherit) while the
-      // parser resolves an omitted value to 'deny' outright. Resolving that
-      // default is the native parser's call — if the SDK filled one in, it
-      // would silently pre-empt whichever reading wins, and on Seatbelt it
-      // would decide for the caller whether the pair diverges (an authoring
-      // error) or matches.
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -1441,14 +1421,6 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should forward an allow ingress under a deny egress on macOS', () => {
-      // The valid-but-surprising Seatbelt shape: hostLoopback is not gated by
-      // egress, so this emits `(allow network-outbound (remote ip
-      // "localhost:*"))` on top of the deny baseline plus the inbound grant —
-      // no internet, but every port on every address of this host is
-      // reachable, and the sandbox can serve. Documented in
-      // docs/seatbelt/seatbelt-backend.md ("hostLoopback is not subordinate to
-      // egress"); the SDK's job is to forward the pair verbatim so that
-      // posture is never silently narrowed at authoring time.
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -1470,14 +1442,6 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should emit an egress-independent ingress block on macOS', () => {
-      // The Seatbelt profile builder makes hostLoopback's *emitted rule*
-      // conditional on the egress default: hostLoopback='deny' under an allow
-      // egress emits `(deny network-outbound (remote ip "localhost:*"))`,
-      // hostLoopback='allow' under a deny egress emits the matching allow, and
-      // the two matching combinations emit nothing because the baseline
-      // already covers them. That coupling is a profile-generation detail —
-      // the wire config the SDK authors must carry the caller's directional
-      // intent unchanged and identically for either egress default.
       mockDarwin();
       try {
         const ingress = { default: 'deny', hostLoopback: 'deny' } as const;
