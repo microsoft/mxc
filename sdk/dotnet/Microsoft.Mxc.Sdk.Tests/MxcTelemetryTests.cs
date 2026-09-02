@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.Versioning;
@@ -74,6 +75,40 @@ public sealed class MxcTelemetryTests
         var ex = Assert.Throws<MxcException>(() =>
             MxcTelemetry.RequestConsent(_ => throw new InvalidOperationException("boom")));
         Assert.Equal(ErrorCode.BackendError, ex.Code);
+    }
+
+    [Fact]
+    public void RequestConsentAsync_PreservesCallerSynchronizationContext_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var _ = new TelemetryTestEnv();
+        using var context = new PumpSynchronizationContext();
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try
+        {
+            var callerThread = Environment.CurrentManagedThreadId;
+            var request = MxcTelemetry.RequestConsentAsync(async _ =>
+            {
+                Assert.Same(context, SynchronizationContext.Current);
+                Assert.Equal(callerThread, Environment.CurrentManagedThreadId);
+                await Task.Yield();
+                Assert.Same(context, SynchronizationContext.Current);
+                Assert.Equal(callerThread, Environment.CurrentManagedThreadId);
+                return TelemetryConsentDecision.Yes;
+            });
+
+            context.RunUntilCompleted(request);
+            Assert.Equal(TelemetryConsentResult.Granted, request.GetAwaiter().GetResult().Result);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
     }
 
     [Fact]
@@ -164,6 +199,35 @@ public sealed class MxcTelemetryTests
 
             Gate.Release();
         }
+    }
+
+    private sealed class PumpSynchronizationContext : SynchronizationContext, IDisposable
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _work = new();
+        private readonly AutoResetEvent _workAvailable = new(initialState: false);
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            _work.Enqueue((callback, state));
+            _workAvailable.Set();
+        }
+
+        public void RunUntilCompleted(Task task)
+        {
+            while (!task.IsCompleted)
+            {
+                if (_work.TryDequeue(out var work))
+                {
+                    work.Callback(work.State);
+                }
+                else
+                {
+                    _workAvailable.WaitOne(TimeSpan.FromSeconds(5));
+                }
+            }
+        }
+
+        public void Dispose() => _workAvailable.Dispose();
     }
 #endif
 }

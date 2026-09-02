@@ -221,7 +221,8 @@ public static class MxcTelemetry
 
     /// <summary>
     /// Asynchronous wrapper over <see cref="RequestConsent(Func{TelemetryConsentPrompt, TelemetryConsentDecision}, string?)"/>.
-    /// The native API is synchronous and blocking, so this offloads the whole call to the thread pool.
+    /// The native API is synchronous and blocking, so the native work runs on the thread pool while
+    /// the presenter is dispatched to the caller's synchronization context when one is available.
     /// </summary>
     public static Task<TelemetryConsentOutcome> RequestConsentAsync(
         Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
@@ -229,9 +230,12 @@ public static class MxcTelemetry
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(presenter);
+        var synchronizationContext = SynchronizationContext.Current;
         return Task.Run(
             () => RequestConsent(
-                prompt => presenter(prompt).ConfigureAwait(false).GetAwaiter().GetResult(),
+                prompt => InvokePresenterAsync(presenter, prompt, synchronizationContext)
+                    .GetAwaiter()
+                    .GetResult(),
                 locale),
             cancellationToken);
     }
@@ -339,6 +343,42 @@ public static class MxcTelemetry
         {
             return NativeConsentPresenterError;
         }
+    }
+
+    private static Task<TelemetryConsentDecision> InvokePresenterAsync(
+        Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
+        TelemetryConsentPrompt prompt,
+        SynchronizationContext? synchronizationContext)
+    {
+        if (synchronizationContext is null)
+        {
+            return presenter(prompt);
+        }
+
+        var completion = new TaskCompletionSource<TelemetryConsentDecision>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            synchronizationContext.Post(
+                async _ =>
+                {
+                    try
+                    {
+                        completion.SetResult(await presenter(prompt));
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.SetException(ex);
+                    }
+                },
+                null);
+        }
+        catch (Exception ex)
+        {
+            completion.SetException(ex);
+        }
+
+        return completion.Task;
     }
 
     private static void EnsureNativeInitialized() => NativeLibraryResolver.Initialize();
