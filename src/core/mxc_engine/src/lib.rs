@@ -55,6 +55,10 @@ pub use policy::{
 };
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
+pub fn guarded_capture_available() -> bool {
+    guarded_capture::is_available()
+}
+#[cfg(target_os = "windows")]
 pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
