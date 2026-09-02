@@ -312,8 +312,7 @@ fn spawn_inner(
         )
     })?;
 
-    let mut request = build_request(&policy, None).map_err(sdk_error_detail)?;
-    request.set_script(command);
+    let request = build_request(&policy, command, None).map_err(sdk_error_detail)?;
 
     spawn_sandbox(request).map_err(sdk_error_detail)
 }
@@ -918,6 +917,29 @@ mod tests {
         assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
         assert!(!err.message_utf8.is_null());
+        // SAFETY: `err` was filled by `mxc_spawn` and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
+    }
+
+    #[test]
+    fn spawn_empty_command_reports_malformed_request() {
+        let policy = CString::new(r#"{"version":"0.7.0-alpha"}"#).unwrap();
+        let command = CString::new("").unwrap();
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
+
+        // SAFETY: valid strings and valid out pointers.
+        let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(handle.is_null());
+        assert!(!err.message_utf8.is_null());
+
+        // SAFETY: `err` was filled by `mxc_spawn`.
+        let message = unsafe { std::ffi::CStr::from_ptr(err.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "script parameter is required");
+
         // SAFETY: `err` was filled by `mxc_spawn` and not yet freed.
         unsafe { crate::mxc_error_detail_free(&mut err) };
     }

@@ -1006,11 +1006,14 @@ fields (`filesystem` / `network` / `ui`) on a per-(backend, phase) Config map di
 to top-level wire fields — they are already wire-format-aligned in the Config, so the
 SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
 `env`, `timeout`) flow through the top-level `process` block, not through
-`experimental`. For non-exec phases the executor emits a single JSON envelope on
-stdout; for exec the script's output streams raw and the SDK constructs the result
-from PTY events. Responses unwrap any `result` envelope at the SDK boundary so the
-caller sees a plain `ProvisionResult` / `StartResult` / `ExecResult` / `StopResult` /
-`DeprovisionResult`.
+`experimental`. The typed SDK requires `commandLine`. The native `wxc-exec.exe`
+entry point may instead complete an `exec` template from arguments after `--`;
+it inserts or replaces `process.commandLine` before parsing. Trailing commands
+are rejected for every non-exec phase. For non-exec phases the executor emits a
+single JSON envelope on stdout; for exec the script's output streams raw and the
+SDK constructs the result from PTY events. Responses unwrap any `result`
+envelope at the SDK boundary so the caller sees a plain `ProvisionResult` /
+`StartResult` / `ExecResult` / `StopResult` / `DeprovisionResult`.
 
 ## 8. Error model
 
@@ -1102,23 +1105,38 @@ domain types for trivial enum/struct conversions). The state-aware path reuses
 this wire model while retaining its per-backend `experimental` subtree for
 dispatch-time typing.
 
+When the native CLI supplies trailing command arguments, the loader first
+splices the rendered command into `process.commandLine` and then parses that
+effective document. Diagnostics and retained state-aware source text are
+therefore relative to the effective document; replacing or inserting the
+command may shift a later same-line column from its position in the caller's
+original bytes.
+
 ```rust
-// In config_parser.rs — discrimination is by presence of the `phase` key in
-// the source JSON without building a full untyped request tree.
-let discriminator: RequestDiscriminator<'_> =
-    config_deserialize::from_str(&json_str)?;
-if discriminator.phase.is_some() {
-    convert_wire_state_aware(
-        &json_str,
-        discriminator.experimental,
-        logger,
-        allow_missing_command,
-    )
+// In load_mxc_request_with_options — complete a CLI template first.
+let (json_str, override_log) = if opts.cli_command.is_empty() {
+    (json_str, None)
 } else {
-    let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)?;
-    convert_wire_config(cfg, logger, true, allow_missing_command)
+    apply_cli_command(&json_str, opts.cli_command)?
+};
+let request = parse_mxc_request_json(&json_str, logger)?;
+
+// In parse_mxc_request_json — discriminate and run the normal typed parser.
+let discriminator: RequestDiscriminator<'_> =
+    config_deserialize::from_str(json_str)?;
+if discriminator.phase.is_some() {
+    convert_wire_state_aware(json_str, discriminator.experimental, logger)
+} else {
+    let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)?;
+    convert_wire_config(cfg, logger, true, false)
 }
 ```
+
+The trailing-command path keeps the exact phase probe separate because it owns
+error routing. Backend selection and command editing share one
+duplicate-preserving raw root parse, and the resulting effective document then
+uses the authoritative parser above. The ordinary path with no trailing command
+enters `parse_mxc_request_json` directly.
 
 `wire::MxcConfig` is closed (`deny_unknown_fields`) on its stable surface, so
 unknown fields are rejected at the trust boundary. `phase` maps to the
@@ -1597,6 +1615,11 @@ shapes.
 | MXC parser (Rust) | Envelope shape: `phase` present; `sandbox_id` present for non-provision; `process` present for exec; typed config deserialisation from JSON | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
 | MXC dispatch common (Rust) | Cross-backend per-phase invariants (e.g., `validate_exec_common` checks `process.commandLine` non-empty) | `error.code: malformed_request`, `policy_validation` |
 | Backend `validate_<phase>` hooks (Rust) | Per-backend per-phase invariants: config field values, cross-cutting policy honor (per the matrix in §10.3), id format checks beyond prefix matching | `error.code: policy_validation`, `malformed_id`, `stale_id`, `backend_error`, `backend_unavailable` |
+
+The native CLI template form is resolved before these layers: a trailing
+command on state-aware `exec` supplies or replaces `process.commandLine`, while
+other phases reject trailing commands. The effective request presented to the
+Rust parser still contains the required non-empty command.
 
 Each layer validates only what it cheaply can. The SDK's typed config catches structural
 errors at compile time. The dispatch layer catches structural errors that escaped the
