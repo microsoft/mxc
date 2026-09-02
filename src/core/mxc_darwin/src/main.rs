@@ -80,14 +80,6 @@ struct Cli {
     /// Preferred BCP 47 locale for a telemetry consent request.
     #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
     telemetry_consent_locale: Option<String>,
-
-    /// Private SDK presenter protocol.
-    #[arg(
-        long = "telemetry-consent-protocol",
-        requires = "telemetry_consent",
-        hide = true
-    )]
-    telemetry_consent_protocol: Option<wxc_common::telemetry::consent_cli::ConsentProtocol>,
 }
 
 fn parse_cli() -> Cli {
@@ -126,7 +118,6 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
     let outcome = wxc_common::telemetry::consent_cli::handle_consent_command(
         action,
         cli.telemetry_consent_locale.as_deref(),
-        cli.telemetry_consent_protocol,
     );
     let code = outcome.emit();
     if code != 0 {

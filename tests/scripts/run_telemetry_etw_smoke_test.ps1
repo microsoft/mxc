@@ -68,7 +68,7 @@ function Invoke-Status {
 function Invoke-CanonicalGrant {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wxcExe
-    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US --telemetry-consent-protocol stdio-v1'
+    $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US'
     $start.UseShellExecute = $false
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true

@@ -115,8 +115,7 @@ write the prompt to stderr, read `Y` or `N` from a terminal, and write one final
 JSON outcome to stdout. A request without terminal stdin and stderr fails
 without changing consent.
 
-The Node SDK uses the hidden
-`--telemetry-consent-protocol stdio-v1` request mode because it owns the host
+When standard input and output are pipes, `request` uses the Node host
 presentation callback. Native MXC emits at most one `presentationRequired`
 JSON line followed by one final JSON line. The host returns exactly one JSON
 decision line containing the emitted challenge, prompt resource version, and
@@ -128,11 +127,6 @@ Domain outcomes exit `0`. Invalid command/protocol input exits `64`.
 Operational failures such as a missing terminal, required-decision EOF, broken
 pipe, presenter failure, or persistence failure exit `1`. `status`,
 `withdraw`, and short-circuit request outcomes never invoke a presenter.
-
-Consent maintenance objects are deliberately not accepted through `--config`
-or `--config-base64`, are not part of `MxcConfig`, and have no published JSON
-Schema. The stable `telemetry.enabled` execution setting remains only the
-per-run opt-in and cannot request, grant, or withdraw consent.
 
 ## State and persistence
 
