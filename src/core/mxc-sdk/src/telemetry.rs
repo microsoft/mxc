@@ -223,11 +223,8 @@ pub enum ConsentActionResult {
 impl ConsentActionResult {
     /// Stable wire string used by the maintenance and binding contracts.
     ///
-    /// The strings are the camelCase spellings of
-    /// [`wxc_common::wire::TelemetryConsentResult`] (its `#[serde(rename_all =
-    /// "camelCase")]` serialization), so the FFI JSON `result` field, the
-    /// generated Node wire types, and this facade all agree on one canonical
-    /// wire representation.
+    /// The FFI JSON `result` field and language bindings use these exact
+    /// camelCase spellings.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Granted => "granted",
@@ -504,9 +501,8 @@ mod tests {
 
     #[test]
     fn consent_result_wire_strings_are_closed_and_stable() {
-        // These camelCase strings are the canonical wire representation
-        // (`wxc_common::wire::TelemetryConsentResult`) also emitted by the FFI
-        // JSON `result` field and the generated Node wire types.
+        // These camelCase strings are emitted by the FFI JSON `result` field
+        // and consumed by the language bindings.
         assert_eq!(ConsentActionResult::Granted.as_str(), "granted");
         assert_eq!(ConsentActionResult::Denied.as_str(), "denied");
         assert_eq!(ConsentActionResult::Dismissed.as_str(), "dismissed");
@@ -517,9 +513,8 @@ mod tests {
         );
         assert_eq!(ConsentActionResult::PolicyBlocked.as_str(), "policyBlocked");
         assert_eq!(ConsentActionResult::NotApplicable.as_str(), "notApplicable");
-        // `ConsentStatusReason` intentionally stays kebab-case: the canonical
-        // wire enum (`wxc_common::wire::TelemetryConsentStatusReason`) is
-        // itself `#[serde(rename_all = "kebab-case")]`, so kebab is correct.
+        // `ConsentStatusReason` intentionally retains the established
+        // kebab-case binding contract.
         assert_eq!(
             ConsentStatusReason::PromptVersionUnsupported.as_str(),
             "prompt-version-unsupported"

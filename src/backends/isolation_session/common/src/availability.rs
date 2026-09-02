@@ -3,13 +3,13 @@
 
 //! IsolationSession host-availability probe.
 //!
-//! Availability is whether the in-proc `Windows.AI.IsolationSession`
-//! `IsoSessionOps` WinRT class is registered on the OS (its activation factory
-//! resolves), matching PR #761 rather than gating on a Windows build number.
+//! Available when `IsoSessionOps` activates and reports a feature level above
+//! zero for `LocalAgentUser`, which the lifecycle requires. No build number is
+//! consulted.
 
 use std::sync::OnceLock;
 
-use isolation_session_bindings::bindings::IsoSessionOps;
+use isolation_session_bindings::bindings::{IsoSessionFeature, IsoSessionOps};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows_core::HRESULT;
 
@@ -17,25 +17,23 @@ static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Cached for the process; never requires elevation.
 pub fn is_isolation_session_available() -> bool {
-    *AVAILABLE.get_or_init(|| available_from(probe_activation()))
+    *AVAILABLE.get_or_init(|| available_from(probe_feature_level()))
 }
 
-/// Split from [`probe_activation`] so the decision is testable without COM/WinRT.
-/// Any activation failure (class not registered, or the OS feature gate off)
-/// means not available here.
-fn available_from(activation: Result<(), HRESULT>) -> bool {
-    activation.is_ok()
+/// Split from [`probe_feature_level`] so the decision is testable without
+/// COM/WinRT. A failed probe or a zero level means not available.
+fn available_from(probe: Result<i32, HRESULT>) -> bool {
+    matches!(probe, Ok(level) if level > 0)
 }
 
-fn probe_activation() -> Result<(), HRESULT> {
+fn probe_feature_level() -> Result<i32, HRESULT> {
     // Guard uninitializes on drop, so a panic in `IsoSessionOps::new()` still
-    // balances `CoInitializeEx`. The `_ops` handle drops before `_apartment`
+    // balances `CoInitializeEx`. The `ops` handle drops before `_apartment`
     // (reverse declaration order), preserving COM's create-before-uninit rule.
     let _apartment = ComApartment::enter();
-    match IsoSessionOps::new() {
-        Ok(_ops) => Ok(()),
-        Err(e) => Err(e.code()),
-    }
+    let ops = IsoSessionOps::new().map_err(|e| e.code())?;
+    ops.GetFeatureLevel(IsoSessionFeature::LocalAgentUser)
+        .map_err(|e| e.code())
 }
 
 /// Owns the COM apartment for the duration of a probe and uninitializes it on
@@ -71,8 +69,11 @@ mod tests {
     use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, REGDB_E_CLASSNOTREG};
 
     #[test]
-    fn only_successful_activation_means_available() {
-        assert!(available_from(Ok(())));
+    fn availability_needs_a_positive_feature_level() {
+        assert!(available_from(Ok(1)));
+        assert!(!available_from(Ok(0)));
+        // Pins the predicate as `> 0` rather than `!= 0`.
+        assert!(!available_from(Ok(-1)));
         assert!(!available_from(Err(CLASS_E_CLASSNOTAVAILABLE)));
         assert!(!available_from(Err(REGDB_E_CLASSNOTREG)));
         assert!(!available_from(Err(HRESULT(0x8000_4005u32 as i32))));

@@ -85,52 +85,51 @@ pub struct DeprovisionResult<M> {
 /// What a state-aware backend needs to know is who is on the other end, because
 /// that decides the **topology** of the streams it returns:
 ///
-/// * [`Executor`](Self::Executor) — the executor binary relays onto its own
-///   stdio for a human. The backend may allocate a pseudo-console inside the
-///   sandbox when the executor is itself on a TTY. A pseudo-console has a
-///   single output stream, so stderr is then merged into stdout and
-///   [`ExecHandle::stderr`] is null. That is a correct result, not a failure.
+/// * [`Executor`](Self::Executor) — the calling process relays onto its own
+///   stdio. The backend may allocate a pseudo-console inside the sandbox when
+///   that process is on a TTY; a pseudo-console has a single output stream, so
+///   stderr is then merged into stdout and [`ExecHandle::stderr`] is null, which
+///   is a correct result rather than a failure.
 ///
-///   Under this variant the relay forwards **no** input, so the backend must
-///   not give the child a stdin pipe whose write end it retains: nothing would
-///   ever write to it or close it, and a workload that reads stdin would block
-///   forever. Give the child a stdin already at EOF, and return a null
-///   [`ExecHandle::stdin`].
-/// * [`Library`](Self::Library) — an in-process caller (the Rust SDK, the FFI)
-///   drives the streams itself. The backend must return separate raw stdout and
-///   stderr pipes, allocate no pseudo-console, and leave the host's console
-///   untouched.
+///   The dispatcher's relay forwards **no** input, so a stdin pipe whose write
+///   end the backend retains would never be written or closed, and a workload
+///   reading stdin would block forever. Return a null [`ExecHandle::stdin`]. A
+///   backend that relays internally, as IsolationSession does through its
+///   pseudo-console, forwards this process's stdin itself.
+/// * [`Library`](Self::Library) — the caller drives the streams itself. The
+///   backend must return separate raw stdout and stderr pipes, allocate no
+///   pseudo-console, and leave the host's console untouched.
 ///
-/// The value is **authoritative**. A backend that probes the host to shape
-/// stdio ("is my stdout a terminal?") may consult that probe only within
-/// `Executor`. Under `Library` the probe is meaningless — an embedded host's
-/// stdout says nothing about the sandbox — and acting on it risks mutating
-/// console state the caller owns.
+/// These distinguish who consumes the streams, not whether the caller is
+/// in-process: a console application hosting an interactive sandboxed shell is
+/// in-process and wants `Executor`.
+///
+/// The value is **authoritative**. A backend that probes the host to shape stdio
+/// may consult that probe only under `Executor`, where the probing process is
+/// the relay target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecConsumer {
-    /// The executor binary, relaying the streams to its own stdio.
+    /// The calling process relays the streams to its own stdio.
     Executor,
-    /// An in-process caller, driving the returned streams itself.
+    /// The caller drives the returned streams itself.
     Library,
 }
 
 /// The error a backend returns when it is asked to serve
 /// [`ExecConsumer::Library`] and cannot.
 ///
-/// A backend that relays the workload's output internally — to the *host
-/// process's* own stdout and stderr — has no streams to hand back. It must
-/// refuse **before running anything**: the workload is arbitrary and may not be
-/// idempotent, so a refusal issued after the fact has already caused the
-/// side effects the caller is being told did not happen, and has already
-/// written its output somewhere the caller never asked for.
+/// Must be raised **before running anything**: the workload is arbitrary and may
+/// not be idempotent, so a later refusal has already caused the side effects the
+/// caller is told did not happen.
 ///
 /// Shared so the refusal reads identically whichever backend raises it, and so
 /// the check cannot drift into a per-backend spelling.
 pub fn unsupported_library_exec(backend: &str) -> MxcError {
     MxcError::backend_error(format!(
-        "the {backend} backend does not support exec for an in-process caller: it relays the \
-         sandbox's output to this process's own stdout and stderr rather than returning streams. \
-         Nothing has been run."
+        "the {backend} backend cannot return exec streams to the caller: it relays the sandbox's \
+         output to this process's own stdout and stderr rather than handing back pipes. Run the \
+         exec attached to this process's stdio instead, which requires this process's stdout and \
+         stdin to be terminals. Nothing has been run."
     ))
 }
 
@@ -187,13 +186,10 @@ pub enum ExecOutcome {
 /// consumers duplicate them and never close the originals.
 ///
 /// `stdin` is **not consumed by the executor relay**, which forwards no input.
-/// The streaming path does hand it to an in-process caller, but with a caveat
-/// that is a known gap rather than a contract: because the handle is duplicated
-/// rather than taken, dropping the writer a caller obtained does not close the
-/// child's stdin, so a workload reading to EOF will not see one. Closing it
-/// needs an ownership model this type does not have yet — a pipe reaches EOF
-/// only once *every* write handle is closed, and nothing here can close the
-/// backend's original.
+/// The streaming path hands it to an in-process caller, which duplicates it
+/// rather than taking it. A pipe reaches EOF only once *every* write handle is
+/// closed, so dropping that duplicate is not enough — `stdin_closer` closes the
+/// backend's own end. A backend that exposes `stdin` must supply one.
 ///
 /// # Reporting failure
 ///
@@ -207,12 +203,18 @@ pub enum ExecOutcome {
 ///   the caller instead of being swallowed. It reports whether the request was
 ///   *accepted*; a backend that can also confirm the process died should say so
 ///   in its own documentation, because this type cannot express the difference.
+///
+/// `stdin_closer` is infallible: it runs from `Drop`, where nothing can act on a
+/// failure.
 pub struct ExecHandle {
     pub stdout: PipeHandle,
     pub stderr: PipeHandle,
     pub stdin: PipeHandle,
     pub waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
     pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+    /// Closes the backend's own stdin write end. `None` when the backend
+    /// exposes no stdin.
+    pub stdin_closer: Option<Box<dyn FnOnce() + Send>>,
 }
 
 // Manual Debug impl: the boxed closures can't derive Debug. Pipe handles are
@@ -284,13 +286,6 @@ pub trait StatefulSandboxBackend {
     /// [`ExecConsumer`] for the full contract, including why this is not
     /// [`StdioMode`](crate::sandbox_process::StdioMode) and what each variant
     /// implies for the topology of the returned streams.
-    ///
-    /// In short: [`ExecConsumer::Library`] means an in-process caller drives
-    /// the returned handle, so the backend must surface separate real pipe
-    /// handles and must not touch the host's console;
-    /// [`ExecConsumer::Executor`] means the executor binary is relaying to its
-    /// own stdio, where a pseudo-console is legitimate and stderr may therefore
-    /// arrive merged into stdout.
     ///
     /// # Honored by one backend so far
     ///

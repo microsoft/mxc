@@ -256,14 +256,15 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
   });
 
   // Full chain, negative case. An oversized appId is rejected by MXC's
-  // own validation, before any IsolationSession API call is made. The
-  // structured failure fields describe an API operation that was in flight;
-  // none was, so they must reach the caller absent rather than empty.
+  // own validation, before any IsolationSession API call is made. `operation`
+  // and `nativeCode` describe a call that was in flight; none was, so they must
+  // reach the caller absent rather than empty. This rejection also offers no
+  // hint, so `remediation` is absent too.
   //
   // The canonical network acknowledgment is supplied so the only thing wrong
   // with this request is the appId; that keeps the assertion on the message
   // independent of the order in which the backend runs its validations.
-  it('a policy rejection reaches the SDK with no structured failure fields', async () => {
+  it('a policy rejection reaches the SDK with no failing-call detail', async () => {
     await assert.rejects(
       () => provisionSandbox(
         'isolation_session',

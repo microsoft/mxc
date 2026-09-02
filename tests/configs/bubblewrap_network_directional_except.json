@@ -1,0 +1,22 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Directional-Except",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); if ! timeout 8 bash -c \"exec 3<>/dev/tcp/9.9.9.9/443\" >/dev/null 2>&1; then echo INCLUDED_DEST_UNREACHABLE; exit 1; fi; echo INCLUDED_DEST_OK; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo EXCLUDED_DEST_LEAKED; exit 1; fi; echo EXCLUDED_DEST_BLOCKED_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{LISTENER_PORT}}\" >/dev/null 2>&1; if [ $? = 0 ]; then echo HOST_LOOPBACK_LEAKED; exit 1; fi; echo HOST_LOOPBACK_BLOCKED_OK'"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "0.0.0.0/0", "except": ["1.1.1.0/24"] }]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}

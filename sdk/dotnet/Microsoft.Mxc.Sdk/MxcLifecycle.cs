@@ -11,19 +11,9 @@ using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
-/// The state-aware sandbox lifecycle: drive a sandbox through
-/// provision → start → exec → stop → deprovision. The envelope phases
-/// (<see cref="ProvisionSandbox"/> / <see cref="StartSandbox"/> /
-/// <see cref="StopSandbox"/> / <see cref="DeprovisionSandbox"/>) are
-/// request/response; <see cref="ExecInSandbox"/> runs a command as a live
-/// streaming <see cref="MxcSandboxProcess"/>.
+/// Drives an IsolationSession, Windows Sandbox, or WSLC sandbox through
+/// provision, start, exec, stop, and deprovision.
 /// </summary>
-/// <remarks>
-/// The only in-tree state-aware backend is IsolationSession (Windows-only,
-/// experimental), which requires its OS-side service. On a host or build without
-/// it, these calls surface an <see cref="MxcException"/> with
-/// <see cref="ErrorCode.UnsupportedPhase"/> / <see cref="ErrorCode.BackendUnavailable"/>.
-/// </remarks>
 public static class MxcLifecycle
 {
     static MxcLifecycle()
@@ -31,93 +21,159 @@ public static class MxcLifecycle
         NativeLibraryResolver.Initialize();
     }
 
-    /// <summary>The schema version state-aware lifecycle requests use.</summary>
-    public const string StateAwareVersion = "0.6.0-alpha";
+    /// <summary>
+    /// Default state-aware schema for IsolationSession and Windows Sandbox.
+    /// </summary>
+    public const string StateAwareVersion = SchemaVersions.StateAware;
 
-    /// <summary>The IsolationSession containment key (the only state-aware backend today).</summary>
+    /// <summary>Default state-aware schema for WSLC.</summary>
+    public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
+
+    /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
+
+    /// <summary>Windows Sandbox containment wire key.</summary>
+    public const string WindowsSandboxContainment = "windows_sandbox";
+
+    /// <summary>WSLC containment wire key.</summary>
+    public const string WslcContainment = "wslc";
+
+    private const int ExperimentalOptIn = 1;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+        Converters =
+        {
+            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
+            new NetworkProxyPolicyJsonConverter(),
+        },
     };
 
-    /// <summary>
-    /// Provision a new IsolationSession sandbox, returning its <see cref="SandboxId"/>.
-    /// </summary>
+    /// <summary>Provision a new sandbox.</summary>
     /// <exception cref="MxcException">Provisioning failed.</exception>
-    public static ProvisionResult ProvisionSandbox(ProvisionSandboxOptions? options = null)
+    public static ProvisionResult ProvisionSandbox(
+        StateAwareContainment containment,
+        StateAwareProvisionOptions? options = null)
     {
-        var result = RunEnvelopePhase(BuildProvisionEnvelope(options))
-            ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no result object");
+        var result = RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: false)
+            ?? throw new MxcException(
+                ErrorCode.BackendError,
+                "provision response carried no result object");
         var sandboxId = result["sandboxId"]?.GetValue<string>()
-            ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no sandboxId");
+            ?? throw new MxcException(
+                ErrorCode.BackendError,
+                "provision response carried no sandboxId");
         var metadata = result["metadata"];
+        var metadataJson = metadata?.ToJsonString();
         return new ProvisionResult
         {
             SandboxId = new SandboxId(sandboxId),
-            MetadataJson = metadata?.ToJsonString(),
+            MetadataJson = metadataJson,
+            IsolationSessionMetadata =
+                containment == StateAwareContainment.IsolationSession
+                && metadataJson is not null
+                    ? JsonSerializer.Deserialize<IsolationSessionProvisionMetadata>(
+                        metadataJson,
+                        JsonOptions)
+                    : null,
         };
     }
 
-    // Build the provision request envelope: containment + cross-cutting
-    // filesystem lifted to the top level, user nested under
-    // experimental.isolation_session.provision.
-    internal static JsonObject BuildProvisionEnvelope(ProvisionSandboxOptions? options)
+    /// <summary>
+    /// Parse and validate a provision request without allocating a sandbox.
+    /// </summary>
+    public static void DryRunProvisionSandbox(
+        StateAwareContainment containment,
+        StateAwareProvisionOptions? options = null)
     {
-        var envelope = NewEnvelope("provision");
-        envelope["containment"] = IsolationSessionContainment;
-        if (options?.Filesystem is { } fs)
+        RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: true);
+    }
+
+    internal static JsonObject BuildProvisionEnvelope(
+        StateAwareContainment containment,
+        StateAwareProvisionOptions? options)
+    {
+        ValidateProvisionOptions(containment, options);
+        var backend = ContainmentKey(containment);
+        var envelope = NewEnvelope(
+            "provision",
+            options?.Version ?? DefaultVersion(containment));
+        envelope["containment"] = backend;
+
+        switch (options)
         {
-            envelope["filesystem"] = SerializeToNode(fs);
+            case IsolationSessionProvisionOptions isolation:
+                envelope["network"] = SerializeToNode(isolation.Network);
+                SetOptionalBackendConfig(
+                    envelope,
+                    backend,
+                    "provision",
+                    "appId",
+                    isolation.AppId);
+                break;
+            case ProvisionSandboxOptions legacy:
+                SetCrossCuttingPolicies(envelope, legacy.Filesystem, legacy.Network);
+                SetOptionalBackendConfig(
+                    envelope,
+                    backend,
+                    "provision",
+                    "appId",
+                    legacy.AppId);
+                break;
+            case WindowsSandboxProvisionOptions windowsSandbox:
+                SetCrossCuttingPolicies(envelope, windowsSandbox.Filesystem, network: null);
+                break;
+            case WslcProvisionOptions wslc:
+                SetCrossCuttingPolicies(envelope, wslc.Filesystem, wslc.Network);
+                SetOptionalBackendConfig(
+                    envelope,
+                    backend,
+                    "provision",
+                    "image",
+                    wslc.Image);
+                SetOptionalBackendConfig(
+                    envelope,
+                    backend,
+                    "provision",
+                    "imageTarPath",
+                    wslc.ImageTarPath);
+                break;
         }
-        if (options?.User is { } user)
-        {
-            SetBackendConfig(envelope, "provision", "user", SerializeToNode(user));
-        }
+
         return envelope;
     }
 
     /// <summary>Start a provisioned sandbox.</summary>
-    /// <exception cref="MxcException">Starting failed.</exception>
-    public static void StartSandbox(SandboxId id, StartSandboxOptions? options = null)
+    public static void StartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options));
+        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: false);
     }
 
-    // Build the start request envelope: sandboxId + optional sizing profile /
-    // user nested under experimental.isolation_session.start.
-    internal static JsonObject BuildStartEnvelope(SandboxId id, StartSandboxOptions? options)
+    /// <summary>Validate a start request without starting the sandbox.</summary>
+    public static void DryRunStartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        var envelope = NewEnvelope("start");
-        envelope["sandboxId"] = id.Value;
-        if (options?.Size is { } size)
-        {
-            // The wire model reads the sizing profile from `configurationId`
-            // (a typed small/medium/large/composable enum). Emitting any other
-            // key would be silently dropped by the permissive experimental block.
-            SetBackendConfig(envelope, "start", "configurationId", size);
-        }
-        if (options?.User is { } user)
-        {
-            SetBackendConfig(envelope, "start", "user", SerializeToNode(user));
-        }
-        return envelope;
+        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: true);
     }
+
+    internal static JsonObject BuildStartEnvelope(
+        SandboxId id,
+        StateAwarePhaseOptions? options = null) =>
+        BuildIdEnvelope("start", id, options?.Version);
 
     /// <summary>
-    /// Run <paramref name="command"/> in a started sandbox and return a live
-    /// <see cref="MxcSandboxProcess"/> streaming its stdio. Dispose the process
-    /// to release native resources.
+    /// Run a command in a started sandbox and return live stdio streams.
+    /// Windows Sandbox and WSLC currently support attached exec and exec
+    /// dry-run, but not this streaming form.
     /// </summary>
-    /// <exception cref="MxcException">The exec could not be started.</exception>
-    public static MxcSandboxProcess ExecInSandbox(SandboxId id, string command)
+    public static MxcSandboxProcess ExecInSandbox(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
-
-        var requestJson = BuildExecEnvelope(id, command).ToJsonString();
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
 
         unsafe
@@ -126,21 +182,10 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                // `experimental` is 0 deliberately. Two things are missing: the engine's
-                // `isolation_session` feature is not enabled in the library this project
-                // builds, so that backend has no dispatch arm and the request ends at
-                // `unsupported_phase`; and the request shape emitted here predates that
-                // backend's Preview migration. Passing 1 without fixing both trades
-                // `backend_unavailable` for `unsupported_phase`, which
-                // `AssertNoUsableBackend` already tolerates — the tests would stay green
-                // while nothing worked. Change it together with the feature and the shape.
                 var status = NativeMethods.mxc_state_aware_exec(
-                    requestPtr, /*experimental*/ 0, &handle, &error);
+                    requestPtr, ExperimentalOptIn, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
-                    // See MxcSandbox.Spawn: the release belongs in `finally` so a throw
-                    // during marshalling or exception construction cannot strand the
-                    // detail's strings.
                     try
                     {
                         throw NativeError.ToException(status, error, "unknown error");
@@ -150,35 +195,113 @@ public static class MxcLifecycle
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle));
+                return new MxcSandboxProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
             }
         }
     }
 
-    // Build the exec request envelope: sandboxId + the command as the
-    // cross-cutting process.commandLine.
-    internal static JsonObject BuildExecEnvelope(SandboxId id, string command)
+    /// <summary>
+    /// Run a command attached to this process's terminal and wait for it.
+    /// </summary>
+    public static SandboxWaitResult ExecInSandboxAttached(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options = null)
     {
-        var envelope = NewEnvelope("exec");
-        envelope["sandboxId"] = id.Value;
-        envelope["process"] = new JsonObject { ["commandLine"] = command };
-        return envelope;
+        ArgumentNullException.ThrowIfNull(command);
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
+        var requestBuf = ToNullTerminatedUtf8(requestJson);
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                MxcExecOutcome outcome = default;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_attached(
+                    requestPtr, ExperimentalOptIn, &outcome, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new SandboxWaitResult
+                {
+                    ExitCode = outcome.exit_code,
+                    TimedOut = outcome.timed_out != 0,
+                };
+            }
+        }
     }
 
     /// <summary>
-    /// Run <paramref name="command"/> in a started sandbox to completion,
-    /// draining stdout/stderr concurrently, and return the captured result.
+    /// Validate an exec request without starting a process.
     /// </summary>
-    /// <exception cref="MxcException">The exec could not be started.</exception>
+    public static void DryRunExecInSandbox(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        RunEnvelopePhase(BuildExecEnvelope(id, command, options), dryRun: true);
+    }
+
+    internal static JsonObject BuildExecEnvelope(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ValidateExecOptions(id, options);
+        var envelope = BuildIdEnvelope("exec", id, options?.Version);
+        var process = new JsonObject { ["commandLine"] = command };
+        if (options?.WorkingDirectory is { } cwd)
+        {
+            process["cwd"] = cwd;
+        }
+        if (options?.Environment is { } env)
+        {
+            process["env"] = SerializeToNode(env);
+        }
+        if (options?.TimeoutMs is { } timeout)
+        {
+            process["timeout"] = timeout;
+        }
+        envelope["process"] = process;
+        if (options is WslcExecOptions { Network: { } network })
+        {
+            envelope["network"] = SerializeToNode(network);
+        }
+        return envelope;
+    }
+
+    /// <summary>Run a command to completion and capture its output.</summary>
+    public static Task<RunResult> ExecInSandboxAsync(
+        SandboxId id,
+        string command,
+        CancellationToken cancellationToken = default) =>
+        ExecInSandboxAsync(id, command, options: null, cancellationToken);
+
+    /// <summary>
+    /// Run a command with process options to completion and capture its output.
+    /// </summary>
     public static async Task<RunResult> ExecInSandboxAsync(
         SandboxId id,
         string command,
+        StateAwareExecOptions? options,
         CancellationToken cancellationToken = default)
     {
-        // Offload the blocking exec-start P/Invoke so this method never blocks
-        // the caller's thread (for a backend that relays exec internally, the
-        // whole exec runs during ExecInSandbox).
-        var proc = await Task.Run(() => ExecInSandbox(id, command), cancellationToken)
+        var proc = await Task.Run(
+                () => ExecInSandbox(id, command, options),
+                cancellationToken)
             .ConfigureAwait(false);
         try
         {
@@ -192,6 +315,7 @@ public static class MxcLifecycle
                 Stdout = Encoding.UTF8.GetString(stdout),
                 Stderr = Encoding.UTF8.GetString(stderr),
                 OutputMetadata = proc.OutputMetadata,
+                Warnings = proc.Warnings,
             };
         }
         finally
@@ -201,69 +325,213 @@ public static class MxcLifecycle
     }
 
     /// <summary>Stop a running sandbox.</summary>
-    /// <exception cref="MxcException">Stopping failed.</exception>
-    public static void StopSandbox(SandboxId id)
+    public static void StopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        var envelope = NewEnvelope("stop");
-        envelope["sandboxId"] = id.Value;
-        RunEnvelopePhase(envelope);
+        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: false);
     }
 
-    /// <summary>Deprovision (destroy) a sandbox, releasing its resources.</summary>
-    /// <exception cref="MxcException">Deprovisioning failed.</exception>
-    public static void DeprovisionSandbox(SandboxId id)
+    /// <summary>Validate a stop request without stopping the sandbox.</summary>
+    public static void DryRunStopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        var envelope = NewEnvelope("deprovision");
-        envelope["sandboxId"] = id.Value;
-        RunEnvelopePhase(envelope);
+        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: true);
     }
 
-    // -- helpers --
+    internal static JsonObject BuildStopEnvelope(
+        SandboxId id,
+        StateAwarePhaseOptions? options = null) =>
+        BuildIdEnvelope("stop", id, options?.Version);
 
-    private static JsonObject NewEnvelope(string phase) => new()
+    /// <summary>Destroy a sandbox and release its resources.</summary>
+    public static void DeprovisionSandbox(
+        SandboxId id,
+        StateAwarePhaseOptions? options = null)
     {
-        ["version"] = StateAwareVersion,
+        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: false);
+    }
+
+    /// <summary>Validate a deprovision request without destroying the sandbox.</summary>
+    public static void DryRunDeprovisionSandbox(
+        SandboxId id,
+        StateAwarePhaseOptions? options = null)
+    {
+        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: true);
+    }
+
+    internal static JsonObject BuildDeprovisionEnvelope(
+        SandboxId id,
+        StateAwarePhaseOptions? options = null) =>
+        BuildIdEnvelope("deprovision", id, options?.Version);
+
+    private static JsonObject BuildIdEnvelope(
+        string phase,
+        SandboxId id,
+        string? version)
+    {
+        var containment = ContainmentForId(id);
+        var envelope = NewEnvelope(
+            phase,
+            version ?? DefaultVersion(containment));
+        envelope["sandboxId"] = id.Value;
+        return envelope;
+    }
+
+    private static JsonObject NewEnvelope(string phase, string version) => new()
+    {
+        ["version"] = version,
         ["phase"] = phase,
     };
 
-    // Nest a backend-specific config value under experimental.isolation_session.<phase>.
-    private static void SetBackendConfig(JsonObject envelope, string phase, string key, JsonNode? value)
+    private static string ContainmentKey(StateAwareContainment containment) => containment switch
+    {
+        StateAwareContainment.IsolationSession => IsolationSessionContainment,
+        StateAwareContainment.WindowsSandbox => WindowsSandboxContainment,
+        StateAwareContainment.Wslc => WslcContainment,
+        _ => throw new MxcException(
+            ErrorCode.UnsupportedContainment,
+            $"unknown state-aware containment '{containment}'"),
+    };
+
+    private static string DefaultVersion(StateAwareContainment containment) =>
+        containment == StateAwareContainment.Wslc
+            ? WslcStateAwareVersion
+            : StateAwareVersion;
+
+    private static void ValidateProvisionOptions(
+        StateAwareContainment containment,
+        StateAwareProvisionOptions? options)
+    {
+        var valid = (containment, options) switch
+        {
+            (StateAwareContainment.IsolationSession, null) => false,
+            (_, null) => true,
+            (StateAwareContainment.IsolationSession, IsolationSessionProvisionOptions) => true,
+            (StateAwareContainment.IsolationSession, ProvisionSandboxOptions) => true,
+            (StateAwareContainment.WindowsSandbox, WindowsSandboxProvisionOptions) => true,
+            (StateAwareContainment.Wslc, WslcProvisionOptions) => true,
+            _ => false,
+        };
+        if (!valid)
+        {
+            throw new ArgumentException(
+                options is null
+                    ? $"{containment} requires backend-specific provision options"
+                    : $"{options.GetType().Name} cannot configure {containment}",
+                nameof(options));
+        }
+        if (options is IsolationSessionProvisionOptions isolation)
+        {
+            IsolationSessionProvisionOptions.ValidateNetwork(
+                isolation.Network,
+                nameof(options));
+        }
+    }
+
+    private static void ValidateExecOptions(SandboxId id, StateAwareExecOptions? options)
+    {
+        var containment = ContainmentForId(id);
+        if (options is WslcExecOptions
+            && containment != StateAwareContainment.Wslc)
+        {
+            throw new ArgumentException(
+                $"{nameof(WslcExecOptions)} requires a wslc: sandbox id",
+                nameof(options));
+        }
+    }
+
+    private static StateAwareContainment ContainmentForId(SandboxId id)
+    {
+        // Mirrors the native `parse_sandbox_id_prefix`, which folds a missing
+        // `:` and an empty prefix into one MalformedId: both are structural,
+        // not an unregistered backend. `default(SandboxId)` leaves Value null
+        // and is handled here too, so it reports a typed error rather than
+        // faulting on the IndexOf.
+        var value = id.Value;
+        var separator = value is null ? -1 : value.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0)
+        {
+            throw new MxcException(
+                ErrorCode.MalformedId,
+                $"sandbox id '{id}' is missing the '<prefix>:...' form");
+        }
+
+        return value![..separator] switch
+        {
+            "iso" => StateAwareContainment.IsolationSession,
+            "wsb" => StateAwareContainment.WindowsSandbox,
+            "wslc" => StateAwareContainment.Wslc,
+            _ => throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                $"no state-aware backend is registered for sandbox id '{id.Value}'"),
+        };
+    }
+
+    private static void SetCrossCuttingPolicies(
+        JsonObject envelope,
+        StateAwareFilesystemPolicy? filesystem,
+        StateAwareNetworkPolicy? network)
+    {
+        if (filesystem is not null)
+        {
+            envelope["filesystem"] = SerializeToNode(filesystem);
+        }
+        if (network is not null)
+        {
+            envelope["network"] = SerializeToNode(network);
+        }
+    }
+
+    private static void SetOptionalBackendConfig(
+        JsonObject envelope,
+        string backend,
+        string phase,
+        string key,
+        string? value)
+    {
+        if (value is not null)
+        {
+            SetBackendConfig(envelope, backend, phase, key, value);
+        }
+    }
+
+    private static void SetBackendConfig(
+        JsonObject envelope,
+        string backend,
+        string phase,
+        string key,
+        JsonNode? value)
     {
         if (envelope["experimental"] is not JsonObject experimental)
         {
             experimental = new JsonObject();
             envelope["experimental"] = experimental;
         }
-        if (experimental[IsolationSessionContainment] is not JsonObject backend)
+        if (experimental[backend] is not JsonObject backendConfig)
         {
-            backend = new JsonObject();
-            experimental[IsolationSessionContainment] = backend;
+            backendConfig = new JsonObject();
+            experimental[backend] = backendConfig;
         }
-        if (backend[phase] is not JsonObject phaseConfig)
+        if (backendConfig[phase] is not JsonObject phaseConfig)
         {
             phaseConfig = new JsonObject();
-            backend[phase] = phaseConfig;
+            backendConfig[phase] = phaseConfig;
         }
         phaseConfig[key] = value;
     }
 
-    // Run an envelope phase via mxc_state_aware and return the parsed `result`
-    // object (may be an empty object). Throws MxcException on failure.
-    private static JsonObject? RunEnvelopePhase(JsonObject envelope)
+    private static JsonObject? RunEnvelopePhase(JsonObject envelope, bool dryRun)
     {
-        var requestJson = envelope.ToJsonString();
-        var requestBuf = ToNullTerminatedUtf8(requestJson);
+        var requestBuf = ToNullTerminatedUtf8(envelope.ToJsonString());
 
         unsafe
         {
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                // `experimental` is 0 for the reason given in ExecInSandbox: the backend
-                // is not compiled into this build and the request shape is stale, so
-                // opting in would only change which error surfaces.
                 var status = NativeMethods.mxc_state_aware(
-                    requestPtr, /*dry_run*/ 0, /*experimental*/ 0, &result);
+                    requestPtr,
+                    dryRun ? 1 : 0,
+                    ExperimentalOptIn,
+                    &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)

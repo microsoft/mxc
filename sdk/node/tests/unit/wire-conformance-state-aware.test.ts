@@ -81,11 +81,11 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // field legal only on provision cannot satisfy the oracle by appearing
 // on the start config, or vice versa.
 //
-// `filesystem` is a lifted top-level wire field (like `network`): WSLc provision
-// surfaces it publicly but it maps to the envelope's top-level `filesystem`, not
-// under `experimental.wslc.provision`. Listing it here keeps the backend-key set
-// limited to genuinely per-phase wire fields.
-type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem';
+// `filesystem` and `telemetry` are lifted top-level wire fields (like `network`):
+// phase configs surface them publicly but they map to the envelope top level,
+// not under `experimental.<backend>.<phase>`. Listing them here keeps the
+// backend-key set limited to genuinely per-phase wire fields.
+type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem' | 'telemetry';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;

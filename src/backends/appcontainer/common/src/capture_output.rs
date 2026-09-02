@@ -7,20 +7,21 @@
 //! decoding its own sealed ETL) and the guarded-WPR legacy-tier fallback
 //! (`appcontainer_runner`, consuming an already-decoded [`AnalysisResult`]
 //! handed back by the elevated PLM guardian) must emit byte-for-byte the same
-//! [`DenialsDocument`] JSON shape, [`CaptureDenialsOutput`] summary, and
-//! resolved output-path convention. Centralizing that here is what guarantees
-//! the two paths can't drift.
+//! [`DenialsDocument`] JSON shape, username-redacted verbose logging sibling,
+//! [`CaptureDenialsOutput`] summary, and resolved output-path convention.
+//! Centralizing that here is what guarantees the two paths can't drift.
 //!
 //! Deliberately free of any Windows API or [`ScriptResponse`] coupling so it
 //! can be shared by both runner modules without either owning the other's
 //! error type; callers map the plain `String` errors into their own error
 //! type at the call site.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
-    write_document, AnalysisResult, DenialSummary, DenialsDocument, DenialsOutputPointer,
+    verbose_logging_sibling_path, write_document, write_paired_output_files,
+    write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
+    DenialsOutputPointer, ExistingOutputPolicy, VerboseLoggingDocument,
 };
 use wxc_common::models::CaptureDenialsOutput;
 
@@ -49,8 +50,9 @@ pub struct DenialsOutputPaths {
     pub etl: Option<PathBuf>,
 }
 
-/// Writes a bounded [`AnalysisResult`] to `output_path` as the JSON denials
-/// document and returns the caller-facing [`CaptureDenialsOutput`] summary.
+/// Writes a bounded [`AnalysisResult`] as the actionable denials document and
+/// deterministic verbose logging sibling, then returns caller-facing metadata for
+/// the actionable document.
 ///
 /// Never overwrites an existing file: a run whose output path collides with a
 /// leftover file from a previous run fails loudly rather than clobbering it.
@@ -59,14 +61,23 @@ pub fn write_denials_document(
     exit_code: i32,
     output_path: &Path,
 ) -> std::io::Result<CaptureDenialsOutput> {
+    let verbose_logging_path = verbose_logging_output_path(output_path)?;
     let summary = DenialSummary::new(
         exit_code,
         analysis.denials.len(),
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials, summary);
+    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
 
-    write_denials_output_file(output_path, |writer| write_document(writer, &document))?;
+    write_paired_output_files(
+        "captureDenials",
+        output_path,
+        &verbose_logging_path,
+        ExistingOutputPolicy::CreateNew,
+        |writer| write_document(writer, &document),
+        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
+    )?;
 
     let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
     Ok(CaptureDenialsOutput {
@@ -79,45 +90,10 @@ pub fn write_denials_document(
     })
 }
 
-/// Creates `output_path` (failing if it already exists) and writes through
-/// `write`, cleaning up a partial file if `write` fails.
-pub fn write_denials_output_file(
-    output_path: &Path,
-    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)
-        .map_err(|error| {
-            std::io::Error::other(format!(
-                "captureDenials failed to create denials output file {}: {error}",
-                output_path.display()
-            ))
-        })?;
-
-    let write_result = {
-        let mut writer = std::io::BufWriter::new(file);
-        write(&mut writer).and_then(|()| writer.flush())
-    };
-    if let Err(error) = write_result {
-        let write_error = std::io::Error::other(format!(
-            "captureDenials failed to write denials output file {}: {error}",
-            output_path.display()
-        ));
-        return match std::fs::remove_file(output_path) {
-            Ok(()) => Err(write_error),
-            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
-                Err(write_error)
-            }
-            Err(cleanup_error) => Err(std::io::Error::other(format!(
-                "{write_error}; additionally failed to remove incomplete output file {}: {cleanup_error}",
-                output_path.display()
-            ))),
-        };
-    }
-
-    Ok(())
+/// Derives the deterministic verbose logging sibling path for a denials output.
+pub fn verbose_logging_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
+    verbose_logging_sibling_path(output_path)
+        .map_err(|error| std::io::Error::other(format!("captureDenials {error}")))
 }
 
 /// Inserts a per-run identifier into a denials output path's file stem so
@@ -305,7 +281,11 @@ pub fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{AccessType, DeniedResource, ResourceType};
+    use learning_mode_core::{
+        AccessType, DeniedResource, ResourceType, VerboseLoggingOutcomeReason,
+        VerboseLoggingProvider, VerboseLoggingSignature,
+    };
+    use std::io::Write;
 
     #[test]
     fn write_denials_document_writes_summary_and_document() {
@@ -327,8 +307,13 @@ mod tests {
         assert_eq!(metadata.total_denials, 1);
         assert!(!metadata.denied_resources_truncated);
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(output_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(document.denials.len(), 1);
+        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
+            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verbose_logging.version, VerboseLoggingDocument::VERSION);
     }
 
     #[test]
@@ -342,35 +327,86 @@ mod tests {
 
         assert_eq!(metadata.total_denials, 0);
         assert!(output_path.exists());
+        assert!(verbose_logging_output_path(&output_path).unwrap().exists());
     }
 
     #[test]
-    fn failed_denials_write_removes_incomplete_output() {
+    fn write_denials_document_writes_verbose_logging_aggregates() {
         let directory = tempfile::tempdir().expect("temp directory");
         let output_path = directory.path().join("denials.json");
+        let mut analysis = AnalysisResult::complete(Vec::new());
+        analysis.verbose_logging.record(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
+            provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
+            event_id: 14,
+            reason: VerboseLoggingOutcomeReason::Actionable,
+            pid: 42,
+            access_type: Some(learning_mode_core::AccessType::Read),
+            resource_type: Some(learning_mode_core::ResourceType::File),
+            properties: vec![("Sid".to_string(), "S-1-15-3-1".to_string())],
+        });
 
-        let error = write_denials_output_file(&output_path, |writer| {
-            std::io::Write::write_all(writer, b"{\"partial\":")?;
-            Err(std::io::Error::other("simulated write failure"))
-        })
-        .expect_err("write should fail");
+        write_denials_document(analysis, 0, &output_path).expect("write should succeed");
 
-        assert!(error.to_string().contains("simulated write failure"));
-        assert!(!output_path.exists());
+        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
+            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verbose_logging.signatures.len(), 1);
+        assert_eq!(verbose_logging.signatures[0].count, 1);
+        assert_eq!(verbose_logging.signatures[0].signature.pid, 42);
     }
 
     #[test]
-    fn denials_output_does_not_overwrite_an_existing_file() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-        std::fs::write(&output_path, b"existing").expect("seed output");
-
-        write_denials_output_file(&output_path, |_| Ok(())).expect_err("collision should fail");
-
+    fn verbose_logging_path_is_a_deterministic_json_sibling() {
         assert_eq!(
-            std::fs::read(&output_path).expect("read existing output"),
-            b"existing"
+            verbose_logging_output_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
+            PathBuf::from(r"C:\out\denials.123.verbose.json")
         );
+        assert_eq!(
+            verbose_logging_output_path(Path::new("denials")).unwrap(),
+            PathBuf::from("denials.verbose.json")
+        );
+    }
+
+    #[test]
+    fn verbose_logging_collision_leaves_actionable_output_absent() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
+        std::fs::write(&verbose_logging_path, b"existing").expect("seed verbose logging output");
+
+        write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
+            .expect_err("collision should fail");
+
+        assert!(!output_path.exists());
+        assert_eq!(std::fs::read(verbose_logging_path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn second_staged_write_failure_leaves_no_final_output() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
+
+        let error = write_paired_output_files(
+            "captureDenials",
+            &output_path,
+            &verbose_logging_path,
+            ExistingOutputPolicy::CreateNew,
+            |writer| writer.write_all(b"denials"),
+            |writer| {
+                writer.write_all(b"partial")?;
+                Err(std::io::Error::other("simulated verbose logging failure"))
+            },
+        )
+        .expect_err("paired write should fail");
+
+        assert!(error
+            .to_string()
+            .contains("simulated verbose logging failure"));
+        assert!(!output_path.exists());
+        assert!(!verbose_logging_path.exists());
     }
 
     #[test]

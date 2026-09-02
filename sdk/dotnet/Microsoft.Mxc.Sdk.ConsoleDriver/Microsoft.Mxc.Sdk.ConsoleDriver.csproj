@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Microsoft.Mxc.Sdk.ConsoleDriver</RootNamespace>
+    <!-- Named for what an operator runs, alongside its Rust siblings
+         (isolation_session_console, attached_console_ffi). -->
+    <AssemblyName>mxc-isolation-session-console</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
+  </ItemGroup>
+
+</Project>

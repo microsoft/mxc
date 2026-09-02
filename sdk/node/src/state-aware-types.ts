@@ -6,6 +6,7 @@ import {
   FilesystemConfig,
   NetworkConfig,
   ProcessConfig,
+  TelemetryConfig,
 } from './types.js';
 
 /**
@@ -40,15 +41,16 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
 export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
-   * Optional identifier for the calling application. For a packaged
-   * application this is the Package Family Name; for an unpackaged one it may
-   * be any string — MXC does not interpret or verify it.
+   * Optional identifier for the calling application.
    *
-   * Carried verbatim inside the returned `SandboxId` so later lifecycle
-   * phases can recover it without the caller re-supplying it. Nothing
-   * consumes it yet; it is accepted now so a future OS contract that acts on
-   * the calling application's identity does not require a breaking change.
+   * **A packaged application must supply its Package Family Name in the form
+   * `PFN:<packageFamilyName>`** — the literal `PFN:` prefix followed by the
+   * PFN, e.g. `PFN:Contoso.App_8wekyb3d8bbwe`. An unpackaged application may 
+   * pass any string — MXC does not interpret or verify it. Carried verbatim
+   * inside the returned `SandboxId` so later lifecycle phases can recover it
+   * without the caller re-supplying it.
    *
    * Validated structurally only: no control characters, at most 256
    * characters. Whitespace and case are preserved exactly. An explicitly
@@ -76,22 +78,26 @@ export interface IsolationSessionProvisionConfig {
 export interface IsolationSessionStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface IsolationSessionStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 /**
@@ -115,6 +121,7 @@ export interface IsolationSessionProvisionMetadata {
 export interface WindowsSandboxProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
@@ -129,22 +136,26 @@ export interface WindowsSandboxProvisionConfig {
 export interface WindowsSandboxStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface WindowsSandboxStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 // WSLc per-(backend, phase) Configs. WSLc runs each sandbox as a warm
@@ -156,6 +167,7 @@ export interface WindowsSandboxDeprovisionConfig {
 export interface WslcProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
@@ -191,11 +203,13 @@ export interface WslcProvisionConfig {
 export interface WslcStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WslcExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
   /**
    * Per-exec network overrides. Only `proxy` is honored: it injects a
@@ -213,11 +227,13 @@ export interface WslcExecConfig {
 export interface WslcStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WslcDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 /**

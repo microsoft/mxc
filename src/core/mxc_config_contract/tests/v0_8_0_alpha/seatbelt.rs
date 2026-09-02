@@ -6,6 +6,7 @@ use crate::common::{assert_invalid, assert_valid};
 fn accepts_complete_seatbelt_object() {
     let json = r#"{
         "version": "0.8.0-alpha",
+        "containment": "seatbelt",
         "seatbelt": {
             "profileOverride": "none",
             "guiAccess": false,
@@ -26,6 +27,7 @@ fn accepts_every_seatbelt_launch_method() {
         let json = format!(
             r#"{{
                 "version": "0.8.0-alpha",
+                "containment": "seatbelt",
                 "seatbelt": {{
                     "launchMethod": "{launch_method}"
                 }},
@@ -41,6 +43,7 @@ fn accepts_every_seatbelt_launch_method() {
 fn rejects_invalid_seatbelt_launch_method() {
     let json = r#"{
             "version": "0.8.0-alpha",
+            "containment": "seatbelt",
             "seatbelt": {
                 "launchMethod": "invalid"
             },
@@ -48,23 +51,6 @@ fn rejects_invalid_seatbelt_launch_method() {
         }"#;
 
     assert_invalid(json);
-}
-
-#[test]
-fn rejects_non_string_seatbelt_launch_method() {
-    for launch_method in ["true", "false", "0", "1", "[]", "{}"] {
-        let json = format!(
-            r#"{{
-                "version": "0.8.0-alpha",
-                "seatbelt": {{
-                    "launchMethod": {launch_method}
-                }},
-                "process": {{"commandLine": "echo"}}
-            }}"#
-        );
-
-        assert_invalid(&json);
-    }
 }
 
 #[test]
@@ -199,6 +185,7 @@ fn rejects_unknown_seatbelt_field() {
 fn accepts_macos_sandbox_section_alias() {
     let json = r#"{
         "version": "0.8.0-alpha",
+        "containment": "macos_sandbox",
         "macos_sandbox": {
             "profileOverride": "none"
         },

@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>Microsoft.Mxc.Sdk</RootNamespace>
     <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Description>C# SDK for MXC (Microsoft eXecution Container), binding the native mxc_ffi library.</Description>
@@ -23,8 +23,51 @@
   <PropertyGroup>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcGeneratedBindings>$(MSBuildProjectDirectory)/Native/NativeMethods.g.cs</MxcGeneratedBindings>
-  </PropertyGroup>
 
+    <MxcCargoProfile Condition="'$(Configuration)' == 'Release'">release</MxcCargoProfile>
+    <MxcCargoProfile Condition="'$(MxcCargoProfile)' == ''">debug</MxcCargoProfile>
+    <MxcCargoProfileArg Condition="'$(MxcCargoProfile)' == 'release'">--release</MxcCargoProfileArg>
+
+    <!-- Mirrors build.bat's optional-backend switches, including their
+         defaults. The two build paths choose this set independently. -->
+    <MxcWithIsolationSession Condition="'$(MxcWithIsolationSession)' == ''">false</MxcWithIsolationSession>
+    <MxcWithWslc Condition="'$(MxcWithWslc)' == ''">false</MxcWithWslc>
+
+    <MxcCargoFeatures>dotnetsdk</MxcCargoFeatures>
+    <MxcCargoFeatures Condition="'$(Configuration)' == 'Debug'">$(MxcCargoFeatures) wxc_common/test-support</MxcCargoFeatures>
+    <MxcCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoFeatures) isolation_session</MxcCargoFeatures>
+    <MxcCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoFeatures) wslc</MxcCargoFeatures>
+
+    <MxcUnsupportedOptionalBackends Condition="!$([MSBuild]::IsOSPlatform('Windows')) and ('$(MxcWithIsolationSession)' == 'true' or '$(MxcWithWslc)' == 'true')">true</MxcUnsupportedOptionalBackends>
+
+    <MxcNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcNativeFileName>
+    <MxcNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcNativeFileName>
+    <MxcNativeFileName Condition="'$(MxcNativeFileName)' == ''">libmxc_ffi.so</MxcNativeFileName>
+
+    <!-- mxc_engine resolves plm.exe beside the loaded module on Windows, so
+         there the native unit is both files. -->
+    <MxcCargoPackages>-p mxc_ffi</MxcCargoPackages>
+    <MxcCargoPackages Condition="$([MSBuild]::IsOSPlatform('Windows'))">-p mxc_ffi -p plm</MxcCargoPackages>
+    <MxcCargoPackages Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoPackages) -p wxc_wslc_daemon</MxcCargoPackages>
+    <MxcSidecarFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">plm.exe</MxcSidecarFileName>
+
+    <MxcNativeUnitFileNames>$(MxcNativeFileName)</MxcNativeUnitFileNames>
+    <MxcNativeUnitFileNames Condition="'$(MxcSidecarFileName)' != ''">$(MxcNativeFileName) and $(MxcSidecarFileName)</MxcNativeUnitFileNames>
+    <MxcNativeUnitFileNames Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcNativeUnitFileNames), wxc-wslc-daemon.exe, and wslcsdk.dll</MxcNativeUnitFileNames>
+    <MxcNativeUnitExpectedCount>1</MxcNativeUnitExpectedCount>
+    <MxcNativeUnitExpectedCount Condition="'$(MxcSidecarFileName)' != ''">2</MxcNativeUnitExpectedCount>
+    <MxcNativeUnitExpectedCount Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">4</MxcNativeUnitExpectedCount>
+    <MxcIsolationSessionFeatureBit>0</MxcIsolationSessionFeatureBit>
+    <MxcIsolationSessionFeatureBit Condition="'$(MxcWithIsolationSession)' == 'true'">1</MxcIsolationSessionFeatureBit>
+    <MxcWslcFeatureBit>0</MxcWslcFeatureBit>
+    <MxcWslcFeatureBit Condition="'$(MxcWithWslc)' == 'true'">1</MxcWslcFeatureBit>
+    <MxcExpectedOptionalBackendStamp>isolation_session=$(MxcIsolationSessionFeatureBit);wslc=$(MxcWslcFeatureBit)</MxcExpectedOptionalBackendStamp>
+
+    <MxcHostRid>$(NETCoreSdkPortableRuntimeIdentifier)</MxcHostRid>
+    <MxcHostArch>$(MxcHostRid.Substring($([MSBuild]::Add($(MxcHostRid.LastIndexOf('-')), 1))))</MxcHostArch>
+    <MxcOtherWindowsRid Condition="'$(MxcHostRid)' == 'win-x64'">win-arm64</MxcOtherWindowsRid>
+    <MxcOtherWindowsRid Condition="'$(MxcHostRid)' == 'win-arm64'">win-x64</MxcOtherWindowsRid>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Native/NativeMethods.g.cs" />
     <Compile Include="Native/NativeMethods.g.cs" />
@@ -34,14 +77,157 @@
     <InternalsVisibleTo Include="Microsoft.Mxc.Sdk.Tests" />
   </ItemGroup>
 
-  <Target Name="GenerateNativeBindings"
-          BeforeTargets="CoreCompile"
-          Inputs="$(MxcSrcDir)/ffi/mxc_ffi/src/lib.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/error_detail.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/streaming.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/state_aware.rs;$(MxcSrcDir)/ffi/mxc_ffi/build.rs"
-          Outputs="$(MxcGeneratedBindings)">
-    <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features dotnetsdk)" />
-    <Exec Command="cargo build -p mxc_ffi --features dotnetsdk" WorkingDirectory="$(MxcSrcDir)" />
+  <!-- Cargo's output directory depends on its configuration, so the produced
+       paths are read back from cargo rather than reconstructed. -->
+  <UsingTask TaskName="MxcReadCargoArtifacts" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Lines ParameterType="System.String[]" Required="true" />
+      <Artifacts ParameterType="System.String[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var produced = new List<string>();
+        foreach (var line in Lines)
+        {
+            var key = line.IndexOf("\"filenames\":[", StringComparison.Ordinal);
+            if (key < 0) continue;
+            var i = line.IndexOf('[', key) + 1;
+            var sb = new System.Text.StringBuilder();
+            var inString = false;
+            while (i < line.Length)
+            {
+                var c = line[i];
+                if (!inString)
+                {
+                    if (c == ']') break;
+                    if (c == '"') { inString = true; sb.Clear(); }
+                    i++;
+                    continue;
+                }
+                if (c == '\\' && i + 1 < line.Length)
+                {
+                    var e = line[i + 1];
+                    if (e == 'u' && i + 5 < line.Length)
+                    {
+                        sb.Append((char)Convert.ToInt32(line.Substring(i + 2, 4), 16));
+                        i += 6;
+                        continue;
+                    }
+                    if (e == 'n') sb.Append('\n');
+                    else if (e == 't') sb.Append('\t');
+                    else if (e == 'r') sb.Append('\r');
+                    else if (e == 'b') sb.Append('\b');
+                    else if (e == 'f') sb.Append('\f');
+                    else sb.Append(e);
+                    i += 2;
+                    continue;
+                }
+                if (c == '"') { inString = false; produced.Add(sb.ToString()); i++; continue; }
+                sb.Append(c);
+                i++;
+            }
+        }
+        Artifacts = produced.ToArray();
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="GenerateNativeBindings" BeforeTargets="CoreCompile">
+    <!-- Cargo builds the native unit for the host. A RuntimeIdentifier can
+         diverge in operating system, PlatformTarget in architecture without
+         one. Both are read from this project's own evaluation, which a
+         ProjectReference consumer's project-file settings do not reach. -->
+    <Error Condition="'$(RuntimeIdentifier)' != '' and '$(RuntimeIdentifier)' != '$(MxcHostRid)'"
+           Text="mxc: RuntimeIdentifier '$(RuntimeIdentifier)' is not this host's '$(MxcHostRid)', and cargo builds the native unit for the host. Drop the RuntimeIdentifier, or set it to '$(MxcHostRid)'." />
+    <Error Condition="'$(PlatformTarget)' != '' and '$(PlatformTarget)' != 'AnyCPU' and '$(PlatformTarget)' != '$(MxcHostArch)'"
+           Text="mxc: PlatformTarget '$(PlatformTarget)' is not this host's '$(MxcHostArch)', and cargo builds the native unit for the host. Drop the PlatformTarget, or set it to '$(MxcHostArch)'." />
+    <Error Condition="'$(MxcUnsupportedOptionalBackends)' == 'true'"
+           Text="mxc: MxcWithIsolationSession and MxcWithWslc are Windows-only build switches." />
+    <!-- Pinning keeps cargo on the host the guards above validated; a
+         CARGO_BUILD_TARGET or a `[build] target` would otherwise choose it. -->
+    <Exec Command="rustc -vV"
+          WorkingDirectory="$(MxcSrcDir)"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="MxcRustcVersion" />
+    </Exec>
+    <ItemGroup>
+      <MxcRustcHostLine Include="@(MxcRustcVersion)"
+                        Condition="$([MSBuild]::ValueOrDefault('%(Identity)', '').StartsWith('host: '))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <MxcRustcHostLine>@(MxcRustcHostLine)</MxcRustcHostLine>
+    </PropertyGroup>
+    <Error Condition="'$(MxcRustcHostLine)' == ''"
+           Text="mxc: 'rustc -vV' reported no host triple, so the cargo build cannot be pinned to this host. Ensure the Rust toolchain is installed and on PATH." />
+    <PropertyGroup>
+      <MxcRustHostTriple>$(MxcRustcHostLine.Replace('host: ', '').Trim())</MxcRustHostTriple>
+    </PropertyGroup>
+    <Message Importance="high" Text="mxc: building the native unit and generating C# P/Invoke bindings (cargo build $(MxcCargoPackages) --features &quot;$(MxcCargoFeatures)&quot; --target $(MxcRustHostTriple) $(MxcCargoProfileArg))" />
+    <Exec Command="cargo build $(MxcCargoPackages) --features &quot;$(MxcCargoFeatures)&quot; --target $(MxcRustHostTriple) $(MxcCargoProfileArg) --message-format=json-render-diagnostics"
+          WorkingDirectory="$(MxcSrcDir)"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="MxcCargoOutput" />
+    </Exec>
+    <MxcReadCargoArtifacts Lines="@(MxcCargoOutput)">
+      <Output TaskParameter="Artifacts" ItemName="MxcCargoArtifact" />
+    </MxcReadCargoArtifacts>
+    <ItemGroup>
+      <MxcFfiArtifact Include="@(MxcCargoArtifact)"
+                      Condition="'%(Filename)%(Extension)' == '$(MxcNativeFileName)'" />
+      <MxcNativeUnit Include="@(MxcFfiArtifact)" />
+      <MxcNativeUnit Include="@(MxcCargoArtifact)"
+                     Condition="'$(MxcSidecarFileName)' != '' and '%(Filename)%(Extension)' == '$(MxcSidecarFileName)'" />
+      <MxcWslcDaemon Include="@(MxcCargoArtifact)"
+                     Condition="'$(MxcWithWslc)' == 'true' and '%(Filename)%(Extension)' == 'wxc-wslc-daemon.exe'" />
+      <MxcWslcSdkDll Include="@(MxcFfiArtifact->'%(RootDir)%(Directory)wslcsdk.dll')"
+                     Condition="'$(MxcWithWslc)' == 'true'" />
+      <MxcNativeUnit Include="@(MxcWslcDaemon);@(MxcWslcSdkDll)"
+                     Condition="'$(MxcWithWslc)' == 'true'" />
+    </ItemGroup>
+    <Error Condition="'$(MxcWithWslc)' == 'true' and !Exists('@(MxcWslcSdkDll)')"
+           Text="mxc: the WSLC-enabled cargo build did not stage wslcsdk.dll beside mxc_ffi." />
     <Error Condition="!Exists('$(MxcGeneratedBindings)')"
            Text="Binding generation did not produce $(MxcGeneratedBindings). Ensure the Rust toolchain (cargo) is installed and on PATH." />
+  </Target>
+
+  <!-- NativeLibraryResolver probes the output root ahead of the staged
+       runtimes/<rid>/native asset, so placing the built unit here is what makes
+       a dev build load the one its bindings were generated from.
+
+       Pack=false: the per-RID assets under runtimes/ are what ships.
+
+       Before AssignTargetPaths so the items join the normal copy-to-output,
+       including into projects that reference this one. -->
+  <Target Name="MxcStageNativeUnitToOutputRoot"
+          BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="GenerateNativeBindings"
+          Condition="'$(NoBuild)' != 'true'">
+    <Error Condition="@(MxcNativeUnit->Count()) != $(MxcNativeUnitExpectedCount)"
+           Text="mxc: cargo reported @(MxcNativeUnit->Count()) of the $(MxcNativeUnitExpectedCount) files making up the native unit ($(MxcNativeUnitFileNames)). The unit must be staged whole: mxc_engine resolves plm.exe beside the loaded module." />
+    <ItemGroup>
+      <!-- Always, not PreserveNewest: the requirement is identity, not recency. -->
+      <None Include="@(MxcNativeUnit)">
+        <Link>%(Filename)%(Extension)</Link>
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        <Pack>false</Pack>
+      </None>
+    </ItemGroup>
+  </Target>
+
+  <!-- Batched per unit member: each staged file must be the one cargo produced
+       in this build. -->
+  <Target Name="MxcVerifyStagedNativeUnit" AfterTargets="Build" Outputs="%(MxcNativeUnit.Identity)">
+    <GetFileHash Files="%(MxcNativeUnit.Identity)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="MxcBuiltHash" />
+    </GetFileHash>
+    <GetFileHash Files="$(OutDir)%(MxcNativeUnit.Filename)%(MxcNativeUnit.Extension)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="MxcStagedHash" />
+    </GetFileHash>
+    <Error Condition="'$(MxcBuiltHash)' != '$(MxcStagedHash)'"
+           Text="mxc: $(OutDir)%(MxcNativeUnit.Filename)%(MxcNativeUnit.Extension) is not the file cargo produced at %(MxcNativeUnit.Identity). The staged native unit must be the one these bindings were generated from." />
   </Target>
 
   <!-- Native mxc_ffi library for the host platform, staged into runtimes/<rid>/native
@@ -49,10 +235,48 @@
        build.sh / build-mac.sh do not yet stage theirs), and packed as NuGet
        runtime assets. A given build only produces its own platform's native
        library, so a multi-RID package requires packing on/with each platform.
-       For local dev/test the native lib is instead located by
-       NativeLibraryResolver from the Cargo target dir. -->
+       These are package payload only: a dev build stages the freshly built unit
+       at the output root instead. -->
   <ItemGroup>
-    <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes/" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="runtimes/**/*"
+          Exclude="runtimes/$(MxcHostRid)/native/*;runtimes/*/mxc-build-features.txt"
+          Pack="true"
+          PackagePath="runtimes/" />
   </ItemGroup>
+
+  <!-- A clean dotnet pack has no pre-staged host RID. Add the exact native
+       unit produced by this invocation; remove a same-RID pre-staged copy to
+       avoid duplicate package paths while retaining other RIDs assembled by
+       build.bat's all-architectures mode. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);MxcAddNativeUnitToPackage</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+  <Target Name="MxcAddNativeUnitToPackage"
+          DependsOnTargets="GenerateNativeBindings">
+    <ItemGroup>
+    <MxcOtherRidNative Include="runtimes/$(MxcOtherWindowsRid)/native/*"
+                       Condition="'$(MxcOtherWindowsRid)' != ''" />
+    <TfmSpecificPackageFile Include="@(MxcNativeUnit)">
+      <PackagePath>runtimes/$(MxcHostRid)/native/%(Filename)%(Extension)</PackagePath>
+    </TfmSpecificPackageFile>
+  </ItemGroup>
+  <ReadLinesFromFile File="runtimes/$(MxcOtherWindowsRid)/mxc-build-features.txt"
+                     Condition="@(MxcOtherRidNative->Count()) != 0 and Exists('runtimes/$(MxcOtherWindowsRid)/mxc-build-features.txt')">
+    <Output TaskParameter="Lines" ItemName="MxcOtherRidFeatureStamp" />
+  </ReadLinesFromFile>
+  <PropertyGroup>
+    <MxcOtherRidFeatureStamp>@(MxcOtherRidFeatureStamp, ';')</MxcOtherRidFeatureStamp>
+  </PropertyGroup>
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and @(MxcOtherRidNative->Count()) != $(MxcNativeUnitExpectedCount)"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) has @(MxcOtherRidNative->Count()) files, but this feature set requires $(MxcNativeUnitExpectedCount) ($(MxcNativeUnitFileNames)). Rebuild that RID with the same optional-backend switches." />
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and (!Exists('runtimes/$(MxcOtherWindowsRid)/native/mxc_ffi.dll') or !Exists('runtimes/$(MxcOtherWindowsRid)/native/plm.exe'))"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) is missing mxc_ffi.dll or plm.exe. Rebuild that RID before creating a multi-RID package." />
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and '$(MxcWithWslc)' == 'true' and (!Exists('runtimes/$(MxcOtherWindowsRid)/native/wxc-wslc-daemon.exe') or !Exists('runtimes/$(MxcOtherWindowsRid)/native/wslcsdk.dll'))"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) does not contain the complete WSLC runtime unit. Rebuild it with WSLC enabled." />
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and !Exists('runtimes/$(MxcOtherWindowsRid)/mxc-build-features.txt')"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) has no optional-backend feature stamp. Rebuild that RID before creating a multi-RID package." />
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and '$(MxcOtherRidFeatureStamp)' != '$(MxcExpectedOptionalBackendStamp)'"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) uses optional backends '$(MxcOtherRidFeatureStamp)', but this pack uses '$(MxcExpectedOptionalBackendStamp)'. Rebuild both RIDs with the same switches." />
+  </Target>
 
 </Project>

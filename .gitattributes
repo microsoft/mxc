@@ -1,3 +1,4 @@
 # Force LF line endings for shell scripts (prevents CRLF issues in WSL/Linux)
 *.sh text eol=lf
+.github/copilot-instructions.md whitespace=cr-at-eol
 .github/workflows/*.lock.yml linguist-generated=true

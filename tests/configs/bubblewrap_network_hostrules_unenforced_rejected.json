@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Host-Rules-Unenforced",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo SHOULD_NOT_RUN"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities",
+    "allowedHosts": ["203.0.113.7"]
+  }
+}

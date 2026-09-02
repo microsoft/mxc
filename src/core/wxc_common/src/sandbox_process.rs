@@ -20,6 +20,7 @@ use std::io::{Read, Write};
 use crate::logger::Logger;
 use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use crate::script_runner::ScriptRunner;
+use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
 /// A handle to a running sandboxed process.
 ///
@@ -67,8 +68,9 @@ use crate::script_runner::ScriptRunner;
 ///   before touching the other can hang on output-heavy children. Taking only
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
-    /// Security warnings associated with this sandbox, such as a policy that
-    /// intentionally relaxes containment. The default is empty.
+    /// Warnings associated with this sandbox, such as a policy that
+    /// intentionally relaxes containment or an unavailable telemetry route.
+    /// The default is empty.
     fn warnings(&self) -> &[String] {
         &[]
     }
@@ -360,15 +362,30 @@ pub enum StdioMode {
 /// calls this directly with [`StdioMode::Pipes`]; the CLI executor binaries
 /// reach it through the [`Runner`] bridge.
 pub trait SandboxBackend {
-    /// Backend-specific validation, run before [`spawn`](SandboxBackend::spawn)
-    /// and on dry-run. Override to reject unsupported policies; default accepts.
-    fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    /// Declares optional network policy features this backend fully enforces.
+    ///
+    /// Return a named feature constant or compose constants with `|`. Use
+    /// [`NetworkPolicySupport::ALL`] only when every feature is enforced.
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        NetworkPolicySupport::LEGACY
+    }
+
+    /// Validates shared network support and backend-specific constraints.
+    ///
+    /// Override to add backend-specific checks. Implementations must first call
+    /// `validate_network_policy_support(request, self.network_policy_support())`.
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
         Ok(())
     }
 
     /// Apply this backend's containment and spawn the sandboxed process with
     /// stdio wired per `stdio`, returning a handle. On a validation or spawn
     /// failure returns a [`ScriptResponse`] carrying the error.
+    ///
+    /// Implementations must apply shared validation and [`Self::validate`]
+    /// before performing any process-launch side effects. This keeps direct
+    /// streaming callers and the [`Runner`] bridge on the same safe path.
     fn spawn(
         &mut self,
         request: &ExecutionRequest,
@@ -407,16 +424,18 @@ impl<B> Runner<B> {
     }
 }
 
-impl<B: SandboxBackend> ScriptRunner for Runner<B> {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        self.0.validate(request)
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        let mut child = match self.0.spawn(request, logger, StdioMode::Inherit) {
+impl<B: SandboxBackend> Runner<B> {
+    fn wait_for_child(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        child: Result<Box<dyn SandboxProcess>, ScriptResponse>,
+    ) -> ScriptResponse {
+        let mut child = match child {
             Ok(child) => child,
             Err(response) => return response,
         };
+
         match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
@@ -454,6 +473,218 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
                 response
             }
         }
+    }
+}
+
+impl<B: SandboxBackend> ScriptRunner for Runner<B> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.0.validate(request)
+    }
+
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // Direct callers have not passed through ScriptRunner::run, so use the
+        // backend's validation-safe public spawn path.
+        let child = self.0.spawn(request, logger, StdioMode::Inherit);
+        self.wait_for_child(request, logger, child)
+    }
+
+    fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // A dry-run has no spawn call to enforce validation. Normal execution
+        // uses SandboxBackend::spawn, the single validation-safe launch path.
+        if request.dry_run {
+            if let Err(response) = validate_common(request) {
+                return response;
+            }
+            if let Err(response) = self.validate_runner(request) {
+                return response;
+            }
+            return ScriptResponse {
+                exit_code: 0,
+                ..Default::default()
+            };
+        }
+
+        self.execute(request, logger)
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::logger::Mode;
+
+    use super::*;
+
+    struct CompletedProcess;
+
+    impl SandboxProcess for CompletedProcess {
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            0
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+    }
+
+    struct CountingBackend {
+        validations: Arc<AtomicUsize>,
+        direct_spawns: Arc<AtomicUsize>,
+        reject_validation: bool,
+    }
+
+    impl SandboxBackend for CountingBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            self.validations.fetch_add(1, Ordering::Relaxed);
+            if self.reject_validation {
+                Err(ScriptResponse::error("backend validation failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn spawn(
+            &mut self,
+            request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            validate_common(request)?;
+            self.validate(request)?;
+            self.direct_spawns.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(CompletedProcess))
+        }
+    }
+
+    #[test]
+    fn runner_execute_validates_direct_callers() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn runner_execute_applies_shared_validation() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest::default();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(validations.load(Ordering::Relaxed), 0);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn runner_run_validates_once() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn runner_run_dry_run_validates_without_spawning() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            reject_validation: false,
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn runner_run_backend_validation_failure_does_not_spawn() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            reject_validation: true,
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(response.error_message, "backend validation failed");
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
     }
 }
 

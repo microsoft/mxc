@@ -25,9 +25,13 @@ fn cached_has_wxc_exe() -> bool {
     *HAS_WXC_EXE.get_or_init(has_wxc_exe)
 }
 
-/// Marker in the error text emitted when the binary was built without
-/// `--features isolation_session`.
-const NOT_COMPILED: &str = "IsolationSession backend not compiled";
+/// Markers in the error text emitted when the binary was built without
+/// `--features isolation_session`. The one-shot and state-aware paths refuse
+/// separately and word it differently.
+const NOT_COMPILED: [&str; 2] = [
+    "IsolationSession backend not compiled",
+    "requires Windows with the `isolation_session` feature",
+];
 
 /// Parse the single JSON envelope on stdout and return `error.code`.
 fn error_code_on_stdout(result: &CommandResult) -> String {
@@ -54,7 +58,7 @@ fn error_code_on_stdout(result: &CommandResult) -> String {
 /// `true` when the run failed only because the feature is not compiled in.
 fn skipped_not_compiled(result: &CommandResult) -> bool {
     let combined = result.combined_output_with_decoded_base64();
-    if combined.contains(NOT_COMPILED) {
+    if NOT_COMPILED.iter().any(|m| combined.contains(m)) {
         println!(
             "SKIPPED: {} — wxc-exec.exe was built without --features isolation_session",
             result.label
@@ -140,6 +144,9 @@ fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
         "ui": { "disable": true }
     });
     let result = run_wxc_state_aware("iso provision + ui", &request, &["--experimental"]);
+    if skipped_not_compiled(&result) {
+        return;
+    }
     let code = error_code_on_stdout(&result);
     if code == "unsupported_phase" || code == "unsupported_containment" {
         println!("SKIPPED: wxc-exec.exe was built without --features isolation_session");
@@ -172,6 +179,9 @@ fn state_aware_provision_accepts_canonical_request_shape() {
         &request,
         &["--experimental", "--dry-run"],
     );
+    if skipped_not_compiled(&result) {
+        return;
+    }
     let stdout = result.stdout.trim();
     let parsed: Value = match serde_json::from_str(stdout) {
         Ok(v) => v,

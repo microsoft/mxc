@@ -117,15 +117,16 @@ Emitted on execution errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
 | `mxc.backend` | string | Containment backend name |
 | `mxc.error_type` | string | Error category (`config_error`, `policy_error`, `process_error`, `timeout`, `init_error`, `internal_error`, `cancelled`, `unknown`) |
 | `mxc.exit_code` | int32 | Process exit code |
 | `mxc.phase` | string | State-aware lifecycle phase; empty for one-shot executions |
 
 > **No free-form error text is emitted.** Error messages can contain paths,
-> usernames, or credentials, so `MXC.Error` deliberately carries only the
-> bounded `error_type` category and the numeric `exit_code` — never the
-> message string itself.
+> usernames, or credentials, so `MXC.Error` deliberately carries only bounded
+> attribution fields, the `error_type` category, and the numeric `exit_code` —
+> never the message string itself.
 
 ### Crash telemetry (panic hook)
 
@@ -180,6 +181,18 @@ free-form text.
 Telemetry emission is gated by the per-run request, MXC-owned consent,
 administrative policy, and provider availability. See
 [`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md).
+
+Consent is managed through the dedicated executor control plane:
+
+```text
+wxc-exec --telemetry-consent status
+wxc-exec --telemetry-consent request
+wxc-exec --telemetry-consent withdraw
+```
+
+These actions are not MXC execution configurations and are never accepted
+through `--config` or `--config-base64`. The stable `telemetry.enabled`
+setting remains only the additional per-run opt-in.
 
 ## Privacy review status
 

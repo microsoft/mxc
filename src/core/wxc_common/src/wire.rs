@@ -50,7 +50,7 @@ pub struct MxcConfig {
     #[serde(rename = "_comment")]
     pub comment: Option<serde_json::Value>,
 
-    /// MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+    /// MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
     pub version: Option<String>,
 
     /// State-aware lifecycle phase. When present, the request is a state-aware
@@ -93,6 +93,9 @@ pub struct MxcConfig {
     /// Network access policy. Shared across all backends.
     pub network: Option<Network>,
 
+    /// Runtime values supplied alongside, but separate from, sandbox policy.
+    pub runtime_config: Option<RuntimeConfig>,
+
     /// Cross-platform UI isolation policy.
     pub ui: Option<Ui>,
 
@@ -106,175 +109,6 @@ pub struct MxcConfig {
 
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
-}
-
-/// Telemetry-consent maintenance request.
-///
-/// This is a separate contract from [`MxcConfig`], even though executors use
-/// the same JSON input loader for both. Its explicit `command` discriminator
-/// lets the loader route maintenance without widening the execution schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[cfg_attr(
-    feature = "schema-gen",
-    schemars(title = "MXC Telemetry Consent Maintenance Request")
-)]
-#[serde(
-    rename_all = "camelCase",
-    deny_unknown_fields,
-    expecting = "a telemetry consent maintenance request"
-)]
-pub struct TelemetryConsentMaintenanceRequest {
-    /// Optional JSON Schema reference for editor validation.
-    #[serde(rename = "$schema")]
-    pub schema: Option<String>,
-    /// Fixed maintenance discriminator. Must be `"telemetryConsent"`.
-    pub command: TelemetryConsentCommand,
-    /// Consent operation to perform.
-    pub action: TelemetryConsentAction,
-    /// Preferred BCP 47 locale for the canonical prompt. Unsupported locales
-    /// fall back to `en-US`. Used only by `request`.
-    pub locale: Option<String>,
-}
-
-/// Fixed telemetry-consent maintenance command discriminator.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentCommand {
-    TelemetryConsent,
-}
-
-/// Telemetry-consent maintenance action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentAction {
-    /// Present the canonical prompt when consent may be requested.
-    Request,
-    /// Idempotently persist denied consent.
-    Withdraw,
-    /// Read status without mutation.
-    Status,
-}
-
-/// Typed result of a telemetry-consent maintenance action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentResult {
-    Status,
-    PresentationRequired,
-    Granted,
-    Denied,
-    Dismissed,
-    Withdrawn,
-    AlreadyGranted,
-    PolicyBlocked,
-    PresentationUnavailable,
-    NotApplicable,
-}
-
-/// Typed decision returned by a consent presenter.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub enum TelemetryConsentDecision {
-    Yes,
-    No,
-    Dismissed,
-}
-
-/// Private, session-bound presenter response consumed by the same executor
-/// process that emitted the challenge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentPresenterResponse {
-    pub challenge: String,
-    pub resource_version: u32,
-    pub decision: TelemetryConsentDecision,
-}
-
-/// Stable consent-state strings used by maintenance responses.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentState {
-    Granted,
-    Denied,
-    Undetermined,
-    NotApplicable,
-}
-
-/// Stable policy-state strings used by maintenance responses.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentPolicyState {
-    Unrestricted,
-    Allowed,
-    Blocked,
-    NotApplicable,
-}
-
-/// Why persisted consent is not currently effective.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum TelemetryConsentStatusReason {
-    NoRecord,
-    StoreUnreadable,
-    StoreMalformed,
-    ConsentSchemaUnsupported,
-    PromptVersionMissing,
-    PromptVersionUnsupported,
-    PolicyBlocked,
-    PresentationUnavailable,
-    NotApplicable,
-}
-
-/// One canonical prompt message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentMessage {
-    pub id: String,
-    pub text: String,
-}
-
-/// Canonical prompt data supplied to an SDK presenter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentPrompt {
-    pub resource_version: u32,
-    pub locale: String,
-    pub title: TelemetryConsentMessage,
-    pub body: TelemetryConsentMessage,
-    pub affirmative_label: TelemetryConsentMessage,
-    pub negative_label: TelemetryConsentMessage,
-    pub learn_more_label: TelemetryConsentMessage,
-    pub learn_more_url: String,
-}
-
-/// Typed telemetry-consent maintenance response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelemetryConsentMaintenanceResponse {
-    pub action: TelemetryConsentAction,
-    pub result: TelemetryConsentResult,
-    pub stored_state: TelemetryConsentState,
-    pub effective_state: TelemetryConsentState,
-    pub reason: Option<TelemetryConsentStatusReason>,
-    pub policy: TelemetryConsentPolicyState,
-    pub needs_prompt: bool,
-    /// Present only during the private SDK presenter handshake.
-    pub prompt: Option<TelemetryConsentPrompt>,
-    /// Opaque, single-request challenge for the private SDK presenter
-    /// handshake. Never persisted.
-    pub challenge: Option<String>,
 }
 
 /// State-aware lifecycle phase.
@@ -382,6 +216,18 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
+    /// ProcessContainer-specific network configuration.
+    pub network: Option<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific network configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerNetwork {
+    /// Installed package family name or AppContainer profile allowed to host
+    /// the configured loopback proxy.
+    pub allowed_proxy_peer: Option<String>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
@@ -524,6 +370,102 @@ pub struct Network {
     pub blocked_hosts: Option<Vec<String>>,
     /// Proxy configuration (one of localhost / builtinTestServer / url).
     pub proxy: Option<Proxy>,
+    /// Outbound network policy.
+    pub egress: Option<NetworkEgress>,
+    /// Inbound and host-loopback network policy.
+    pub ingress: Option<NetworkIngress>,
+}
+
+/// Outbound network policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkEgress {
+    /// Action used when no explicit rule matches. Defaults to `deny`.
+    pub default: Option<NetworkAction>,
+    /// Explicit allow rules.
+    pub allow: Option<Vec<NetworkRule>>,
+    /// Explicit deny rules. Deny rules take precedence over allow rules.
+    pub deny: Option<Vec<NetworkRule>>,
+}
+
+/// Inbound and host-loopback network policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkIngress {
+    /// Default action for LAN/private-network inbound traffic.
+    pub default: Option<NetworkAction>,
+    /// Bidirectional host-loopback connectivity action.
+    pub host_loopback: Option<NetworkAction>,
+}
+
+/// Allow or deny network action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkAction {
+    Allow,
+    Deny,
+}
+
+/// Outbound network rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkRule {
+    /// Destination CIDRs. Omission matches both IP families.
+    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
+    pub to: Option<Vec<NetworkPeer>>,
+    /// Destination protocols and ports. Omission matches all.
+    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
+    pub ports: Option<Vec<NetworkPort>>,
+}
+
+/// CIDR network peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPeer {
+    /// IPv4 or IPv6 CIDR.
+    pub cidr: String,
+    /// CIDRs excluded from this peer.
+    pub except: Option<Vec<String>>,
+}
+
+/// Protocol and destination-port selector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPort {
+    /// Transport protocol. Defaults to `any`.
+    pub protocol: Option<NetworkProtocol>,
+    /// Destination port. Omission matches every port.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub port: Option<u16>,
+    /// Inclusive end of a destination-port range. Requires `port`.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub end_port: Option<u16>,
+}
+
+/// Transport protocol selector.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+/// Runtime values supplied alongside, but separate from, sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// HTTP/S loopback proxy URL.
+    pub network_proxy: Option<String>,
 }
 
 /// Default network policy.
@@ -775,10 +717,12 @@ pub struct IsolationSession {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionProvisionPhase {
-    /// Optional application identifier for the calling application. For a
-    /// packaged application this is the Package Family Name; for an unpackaged
-    /// one it may be any string. Carried inside the `sandboxId` so later
-    /// lifecycle phases can recover it without the caller re-supplying it.
+    /// Optional identifier for the calling application.
+    ///
+    /// **A packaged application must supply its Package Family Name in the
+    /// form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`).
+    /// An unpackaged application may pass any string. Carried inside the `sandboxId`
+    /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
 }
 
@@ -787,18 +731,13 @@ pub struct IsolationSessionProvisionPhase {
 /// re-exported below as `generate_config_schema_json`.
 #[cfg(feature = "schema-gen")]
 mod schema_gen {
-    use super::{
-        MxcConfig, TelemetryConsentMaintenanceRequest, TelemetryConsentMaintenanceResponse,
-        TelemetryConsentPresenterResponse,
-    };
+    use super::MxcConfig;
     use schemars::JsonSchema;
 
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
     const SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json";
-    const TELEMETRY_CONSENT_SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-telemetry-consent.schema.1.json";
+        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
 
     /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
     /// model. The schema is post-processed to (a) inject the canonical `$id`,
@@ -812,7 +751,7 @@ mod schema_gen {
     pub fn generate_config_schema_json() -> String {
         let value = schema_value();
         if let serde_json::Value::Object(map) = &value {
-            return render_root_ordered(map);
+            return mxc_schema_support::render_root_ordered(map);
         }
         serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
     }
@@ -828,13 +767,7 @@ mod schema_gen {
     fn schema_value_for<T: JsonSchema>(schema_id: &str) -> serde_json::Value {
         let schema = schemars::schema_for!(T);
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
-        normalize_integer_formats(&mut value);
-        if let serde_json::Value::Object(map) = &mut value {
-            map.insert(
-                "$id".to_string(),
-                serde_json::Value::String(schema_id.to_string()),
-            );
-        }
+        mxc_schema_support::prepare_schema(&mut value, schema_id);
         value
     }
 
@@ -847,118 +780,9 @@ mod schema_gen {
     /// (alphabetical) order.
     pub fn generate_sdk_types_ts() -> String {
         let value = schema_value();
-        crate::ts_emit::emit_ts(&value)
-    }
-
-    /// Generate the separate telemetry-consent maintenance request schema.
-    pub fn generate_telemetry_consent_schema_json() -> String {
-        let value =
-            schema_value_for::<TelemetryConsentMaintenanceRequest>(TELEMETRY_CONSENT_SCHEMA_ID);
-        if let serde_json::Value::Object(map) = &value {
-            return render_root_ordered(map);
-        }
-        serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
-    }
-
-    #[derive(JsonSchema)]
-    #[allow(dead_code)]
-    struct TelemetryConsentMaintenanceTypes {
-        request: TelemetryConsentMaintenanceRequest,
-        response: TelemetryConsentMaintenanceResponse,
-        presenter_response: TelemetryConsentPresenterResponse,
-    }
-
-    /// Generate TypeScript wire types for both maintenance requests and
-    /// responses without adding them to the execution-config drift oracle.
-    pub fn generate_telemetry_consent_sdk_types_ts() -> String {
-        let value =
-            schema_value_for::<TelemetryConsentMaintenanceTypes>(TELEMETRY_CONSENT_SCHEMA_ID);
-        crate::ts_emit::emit_ts(&value)
-    }
-
-    /// Render the root object as pretty JSON with a fixed key order — the schema
-    /// metadata (`$schema`, `$id`, `title`, `description`) first, then the
-    /// structural keys — without disturbing nested key order.
-    ///
-    /// `serde_json`'s default `Map` is a `BTreeMap`, so it emits every object's keys
-    /// alphabetically and gives no control over root order. Rather than switch the
-    /// whole crate to `preserve_order` (which would reorder every nested object too),
-    /// only the root is rendered here: each value is pretty-printed with the standard
-    /// serializer (so nested objects stay alphabetical, byte-for-byte as before) and
-    /// re-indented one level. Any key not in `ORDER` keeps its alphabetical position
-    /// after the listed ones.
-    fn render_root_ordered(map: &serde_json::Map<String, serde_json::Value>) -> String {
-        // Only the metadata keys are floated to the front; every other key keeps its
-        // natural (alphabetical) position, so the rest of the file is unchanged.
-        const ORDER: &[&str] = &["$schema", "$id", "title", "description"];
-        let rank = |key: &str| ORDER.iter().position(|k| *k == key).unwrap_or(ORDER.len());
-
-        // `map` is a BTreeMap, so `keys()` is already alphabetical; a stable sort by
-        // rank floats the listed keys to the front and leaves the rest alphabetical.
-        let mut keys: Vec<&String> = map.keys().collect();
-        keys.sort_by_key(|k| rank(k));
-
-        let mut out = String::from("{\n");
-        for (i, key) in keys.iter().enumerate() {
-            let value_pretty =
-                serde_json::to_string_pretty(&map[*key]).expect("schema value serialises to JSON");
-            // The value sits one level deep: keep its first line in place after the
-            // key, and indent every following line by two spaces.
-            let mut lines = value_pretty.lines();
-            let mut indented = lines.next().unwrap_or("").to_string();
-            for line in lines {
-                indented.push_str("\n  ");
-                indented.push_str(line);
-            }
-            let key_json = serde_json::to_string(key).expect("object key serialises to JSON");
-            out.push_str("  ");
-            out.push_str(&key_json);
-            out.push_str(": ");
-            out.push_str(&indented);
-            if i + 1 < keys.len() {
-                out.push(',');
-            }
-            out.push('\n');
-        }
-        out.push('}');
-        out
-    }
-
-    /// Recursively rewrite non-standard schemars integer `format`s into draft-07
-    /// constructs: unsigned types (`uint*`) gain `minimum: 0` and drop `format`;
-    /// signed types (`int*`) just drop `format`. Standard string formats
-    /// (`date-time`, `uri`, …) are left untouched.
-    fn normalize_integer_formats(value: &mut serde_json::Value) {
-        use serde_json::Value;
-        match value {
-            Value::Object(map) => {
-                if let Some(Value::String(fmt)) = map.get("format") {
-                    let fmt = fmt.clone();
-                    let is_unsigned = fmt.starts_with("uint");
-                    let is_signed = fmt.starts_with("int");
-                    if is_unsigned || is_signed {
-                        map.remove("format");
-                        if is_unsigned {
-                            map.entry("minimum").or_insert(Value::Number(0.into()));
-                        }
-                    }
-                }
-                for v in map.values_mut() {
-                    normalize_integer_formats(v);
-                }
-            }
-            Value::Array(items) => {
-                for v in items {
-                    normalize_integer_formats(v);
-                }
-            }
-            _ => {}
-        }
+        mxc_schema_support::emit_ts(&value)
     }
 }
 
 #[cfg(feature = "schema-gen")]
-pub use schema_gen::{
-    generate_config_schema_json, generate_sdk_types_ts, generate_telemetry_consent_schema_json,
-    generate_telemetry_consent_sdk_types_ts,
-};
+pub use schema_gen::{generate_config_schema_json, generate_sdk_types_ts};

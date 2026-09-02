@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-GA-Egress-Deny",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"wget -qO- --timeout=8 http://203.0.113.2:443/ >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  }
+}

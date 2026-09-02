@@ -76,6 +76,30 @@ public sealed class MxcTelemetryTests
         Assert.Equal(ErrorCode.BackendError, ex.Code);
     }
 
+    [Fact]
+    public void ConsentLifecycle_RoundTripsThroughNativeApi_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var _ = new TelemetryTestEnv();
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+        Assert.True(MxcTelemetry.NeedsConsentPrompt());
+
+        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+        Assert.Equal(TelemetryConsentResult.Granted, granted.Result);
+        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
+        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsentStatus().EffectiveState);
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+
+        var withdrawn = MxcTelemetry.WithdrawConsent();
+        Assert.Equal(TelemetryConsentResult.Withdrawn, withdrawn.Result);
+        Assert.Equal(TelemetryConsentState.Denied, MxcTelemetry.GetConsent());
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+    }
+
     [SupportedOSPlatform("windows")]
     private sealed class TelemetryTestEnv : IDisposable
     {
@@ -83,6 +107,7 @@ public sealed class MxcTelemetryTests
 
         private readonly string? _originalLocalAppData;
         private readonly string? _originalPolicyKey;
+        private readonly string? _originalPolicyOwnerPid;
         private readonly string _storeDir;
         private readonly string _policySubkey;
 
@@ -93,6 +118,7 @@ public sealed class MxcTelemetryTests
             {
                 _originalLocalAppData = Environment.GetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE");
                 _originalPolicyKey = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE");
+                _originalPolicyOwnerPid = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID");
 
                 _storeDir = Directory.CreateTempSubdirectory("mxc-dotnet-telemetry-").FullName;
                 _policySubkey = $@"Software\MxcTelemetryDotNetTests\{Guid.NewGuid():N}";
@@ -100,6 +126,9 @@ public sealed class MxcTelemetryTests
                 Registry.CurrentUser.CreateSubKey(_policySubkey)?.Dispose();
                 Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _storeDir);
                 Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _policySubkey);
+                Environment.SetEnvironmentVariable(
+                    "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID",
+                    Environment.ProcessId.ToString());
             }
             catch
             {
@@ -112,6 +141,7 @@ public sealed class MxcTelemetryTests
         {
             Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _originalLocalAppData);
             Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _originalPolicyKey);
+            Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID", _originalPolicyOwnerPid);
 
             try
             {

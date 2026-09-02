@@ -1,0 +1,14 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Directional-Pre08-Rejected",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo DIRECTIONAL_PRE_0_8_SHOULD_NOT_RUN"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "10.0.2.2/32" }] }]
+    }
+  }
+}

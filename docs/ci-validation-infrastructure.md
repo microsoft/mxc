@@ -27,11 +27,11 @@ the individual local test scripts are documented in
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
-| `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers. |
+| `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
-| `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. |
+| `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `tests/scripts/run_ci_backend_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
 ### Flow
@@ -75,10 +75,9 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_ci_backend_tests.sh <backend id>`. No host-prep step. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
-the architecture). Job timeout 60 min; host prep 15 min; the test step 45 min
-(60 on macOS), so a hung backend fails while the log is still useful. On failure
-or cancellation the job uploads `mxc-ci.log` plus the Process Container log
-directories as `logs-<plan>-<os>-<arch>-<backend>-<attempt>`, kept 7 days.
+the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
+(60 on macOS), so a hung backend fails while the log is still useful. Logs are
+uploaded either way — see [Log collection](#log-collection).
 
 ## The catalog
 
@@ -157,6 +156,39 @@ isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc) and
 8 Linux (each of the four distros × bubblewrap + lxc). macOS resolves empty
 because Seatbelt has no wired suite.
 
+### `backendDelayedStart`
+
+Optional. Staggers the start of jobs for a named backend instead of letting
+them all begin at once:
+
+```json
+"backendDelayedStart": [
+  { "backend": "wslc", "seconds": 300 }
+]
+```
+
+Every runner in a pool shares one egress address, so a backend whose setup
+pulls down a large runtime or several container images concentrates all that
+traffic into a burst the moment its jobs start together. Public registries
+answer with rate limiting and stalled downloads.
+
+`seconds` is the gap between consecutive jobs of that backend, counted per
+backend and following the resolved job order. With the entry above, four WSLC
+jobs start at 0, 300, 600, and 900 seconds.
+
+The resolver puts the offset on every matrix entry as
+`startup_delay_seconds` — `0` where no stagger applies — and the job sleeps
+that long before its first network step. Job timeout is a flat 180 minutes,
+with plenty of room for any wait you'd reasonably configure.
+
+Leave the section out (or empty) and every job starts as soon as its runner is
+ready. A backend id that no plan schedules is accepted; it just never applies.
+
+Do keep in mind that the runner is held while it sleeps — Actions can't defer
+allocating a matrix job, so the wait has to happen inside it. Use no more than
+the contention calls for. This spreads simultaneous load and nothing else; a
+single download that stalls on its own is unaffected.
+
 ## Backend status
 
 Snapshot of what the matrix actually proves today. Update this table as backends
@@ -167,8 +199,8 @@ get fixed or wired.
 | Process T1 | ✅ Good | Prerelease Windows only. Remaining failures are genuine MXC bugs or harness limitations. |
 | Process T3 | ✅ Good | Non-prerelease Windows builds only, until the testing suite is updated. |
 | Bubblewrap | ✅ Good | |
-| LXC | ⚠️ Mostly good | Some networking tests fail on distros other than Ubuntu 24.04; host-vs-MXC cause not yet isolated. |
-| WSLC | ⚠️ Mostly good | Can hit a download rate limit while updating WSL / pulling container images. Planned fix: split into several jobs spaced ~15 min apart. |
+| LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
+| WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ⚠️ Blocked | `Feature_AgentSessionsBaseSupport` is not enabled on the pool image yet. |
 | Windows Sandbox | ⛔ Not scheduled | Dispatcher case is wired; no trigger entry yet. |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
@@ -201,15 +233,36 @@ message instead of surfacing later as an opaque backend error.
 
 `prepare-linux-host.sh`:
 
-- `bubblewrap` — installs `bwrap` (apt/dnf/yum/microdnf) and relaxes
+- `bubblewrap` — installs `bwrap`, `slirp4netns`, `util-linux`, and `iptables`
+  (apt/dnf/yum/microdnf), verifies their required commands, and relaxes
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
 - `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
-  for `lxcbr0`, and prints network diagnostics. On RHEL-likes it first needs
-  EPEL, because Red Hat dropped LXC after RHEL 7 and ships no replacement.
+  for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
+  is in place. On RHEL-likes it needs EPEL first, because Red Hat dropped LXC
+  after RHEL 7 and ships no replacement.
 - `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
 macOS has no preparation step.
+
+## Log collection
+
+Every job uploads its logs whether it passed or failed, as
+`logs-<plan>-<os>-<arch>-<backend>-<attempt>`, kept 7 days.
+
+The catch is that `$env:TEMP` is not `$RUNNER_TEMP`. The Windows suites write their
+scratch trees, transcripts, and results files under the user's temp directory
+(`C:\Users\<user>\AppData\Local\Temp`), but `upload-artifact` reads
+`${{ runner.temp }}` (`C:\a\_work\_temp`). Anything left in the former is simply
+never collected, which is why the artifact used to arrive nearly empty.
+
+So `run_ci_backend_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
+it dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
+processes all read those variables, so everything temp-rooted lands in the
+upload directory without CI having to know a single filename.
+
+Linux and macOS need none of this — those suites log to stdout, and the run
+step tees that into `$RUNNER_TEMP/mxc-ci.log`.
 
 ## Runbook
 
@@ -281,6 +334,19 @@ passing a distinguishing argument later without touching the matrix.
 Replace the explicit failure in the dispatcher with the suite invocation, add
 any host prerequisites, then add the OS/backend pair to a trigger. Always verify 
 by testing it ahead of time. 
+
+### Stagger a backend's job starts
+
+Add or edit its `backendDelayedStart` entry in the catalog, then resolve
+locally to confirm the offsets. Worth reaching for when a backend's setup is
+network-heavy enough that concurrent jobs run into rate limits or stalled
+downloads — and worth removing again once that pressure is gone.
+
+### Collect a new log file
+
+Have the suite write it under `$env:TEMP`. The dispatcher redirects that to the
+upload directory, so nothing in CI needs to change. See
+[Log collection](#log-collection).
 
 ### Change the schedule
 

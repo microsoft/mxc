@@ -21,9 +21,7 @@
     PowerShell on that host.
 
     Prerequisite probe (skip if unavailable -- not a failure):
-      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`. This
-        single signal covers an OS that cannot activate the isolation session
-        API as well as a binary built without `--features isolation_session`.
+      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`.
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes the host-arch target dir, then
@@ -148,7 +146,7 @@ function Get-IsolationSessionProbe {
 
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
-    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
     exit 0
 }
 if ($probeResult.Status -ne 'available') {
@@ -414,7 +412,7 @@ try {
             $id = $envObj.result.sandboxId
             $decoded = Decode-SandboxId $id
             Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
-            Assert-True ($decoded.appId -eq 'Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
+            Assert-True ($decoded.appId -eq 'PFN:Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
             Assert-True ($decoded.agentUserName -eq $envObj.result.metadata.agentUserName) "payload agentUserName matches metadata"
             # appId is deliberately NOT echoed in metadata -- the caller already
             # supplied it, so echoing it would be redundant surface.
@@ -1035,15 +1033,13 @@ Run-StateAwareTest "filesystem: provision rejected" {
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 
-    # MXC rejects this before any API call is made, so the structured
-    # failure fields must be absent entirely -- they describe an API
-    # operation that was in flight, and none was.
+    # MXC rejects this before any API call is made, so the fields describing
+    # that call must be absent. `remediation` is not one of them, and is
+    # unasserted here.
     $hasOperation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['operation'] } else { $true }
     Assert-True (-not $hasOperation) "error.operation is absent on an MXC-side rejection"
     $hasNativeCode = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['nativeCode'] } else { $true }
     Assert-True (-not $hasNativeCode) "error.nativeCode is absent on an MXC-side rejection"
-    $hasRemediation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['remediation'] } else { $true }
-    Assert-True (-not $hasRemediation) "error.remediation is absent on an MXC-side rejection"
 } | Out-Null
 
 

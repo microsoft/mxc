@@ -6,24 +6,85 @@
 //! The executor binaries share this CLI surface; persistence remains
 //! platform-dependent in [`super::consent`].
 
-use std::io::{IsTerminal, Write};
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+use std::str::FromStr;
 
-use super::{consent, consent_prompt, policy};
-use crate::wire;
+use serde::{Deserialize, Serialize};
 
-const PRESENTER_PROTOCOL_ENV: &str = "MXC_TELEMETRY_CONSENT_PRESENTER_PROTOCOL";
+use super::{consent, consent_prompt, consent_protocol as protocol, policy};
 
-/// Telemetry-consent CLI flags.
-#[derive(Debug, Clone, Copy)]
-pub struct ConsentCliFlags<'a> {
-    /// `--telemetry-consent-status`
-    pub status: bool,
-    /// `--telemetry-consent-grant`
-    pub grant: bool,
-    /// `--telemetry-consent-revoke`
-    pub revoke: bool,
-    /// `--telemetry-consent-source`; defaults to `"cli"` when absent.
-    pub source: Option<&'a str>,
+const MAX_DECISION_BYTES: u64 = 64 * 1024;
+
+/// Consent operation selected by `--telemetry-consent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConsentAction {
+    /// Read consent and policy status without mutation.
+    Status,
+    /// Idempotently persist denied consent.
+    Withdraw,
+    /// Request consent through the native terminal or SDK presenter.
+    Request,
+}
+
+impl FromStr for ConsentAction {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "status" => Ok(Self::Status),
+            "withdraw" => Ok(Self::Withdraw),
+            "request" => Ok(Self::Request),
+            _ => Err(format!(
+                "invalid telemetry consent action '{value}'; expected status, withdraw, or request"
+            )),
+        }
+    }
+}
+
+/// Optional private presenter protocol selected by SDK hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentProtocol {
+    /// Newline-delimited JSON over the executor's standard streams.
+    StdioV1,
+}
+
+impl FromStr for ConsentProtocol {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stdio-v1" => Ok(Self::StdioV1),
+            _ => Err(format!(
+                "invalid telemetry consent protocol '{value}'; expected stdio-v1"
+            )),
+        }
+    }
+}
+
+/// Whether an argv sequence invokes the dedicated consent command surface.
+///
+/// Executor binaries use this to map clap failures involving consent options
+/// to the consent API's invalid-input exit code without changing unrelated CLI
+/// error behavior.
+pub fn invocation_uses_consent_options<I, S>(arguments: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    arguments
+        .into_iter()
+        .take_while(|argument| argument.as_ref() != OsStr::new("--"))
+        .any(|argument| {
+            let argument = argument.as_ref().to_string_lossy();
+            argument == "--telemetry-consent"
+                || argument.starts_with("--telemetry-consent=")
+                || argument == "--telemetry-consent-locale"
+                || argument.starts_with("--telemetry-consent-locale=")
+                || argument == "--telemetry-consent-protocol"
+                || argument.starts_with("--telemetry-consent-protocol=")
+        })
 }
 
 /// Output and exit code for a handled consent command.
@@ -33,8 +94,8 @@ pub struct ConsentCliOutcome {
     pub stdout: Option<String>,
     /// Line to print to stderr, if any.
     pub stderr: Option<String>,
-    /// Process exit code: `0` on success, `64` (`EX_USAGE`) for mutually
-    /// exclusive flags, `1` for a failed write or serialization.
+    /// Process exit code: `0` for domain outcomes, `64` for invalid input, and
+    /// `1` for operational failures.
     pub exit_code: i32,
 }
 
@@ -43,7 +104,12 @@ impl ConsentCliOutcome {
     /// caller should terminate with.
     pub fn emit(&self) -> i32 {
         if let Some(out) = &self.stdout {
-            println!("{out}");
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            if let Err(error) = writeln!(handle, "{out}") {
+                eprintln!("Error: failed to write telemetry consent response: {error}");
+                return 1;
+            }
         }
         if let Some(err) = &self.stderr {
             eprintln!("{err}");
@@ -59,7 +125,7 @@ impl ConsentCliOutcome {
         }
     }
 
-    fn json(response: &wire::TelemetryConsentMaintenanceResponse) -> Self {
+    fn json(response: &protocol::ConsentResponse) -> Self {
         match serde_json::to_string(response) {
             Ok(json) => Self {
                 stdout: Some(json),
@@ -74,130 +140,75 @@ impl ConsentCliOutcome {
     }
 }
 
-/// Handle legacy consent flags. Returns `None` when no flag was supplied.
-pub fn handle_consent_flags(flags: &ConsentCliFlags<'_>) -> Option<ConsentCliOutcome> {
-    if !(flags.status || flags.grant || flags.revoke || flags.source.is_some()) {
-        return None;
-    }
-
-    if flags.grant || flags.revoke || flags.source.is_some() {
-        return Some(ConsentCliOutcome::failure(
-            "Error: --telemetry-consent-grant, --telemetry-consent-revoke, and \
-             --telemetry-consent-source no longer change consent. Use the typed \
-             telemetry-consent JSON maintenance envelope instead."
+/// Execute one dedicated telemetry-consent command.
+pub fn handle_consent_command(
+    action: ConsentAction,
+    locale: Option<&str>,
+    selected_protocol: Option<ConsentProtocol>,
+) -> ConsentCliOutcome {
+    if action != ConsentAction::Request && locale.is_some() {
+        return ConsentCliOutcome::failure(
+            "Error: --telemetry-consent-locale is valid only with \
+             --telemetry-consent request"
                 .to_string(),
             64,
-        ));
+        );
+    }
+    if action != ConsentAction::Request && selected_protocol.is_some() {
+        return ConsentCliOutcome::failure(
+            "Error: --telemetry-consent-protocol is valid only with \
+             --telemetry-consent request"
+                .to_string(),
+            64,
+        );
     }
 
-    Some(ConsentCliOutcome::json(&maintenance_response(
-        wire::TelemetryConsentAction::Status,
-        wire::TelemetryConsentResult::Status,
-        None,
-        None,
-        None,
-    )))
-}
-
-/// Handle a typed consent-maintenance envelope, if present.
-///
-/// Convenience wrapper that decodes `input` (either a file path or a base64
-/// blob) into JSON and delegates to [`handle_maintenance_input_json`]. Callers
-/// that already hold the decoded JSON string — typically executor binaries
-/// that decode the request once and thread the JSON through to both the
-/// maintenance probe and the normal request loader — should call
-/// [`handle_maintenance_input_json`] directly to avoid re-reading the input
-/// source. Re-reading matters for regular files (duplicate I/O + parsing) and
-/// is a correctness issue for named pipes, `/dev/stdin`, and process-
-/// substitution paths, which are drained by the first read and fail on the
-/// second.
-pub fn handle_maintenance_input(input: &str, is_base64: bool) -> Option<ConsentCliOutcome> {
-    let json = match crate::config_parser::decode_request_input(input, is_base64) {
-        Ok(json) => json,
-        Err(_) => return None,
-    };
-    handle_maintenance_input_json(&json)
-}
-
-/// Handle a typed consent-maintenance envelope, given an already-decoded JSON
-/// string.
-///
-/// The single-source-of-truth path shared with [`handle_maintenance_input`].
-/// Returns `None` when the JSON does not carry the `telemetryConsent`
-/// discriminator; executor binaries treat that as "not a maintenance request"
-/// and continue to the normal request loader with the same JSON.
-///
-/// This function is deliberately `pub` (not `pub(crate)`) because the sibling
-/// executor crates `wxc`, `lxc`, and `mxc_darwin` all call it from their
-/// respective `main.rs` entry points. Threading the pre-decoded JSON through
-/// this entry point avoids re-reading named pipes, `/dev/stdin`, and
-/// process-substitution inputs, which are drained by the first read.
-pub fn handle_maintenance_input_json(json: &str) -> Option<ConsentCliOutcome> {
-    let Ok(hint) = crate::config_parser::parse_request_hint_from_json(json) else {
-        return None;
-    };
-    if hint.kind() != crate::config_parser::RequestKind::TelemetryConsent {
-        return None;
-    }
-
-    let request: wire::TelemetryConsentMaintenanceRequest =
-        match crate::config_deserialize::from_str(json) {
-            Ok(request) => request,
-            Err(error) => {
-                return Some(ConsentCliOutcome::failure(
-                    format!("Error: invalid telemetry consent maintenance request: {error}"),
-                    64,
-                ));
-            }
-        };
-
-    Some(handle_maintenance_request(request))
-}
-
-fn handle_maintenance_request(
-    request: wire::TelemetryConsentMaintenanceRequest,
-) -> ConsentCliOutcome {
-    match request.action {
-        wire::TelemetryConsentAction::Status => ConsentCliOutcome::json(&maintenance_response(
-            request.action,
-            wire::TelemetryConsentResult::Status,
+    match action {
+        ConsentAction::Status => ConsentCliOutcome::json(&consent_response(
+            action,
+            protocol::ConsentResult::Status,
             None,
             None,
             None,
         )),
-        wire::TelemetryConsentAction::Withdraw => match consent::withdraw_consent() {
-            Ok(outcome) => ConsentCliOutcome::json(&maintenance_response(
-                request.action,
-                action_result_to_wire(outcome.result),
+        ConsentAction::Withdraw => match consent::withdraw_consent() {
+            Ok(outcome) => ConsentCliOutcome::json(&consent_response(
+                action,
+                action_result_to_protocol(outcome.result),
                 None,
                 None,
                 None,
             )),
             Err(error) => ConsentCliOutcome::failure(format!("Error: {error}"), 1),
         },
-        wire::TelemetryConsentAction::Request => {
-            let protocol =
-                std::env::var_os(PRESENTER_PROTOCOL_ENV).is_some_and(|value| value == "1");
-            let result = consent::request_consent(request.locale.as_deref(), |prompt| {
-                if protocol {
-                    present_over_stdio_protocol(request.action, prompt)
-                } else {
-                    present_on_terminal(prompt)
-                }
+        ConsentAction::Request => {
+            let mut presenter_failure_kind = None;
+            let result = consent::request_consent(locale, |prompt| {
+                let presented = match selected_protocol {
+                    Some(ConsentProtocol::StdioV1) => present_over_stdio_protocol(action, prompt),
+                    None => present_on_terminal(prompt).map_err(ProtocolFailure::operational),
+                };
+                presented.map_err(|failure| {
+                    presenter_failure_kind = Some(failure.kind);
+                    failure.message
+                })
             });
             match result {
-                Ok(outcome) => ConsentCliOutcome::json(&maintenance_response(
-                    request.action,
-                    action_result_to_wire(outcome.result),
+                Ok(outcome) => ConsentCliOutcome::json(&consent_response(
+                    action,
+                    action_result_to_protocol(outcome.result),
                     None,
                     None,
                     None,
                 )),
                 Err(consent::ConsentActionError::Presenter(error)) => {
-                    let response = maintenance_response(
-                        request.action,
-                        wire::TelemetryConsentResult::PresentationUnavailable,
-                        Some(wire::TelemetryConsentStatusReason::PresentationUnavailable),
+                    if presenter_failure_kind == Some(ProtocolFailureKind::InvalidInput) {
+                        return ConsentCliOutcome::failure(format!("Error: {error}"), 64);
+                    }
+                    let response = consent_response(
+                        action,
+                        protocol::ConsentResult::PresentationUnavailable,
+                        Some(protocol::StatusReason::PresentationUnavailable),
                         None,
                         None,
                     );
@@ -208,6 +219,34 @@ fn handle_maintenance_request(
                 }
                 Err(error) => ConsentCliOutcome::failure(format!("Error: {error}"), 1),
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtocolFailureKind {
+    InvalidInput,
+    Operational,
+}
+
+#[derive(Debug, Clone)]
+struct ProtocolFailure {
+    kind: ProtocolFailureKind,
+    message: String,
+}
+
+impl ProtocolFailure {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProtocolFailureKind::InvalidInput,
+            message: message.into(),
+        }
+    }
+
+    fn operational(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProtocolFailureKind::Operational,
+            message: message.into(),
         }
     }
 }
@@ -242,67 +281,81 @@ fn present_on_terminal(
     if read == 0 {
         return Ok(consent::ConsentDecision::Dismissed);
     }
+    Ok(parse_terminal_decision(&input))
+}
+
+fn parse_terminal_decision(input: &str) -> consent::ConsentDecision {
     match input.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Ok(consent::ConsentDecision::Yes),
-        "n" | "no" => Ok(consent::ConsentDecision::No),
-        _ => Ok(consent::ConsentDecision::Dismissed),
+        "y" | "yes" => consent::ConsentDecision::Yes,
+        "n" | "no" => consent::ConsentDecision::No,
+        _ => consent::ConsentDecision::Dismissed,
     }
 }
 
 fn present_over_stdio_protocol(
-    action: wire::TelemetryConsentAction,
+    action: ConsentAction,
     prompt: &consent_prompt::ConsentPrompt,
-) -> Result<consent::ConsentDecision, String> {
+) -> Result<consent::ConsentDecision, ProtocolFailure> {
     let mut transport = StdioPresenterTransport;
     present_over_transport(action, prompt, &mut transport)
 }
 
 fn validate_presenter_response(
-    response: wire::TelemetryConsentPresenterResponse,
+    response: protocol::PresenterResponse,
     expected_challenge: &str,
     expected_resource_version: u32,
-) -> Result<consent::ConsentDecision, String> {
+) -> Result<consent::ConsentDecision, ProtocolFailure> {
     if response.challenge != expected_challenge {
-        return Err("consent presenter challenge did not match this request".to_string());
+        return Err(ProtocolFailure::invalid(
+            "consent presenter challenge did not match this request",
+        ));
     }
     if response.resource_version != expected_resource_version {
-        return Err("consent presenter prompt version did not match this request".to_string());
+        return Err(ProtocolFailure::invalid(
+            "consent presenter prompt version did not match this request",
+        ));
     }
     Ok(match response.decision {
-        wire::TelemetryConsentDecision::Yes => consent::ConsentDecision::Yes,
-        wire::TelemetryConsentDecision::No => consent::ConsentDecision::No,
-        wire::TelemetryConsentDecision::Dismissed => consent::ConsentDecision::Dismissed,
+        protocol::ConsentDecision::Yes => consent::ConsentDecision::Yes,
+        protocol::ConsentDecision::No => consent::ConsentDecision::No,
+        protocol::ConsentDecision::Dismissed => consent::ConsentDecision::Dismissed,
     })
 }
 
-fn random_challenge() -> Result<String, String> {
+fn random_challenge() -> Result<String, ProtocolFailure> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|error| format!("failed to create consent presenter challenge: {error}"))?;
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        ProtocolFailure::operational(format!(
+            "failed to create consent presenter challenge: {error}"
+        ))
+    })?;
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}")
-            .map_err(|error| format!("failed to encode consent presenter challenge: {error}"))?;
+        write!(&mut encoded, "{byte:02x}").map_err(|error| {
+            ProtocolFailure::operational(format!(
+                "failed to encode consent presenter challenge: {error}"
+            ))
+        })?;
     }
     Ok(encoded)
 }
 
 trait PresenterTransport {
-    fn next_challenge(&mut self) -> Result<String, String>;
-    fn write_presentation(&mut self, json: &str) -> Result<(), String>;
-    fn flush_presentation(&mut self) -> Result<(), String>;
-    fn read_response_line(&mut self, input: &mut String) -> Result<usize, String>;
+    fn next_challenge(&mut self) -> Result<String, ProtocolFailure>;
+    fn write_presentation(&mut self, json: &str) -> Result<(), ProtocolFailure>;
+    fn flush_presentation(&mut self) -> Result<(), ProtocolFailure>;
+    fn read_response(&mut self) -> Result<String, ProtocolFailure>;
 }
 
 struct StdioPresenterTransport;
 
 impl PresenterTransport for StdioPresenterTransport {
-    fn next_challenge(&mut self) -> Result<String, String> {
+    fn next_challenge(&mut self) -> Result<String, ProtocolFailure> {
         random_challenge()
     }
 
-    fn write_presentation(&mut self, json: &str) -> Result<(), String> {
+    fn write_presentation(&mut self, json: &str) -> Result<(), ProtocolFailure> {
         // Write the presentation envelope via `writeln!` on a locked stdout
         // handle so a BrokenPipe (host closed the pipe before we emitted)
         // becomes a clean transport error rather than a panic. `println!`
@@ -312,90 +365,146 @@ impl PresenterTransport for StdioPresenterTransport {
         let mut handle = stdout.lock();
         writeln!(handle, "{json}").map_err(|error| {
             if error.kind() == std::io::ErrorKind::BrokenPipe {
-                "consent presenter pipe closed before presentation envelope was delivered"
-                    .to_string()
+                ProtocolFailure::operational(
+                    "consent presenter pipe closed before presentation envelope was delivered",
+                )
             } else {
-                format!("failed to write consent presentation: {error}")
+                ProtocolFailure::operational(format!(
+                    "failed to write consent presentation: {error}"
+                ))
             }
         })
     }
 
-    fn flush_presentation(&mut self) -> Result<(), String> {
+    fn flush_presentation(&mut self) -> Result<(), ProtocolFailure> {
         std::io::stdout().flush().map_err(|error| {
             if error.kind() == std::io::ErrorKind::BrokenPipe {
-                "consent presenter pipe closed before presentation envelope was flushed".to_string()
+                ProtocolFailure::operational(
+                    "consent presenter pipe closed before presentation envelope was flushed",
+                )
             } else {
-                format!("failed to flush consent presentation: {error}")
+                ProtocolFailure::operational(format!(
+                    "failed to flush consent presentation: {error}"
+                ))
             }
         })
     }
 
-    fn read_response_line(&mut self, input: &mut String) -> Result<usize, String> {
-        std::io::stdin()
-            .read_line(input)
-            .map_err(|error| format!("failed to read consent presenter response: {error}"))
+    fn read_response(&mut self) -> Result<String, ProtocolFailure> {
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock().take(MAX_DECISION_BYTES + 1));
+        let mut input = String::new();
+        let read = reader.read_line(&mut input).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                ProtocolFailure::invalid("consent presenter response was not valid UTF-8")
+            } else {
+                ProtocolFailure::operational(format!(
+                    "failed to read consent presenter response: {error}"
+                ))
+            }
+        })?;
+        if read == 0 {
+            return Err(ProtocolFailure::operational(
+                "consent presenter closed without returning a decision",
+            ));
+        }
+        if read as u64 > MAX_DECISION_BYTES {
+            return Err(ProtocolFailure::invalid(format!(
+                "consent presenter response exceeded the {MAX_DECISION_BYTES}-byte limit"
+            )));
+        }
+        if !reader.buffer().is_empty() {
+            return Err(ProtocolFailure::invalid(
+                "consent presenter returned more than one decision line",
+            ));
+        }
+        Ok(input)
     }
 }
 
 fn present_over_transport(
-    action: wire::TelemetryConsentAction,
+    action: ConsentAction,
     prompt: &consent_prompt::ConsentPrompt,
     transport: &mut dyn PresenterTransport,
-) -> Result<consent::ConsentDecision, String> {
+) -> Result<consent::ConsentDecision, ProtocolFailure> {
     let challenge = transport.next_challenge()?;
-    let presentation = maintenance_response(
+    let presentation = consent_response(
         action,
-        wire::TelemetryConsentResult::PresentationRequired,
+        protocol::ConsentResult::PresentationRequired,
         None,
-        Some(prompt_to_wire(prompt)),
+        Some(prompt_to_protocol(prompt)),
         Some(challenge.clone()),
     );
-    let json = serde_json::to_string(&presentation)
-        .map_err(|error| format!("failed to serialize consent presentation: {error}"))?;
+    let json = serde_json::to_string(&presentation).map_err(|error| {
+        ProtocolFailure::operational(format!("failed to serialize consent presentation: {error}"))
+    })?;
     transport.write_presentation(&json)?;
     transport.flush_presentation()?;
 
-    let mut input = String::new();
-    let read = transport.read_response_line(&mut input)?;
-    if read == 0 {
-        return Ok(consent::ConsentDecision::Dismissed);
-    }
-    let response: wire::TelemetryConsentPresenterResponse = serde_json::from_str(&input)
-        .map_err(|error| format!("invalid consent presenter response for this request: {error}"))?;
-    validate_presenter_response(response, &challenge, prompt.resource_version)
+    let input = transport.read_response()?;
+    parse_presenter_response(&input, &challenge, prompt.resource_version)
 }
 
-fn maintenance_response(
-    action: wire::TelemetryConsentAction,
-    result: wire::TelemetryConsentResult,
-    reason: Option<wire::TelemetryConsentStatusReason>,
-    prompt: Option<wire::TelemetryConsentPrompt>,
+fn parse_presenter_response(
+    input: &str,
+    expected_challenge: &str,
+    expected_resource_version: u32,
+) -> Result<consent::ConsentDecision, ProtocolFailure> {
+    if input.len() > MAX_DECISION_BYTES as usize {
+        return Err(ProtocolFailure::invalid(format!(
+            "consent presenter response exceeded the {MAX_DECISION_BYTES}-byte limit"
+        )));
+    }
+    let Some(line) = input.strip_suffix('\n') else {
+        return Err(ProtocolFailure::invalid(
+            "consent presenter decision must end with a newline",
+        ));
+    };
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.is_empty() || line.contains(['\r', '\n']) {
+        return Err(ProtocolFailure::invalid(
+            "consent presenter must return exactly one JSON decision line",
+        ));
+    }
+    let response: protocol::PresenterResponse = serde_json::from_str(line).map_err(|error| {
+        ProtocolFailure::invalid(format!(
+            "invalid consent presenter response for this request: {error}"
+        ))
+    })?;
+    validate_presenter_response(response, expected_challenge, expected_resource_version)
+}
+
+fn consent_response(
+    action: ConsentAction,
+    result: protocol::ConsentResult,
+    reason: Option<protocol::StatusReason>,
+    prompt: Option<protocol::ConsentPrompt>,
     challenge: Option<String>,
-) -> wire::TelemetryConsentMaintenanceResponse {
+) -> protocol::ConsentResponse {
     let status = consent::get_status();
     let policy_state = policy::get_policy();
-    wire::TelemetryConsentMaintenanceResponse {
+    protocol::ConsentResponse {
         action,
         result,
-        stored_state: consent_state_to_wire(status.stored_state),
-        effective_state: consent_state_to_wire(status.effective_state),
-        reason: reason.or_else(|| status.reason.map(status_reason_to_wire)),
-        policy: policy_state_to_wire(policy_state),
+        stored_state: consent_state_to_protocol(status.stored_state),
+        effective_state: consent_state_to_protocol(status.effective_state),
+        reason: reason.or_else(|| status.reason.map(status_reason_to_protocol)),
+        policy: policy_state_to_protocol(policy_state),
         needs_prompt: policy_state.allows_collection() && status.needs_prompt(),
         prompt,
         challenge,
     }
 }
 
-fn prompt_to_wire(prompt: &consent_prompt::ConsentPrompt) -> wire::TelemetryConsentPrompt {
-    fn message(value: consent_prompt::ConsentMessage) -> wire::TelemetryConsentMessage {
-        wire::TelemetryConsentMessage {
+fn prompt_to_protocol(prompt: &consent_prompt::ConsentPrompt) -> protocol::ConsentPrompt {
+    fn message(value: consent_prompt::ConsentMessage) -> protocol::ConsentMessage {
+        protocol::ConsentMessage {
             id: value.id.to_string(),
             text: value.text.to_string(),
         }
     }
 
-    wire::TelemetryConsentPrompt {
+    protocol::ConsentPrompt {
         resource_version: prompt.resource_version,
         locale: prompt.locale.to_string(),
         title: message(prompt.title),
@@ -407,61 +516,51 @@ fn prompt_to_wire(prompt: &consent_prompt::ConsentPrompt) -> wire::TelemetryCons
     }
 }
 
-fn consent_state_to_wire(state: consent::ConsentState) -> wire::TelemetryConsentState {
+fn consent_state_to_protocol(state: consent::ConsentState) -> protocol::ConsentState {
     match state {
-        consent::ConsentState::Granted => wire::TelemetryConsentState::Granted,
-        consent::ConsentState::Denied => wire::TelemetryConsentState::Denied,
-        consent::ConsentState::Undetermined => wire::TelemetryConsentState::Undetermined,
-        consent::ConsentState::NotApplicable => wire::TelemetryConsentState::NotApplicable,
+        consent::ConsentState::Granted => protocol::ConsentState::Granted,
+        consent::ConsentState::Denied => protocol::ConsentState::Denied,
+        consent::ConsentState::Undetermined => protocol::ConsentState::Undetermined,
+        consent::ConsentState::NotApplicable => protocol::ConsentState::NotApplicable,
     }
 }
 
-fn status_reason_to_wire(
-    reason: consent::ConsentStatusReason,
-) -> wire::TelemetryConsentStatusReason {
+fn status_reason_to_protocol(reason: consent::ConsentStatusReason) -> protocol::StatusReason {
     match reason {
-        consent::ConsentStatusReason::NoRecord => wire::TelemetryConsentStatusReason::NoRecord,
-        consent::ConsentStatusReason::StoreUnreadable => {
-            wire::TelemetryConsentStatusReason::StoreUnreadable
-        }
-        consent::ConsentStatusReason::StoreMalformed => {
-            wire::TelemetryConsentStatusReason::StoreMalformed
-        }
+        consent::ConsentStatusReason::NoRecord => protocol::StatusReason::NoRecord,
+        consent::ConsentStatusReason::StoreUnreadable => protocol::StatusReason::StoreUnreadable,
+        consent::ConsentStatusReason::StoreMalformed => protocol::StatusReason::StoreMalformed,
         consent::ConsentStatusReason::ConsentSchemaUnsupported => {
-            wire::TelemetryConsentStatusReason::ConsentSchemaUnsupported
+            protocol::StatusReason::ConsentSchemaUnsupported
         }
         consent::ConsentStatusReason::PromptVersionMissing => {
-            wire::TelemetryConsentStatusReason::PromptVersionMissing
+            protocol::StatusReason::PromptVersionMissing
         }
         consent::ConsentStatusReason::PromptVersionUnsupported => {
-            wire::TelemetryConsentStatusReason::PromptVersionUnsupported
+            protocol::StatusReason::PromptVersionUnsupported
         }
-        consent::ConsentStatusReason::NotApplicable => {
-            wire::TelemetryConsentStatusReason::NotApplicable
-        }
+        consent::ConsentStatusReason::NotApplicable => protocol::StatusReason::NotApplicable,
     }
 }
 
-fn policy_state_to_wire(state: policy::PolicyState) -> wire::TelemetryConsentPolicyState {
+fn policy_state_to_protocol(state: policy::PolicyState) -> protocol::PolicyState {
     match state {
-        policy::PolicyState::Unrestricted => wire::TelemetryConsentPolicyState::Unrestricted,
-        policy::PolicyState::Allowed => wire::TelemetryConsentPolicyState::Allowed,
-        policy::PolicyState::Blocked => wire::TelemetryConsentPolicyState::Blocked,
-        policy::PolicyState::NotApplicable => wire::TelemetryConsentPolicyState::NotApplicable,
+        policy::PolicyState::Unrestricted => protocol::PolicyState::Unrestricted,
+        policy::PolicyState::Allowed => protocol::PolicyState::Allowed,
+        policy::PolicyState::Blocked => protocol::PolicyState::Blocked,
+        policy::PolicyState::NotApplicable => protocol::PolicyState::NotApplicable,
     }
 }
 
-fn action_result_to_wire(result: consent::ConsentActionResult) -> wire::TelemetryConsentResult {
+fn action_result_to_protocol(result: consent::ConsentActionResult) -> protocol::ConsentResult {
     match result {
-        consent::ConsentActionResult::Granted => wire::TelemetryConsentResult::Granted,
-        consent::ConsentActionResult::Denied => wire::TelemetryConsentResult::Denied,
-        consent::ConsentActionResult::Dismissed => wire::TelemetryConsentResult::Dismissed,
-        consent::ConsentActionResult::Withdrawn => wire::TelemetryConsentResult::Withdrawn,
-        consent::ConsentActionResult::AlreadyGranted => {
-            wire::TelemetryConsentResult::AlreadyGranted
-        }
-        consent::ConsentActionResult::PolicyBlocked => wire::TelemetryConsentResult::PolicyBlocked,
-        consent::ConsentActionResult::NotApplicable => wire::TelemetryConsentResult::NotApplicable,
+        consent::ConsentActionResult::Granted => protocol::ConsentResult::Granted,
+        consent::ConsentActionResult::Denied => protocol::ConsentResult::Denied,
+        consent::ConsentActionResult::Dismissed => protocol::ConsentResult::Dismissed,
+        consent::ConsentActionResult::Withdrawn => protocol::ConsentResult::Withdrawn,
+        consent::ConsentActionResult::AlreadyGranted => protocol::ConsentResult::AlreadyGranted,
+        consent::ConsentActionResult::PolicyBlocked => protocol::ConsentResult::PolicyBlocked,
+        consent::ConsentActionResult::NotApplicable => protocol::ConsentResult::NotApplicable,
     }
 }
 
@@ -470,25 +569,30 @@ mod tests {
     use super::*;
     use crate::telemetry::consent_prompt::{ConsentPrompt, EN_US_CONSENT_PROMPT};
 
-    fn flags(status: bool, grant: bool, revoke: bool) -> ConsentCliFlags<'static> {
-        ConsentCliFlags {
-            status,
-            grant,
-            revoke,
-            source: None,
-        }
-    }
-
     fn prompt() -> ConsentPrompt {
         EN_US_CONSENT_PROMPT
     }
 
+    fn present_for_test(
+        transport: &mut dyn PresenterTransport,
+    ) -> Result<consent::ConsentDecision, ProtocolFailure> {
+        #[cfg(target_os = "windows")]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let _environment = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            present_over_transport(ConsentAction::Request, &prompt(), transport)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            present_over_transport(ConsentAction::Request, &prompt(), transport)
+        }
+    }
+
     struct FakeTransport {
-        challenge: Result<String, String>,
-        write_result: Result<(), String>,
-        flush_result: Result<(), String>,
-        read_result: Result<usize, String>,
-        response_line: String,
+        challenge: Result<String, ProtocolFailure>,
+        write_result: Result<(), ProtocolFailure>,
+        flush_result: Result<(), ProtocolFailure>,
+        read_result: Result<String, ProtocolFailure>,
         writes: Vec<String>,
     }
 
@@ -498,36 +602,103 @@ mod tests {
                 challenge: Ok("request-a".to_string()),
                 write_result: Ok(()),
                 flush_result: Ok(()),
-                read_result: Ok(response_line.len()),
-                response_line,
+                read_result: Ok(format!("{response_line}\n")),
                 writes: Vec::new(),
             }
         }
     }
 
     impl PresenterTransport for FakeTransport {
-        fn next_challenge(&mut self) -> Result<String, String> {
+        fn next_challenge(&mut self) -> Result<String, ProtocolFailure> {
             self.challenge.clone()
         }
 
-        fn write_presentation(&mut self, json: &str) -> Result<(), String> {
+        fn write_presentation(&mut self, json: &str) -> Result<(), ProtocolFailure> {
             self.writes.push(json.to_string());
             self.write_result.clone()
         }
 
-        fn flush_presentation(&mut self) -> Result<(), String> {
+        fn flush_presentation(&mut self) -> Result<(), ProtocolFailure> {
             self.flush_result.clone()
         }
 
-        fn read_response_line(&mut self, input: &mut String) -> Result<usize, String> {
-            input.push_str(&self.response_line);
+        fn read_response(&mut self) -> Result<String, ProtocolFailure> {
             self.read_result.clone()
         }
     }
 
     #[test]
-    fn no_flags_is_a_noop() {
-        assert!(handle_consent_flags(&flags(false, false, false)).is_none());
+    fn locale_is_rejected_for_non_request_actions() {
+        let outcome = handle_consent_command(ConsentAction::Status, Some("en-US"), None);
+        assert_eq!(outcome.exit_code, 64);
+        assert!(outcome.stderr.as_deref().unwrap().contains("valid only"));
+    }
+
+    #[test]
+    fn consent_option_detection_is_testable_without_process_arguments() {
+        assert!(invocation_uses_consent_options([
+            "wxc-exec",
+            "--telemetry-consent=request"
+        ]));
+        assert!(invocation_uses_consent_options([
+            "wxc-exec",
+            "--telemetry-consent-locale",
+            "en-US"
+        ]));
+        assert!(!invocation_uses_consent_options([
+            "wxc-exec",
+            "--config",
+            "policy.json"
+        ]));
+        assert!(!invocation_uses_consent_options([
+            "wxc-exec",
+            "--telemetry-consent-status"
+        ]));
+        assert!(!invocation_uses_consent_options([
+            "wxc-exec",
+            "--unknown-flag",
+            "--",
+            "--telemetry-consent=request"
+        ]));
+        assert!(invocation_uses_consent_options([
+            "wxc-exec",
+            "--telemetry-consent=request",
+            "--",
+            "--telemetry-consent=withdraw"
+        ]));
+    }
+
+    #[test]
+    fn terminal_decisions_are_parsed_without_live_stdio() {
+        for affirmative in ["y", "Y", "yes", " YES "] {
+            assert_eq!(
+                parse_terminal_decision(affirmative),
+                consent::ConsentDecision::Yes
+            );
+        }
+        for negative in ["n", "N", "no", " NO "] {
+            assert_eq!(
+                parse_terminal_decision(negative),
+                consent::ConsentDecision::No
+            );
+        }
+        for dismissed in ["", " ", "later", "cancel"] {
+            assert_eq!(
+                parse_terminal_decision(dismissed),
+                consent::ConsentDecision::Dismissed
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_is_rejected_for_non_request_actions() {
+        let outcome = handle_consent_command(
+            ConsentAction::Withdraw,
+            None,
+            Some(ConsentProtocol::StdioV1),
+        );
+        assert_eq!(outcome.exit_code, 64);
+        assert!(outcome.stderr.as_deref().unwrap().contains("valid only"));
     }
 
     fn assert_status_json(
@@ -547,48 +718,36 @@ mod tests {
         assert_eq!(value["needsPrompt"], needs_prompt);
     }
 
-    /// Previously unreachable in-process: this branch called
-    /// `std::process::exit(64)` and would have killed the test runner.
-    #[test]
-    fn legacy_state_changing_flags_return_a_migration_error() {
-        let outcome = handle_consent_flags(&flags(false, true, true)).expect("handled");
-        assert_eq!(outcome.exit_code, 64);
-        assert_eq!(outcome.stdout, None);
-        assert!(outcome
-            .stderr
-            .as_deref()
-            .unwrap()
-            .contains("JSON maintenance envelope"));
-    }
-
     #[test]
     fn presenter_response_is_bound_to_challenge_and_prompt_version() {
-        let valid = wire::TelemetryConsentPresenterResponse {
+        let valid = protocol::PresenterResponse {
             challenge: "request-a".to_string(),
             resource_version: 1,
-            decision: wire::TelemetryConsentDecision::Yes,
+            decision: protocol::ConsentDecision::Yes,
         };
         assert_eq!(
             validate_presenter_response(valid, "request-a", 1).unwrap(),
             consent::ConsentDecision::Yes
         );
 
-        let replay = wire::TelemetryConsentPresenterResponse {
+        let replay = protocol::PresenterResponse {
             challenge: "request-a".to_string(),
             resource_version: 1,
-            decision: wire::TelemetryConsentDecision::Yes,
+            decision: protocol::ConsentDecision::Yes,
         };
         assert!(validate_presenter_response(replay, "request-b", 1)
             .unwrap_err()
+            .message
             .contains("challenge"));
 
-        let stale_prompt = wire::TelemetryConsentPresenterResponse {
+        let stale_prompt = protocol::PresenterResponse {
             challenge: "request-a".to_string(),
             resource_version: 0,
-            decision: wire::TelemetryConsentDecision::Yes,
+            decision: protocol::ConsentDecision::Yes,
         };
         assert!(validate_presenter_response(stale_prompt, "request-a", 1)
             .unwrap_err()
+            .message
             .contains("version"));
     }
 
@@ -596,75 +755,137 @@ mod tests {
     fn presenter_transport_reports_broken_write_without_touching_stdio() {
         let mut transport = FakeTransport {
             challenge: Ok("request-a".to_string()),
-            write_result: Err("consent presenter pipe closed".to_string()),
+            write_result: Err(ProtocolFailure::operational(
+                "consent presenter pipe closed",
+            )),
             flush_result: Ok(()),
-            read_result: Ok(0),
-            response_line: String::new(),
+            read_result: Ok(String::new()),
             writes: Vec::new(),
         };
-        let error = present_over_transport(
-            wire::TelemetryConsentAction::Request,
-            &prompt(),
-            &mut transport,
-        )
-        .unwrap_err();
-        assert!(error.contains("pipe closed"));
+        let error = present_for_test(&mut transport).unwrap_err();
+        assert!(error.message.contains("pipe closed"));
         assert_eq!(transport.writes.len(), 1);
     }
 
     #[test]
-    fn presenter_transport_treats_eof_as_dismissed() {
+    fn presenter_transport_treats_eof_as_operational_failure() {
         let mut transport = FakeTransport {
             challenge: Ok("request-a".to_string()),
             write_result: Ok(()),
             flush_result: Ok(()),
-            read_result: Ok(0),
-            response_line: String::new(),
+            read_result: Err(ProtocolFailure::operational(
+                "consent presenter closed without returning a decision",
+            )),
             writes: Vec::new(),
         };
-        let decision = present_over_transport(
-            wire::TelemetryConsentAction::Request,
-            &prompt(),
-            &mut transport,
-        )
-        .unwrap();
-        assert_eq!(decision, consent::ConsentDecision::Dismissed);
+        let error = present_for_test(&mut transport).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::Operational);
     }
 
     #[test]
     fn presenter_transport_rejects_malformed_json() {
         let mut transport = FakeTransport::with_response("not json".to_string());
-        let error = present_over_transport(
-            wire::TelemetryConsentAction::Request,
-            &prompt(),
-            &mut transport,
-        )
-        .unwrap_err();
-        assert!(error.contains("invalid consent presenter response"));
+        let error = present_for_test(&mut transport).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::InvalidInput);
+        assert!(error.message.contains("invalid consent presenter response"));
     }
 
     #[test]
     fn presenter_transport_rejects_mismatched_response() {
-        let response = serde_json::to_string(&wire::TelemetryConsentPresenterResponse {
+        let response = serde_json::to_string(&protocol::PresenterResponse {
             challenge: "wrong-request".to_string(),
             resource_version: 1,
-            decision: wire::TelemetryConsentDecision::Yes,
+            decision: protocol::ConsentDecision::Yes,
         })
         .unwrap();
         let mut transport = FakeTransport::with_response(response);
-        let error = present_over_transport(
-            wire::TelemetryConsentAction::Request,
-            &prompt(),
-            &mut transport,
-        )
-        .unwrap_err();
-        assert!(error.contains("challenge"));
+        let error = present_for_test(&mut transport).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::InvalidInput);
+        assert!(error.message.contains("challenge"));
+    }
+
+    #[test]
+    fn presenter_transport_rejects_extra_decision_lines() {
+        let response = serde_json::to_string(&protocol::PresenterResponse {
+            challenge: "request-a".to_string(),
+            resource_version: 1,
+            decision: protocol::ConsentDecision::Yes,
+        })
+        .unwrap();
+        let mut transport = FakeTransport::with_response(format!("{response}\n{response}"));
+        let error = present_for_test(&mut transport).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::InvalidInput);
+        assert!(error.message.contains("exactly one"));
+    }
+
+    #[test]
+    fn presenter_transport_requires_newline_terminated_decision() {
+        let response = serde_json::to_string(&protocol::PresenterResponse {
+            challenge: "request-a".to_string(),
+            resource_version: 1,
+            decision: protocol::ConsentDecision::Yes,
+        })
+        .unwrap();
+        let error = parse_presenter_response(&response, "request-a", 1).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::InvalidInput);
+        assert!(error.message.contains("end with a newline"));
+    }
+
+    #[test]
+    fn presenter_transport_rejects_oversized_decision() {
+        let input = format!("{}\n", "x".repeat(MAX_DECISION_BYTES as usize));
+        let error = parse_presenter_response(&input, "request-a", 1).unwrap_err();
+        assert_eq!(error.kind, ProtocolFailureKind::InvalidInput);
+        assert!(error.message.contains("byte limit"));
+    }
+
+    #[test]
+    fn shared_decision_fixtures_match_the_private_protocol() {
+        let fixtures = [
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-yes.json"
+                )),
+                consent::ConsentDecision::Yes,
+            ),
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-no.json"
+                )),
+                consent::ConsentDecision::No,
+            ),
+            (
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-dismissed.json"
+                )),
+                consent::ConsentDecision::Dismissed,
+            ),
+        ];
+
+        for (fixture, expected) in fixtures {
+            assert_eq!(
+                parse_presenter_response(fixture, "request-a", 1).unwrap(),
+                expected
+            );
+        }
+        let invalid = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/telemetry-consent/stdio-v1-decision-unknown-field.json"
+        ));
+        assert_eq!(
+            parse_presenter_response(invalid, "request-a", 1)
+                .unwrap_err()
+                .kind,
+            ProtocolFailureKind::InvalidInput
+        );
     }
 
     /// The non-Windows contract every executor must honor: status is a
-    /// successful `not-applicable` report, and grant/revoke are refused
-    /// rather than silently accepted. MXC must never offer — or appear to
-    /// record — consent on a platform where it cannot collect telemetry.
+    /// successful `not-applicable` report. MXC must never offer — or appear
+    /// to record — consent on a platform where it cannot collect telemetry.
     ///
     /// Gated to non-Windows (rather than merged into the Windows tests)
     /// because it asserts the *stub* behavior; without it, Linux/macOS CI
@@ -675,7 +896,7 @@ mod tests {
 
         #[test]
         fn status_reports_not_applicable_and_succeeds() {
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_command(ConsentAction::Status, None, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -686,37 +907,10 @@ mod tests {
             );
             assert_eq!(outcome.stderr, None);
         }
-
-        #[test]
-        fn grant_is_refused() {
-            let outcome = handle_consent_flags(&flags(false, true, false)).expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert!(outcome
-                .stderr
-                .as_deref()
-                .unwrap()
-                .contains("JSON maintenance envelope"));
-        }
-
-        #[test]
-        fn revoke_is_refused() {
-            let outcome = handle_consent_flags(&flags(false, false, true)).expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert!(outcome
-                .stderr
-                .as_deref()
-                .unwrap()
-                .contains("JSON maintenance envelope"));
-        }
     }
 
-    /// End-to-end coverage of the `handle_consent_flags` paths (grant,
-    /// revoke, status, and a forced write failure) against an isolated
-    /// consent store — this is the same fast path all three executors
-    /// (`wxc-exec`, `lxc-exec`, `mxc-exec-mac`) delegate to, so exercising it
-    /// here covers the shared behavior for all three executors.
+    /// End-to-end coverage of the status path against an isolated consent
+    /// store. This is the same fast path all three executors delegate to.
     #[cfg(target_os = "windows")]
     mod windows_tests {
         use super::*;
@@ -731,45 +925,11 @@ mod tests {
         }
 
         #[test]
-        fn grant_flag_is_a_non_mutating_migration_tombstone() {
-            let tmp = tempfile::tempdir().unwrap();
-            let _guards = isolate(tmp.path());
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: true,
-                revoke: false,
-                source: Some("prompt"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert_eq!(consent::get_consent().as_str(), "undetermined");
-        }
-
-        #[test]
-        fn revoke_flag_is_a_non_mutating_migration_tombstone() {
-            let tmp = tempfile::tempdir().unwrap();
-            let _guards = isolate(tmp.path());
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: false,
-                revoke: true,
-                source: Some("settings-toggle"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(outcome.stdout, None);
-            assert_eq!(consent::get_consent().as_str(), "undetermined");
-        }
-
-        #[test]
         fn status_flag_reports_current_state_without_mutating_it() {
             let tmp = tempfile::tempdir().unwrap();
             let _guards = isolate(tmp.path());
 
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_command(ConsentAction::Status, None, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(
                 &outcome,
@@ -791,32 +951,9 @@ mod tests {
             let env = isolate(tmp.path());
             env.set_policy_value(0);
 
-            let outcome = handle_consent_flags(&flags(true, false, false)).expect("handled");
+            let outcome = handle_consent_command(ConsentAction::Status, None, None);
             assert_eq!(outcome.exit_code, 0);
             assert_status_json(&outcome, "undetermined", "undetermined", "blocked", false);
-        }
-
-        /// A user may still record a decision while policy blocks collection;
-        /// it is honoured if the administrator later relaxes the policy. What
-        /// must not happen is the grant being treated as collectable.
-        #[test]
-        fn grant_tombstone_does_not_record_under_a_blocking_policy() {
-            let tmp = tempfile::tempdir().unwrap();
-            let env = isolate(tmp.path());
-            env.set_policy_value(0);
-
-            let outcome = handle_consent_flags(&ConsentCliFlags {
-                status: false,
-                grant: true,
-                revoke: false,
-                source: Some("cli"),
-            })
-            .expect("handled");
-            assert_eq!(outcome.exit_code, 64);
-            assert_eq!(consent::get_consent(), consent::ConsentState::Undetermined);
-            assert!(!crate::telemetry::is_enabled(
-                &crate::models::TelemetryConfig::default()
-            ));
         }
 
         /// Previously unreachable in-process: this branch called
@@ -830,12 +967,7 @@ mod tests {
             std::fs::write(tmp.path().join("mxc"), b"not a directory").unwrap();
             let _guards = isolate(tmp.path());
 
-            let outcome = handle_maintenance_request(wire::TelemetryConsentMaintenanceRequest {
-                schema: None,
-                command: wire::TelemetryConsentCommand::TelemetryConsent,
-                action: wire::TelemetryConsentAction::Withdraw,
-                locale: None,
-            });
+            let outcome = handle_consent_command(ConsentAction::Withdraw, None, None);
             assert_eq!(outcome.exit_code, 1);
             assert_eq!(outcome.stdout, None);
             assert!(outcome.stderr.as_deref().unwrap().starts_with("Error: "));

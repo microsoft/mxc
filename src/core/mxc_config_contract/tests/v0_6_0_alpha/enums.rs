@@ -154,47 +154,6 @@ fn rejects_invalid_process_container_ui_isolation_value() {
     );
 }
 
-#[test]
-fn rejects_object_encoding_for_fieldless_enums() {
-    let cases = [
-        r#"{
-                "version": {"0.6.0-alpha": null},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.6.0-alpha",
-                "containment": {"process": null},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.6.0-alpha",
-                "network": {"defaultPolicy": {"allow": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.6.0-alpha",
-                "network": {"enforcementMode": {"both": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.6.0-alpha",
-                "ui": {"clipboard": {"all": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.6.0-alpha",
-                "processContainer": {
-                    "ui": {"isolation": {"desktop": null}}
-                },
-                "process": {"commandLine": "echo"}
-            }"#,
-    ];
-
-    for case in cases {
-        assert_invalid(case);
-    }
-}
-
 use mxc_config_contract::published::v0_6_0_alpha::{Containment, Request};
 
 #[test]

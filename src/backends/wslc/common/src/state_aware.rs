@@ -22,6 +22,7 @@ use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 use wxc_common::wire::WslcProvisionPhase;
 
 use crate::container_steps::OutStream;
@@ -128,7 +129,8 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     }
 
     /// Runs one command in the warm container, relaying its stdout/stderr to the
-    /// executor's own stdio **live** as the daemon streams it, then hands back an
+    /// calling process's own stdio **live** as the daemon streams it, then hands
+    /// back an
     /// [`ExecHandle`] with sentinel pipe handles and a waiter that yields the
     /// captured exit code (so the dispatcher's `relay_exec_to_stdio` is a thin
     /// call-through, mirroring the IsolationSession and Windows Sandbox backends).
@@ -140,7 +142,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         // Before any work: this backend relays to the executor's stdio, so it
-        // cannot serve an in-process caller, and running the workload first
+        // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
         if consumer == ExecConsumer::Library {
             return Err(wxc_common::state_aware_backend::unsupported_library_exec(
@@ -211,6 +213,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
+            stdin_closer: None,
             // `Exited`, not `TimedOut`: this backend relays internally and has
             // already run the workload to completion by the time it returns, so
             // `exit_code` is whatever the container reported — including for a
@@ -228,6 +231,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         request: &ExecutionRequest,
         _config: Option<&WslcProvisionPhase>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_provision_policy(request)
     }
 
@@ -238,6 +242,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 
@@ -248,6 +253,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_exec_policy(request)
     }
 
@@ -258,6 +264,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 
@@ -268,6 +275,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 }
@@ -427,12 +435,12 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ContainerPolicy;
+    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
 
     /// A `Library` exec is refused before the backend touches the daemon.
     ///
     /// This backend writes the workload's output to *this process's* stdout and
-    /// stderr, so it cannot serve an in-process caller. The refusal has to come
+    /// stderr, so it cannot return exec streams to the caller. The refusal has to come
     /// first: the workload is arbitrary and may not be idempotent, so refusing
     /// after running it would report "unsupported" for something that already
     /// happened, with its output delivered somewhere the caller never asked for.
@@ -450,10 +458,9 @@ mod tests {
                 None,
                 ExecConsumer::Library,
             )
-            .expect_err("an in-process caller must be refused");
+            .expect_err("a streams-consuming caller must be refused");
         assert!(
-            err.message
-                .contains("does not support exec for an in-process caller"),
+            err.message.contains("cannot return exec streams"),
             "expected the shared refusal before any daemon work, got: {}",
             err.message
         );
@@ -517,6 +524,24 @@ mod tests {
     #[test]
     fn validate_sandbox_id_rejects_uppercase_hex() {
         assert!(validate_sandbox_id("wslc:0123456789ABCDEF0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn post_provision_hooks_reject_raw_directional_network_fields() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        assert!(runner.validate_start(id, &request, None).is_err());
+        assert!(runner.validate_exec(id, &request, None).is_err());
+        assert!(runner.validate_stop(id, &request, None).is_err());
+        assert!(runner.validate_deprovision(id, &request, None).is_err());
     }
 
     #[test]

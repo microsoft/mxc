@@ -97,9 +97,7 @@ node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
 
 **Skip semantics.** Several suites degrade gracefully on an unsupported host:
 the IsolationSession suites decide availability from a single `wxc-exec --probe`
-read of `probes.isolationSessionAvailable` (covering both a host that cannot
-activate the API and a binary built without `--features isolation_session`),
-print `SKIPPED`, and exit 0.
+read of `probes.isolationSessionAvailable`, print `SKIPPED`, and exit 0.
 
 Because a skip exits 0 and the dispatchers propagate only the exit code, **a
 green CI job does not by itself prove the suite ran.** Anything treating these

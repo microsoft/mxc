@@ -202,7 +202,7 @@ fn seed_consent(local_app_data: &Path, state: &str) {
 /// vacuous pass — it would record no events for the wrong reason.
 fn assert_effective_consent(exe: &Path, local_app_data: &Path, expected: &str) {
     let output = Command::new(exe)
-        .arg("--telemetry-consent-status")
+        .args(["--telemetry-consent", "status"])
         .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
         .output()
         .expect("failed to query consent status");
