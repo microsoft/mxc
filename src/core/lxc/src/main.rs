@@ -119,27 +119,6 @@ fn parse_cli() -> Cli {
     }
 }
 
-/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
-/// mirrors. On Linux, `wxc_common::telemetry::consent` always reports
-/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
-/// this fast path can't drift from `wxc-exec`/`mxc-exec-mac`. The shared
-/// handler returns the outcome as data; terminating the process is this
-/// binary's job, not the foundation crate's.
-fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
-    let Some(action) = cli.telemetry_consent else {
-        return false;
-    };
-    let outcome = telemetry::consent_cli::handle_consent_command(
-        action,
-        cli.telemetry_consent_locale.as_deref(),
-    );
-    let code = outcome.emit();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    true
-}
-
 /// Read the request source (file path / base64 blob) once.
 fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
     let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
@@ -207,23 +186,16 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 fn main() {
     let cli = parse_cli();
 
-    // --telemetry-consent: report/administer the
-    // (always not-applicable on Linux) consent state and exit. Runs before
-    // signal_cleanup::install():
-    // this is a read-only/local-file fast path that never spawns a
-    // container, so it must not be gated on — or fail because of — signal
-    // handler installation, matching `wxc-exec`/`mxc-exec-mac`, where the
-    // consent fast path also runs unconditionally before any other setup.
-    if handle_telemetry_consent_flags(&cli) {
-        return;
+    if let Some(action) = cli.telemetry_consent {
+        let outcome = telemetry::consent_cli::handle_consent_command(
+            action,
+            cli.telemetry_consent_locale.as_deref(),
+        );
+        process::exit(outcome.emit());
     }
     // Decode the request source (file path / base64) once, up front.
     let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
         decode_config_input_once(&cli);
-    let request_hint = decoded_config
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We
@@ -326,16 +298,7 @@ fn main() {
     let config_json = config_json.expect("config_json is Some on non-delete paths");
 
     // Load request
-    let parsed_request = if let Some(hint) = request_hint.as_ref() {
-        wxc_common::config_parser::load_request_from_json_with_hint_and_options(
-            &config_json,
-            &mut logger,
-            wxc_common::config_parser::LoadOptions::default(),
-            hint,
-        )
-    } else {
-        load_request_from_json(&config_json, &mut logger)
-    };
+    let parsed_request = load_request_from_json(&config_json, &mut logger);
     let mut request = match parsed_request {
         Ok(r) => r,
         Err(_) => {
