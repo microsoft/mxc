@@ -2282,8 +2282,10 @@ inspection with the raw source edit, restored cross-platform and public-surface
 coverage, and updated the user and architecture documentation. They were
 squashed on 2026-09-02 as `499fcda8`. The presquash history is retained on
 `backup/version_specific_config_parsers_phase7a_redux_presquash-993a651a`.
-PR #969 still names the original branch until the verified redux tip is
-explicitly pushed to that remote ref.
+On 2026-09-02 the local and remote
+`user/gudge/version_specific_config_parsers_phase7a` refs were moved to that
+verified redux tip with `--force-with-lease`, so PR #969 now points to the
+converged implementation.
 
 The squashed commit covers the steps the plan broke out separately:
 
