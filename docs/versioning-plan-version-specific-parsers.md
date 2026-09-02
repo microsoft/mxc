@@ -2274,6 +2274,17 @@ landed. The pre-squash history is retained locally on
 `user/gudge/version_specific_config_parsers_phase7_prerebase`. The result is
 open as PR #969.
 
+After adversarial review, convergence work restarted from the pre-expansion
+commit `3a295c00` on
+`user/gudge/version_specific_config_parsers_phase7a_redux`. The follow-up
+commits applied the compatibility boundary below, consolidated backend
+inspection with the raw source edit, restored cross-platform and public-surface
+coverage, and updated the user and architecture documentation. They were
+squashed on 2026-09-02 as `499fcda8`. The presquash history is retained on
+`backup/version_specific_config_parsers_phase7a_redux_presquash-993a651a`.
+PR #969 still names the original branch until the verified redux tip is
+explicitly pushed to that remote ref.
+
 The squashed commit covers the steps the plan broke out separately:
 
 | Step | Content |
