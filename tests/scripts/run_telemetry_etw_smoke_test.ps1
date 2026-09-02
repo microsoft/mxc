@@ -75,7 +75,7 @@ function Invoke-CanonicalGrant {
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
-    [void]$start.Environment.Remove('MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
+    $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'] = "$PID"
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
@@ -130,9 +130,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 $overrideName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE'
+$overrideOwnerName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'
 $policyOverrideName = 'MXC_TEST_POLICY_KEY_OVERRIDE'
 $policyOverrideOwnerName = 'MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'
 $originalOverride = [Environment]::GetEnvironmentVariable($overrideName)
+$originalOverrideOwner = [Environment]::GetEnvironmentVariable($overrideOwnerName)
 $originalPolicyOverride = [Environment]::GetEnvironmentVariable($policyOverrideName)
 $originalPolicyOverrideOwner = [Environment]::GetEnvironmentVariable($policyOverrideOwnerName)
 $runId = [guid]::NewGuid().ToString('N')
@@ -151,6 +153,7 @@ try {
     New-Item -ItemType Directory -Path $etlDir -Force | Out-Null
     New-Item -Path $policyPath -Force | Out-Null
     Set-Item -Path "Env:$overrideName" -Value $tempDir
+    Set-Item -Path "Env:$overrideOwnerName" -Value $PID
     Set-Item -Path "Env:$policyOverrideName" -Value $policySubkey
     Set-Item -Path "Env:$policyOverrideOwnerName" -Value $PID
 
@@ -217,6 +220,8 @@ try {
     if ($traceStarted) { logman stop $sessionName -ets 2>$null | Out-Null }
     if ($null -eq $originalOverride) { Remove-Item "Env:$overrideName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$overrideName" $originalOverride }
+    if ($null -eq $originalOverrideOwner) { Remove-Item "Env:$overrideOwnerName" -ErrorAction SilentlyContinue }
+    else { Set-Item "Env:$overrideOwnerName" $originalOverrideOwner }
     if ($null -eq $originalPolicyOverride) { Remove-Item "Env:$policyOverrideName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$policyOverrideName" $originalPolicyOverride }
     if ($null -eq $originalPolicyOverrideOwner) { Remove-Item "Env:$policyOverrideOwnerName" -ErrorAction SilentlyContinue }

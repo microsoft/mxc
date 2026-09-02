@@ -511,9 +511,12 @@ closed rather than upgrading an unreadable device state into collection.
   interactive terminal inside an isolation session. Terminal behaviour has no
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
-- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The lifecycle and streaming
-  end-to-end tests need a capable host and skip, with a reason, unless
-  `MXC_E2E_HOST_PREPPED=1`.
+- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
+  need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
+  The isolation-session lifecycle tests skip unless `GetAvailableBackends()`
+  reports that backend, which needs both a build with
+  `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
+  `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
 
 Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 

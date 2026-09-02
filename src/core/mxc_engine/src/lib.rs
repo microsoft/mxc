@@ -97,6 +97,7 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
         .unwrap_or(false);
+    let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let requested_sandbox_kind = request
         .inner
         .telemetry
@@ -113,7 +114,7 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
             // catch-all `InitError`. Shares the exhaustive `MxcErrorCode` →
             // `FailureReason` mapping with the state-aware path.
             telemetry::emit_sdk_early_exit_with_kind(
-                telemetry_active,
+                telemetry_registration.transfer(),
                 &containment,
                 requested_sandbox_kind,
                 telemetry::classify_mxc_error(&error),
@@ -123,10 +124,10 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
     };
     let extra_warnings = logger.take_warnings();
     let process: Box<dyn SandboxProcess> = ProcessWithWarnings::wrap(process, extra_warnings);
-    if telemetry_active {
+    if telemetry_registration.active() {
         Ok(Box::new(TelemetryProcess {
             inner: process,
-            active: true,
+            active: telemetry_registration.transfer(),
             mode: TelemetryMode::OneShot {
                 containment,
                 requested_sandbox_kind,
@@ -135,6 +136,32 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
         }))
     } else {
         Ok(process)
+    }
+}
+
+pub(crate) struct TelemetryRegistration {
+    active: bool,
+}
+
+impl TelemetryRegistration {
+    pub(crate) fn new(active: bool) -> Self {
+        Self { active }
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.active
+    }
+
+    pub(crate) fn transfer(&mut self) -> bool {
+        std::mem::take(&mut self.active)
+    }
+}
+
+impl Drop for TelemetryRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            telemetry::shutdown();
+        }
     }
 }
 

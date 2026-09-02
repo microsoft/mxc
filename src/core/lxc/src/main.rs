@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request_from_json;
+use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::handle_dry_run_exit;
@@ -73,64 +73,6 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
-
-    /// Manage telemetry consent without spawning a sandbox.
-    #[arg(
-        long = "telemetry-consent",
-        value_name = "ACTION",
-        conflicts_with_all = [
-            "config_path",
-            "config",
-            "config_base64",
-            "delete",
-            "containername",
-            "experimental",
-            "allow_testing_features",
-            "dry_run",
-            "setup_hyperlight",
-            "force"
-        ]
-    )]
-    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
-
-    /// Preferred BCP 47 locale for a telemetry consent request.
-    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
-    telemetry_consent_locale: Option<String>,
-}
-
-fn parse_cli() -> Cli {
-    match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) => {
-            if matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                error.exit();
-            }
-            let is_consent_command =
-                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
-            if is_consent_command {
-                let _ = error.print();
-                process::exit(64);
-            }
-            error.exit();
-        }
-    }
-}
-
-/// Read the request source (file path / base64 blob) once.
-fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
-    let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
-        (input.clone(), true)
-    } else if let Some(input) = cli.config.as_ref().or(cli.config_path.as_ref()) {
-        (input.clone(), false)
-    } else {
-        return None;
-    };
-    Some(wxc_common::config_parser::decode_request_input(
-        &input, is_base64,
-    ))
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -184,18 +126,6 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
-    let cli = parse_cli();
-
-    if let Some(action) = cli.telemetry_consent {
-        let outcome = telemetry::consent_cli::handle_consent_command(
-            action,
-            cli.telemetry_consent_locale.as_deref(),
-        );
-        process::exit(outcome.emit());
-    }
-    // Decode the request source (file path / base64) once, up front.
-    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
-        decode_config_input_once(&cli);
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We
@@ -205,6 +135,8 @@ fn main() {
         eprintln!("Error: failed to install signal cleanup handler: {}", e);
         process::exit(1);
     }
+
+    let cli = Cli::parse();
 
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
@@ -245,26 +177,18 @@ fn main() {
         }
     }
 
-    // Determine config input. In delete mode the config is optional; every
-    // other path requires it. `decoded_config` above already read the source
-    // once — if it's populated, unpack the decoded JSON (or surface the
-    // decode error). If it's absent, either accept the empty state for
-    // delete mode or report the missing-config error.
-    let config_json: Option<String> = match decoded_config {
-        Some(Ok(json)) => Some(json),
-        Some(Err(error)) => {
-            eprintln!("Request error\n{error}");
-            process::exit(1);
-        }
-        None => {
-            if !cli.delete {
-                eprintln!(
-                    "Error: No config provided. Use a positional path, --config, or --config-base64"
-                );
-                process::exit(1);
-            }
-            None
-        }
+    // Determine config input
+    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
+        (b64.clone(), true)
+    } else if let Some(ref path) = cli.config {
+        (path.clone(), false)
+    } else if let Some(ref path) = cli.config_path {
+        (path.clone(), false)
+    } else if !cli.delete {
+        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
+        process::exit(1);
+    } else {
+        (String::new(), false)
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -293,13 +217,8 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
-    // Non-delete paths always have a config JSON at this point (or exited
-    // above with the missing-config error).
-    let config_json = config_json.expect("config_json is Some on non-delete paths");
-
     // Load request
-    let parsed_request = load_request_from_json(&config_json, &mut logger);
-    let mut request = match parsed_request {
+    let mut request = match load_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());

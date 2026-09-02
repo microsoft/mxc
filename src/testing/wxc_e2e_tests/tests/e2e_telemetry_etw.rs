@@ -204,6 +204,10 @@ fn assert_effective_consent(exe: &Path, local_app_data: &Path, expected: &str) {
     let output = Command::new(exe)
         .args(["--telemetry-consent", "status"])
         .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
+        .env(
+            "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
+            std::process::id().to_string(),
+        )
         .output()
         .expect("failed to query consent status");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -219,6 +223,10 @@ fn run_traced_execution(exe: &Path, local_app_data: &Path) -> std::process::Outp
         .arg("--config")
         .arg(examples_dir().join("28_telemetry_enabled.json"))
         .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
+        .env(
+            "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
+            std::process::id().to_string(),
+        )
         .output()
         .expect("failed to run wxc-exec")
 }

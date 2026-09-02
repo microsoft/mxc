@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request_from_json;
+use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 
@@ -61,65 +61,6 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
-
-    /// Manage telemetry consent without spawning a sandbox.
-    #[arg(
-        long = "telemetry-consent",
-        value_name = "ACTION",
-        conflicts_with_all = [
-            "config_path",
-            "config",
-            "config_base64",
-            "experimental",
-            "allow_testing_features",
-            "dry_run"
-        ]
-    )]
-    telemetry_consent: Option<wxc_common::telemetry::consent_cli::ConsentAction>,
-
-    /// Preferred BCP 47 locale for a telemetry consent request.
-    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
-    telemetry_consent_locale: Option<String>,
-}
-
-fn parse_cli() -> Cli {
-    match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) => {
-            if matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                error.exit();
-            }
-            let is_consent_command =
-                wxc_common::telemetry::consent_cli::invocation_uses_consent_options(
-                    std::env::args_os(),
-                );
-            if is_consent_command {
-                let _ = error.print();
-                process::exit(64);
-            }
-            error.exit();
-        }
-    }
-}
-
-/// Decode the config input source (base64 arg / file path) exactly once.
-///
-/// Returns `None` if the CLI provided no config source at all — the caller
-/// then reports the appropriate missing-config error for its mode.
-fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
-    let (input, is_base64) = if let Some(b64) = cli.config_base64.as_ref() {
-        (b64.as_str(), true)
-    } else if let Some(path) = cli.config.as_ref().or(cli.config_path.as_ref()) {
-        (path.as_str(), false)
-    } else {
-        return None;
-    };
-    Some(wxc_common::config_parser::decode_request_input(
-        input, is_base64,
-    ))
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -139,31 +80,18 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 }
 
 fn main() {
-    let cli = parse_cli();
+    let cli = Cli::parse();
 
-    if let Some(action) = cli.telemetry_consent {
-        let outcome = wxc_common::telemetry::consent_cli::handle_consent_command(
-            action,
-            cli.telemetry_consent_locale.as_deref(),
-        );
-        process::exit(outcome.emit());
-    }
-    // Decode the config source once for normal request loading.
-    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
-        decode_config_input_once(&cli);
     // Determine config input.
-    let config_json = match decoded_config {
-        Some(Ok(json)) => json,
-        Some(Err(error)) => {
-            eprintln!("Request error\n{error}");
-            process::exit(1);
-        }
-        None => {
-            eprintln!(
-                "Error: No config provided. Use a positional path, --config, or --config-base64"
-            );
-            process::exit(1);
-        }
+    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
+        (b64.clone(), true)
+    } else if let Some(ref path) = cli.config {
+        (path.clone(), false)
+    } else if let Some(ref path) = cli.config_path {
+        (path.clone(), false)
+    } else {
+        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
+        process::exit(1);
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -178,8 +106,7 @@ fn main() {
         }
     }
 
-    let parsed_request = load_request_from_json(&config_json, &mut logger);
-    let mut request = match parsed_request {
+    let mut request = match load_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
