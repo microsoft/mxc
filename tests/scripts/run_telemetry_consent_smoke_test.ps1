@@ -158,9 +158,11 @@ function Assert-Status(
 }
 
 $overrideName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE'
+$overrideOwnerName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'
 $policyOverrideName = 'MXC_TEST_POLICY_KEY_OVERRIDE'
 $policyOverrideOwnerName = 'MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'
 $originalOverride = [Environment]::GetEnvironmentVariable($overrideName)
+$originalOverrideOwner = [Environment]::GetEnvironmentVariable($overrideOwnerName)
 $originalPolicyOverride = [Environment]::GetEnvironmentVariable($policyOverrideName)
 $originalPolicyOverrideOwner = [Environment]::GetEnvironmentVariable($policyOverrideOwnerName)
 $runId = [guid]::NewGuid().ToString('N')
@@ -175,6 +177,7 @@ try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
     New-Item -Path $policyPath -Force | Out-Null
     Set-Item "Env:$overrideName" $tempDir
+    Set-Item "Env:$overrideOwnerName" $PID
     Set-Item "Env:$policyOverrideName" $policySubkey
     Set-Item "Env:$policyOverrideOwnerName" $PID
 
@@ -230,6 +233,8 @@ try {
 } finally {
     if ($null -eq $originalOverride) { Remove-Item "Env:$overrideName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$overrideName" $originalOverride }
+    if ($null -eq $originalOverrideOwner) { Remove-Item "Env:$overrideOwnerName" -ErrorAction SilentlyContinue }
+    else { Set-Item "Env:$overrideOwnerName" $originalOverrideOwner }
     if ($null -eq $originalPolicyOverride) { Remove-Item "Env:$policyOverrideName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$policyOverrideName" $originalPolicyOverride }
     if ($null -eq $originalPolicyOverrideOwner) { Remove-Item "Env:$policyOverrideOwnerName" -ErrorAction SilentlyContinue }
