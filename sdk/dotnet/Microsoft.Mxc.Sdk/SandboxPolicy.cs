@@ -67,7 +67,9 @@ public sealed class SandboxPolicy
     /// Convenience projection for <see cref="TelemetrySettings.Enabled"/>.
     /// Setting this to <see langword="true"/> is necessary but does not bypass
     /// persisted user consent or administrative policy. Omitted or false
-    /// keeps telemetry off.
+    /// keeps telemetry off. This serializes through the canonical nested
+    /// <c>telemetry.enabled</c> field; the native FFI rejects the legacy
+    /// top-level <c>telemetryEnabled</c> alias.
     /// </summary>
     [JsonIgnore]
     public bool? TelemetryEnabled

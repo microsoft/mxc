@@ -105,7 +105,7 @@ function Invoke-ConsentRequest([string]$Decision) {
     $finalLine | ConvertFrom-Json
 }
 
-function Assert-NonInteractiveRequestFails {
+function Assert-PipedRequestEofFails {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wxcExec
     $start.Arguments = '--telemetry-consent request --telemetry-consent-locale en-US'
@@ -120,20 +120,24 @@ function Assert-NonInteractiveRequestFails {
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
-    if (-not $process.Start()) { throw 'Failed to start non-interactive consent process.' }
+    if (-not $process.Start()) { throw 'Failed to start piped consent process.' }
     $process.StandardInput.Close()
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
     if ($process.ExitCode -ne 1) {
-        throw "Non-interactive request exited $($process.ExitCode), expected 1: $stderr"
+        throw "Piped request exited $($process.ExitCode), expected 1: $stderr"
     }
-    $response = $stdout | ConvertFrom-Json
-    if ($response.result -ne 'presentationUnavailable') {
-        throw "Non-interactive request returned an unexpected response: $stdout"
+    $responses = @($stdout -split '\r?\n' |
+        Where-Object { $_ } |
+        ForEach-Object { $_ | ConvertFrom-Json })
+    if ($responses.Count -ne 2 -or
+        $responses[0].result -ne 'presentationRequired' -or
+        $responses[1].result -ne 'presentationUnavailable') {
+        throw "Piped request returned an unexpected response: $stdout"
     }
     if (Test-Path $consentFile) {
-        throw 'Non-interactive request changed the consent store.'
+        throw 'Piped request EOF changed the consent store.'
     }
 }
 
@@ -195,7 +199,7 @@ try {
     }
     Remove-Item $consentFile -Force
 
-    Assert-NonInteractiveRequestFails
+    Assert-PipedRequestEofFails
 
     $fresh = Invoke-Maintenance 'status'
     Assert-Status $fresh 'undetermined' 'undetermined' 'unrestricted' $true 'fresh status'
