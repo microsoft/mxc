@@ -334,11 +334,10 @@ above.
 When stable telemetry is enabled and authorized, MXC may validate, compact, and
 send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
 event contains a valid JSON array of complete signatures and document
-reconstruction metadata. Before emission, MXC replaces every verbose property
-value with the fixed `<redacted>` marker; property names remain to identify
-provider schema compatibility patterns. MXC does not send the actionable
-denials file, workload-derived property values, or raw ETL through telemetry.
-See [MXC telemetry](../telemetry/telemetry.md).
+reconstruction metadata. Before emission, MXC derives provider GUIDs from the
+closed provider enum and drops every verbose property name and value. MXC does
+not send the actionable denials file, workload-derived properties, or raw ETL
+through telemetry. See [MXC telemetry](../telemetry/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique

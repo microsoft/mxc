@@ -266,14 +266,14 @@ No PII is collected. Execution/error events contain only execution metrics
 (`error_type`). When a ProcessContainer run successfully produces a Learning
 Mode verbose artifact, `MXC.VerboseDenials` can include sanitized
 provider/event identifiers, process IDs, closed outcome reasons,
-classifications, property names with every property value replaced by the
-fixed `<redacted>` marker, occurrence counts, and truncation state. It excludes
-commands, credentials, complete file paths, usernames, workload-derived
-property values, sandbox output, raw ETL, actionable denial documents, general
-logger text, and free-form error text. The verbose-event data inventory
-requires explicit privacy/release review before shipment. If you use the SDK
-to build applications, you are responsible for providing appropriate telemetry
-notices to your own users.
+access/resource classifications, occurrence counts, and truncation state. The
+telemetry projection derives provider GUIDs from a closed provider enum and
+drops all verbose property names and values. MXC never emits commands,
+credentials, complete file paths, usernames, workload-derived properties, sandbox output,
+raw ETL, actionable denial documents, general logger text, or free-form error
+text. The verbose-event data inventory requires explicit privacy/release review
+before shipment. If you use the SDK to build applications, you are responsible
+for providing appropriate telemetry notices to your own users.
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
 
