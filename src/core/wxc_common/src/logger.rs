@@ -269,16 +269,6 @@ impl Logger {
         self.log_diagnostic_line(msg);
     }
 
-    /// Record a warning for library callers and the primary diagnostic stream.
-    ///
-    /// Use this when executor users must see the message in the ordinary
-    /// buffered/console output while in-process callers also need it through
-    /// [`warnings`](Self::warnings).
-    pub fn retained_warning_line(&mut self, msg: &str) {
-        self.warnings.push(msg.to_string());
-        self.log_line(msg);
-    }
-
     /// Warnings emitted during the run.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
@@ -371,16 +361,6 @@ mod tests {
         assert!(logger.get_buffer().is_empty());
         assert_eq!(logger.take_warnings(), ["security warning"]);
         assert!(logger.warnings().is_empty());
-    }
-
-    #[test]
-    fn retained_warning_line_reaches_primary_output_and_callers() {
-        let mut logger = Logger::new(Mode::Buffer);
-
-        logger.retained_warning_line("operational warning");
-
-        assert_eq!(logger.warnings(), ["operational warning"]);
-        assert_eq!(logger.get_buffer(), "operational warning\n");
     }
 
     /// The body of the child process spawned by
