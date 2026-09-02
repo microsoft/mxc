@@ -485,8 +485,10 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 2. the caller opts this invocation in via telemetry settings.
 
 `MxcTelemetry` is UI-agnostic: it passes the native canonical prompt resource
-to your presenter and persists only the typed decision you return. For
-presenter rules and consent semantics, see
+to your presenter and persists only the typed decision you return.
+`GetConsentStatus`, `NeedsConsentPrompt`, and `WithdrawConsent` provide the
+remaining maintenance operations. Dismissal and failures never grant consent.
+For presenter rules and consent semantics, see
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
@@ -521,8 +523,8 @@ without invoking a presenter.
 
 ### Administrative policy
 
-An IT administrator can block MXC telemetry device-wide via MXC's own
-Group Policy / MDM setting. `MxcTelemetry.GetPolicy()` reports the result:
+An administrator can block MXC telemetry device-wide through MXC's registry
+policy. `MxcTelemetry.GetPolicy()` reports the result:
 
 ```csharp
 if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)

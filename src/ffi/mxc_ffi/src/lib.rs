@@ -38,9 +38,7 @@
 //!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
 //! - **Per-invocation telemetry opt-in**: [`mxc_run`] / [`mxc_spawn`] accept
 //!   the canonical top-level execution field `telemetry.enabled` inside the
-//!   policy JSON they already take. For compatibility, the legacy top-level
-//!   `telemetryEnabled` boolean remains accepted as an alias; if both are
-//!   present they must agree.
+//!   policy JSON they already take.
 //! - **Telemetry consent** — [`mxc_telemetry_get_consent`],
 //!   [`mxc_telemetry_get_consent_status`], [`mxc_telemetry_request_consent`],
 //!   [`mxc_telemetry_withdraw_consent`], [`mxc_telemetry_needs_consent_prompt`],
@@ -358,19 +356,21 @@ pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FfiTelemetrySection {
-    enabled: Option<bool>,
+    enabled: bool,
 }
 
-fn deserialize_legacy_telemetry_enabled<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+#[derive(Default)]
+struct OptionalTelemetrySection(Option<FfiTelemetrySection>);
+
+impl<'de> serde::Deserialize<'de> for OptionalTelemetrySection
 where
-    D: serde::Deserializer<'de>,
+    Self: Sized,
 {
-    match <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)? {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Bool(enabled)) => Ok(Some(enabled)),
-        Some(_) => Err(serde::de::Error::custom(
-            "telemetryEnabled must be a boolean",
-        )),
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        FfiTelemetrySection::deserialize(deserializer).map(|section| Self(Some(section)))
     }
 }
 
@@ -380,38 +380,38 @@ struct FfiPolicyEnvelope {
     #[serde(flatten)]
     policy: SandboxPolicy,
     #[serde(default)]
-    telemetry: Option<FfiTelemetrySection>,
-    #[serde(default, deserialize_with = "deserialize_legacy_telemetry_enabled")]
-    telemetry_enabled: Option<bool>,
+    telemetry: OptionalTelemetrySection,
+    #[serde(
+        default,
+        rename = "telemetryEnabled",
+        deserialize_with = "reject_legacy_telemetry_enabled"
+    )]
+    _telemetry_enabled: (),
 }
 
-fn telemetry_enabled_from_policy(policy: &FfiPolicyEnvelope) -> Result<Option<bool>, String> {
-    let canonical = policy
+fn reject_legacy_telemetry_enabled<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)?;
+    Err(serde::de::Error::custom(
+        "telemetryEnabled is not supported; use telemetry.enabled",
+    ))
+}
+
+fn telemetry_enabled_from_policy(policy: &FfiPolicyEnvelope) -> Option<bool> {
+    policy
         .telemetry
+        .0
         .as_ref()
-        .and_then(|telemetry| telemetry.enabled);
-    let legacy = policy.telemetry_enabled;
-    match (canonical, legacy) {
-        (Some(current), Some(alias)) if current != alias => Err(
-            "failed to parse policy JSON: telemetry.enabled and telemetryEnabled must agree"
-                .to_string(),
-        ),
-        (Some(current), _) => Ok(Some(current)),
-        (None, legacy) => Ok(legacy),
-    }
+        .map(|telemetry| telemetry.enabled)
 }
 
-fn validate_canonical_telemetry_version(value: &serde_json::Value) -> Result<(), String> {
-    let Some(policy) = value.as_object() else {
-        return Ok(());
-    };
-    if !policy.contains_key("telemetry") {
+fn validate_canonical_telemetry_version(policy: &FfiPolicyEnvelope) -> Result<(), String> {
+    if policy.telemetry.0.is_none() {
         return Ok(());
     }
-    let Some(version) = policy.get("version").and_then(serde_json::Value::as_str) else {
-        return Ok(());
-    };
-    let Some(core) = version.split(['-', '+']).next() else {
+    let Some(core) = policy.policy.version.split(['-', '+']).next() else {
         return Ok(());
     };
     let mut components = core.split('.');
@@ -443,12 +443,10 @@ fn validate_canonical_telemetry_version(value: &serde_json::Value) -> Result<(),
 pub(crate) fn parse_policy_json(
     policy_json: &str,
 ) -> Result<(SandboxPolicy, Option<bool>), String> {
-    let value: serde_json::Value = serde_json::from_str(policy_json)
+    let envelope: FfiPolicyEnvelope = serde_json::from_str(policy_json)
         .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
-    validate_canonical_telemetry_version(&value)?;
-    let envelope: FfiPolicyEnvelope = serde_json::from_value(value)
-        .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
-    let telemetry_enabled = telemetry_enabled_from_policy(&envelope)?;
+    validate_canonical_telemetry_version(&envelope)?;
+    let telemetry_enabled = telemetry_enabled_from_policy(&envelope);
     Ok((envelope.policy, telemetry_enabled))
 }
 
@@ -1103,31 +1101,39 @@ mod tests {
     }
 
     #[test]
-    fn policy_telemetry_switch_keeps_legacy_alias_for_compatibility() {
-        let (policy, telemetry_enabled) =
-            parse_policy_json(r#"{"version":"0.8.0-alpha","telemetryEnabled":true}"#)
-                .expect("policy should parse");
+    fn policy_telemetry_switch_rejects_legacy_alias() {
+        let error = parse_policy_json(r#"{"version":"0.9.0-alpha","telemetryEnabled":true}"#)
+            .expect_err("the legacy telemetry alias must be rejected");
 
-        assert_eq!(policy.version, "0.8.0-alpha");
-        assert_eq!(telemetry_enabled, Some(true));
+        assert!(error.contains("telemetryEnabled"));
     }
 
     #[test]
-    fn policy_telemetry_switch_rejects_non_boolean_values() {
-        let error = parse_policy_json(r#"{"version":"0.8.0-alpha","telemetryEnabled":"yes"}"#)
-            .expect_err("non-boolean telemetry switch must fail");
-
-        assert!(error.contains("telemetryEnabled must be a boolean"));
+    fn policy_telemetry_switch_rejects_null_and_missing_enabled() {
+        for policy_json in [
+            r#"{"version":"0.9.0-alpha","telemetry":null}"#,
+            r#"{"version":"0.9.0-alpha","telemetry":{"enabled":null}}"#,
+            r#"{"version":"0.9.0-alpha","telemetry":{}}"#,
+        ] {
+            assert!(
+                parse_policy_json(policy_json).is_err(),
+                "{policy_json} must be rejected"
+            );
+        }
     }
 
     #[test]
-    fn policy_telemetry_switch_rejects_conflicting_shapes() {
-        let error = parse_policy_json(
-            r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false},"telemetryEnabled":true}"#,
-        )
-        .expect_err("conflicting telemetry fields must fail");
-
-        assert!(error.contains("must agree"));
+    fn policy_telemetry_switch_rejects_duplicate_fields() {
+        for policy_json in [
+            r#"{"version":"0.9.0-alpha","version":"0.9.0-alpha"}"#,
+            r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true},"telemetry":{"enabled":false}}"#,
+            r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true,"enabled":false}}"#,
+        ] {
+            assert!(
+                parse_policy_json(policy_json).is_err(),
+                "{policy_json} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1141,10 +1147,6 @@ mod tests {
             (
                 r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false}}"#,
                 Some(false),
-            ),
-            (
-                r#"{"version":"0.8.0-alpha","telemetryEnabled":true}"#,
-                Some(true),
             ),
         ] {
             let request = build_run_request(policy_json, "echo hi")

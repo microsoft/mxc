@@ -32,6 +32,8 @@ isolation_session = ["mxc-sdk/isolation_session"]
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+# Exposes the debug-only telemetry test seams to language-binding tests.
+test-support = ["mxc-sdk/test-support"]
 
 [dev-dependencies]
 # Gives the FFI tests the policy-key redirector, so they can assert the exact
