@@ -213,16 +213,16 @@ Required behavior:
   error. This is a new failure site: today `has_cli_command` makes an empty
   converted command unreachable, so the rework needs an explicit error and a
   test rather than relying on the validator's empty-command check.
-- The containment probe's raw-string-to-backend mapping lives outside the
-  immutable contract modules, beside the adapters.
-- The probe reproduces a mapping the parser also performs — including the
-  absent-containment host default and the abstract `vm` intent — so the two can
-  drift, and a drift would quote the command for one backend while another
-  executes it. After the typed parse, assert that the context used for the
-  splice matches the resolved containment and fail loudly on a mismatch. This
-  assertion is part of the Phase 9 acceptance criteria. **As implemented in
-  Phase 7a the probes reuse the parser's own mapping rather than reproducing
-  it, so the premise of this item no longer holds; see the 7.1.1.4 note.**
+- The containment inspection's raw-string-to-backend mapping lives outside the
+  immutable contract modules, in `wxc_common::splice::CommandSource` beside
+  the duplicate-preserving source edit.
+- `CommandSource::one_shot_backend` deserializes the declared containment as
+  `wire::Containment` and reuses the same `From` conversion as the parser —
+  including the absent-containment host default and the abstract `vm` intent.
+  The exhaustive `one_shot_backend_agrees_with_the_parser_for_every_spelling`
+  test pins all accepted spellings plus the absent and explicit-null cases.
+  This removes the independent mapping that would otherwise require a
+  post-parse drift assertion; see the 7.1.1.4 note.
 
 Known trade-off: when a command is spliced, serde's source positions and the
 state-aware `source_text` used for positional experimental diagnostics describe
@@ -2280,12 +2280,12 @@ commit `3a295c00` on
 commits applied the compatibility boundary below, consolidated backend
 inspection with the raw source edit, restored cross-platform and public-surface
 coverage, and updated the user and architecture documentation. They were
-squashed on 2026-09-02 as `499fcda8`. The presquash history is retained on
+squashed on 2026-09-02 as `499fcda8`, then rebased onto `origin/main` at
+`878936a4` and verified again. The presquash history is retained on
 `backup/version_specific_config_parsers_phase7a_redux_presquash-993a651a`.
-On 2026-09-02 the local and remote
-`user/gudge/version_specific_config_parsers_phase7a` refs were moved to that
-verified redux tip with `--force-with-lease`, so PR #969 now points to the
-converged implementation.
+The local and remote `user/gudge/version_specific_config_parsers_phase7a` refs
+were moved to the rebased tip `2675e624` with `--force-with-lease`, so PR #969
+now points to the converged implementation.
 
 The squashed commit covers the steps the plan broke out separately:
 
@@ -2474,17 +2474,18 @@ the Phase 9 acceptance criterion recorded under "Entry-point-dependent command
 requirements".
 
 **Superseded as implemented.** Phase 7a carries no runtime assertion. The drift
-it guards against is closed at the source instead: `probe_one_shot_backend`
-deserializes `wire::Containment` and reuses the same `From` conversion the
-parser uses, and `one_shot_probe_agrees_with_the_parser_for_every_spelling`
-pins probe against `map_wire_containment` for all twelve accepted spellings,
-including the absent-containment host default and the explicit-null case. That
-is the outcome 7.1.1.1 predicted when it required the probes to reuse existing
+it guards against is closed at the source instead:
+`CommandSource::one_shot_backend` deserializes `wire::Containment` and reuses
+the same `From` conversion the parser uses, and
+`one_shot_backend_agrees_with_the_parser_for_every_spelling` pins it against
+`map_wire_containment` for all twelve accepted spellings, including the
+absent-containment host default and the explicit-null case. That is the outcome
+7.1.1.1 predicted when it required command preparation to reuse existing
 machinery rather than hand-roll a second mapping. The Phase 9 acceptance
 criterion is therefore restated: the requirement is that the splice context and
 the resolved containment cannot diverge, satisfied by shared code plus an
 exhaustive test rather than by a post-parse comparison. Reinstate the runtime
-assertion only if a future change gives the probe its own mapping.
+assertion only if a future change gives command preparation its own mapping.
 
 **7.1.1.5 — Wire the driver and delete the old path.** Pass the CLI command
 through `LoadOptions`; delete `apply_command_override`, the
