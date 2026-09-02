@@ -1498,6 +1498,15 @@ pub mod test_support {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    impl Drop for LocalAppDataGuard {
+        fn drop(&mut self) {
+            *LOCAL_APP_DATA_OVERRIDE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = self.previous_override.clone();
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::scoped_local_app_data_override;
@@ -1519,15 +1528,6 @@ pub mod test_support {
                 None
             );
             assert_eq!(scoped_local_app_data_override(path, None, Some(41)), None);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    impl Drop for LocalAppDataGuard {
-        fn drop(&mut self) {
-            *LOCAL_APP_DATA_OVERRIDE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = self.previous_override.clone();
         }
     }
 }
