@@ -370,7 +370,7 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                TelemetryConsentStatusReason.StoreUnreadable,
+                null,
                 TelemetryPolicyState.Blocked);
         }
         catch (MxcException ex)
@@ -388,7 +388,7 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                TelemetryConsentStatusReason.StoreUnreadable,
+                null,
                 TelemetryPolicyState.Blocked);
         }
     }

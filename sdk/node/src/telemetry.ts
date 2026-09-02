@@ -168,6 +168,8 @@ async function defaultConsentProtocolRunner(
     let stdout = '';
     let stderr = '';
     let finalResponse: TelemetryConsentOutcome | undefined;
+    let presentationSeen = false;
+    let terminalSeen = false;
     let settled = false;
     let timeout: NodeJS.Timeout | null = null;
     let timeoutStartedAt = 0;
@@ -240,9 +242,23 @@ async function defaultConsentProtocolRunner(
       }
 
       if (response.result !== 'presentationRequired') {
+        if (terminalSeen) {
+          fail(new Error('telemetry consent protocol emitted multiple terminal responses'));
+          return;
+        }
+        terminalSeen = true;
         finalResponse = toConsentOutcome(response);
         return;
       }
+      if (terminalSeen) {
+        fail(new Error('telemetry consent protocol emitted a presentation after its terminal response'));
+        return;
+      }
+      if (presentationSeen) {
+        fail(new Error('telemetry consent protocol emitted multiple presentations'));
+        return;
+      }
+      presentationSeen = true;
       if (!isConsentPrompt(response.prompt) || !isChallenge(response.challenge)) {
         fail(new Error('telemetry consent presentation omitted its prompt or challenge'));
         return;
@@ -344,12 +360,8 @@ async function defaultConsentProtocolRunner(
         if (settled) return;
         clearProtocolDeadline();
         if (stdout.trim() !== '') {
-          try {
-            finalResponse = toConsentOutcome(parseMaintenanceResponse(stdout, 'request'));
-          } catch (error) {
-            fail(error);
-            return;
-          }
+          await processLine(stdout);
+          if (settled) return;
         }
         if (code !== 0 || finalResponse === undefined) {
           fail(new Error(`telemetry consent process failed (${code ?? 'no exit code'}): ${stderr.trim()}`));

@@ -207,6 +207,39 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     assert.strictEqual((await promise).result, 'dismissed');
   });
 
+  it('rejects multiple terminal responses', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+
+    box.current.writeStdout(grantedLine() + grantedLine());
+
+    await assert.rejects(promise, /multiple terminal responses/);
+    assert.strictEqual(box.current.killCount, 1);
+  });
+
+  it('rejects a presentation after a terminal response', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+
+    box.current.writeStdout(grantedLine() + presentationLine());
+
+    await assert.rejects(promise, /presentation after its terminal response/);
+    assert.strictEqual(box.current.killCount, 1);
+  });
+
+  it('rejects multiple presentations', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+
+    box.current.writeStdout(presentationLine() + presentationLine('request-b'));
+
+    await assert.rejects(promise, /multiple presentations/);
+    assert.strictEqual(box.current.killCount, 1);
+  });
+
   it('suspends the IO timeout while the presenter is thinking', async () => {
     // The runner is documented to clear the IO timeout right before awaiting
     // the presenter and rearm it after. A very short timeout would trip if

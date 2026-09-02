@@ -82,7 +82,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         var status = MxcTelemetry.GetConsentStatus();
         Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
-        Assert.Equal(TelemetryConsentStatusReason.StoreUnreadable, status.Reason);
+        Assert.Null(status.Reason);
         Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
     }
 
@@ -200,7 +200,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         var status = MxcTelemetry.GetConsentStatus();
         Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
-        Assert.Equal(TelemetryConsentStatusReason.StoreUnreadable, status.Reason);
+        Assert.Null(status.Reason);
         Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
     }
 
