@@ -771,7 +771,10 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(&request);
+        let output = appcontainer_common::probe::run_probe_with_guarded_capture_availability(
+            &request,
+            mxc_engine::guarded_capture_available(),
+        );
         // appcontainer_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation

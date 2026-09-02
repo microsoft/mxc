@@ -50,6 +50,8 @@ pub struct ProbeFacts {
     /// host capability, not request compatibility; a request can still require
     /// guarded WPR when its policy cannot be represented by PSEC.
     pub native_capture_available: bool,
+    /// Whether the guarded WPR capture fallback is available.
+    pub guarded_capture_available: bool,
     /// `bfscfg.exe` is on disk in `%SystemRoot%\System32`.
     ///
     /// Always `false` when [`Self::bfs_compiled_in`] is `false`, because
@@ -130,6 +132,17 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 
 /// Run the fallback detector against `request` and return a JSON-shaped summary.
 pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
+    run_probe_with_guarded_capture_availability(request, true)
+}
+
+/// Run the probe with the availability of the guarded WPR capture fallback.
+///
+/// The concrete guarded-capture implementation lives above this crate in
+/// `mxc_engine`, which supplies this capability to the executor probe.
+pub fn run_probe_with_guarded_capture_availability(
+    request: &ExecutionRequest,
+    guarded_capture_available: bool,
+) -> ProbeOutput {
     use crate::base_container_runner::BaseContainerRunner;
 
     let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
@@ -139,6 +152,7 @@ pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
         native_capture_available: BaseContainerRunner::is_native_capture_available(),
+        guarded_capture_available,
         bfscfg_present: fallback_detector::find_bfscfg_exe()
             .ok()
             .flatten()
@@ -165,6 +179,19 @@ fn run_probe_with_capabilities(
         prefer_base_container,
         supports_deny_paths,
     ) {
+        Ok(decision)
+            if request.policy.capture_denials.is_some()
+                && !prefer_base_container
+                && !probes.guarded_capture_available =>
+        {
+            ProbeOutput {
+                tier: None,
+                needs_dacl_augmentation: None,
+                warnings: decision.warnings,
+                probes,
+                error: Some("guarded WPR captureDenials fallback is unavailable".to_string()),
+            }
+        }
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
             needs_dacl_augmentation: Some(decision.needs_dacl_augmentation),
@@ -234,10 +261,14 @@ mod tests {
         }
     }
 
-    fn test_probe_facts(native_capture_available: bool) -> ProbeFacts {
+    fn test_probe_facts(
+        native_capture_available: bool,
+        guarded_capture_available: bool,
+    ) -> ProbeFacts {
         ProbeFacts {
             base_container_api_present: true,
             native_capture_available,
+            guarded_capture_available,
             bfscfg_present: false,
             bfs_compiled_in: false,
             base_container_supports_deny_paths: false,
@@ -256,6 +287,7 @@ mod tests {
             probes: ProbeFacts {
                 base_container_api_present: true,
                 native_capture_available: true,
+                guarded_capture_available: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -272,6 +304,7 @@ mod tests {
         assert_eq!(v["warnings"][0], "a warning");
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
         assert_eq!(v["probes"]["nativeCaptureAvailable"], true);
+        assert_eq!(v["probes"]["guardedCaptureAvailable"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
         assert_eq!(v["probes"]["isolationSessionAvailable"], true);
@@ -296,6 +329,7 @@ mod tests {
             probes: ProbeFacts {
                 base_container_api_present: false,
                 native_capture_available: false,
+                guarded_capture_available: false,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -327,7 +361,7 @@ mod tests {
     fn request_capabilities_control_base_container_selection() {
         let _lock = crate::test_env::lock();
         let request = ExecutionRequest::default();
-        let probes = test_probe_facts(false);
+        let probes = test_probe_facts(false, false);
 
         let selected = run_probe_with_capabilities(&request, probes, true, true);
 
@@ -344,11 +378,35 @@ mod tests {
         };
         let request = request_with_policy(policy);
 
-        let output = run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
+        let output =
+            run_probe_with_capabilities(&request, test_probe_facts(false, true), false, false);
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
         assert!(!output.probes.native_capture_available);
         assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn capture_denials_requires_guarded_capture_on_appcontainer_fallback() {
+        let _guard = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+        let output = run_probe_with_capabilities(
+            &request_with_policy(policy),
+            test_probe_facts(false, false),
+            false,
+            false,
+        );
+
+        assert!(output.tier.is_none());
+        assert!(output.needs_dacl_augmentation.is_none());
+        assert!(!output.probes.guarded_capture_available);
+        assert_eq!(
+            output.error.as_deref(),
+            Some("guarded WPR captureDenials fallback is unavailable")
+        );
     }
 
     #[test]
