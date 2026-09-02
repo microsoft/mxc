@@ -10,42 +10,15 @@ use mxc_sdk::configs::{
     ProcessContainerUi, ProcessContainerUiIsolation,
 };
 use mxc_sdk::{
-    build_request_with_containment, Containment, Error, ErrorCode, SandboxPolicy, SandboxRequest,
-    WslcSection,
+    build_request_with_containment, Containment, Error, ErrorCode, SandboxRequest, WslcSection,
 };
-use serde_json::Value;
-
-struct RequestPolicy {
-    policy: SandboxPolicy,
-    telemetry_enabled: Option<bool>,
-}
-
-impl RequestPolicy {
-    fn sdk_policy(&self) -> &SandboxPolicy {
-        &self.policy
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for RequestPolicy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
-        let policy_json = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
-        let (policy, telemetry_enabled) =
-            crate::parse_policy_json(&policy_json).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            policy,
-            telemetry_enabled,
-        })
-    }
-}
+use serde_json::{value::RawValue, Value};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RequestSpec {
-    policy: RequestPolicy,
+struct RequestSpec<'a> {
+    #[serde(borrow)]
+    policy: &'a RawValue,
     command: String,
     #[serde(default)]
     containment: RequestContainment,
@@ -246,12 +219,11 @@ impl ProcessContainerNetworkSpec {
 
 /// Parse a binding request and build the public Rust SDK request it describes.
 pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, Error> {
-    let value: Value = serde_json::from_str(request_json).map_err(malformed_request)?;
-    if value
-        .get("policy")
-        .and_then(|policy| policy.get("captureDenials"))
-        .is_some()
-    {
+    let spec: RequestSpec<'_> = serde_json::from_str(request_json).map_err(malformed_request)?;
+    let (policy, telemetry_enabled) = crate::parse_policy_json(spec.policy.get())
+        .map_err(|error| Error::new(ErrorCode::MalformedRequest, error))?;
+    let policy_value: Value = serde_json::from_str(spec.policy.get()).map_err(malformed_request)?;
+    if policy_value.get("captureDenials").is_some() {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             "policy.captureDenials is not supported; set containment.type to \
@@ -259,21 +231,17 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
         ));
     }
 
-    let spec: RequestSpec = serde_json::from_value(value).map_err(malformed_request)?;
     let containment = spec.containment.into_sdk();
 
-    let mut request = build_request_with_containment(
-        spec.policy.sdk_policy(),
-        &containment,
-        spec.container_name.as_deref(),
-    )?;
+    let mut request =
+        build_request_with_containment(&policy, &containment, spec.container_name.as_deref())?;
     request.set_script(spec.command);
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
     request.set_env(spec.environment);
     request.set_experimental(spec.experimental);
-    if let Some(enabled) = spec.policy.telemetry_enabled {
+    if let Some(enabled) = telemetry_enabled {
         request.set_telemetry_enabled(enabled);
     }
     Ok(request)
@@ -301,10 +269,11 @@ mod tests {
             process_spec.environment.get("PARITY").map(String::as_str),
             Some("true")
         );
-        assert_eq!(process_spec.policy.sdk_policy().timeout_ms, Some(30_000));
-        let filesystem = process_spec
-            .policy
-            .sdk_policy()
+        let process_policy = crate::parse_policy_json(process_spec.policy.get())
+            .expect("process-container policy parses")
+            .0;
+        assert_eq!(process_policy.timeout_ms, Some(30_000));
+        let filesystem = process_policy
             .filesystem
             .as_ref()
             .expect("filesystem policy is preserved");
@@ -312,18 +281,11 @@ mod tests {
         assert_eq!(filesystem.readonly_paths, ["C:\\input"]);
         assert_eq!(filesystem.denied_paths, ["C:\\secret"]);
         assert_eq!(filesystem.clear_policy_on_exit, Some(true));
-        let ui = process_spec
-            .policy
-            .sdk_policy()
-            .ui
-            .as_ref()
-            .expect("UI policy is preserved");
+        let ui = process_policy.ui.as_ref().expect("UI policy is preserved");
         assert!(!ui.allow_windows);
         assert_eq!(ui.clipboard, mxc_sdk::policy::ClipboardPolicy::Read);
         assert!(!ui.allow_input_injection);
-        let authored_network = process_spec
-            .policy
-            .sdk_policy()
+        let authored_network = process_policy
             .network
             .as_ref()
             .expect("network policy is preserved");
@@ -378,9 +340,10 @@ mod tests {
             network_spec.containment,
             RequestContainment::Process
         ));
-        let network = network_spec
-            .policy
-            .sdk_policy()
+        let network_policy = crate::parse_policy_json(network_spec.policy.get())
+            .expect("directional-network policy parses")
+            .0;
+        let network = network_policy
             .network
             .as_ref()
             .expect("directional network policy is preserved");

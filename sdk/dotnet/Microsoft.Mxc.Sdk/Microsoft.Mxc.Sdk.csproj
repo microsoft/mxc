@@ -34,7 +34,6 @@
     <MxcWithWslc Condition="'$(MxcWithWslc)' == ''">false</MxcWithWslc>
 
     <MxcCargoFeatures>dotnetsdk</MxcCargoFeatures>
-    <MxcCargoFeatures Condition="'$(Configuration)' == 'Debug'">$(MxcCargoFeatures) wxc_common/test-support</MxcCargoFeatures>
     <MxcCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoFeatures) isolation_session</MxcCargoFeatures>
     <MxcCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoFeatures) wslc</MxcCargoFeatures>
 

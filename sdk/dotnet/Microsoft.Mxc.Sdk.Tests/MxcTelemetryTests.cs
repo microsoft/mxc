@@ -22,7 +22,7 @@ public sealed class MxcTelemetryTests
     {
         var policy = new SandboxPolicy
         {
-            Version = "0.8.0-alpha",
+            Version = SchemaVersions.MaximumSupported,
             TelemetryEnabled = true,
         };
 

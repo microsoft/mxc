@@ -1005,10 +1005,6 @@ mod tests {
                 r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false}}"#,
                 Some(false),
             ),
-            (
-                r#"{"version":"0.8.0-alpha","telemetryEnabled":false}"#,
-                Some(false),
-            ),
         ] {
             let request = build_spawn_request(policy_json, "echo hi")
                 .unwrap_or_else(|_| panic!("build_spawn_request failed for {policy_json}"));

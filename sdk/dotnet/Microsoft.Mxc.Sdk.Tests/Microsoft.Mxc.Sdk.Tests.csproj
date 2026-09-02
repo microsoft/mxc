@@ -12,11 +12,30 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefineConstants Condition="'$(MxcWithWslc)' == 'true'">$(DefineConstants);MXC_WITH_WSLC</DefineConstants>
     <DefineConstants Condition="'$(MxcWithIsolationSession)' == 'true'">$(DefineConstants);MXC_WITH_ISOLATION_SESSION</DefineConstants>
+    <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
+    <MxcTestCargoTargetDir>$(MxcSrcDir)/target/dotnet-test-support</MxcTestCargoTargetDir>
+    <MxcTestCargoProfileArg Condition="'$(Configuration)' == 'Release'">--release</MxcTestCargoProfileArg>
+    <MxcTestCargoProfileDir Condition="'$(Configuration)' == 'Release'">release</MxcTestCargoProfileDir>
+    <MxcTestCargoProfileDir Condition="'$(Configuration)' != 'Release'">debug</MxcTestCargoProfileDir>
+    <MxcTestNativeOutput Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/mxc_ffi.dll</MxcTestNativeOutput>
+    <MxcTestNativeOutput Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.dylib</MxcTestNativeOutput>
+    <MxcTestNativeOutput Condition="'$(MxcTestNativeOutput)' == ''">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.so</MxcTestNativeOutput>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
+
+  <Target Name="BuildMxcTestSupportNativeLibrary"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Message Importance="high" Text="mxc: building isolated test-support native library" />
+    <Exec Command="cargo build -p mxc_ffi --features test-support $(MxcTestCargoProfileArg) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
+    <Error Condition="!Exists('$(MxcTestNativeOutput)')"
+           Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
+    <Copy SourceFiles="$(MxcTestNativeOutput)"
+          DestinationFolder="$(TargetDir)" />
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />

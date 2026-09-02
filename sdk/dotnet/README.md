@@ -486,9 +486,11 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 
 Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
 
-Any .NET consent surface should stay UI-agnostic, present the canonical
-resource verbatim through a host callback, persist only explicit yes/no
-decisions, treat dismissal and failures as non-grants, and follow the rules in
+The .NET consent APIs are UI-agnostic: `MxcTelemetry.RequestConsent` supplies
+the canonical resource to a host callback, while `GetConsentStatus`,
+`NeedsConsentPrompt`, and `WithdrawConsent` provide maintenance operations.
+They persist only explicit yes/no decisions and treat dismissal and failures
+as non-grants. See
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
@@ -498,8 +500,7 @@ and its
 An IT administrator can still block MXC telemetry device-wide via MXC's own
 registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Policy and consent
-queries are not yet exposed by the .NET SDK; any eventual query must fail
+for the stable registry contract and interaction rules. Read-only queries fail
 closed rather than upgrading an unreadable device state into collection.
 
 ## Projects
