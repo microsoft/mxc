@@ -6,7 +6,9 @@
 use std::io::Read;
 use std::path::Path;
 
-use learning_mode_core::{verbose_logging_sibling_path, VerboseLoggingDocument};
+use learning_mode_core::{
+    verbose_logging_sibling_path, VerboseLoggingDocument, VerboseLoggingProvider,
+};
 use sha2::{Digest, Sha256};
 use wxc_common::models::{ContainmentBackend, ScriptResponse};
 use wxc_common::telemetry::{self, VerboseEvent};
@@ -16,10 +18,6 @@ use wxc_common::telemetry::{self, VerboseEvent};
 const MAX_CONTENT_BYTES: usize = 48 * 1024;
 /// The pretty-printed file is bounded separately from its compact form.
 const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024;
-/// Property names describe provider schemas, but values can contain
-/// workload-controlled object names and are never included in telemetry.
-const REDACTED_PROPERTY_VALUE: &str = "<redacted>";
-
 #[derive(Debug)]
 struct PreparedVerboseDocument {
     document_id: String,
@@ -148,11 +146,20 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
 
 fn project_for_telemetry(mut document: VerboseLoggingDocument) -> VerboseLoggingDocument {
     for aggregate in &mut document.signatures {
-        for (_, value) in &mut aggregate.signature.properties {
-            REDACTED_PROPERTY_VALUE.clone_into(value);
-        }
+        aggregate.signature.provider_guid =
+            canonical_provider_guid(aggregate.signature.provider).to_string();
+        aggregate.signature.properties.clear();
     }
     document
+}
+
+fn canonical_provider_guid(provider: VerboseLoggingProvider) -> &'static str {
+    match provider {
+        VerboseLoggingProvider::KernelGeneral => "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
+        VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
+            "{811A1DDB-2E69-5F25-ADC0-4B186170E760}"
+        }
+    }
 }
 
 fn chunk_signatures(document: &VerboseLoggingDocument) -> Result<Vec<String>, String> {
@@ -326,12 +333,13 @@ mod tests {
             prepared.document_sha256
         );
         assert_eq!(reconstructed, project_for_telemetry(doc));
+        assert!(reconstructed
+            .signatures
+            .iter()
+            .all(|aggregate| aggregate.signature.properties.is_empty()));
         assert!(reconstructed.signatures.iter().all(|aggregate| {
-            aggregate
-                .signature
-                .properties
-                .iter()
-                .all(|(_, value)| value == REDACTED_PROPERTY_VALUE)
+            aggregate.signature.provider_guid
+                == canonical_provider_guid(aggregate.signature.provider)
         }));
     }
 
@@ -343,5 +351,23 @@ mod tests {
         let error = prepare_document(&path).unwrap_err();
         assert_eq!(error, "verbose artifact is not valid typed JSON");
         assert!(!error.contains("do-not-send"));
+    }
+
+    #[test]
+    fn telemetry_projection_drops_injected_strings() {
+        let injected = "customer-secret";
+        let mut doc = document(vec![aggregate(1, injected)]);
+        doc.signatures[0].signature.provider_guid = injected.to_string();
+        doc.signatures[0].signature.properties = vec![(injected.to_string(), injected.to_string())];
+
+        let projected = project_for_telemetry(doc);
+        let serialized = serde_json::to_string(&projected).unwrap();
+
+        assert!(!serialized.contains(injected));
+        assert_eq!(
+            projected.signatures[0].signature.provider_guid,
+            canonical_provider_guid(VerboseLoggingProvider::KernelGeneral)
+        );
+        assert!(projected.signatures[0].signature.properties.is_empty());
     }
 }

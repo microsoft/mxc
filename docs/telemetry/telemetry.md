@@ -133,11 +133,11 @@ Emitted on execution errors.
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
 versioned `*.verbose.json` sibling, validates it as a
-`VerboseLoggingDocument`, replaces every workload-derived property value with
-the fixed `<redacted>` marker, and serializes that telemetry-specific
-projection as compact JSON. Property names are retained to identify provider
-schema compatibility patterns. The event never contains the actionable
-denials file, raw ETL, commands, sandbox output, or general logger text.
+`VerboseLoggingDocument`, derives each provider GUID from the document's
+closed provider enum, drops every verbose property name and value, and
+serializes that telemetry-specific projection as compact JSON. The event never
+contains the actionable denials file, raw ETL, commands, sandbox output, or
+general logger text.
 
 One verbose document may require multiple ETW events. Every `mxc.content`
 value is an independently parseable compact JSON array of complete verbose
@@ -297,12 +297,12 @@ MXC's optional diagnostic events contain:
   nor receive it.
 - Sanitized Learning Mode verbose signatures when `captureDenials` produces a
   verbose artifact: provider/event identifiers, PID, closed outcome reason,
-  access/resource classifications, property names with every property value
-  replaced by the fixed `<redacted>` marker, occurrence counts, and truncation
-  state.
+  access/resource classifications, occurrence counts, and truncation state.
+  Provider GUIDs are derived from a closed provider enum; verbose property
+  names and values are dropped.
 
 MXC does not emit commands, credentials, complete file paths, usernames,
-workload-derived property values, sandbox output, raw ETL, actionable denial
+workload-derived properties, sandbox output, raw ETL, actionable denial
 documents, general logger text, or free-form error text.
 
 ### Review status
