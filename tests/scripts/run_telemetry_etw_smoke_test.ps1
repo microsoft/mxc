@@ -75,7 +75,7 @@ function Invoke-CanonicalGrant {
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
-    [void]$start.Environment.Remove('MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
+    $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'] = "$PID"
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
     $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
