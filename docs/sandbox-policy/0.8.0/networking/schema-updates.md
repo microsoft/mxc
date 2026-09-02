@@ -24,9 +24,9 @@ Schemas before 0.8 cannot use the new fields.
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
 On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
-`ingress` governs traffic entering the container. ProcessContainer also applies `egress` rules to all outbound
-destinations, but private-network traffic additionally requires `ingress.default: "allow"` to grant Windows'
-bidirectional `privateNetworkClientServer` capability.
+`ingress` governs traffic entering the container. ProcessContainer follows this model when OS ingress policy support
+is available. Compatibility paths require `ingress.default: "allow"` to grant Windows' bidirectional
+`privateNetworkClientServer` capability before private-network traffic can flow.
 
 This table maps the immutable 0.7 wire fields. In schema 0.7, `allowLocalNetwork` expresses inbound bind/listen
 permission and is honored by Seatbelt; ProcessContainer capabilities are separate. It maps only to
@@ -124,8 +124,8 @@ migrates to deny-default egress with allowed private/LAN inbound:
 }
 ```
 
-On backends that cleanly separate private-network ingress from egress, this does not grant outbound private-network or
-internet access. On ProcessContainer, `ingress.default: "allow"` grants the bidirectional private-network capability,
+This does not grant outbound private-network or internet access when OS ingress policy support is available. On
+ProcessContainer compatibility paths, `ingress.default: "allow"` grants the bidirectional private-network capability,
 but deny-default `egress` still blocks outbound public and private destinations unless an allow rule or the configured
 proxy path applies.
 

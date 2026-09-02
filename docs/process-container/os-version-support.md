@@ -65,6 +65,8 @@ The PSEC probe requires:
 - `QueryProcessSecurityEnvironmentSupport`
 - `CloseProcessSecurityEnvironment`
 
+The support query also reports whether the OS accepts directional ingress policy.
+
 When `processContainer.captureDenials` is present, MXC treats PSEC plus the
 official V2 Learning Mode exports as one native capture capability set:
 
@@ -118,7 +120,7 @@ fallback chain.
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
-| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when `SANDBOX_CAP_DENY_PATHS` is set, otherwise rejected at launch and dispatched to T3) |
+| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 when the active contract reports deny-path support) |
 | BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
 Notes:
@@ -158,14 +160,17 @@ Schema 0.8 support is selected by runtime contract rather than Windows release:
 
 | Schema 0.8 capability | PSEC | Legacy SBOX | AppContainer fallback |
 |---|:---:|:---:|:---:|
-| Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
+| Directional defaults | ✅ (OS ingress policy when reported; capability mapping otherwise) | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
 | Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ | ❌ |
-| `allowedProxyPeer` or `ingress.hostLoopback: "allow"` | ✅ | ❌ | ❌ |
+| `allowedProxyPeer` | ✅ | ❌ | ❌ |
+| `ingress.hostLoopback: "allow"` | ✅ when OS ingress policy support is reported | ❌ | ❌ |
 | `runtimeConfig.networkProxy` | ✅ | ❌ | ❌ |
 
 PSEC owns the WFP policy lifetime through workload completion. SBOX exposes no
 equivalent cleanup handle, so MXC never installs schema 0.8 WFP filters through
-that contract. The AppContainer fallback also rejects
+that contract. OS ingress policy support replaces the policy-owned
+`privateNetworkClientServer` capability. Compatibility paths retain the capability
+mapping. The AppContainer fallback also rejects
 `egress.default: "deny"` with `ingress.default: "allow"` because
 `privateNetworkClientServer` is bidirectional and no schema 0.8 WFP filter is
 available there to block private-network egress.
@@ -199,12 +204,12 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 - Tier selection: `src/backends/appcontainer/common/src/fallback_detector.rs`,
   `src/backends/appcontainer/common/src/dispatcher.rs`
-- BaseContainer capability probing (`SANDBOX_CAP_*`,
-  `Experimental_QuerySandboxSupport`) and FlatBuffer `SandboxSpec` construction:
+- BaseContainer capability probing and contract construction:
   `src/backends/appcontainer/common/src/base_container_runner.rs`
 - UI-limit build gating (`MIN_BUILD_FOR_IME_LIMIT`,
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
   `src/backends/appcontainer/common/src/job_object.rs`
-- FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
+- FlatBuffer contracts: `external/windows-sdk/BaseContainerSpecification.fbs`,
+  `external/windows-sdk/ProcessSecurityEnvironment.fbs`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)
