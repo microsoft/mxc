@@ -77,6 +77,21 @@ public sealed class MxcTelemetryTests : IDisposable
         AssertPolicyKeyIsRedirected();
     }
 
+    [Fact]
+    public void SandboxPolicy_TelemetrySerializesCanonically()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = SchemaVersions.MaximumSupported,
+            Telemetry = new TelemetrySettings { Enabled = true },
+        };
+
+        var json = System.Text.Json.JsonSerializer.Serialize(policy);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+        Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+    }
+
     /// <summary>
     /// The policy counterpart to <see cref="AssertStoreIsRedirected"/>: prove
     /// the native library honours <c>MXC_TEST_POLICY_KEY_OVERRIDE</c> before

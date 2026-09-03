@@ -648,22 +648,6 @@ public class MxcSandboxTests
         var roundTrip = JsonSerializer.Deserialize<SandboxPolicy>(json);
         Assert.NotNull(roundTrip);
         Assert.Equal(enabled, roundTrip.Telemetry?.Enabled);
-        Assert.Equal(enabled, roundTrip.TelemetryEnabled);
-    }
-
-    [Fact]
-    public void SandboxPolicy_TelemetryEnabledConvenienceUsesCanonicalNestedShape()
-    {
-        var policy = new SandboxPolicy
-        {
-            Version = "0.9.0-alpha",
-            TelemetryEnabled = true,
-        };
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
-        var root = document.RootElement;
-        Assert.True(root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
-        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
     }
 
     [Fact]
@@ -672,7 +656,7 @@ public class MxcSandboxTests
         var policy = new SandboxPolicy
         {
             Version = "0.8.0-alpha",
-            TelemetryEnabled = true,
+            Telemetry = new TelemetrySettings { Enabled = true },
         };
 
         var error = Assert.Throws<MxcException>(() => MxcSandbox.SerializePolicy(policy));
