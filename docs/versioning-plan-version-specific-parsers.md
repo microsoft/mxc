@@ -9,9 +9,10 @@ legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
 reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
 PR #969. Phase 7.2 is complete on
-`user/gudge/version_specific_config_parsers_phase7.2` at `074a8273`. Phases
-7.3-7.5, 8-9.5, and 10-11 remain; the planned end state publishes
-`0.9.0-alpha` and opens `0.10.0-alpha` development.
+`user/gudge/version_specific_config_parsers_phase7b` at `401ba0c2` and is open
+as PR #1091, stacked on #969. Phases 7.3-7.5, 8-9.5, and 10-11 remain; the
+planned end state publishes `0.9.0-alpha` and opens `0.10.0-alpha`
+development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -1028,7 +1029,7 @@ in progress, but merge in the order below.
 
 | PR | Plan scope | Boundary |
 | --- | --- | --- |
-| 1 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
+| 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
 | 2 | Phase 7.3 | Add the private exact parser path and versioned policy builders |
 | 3 | Phases 7.4-7.5 | Add the differential harness and commit its complete divergence classification together |
 | 4 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references |
@@ -2589,7 +2590,8 @@ backend is known is the defect this design exists to prevent.
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7.2` at `074a8273`.
+`user/gudge/version_specific_config_parsers_phase7b` at `401ba0c2`; open as
+PR #1091, stacked on Phase 7a PR #969.
 
 Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
 `experimental_raw` and the masked base JSON, a series of validations that read
