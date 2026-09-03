@@ -22,7 +22,8 @@ Original planning base: `origin/main` at
 ### Goals
 
 - Require every config to declare an exact registered version.
-- Deserialize each published version through its own immutable Rust wire types.
+- Deserialize each published version through its own JSON-shape-frozen Rust
+  wire types.
 - Support exact published contracts for `0.6.0-alpha`, `0.7.0-alpha`, and
   `0.8.0-alpha`.
 - Use `0.9.0-alpha` as the current mutable development contract.
@@ -67,6 +68,25 @@ Published request types contain only the stable one-shot surface. They exclude
 containments, and the abstract `vm` intent while it resolves only to an
 experimental backend. The historical `0.5.0-alpha` schema remains unsupported;
 no runtime contract is added for it.
+
+#### Freeze model
+
+Before Phase 11, a published contract is frozen with respect to its observable
+JSON contract: field names and nesting, required and optional presence,
+accepted canonical and compatibility spellings, enum values, null handling,
+unknown-field rejection, and local value rules. Its Rust implementation may
+still gain safe constructors, helper methods, traits, documentation, tests, or
+internal refactoring needed to complete exact dispatch, provided those changes
+do not alter that JSON behavior.
+
+Phase 11 freezes both the JSON shape and the contract-to-runtime behavior:
+exact dispatch, adapter normalization, field-presence semantics, typed builder
+output, and contract-specific acceptance and rejection behavior. After that
+point, observable semantic changes require a new contract version. Source code
+is not byte-frozen: internal refactoring and security hardening remain allowed
+when the freeze gates prove the published shape and behavior are unchanged.
+Contract versions never select obsolete backend implementations or weaker
+shared semantic validation.
 
 ### Contract reconstruction policy
 
@@ -991,7 +1011,12 @@ declaring `0.9.0-alpha` with `containment: "windows_sandbox"` must move to
 one-off; a smaller version recurs at each publication.
 
 Add CI checks that published Rust modules, stable generated schemas, registry
-identities, and recorded digests cannot be modified or deleted. Reuse
+identities, and recorded digests cannot be deleted or changed incompatibly.
+The gates freeze observable shape and behavior rather than source bytes:
+schema digests, acceptance and rejection fixtures, aliases and local value
+rules, adapter/runtime snapshots, field-presence semantics, and
+builder-versus-parser equivalence must remain unchanged. Published Rust source
+may be refactored only when those gates prove equivalent behavior. Reuse
 `scripts/versioning/lib/git-base.js` for base-ref handling.
 
 Replace `schemas/schema-version.json` and the regex-based version synchronization
@@ -2892,7 +2917,8 @@ though the override machinery itself is identical in both.
 | Programmatic policy construction | Build the selected version's typed contract directly rather than round-tripping synthesized JSON |
 | Command overrides | Resolve and splice the command before exact parsing so every effective request satisfies the required process shape |
 | State-aware backend payload transport | Preserve `experimental_raw` through exact-dispatch cutover, then replace it with typed payloads in Phase 9.5 |
-| Publication mechanics | Future publication freezes contract, adapter, and policy builder together and adds immutable artifact/digest checks |
+| Freeze model | Published JSON shapes are fixed now; Phase 11 freezes contract-to-runtime behavior as well, while permitting behavior-equivalent source refactoring and security hardening |
+| Publication mechanics | Future publication freezes contract, adapter, and policy builder behavior together and adds artifact, fixture, and equivalence checks |
 
 ### Publication and version-transition decision record
 
