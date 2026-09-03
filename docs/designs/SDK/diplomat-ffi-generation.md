@@ -1,4 +1,4 @@
-# Layer 2: core C FFI
+# Diplomat and C FFI generation
 
 ## Decision
 

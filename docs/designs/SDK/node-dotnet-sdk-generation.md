@@ -1,4 +1,4 @@
-# Layer 3: generated Node and .NET SDKs
+# Node and .NET SDK generation
 
 ## Decision
 

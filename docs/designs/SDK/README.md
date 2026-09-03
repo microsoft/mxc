@@ -65,9 +65,9 @@ Each step is switched independently. Existing entry points remain until parity t
 
 ## Documents
 
-1. [Rust SDK (`mxc-sdk`)](01-shared-rust-api.md)
-2. [Core C FFI](02-core-ffi.md)
-3. [Generated Node and .NET SDKs](03-generated-sdks.md)
+1. [Rust SDK (`mxc-sdk`) architecture](rust-sdk-architecture.md)
+2. [Diplomat and C FFI generation](diplomat-ffi-generation.md)
+3. [Node and .NET SDK generation](node-dotnet-sdk-generation.md)
 
 ## Selected tooling
 

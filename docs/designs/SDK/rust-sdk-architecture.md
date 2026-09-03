@@ -1,4 +1,4 @@
-# Layer 1: Rust SDK (`mxc-sdk`)
+# Rust SDK (`mxc-sdk`) architecture
 
 ## Decision
 
