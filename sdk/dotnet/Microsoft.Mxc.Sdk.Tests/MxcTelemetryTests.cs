@@ -21,12 +21,12 @@ public sealed class MxcTelemetryTests
     };
 
     [Fact]
-    public void SandboxPolicy_TelemetryEnabledSerializesCanonically()
+    public void SandboxPolicy_TelemetrySerializesCanonically()
     {
         var policy = new SandboxPolicy
         {
             Version = SchemaVersions.MaximumSupported,
-            TelemetryEnabled = true,
+            Telemetry = new TelemetrySettings { Enabled = true },
         };
 
         var json = JsonSerializer.Serialize(policy, PolicyJsonOptions);
@@ -34,7 +34,6 @@ public sealed class MxcTelemetryTests
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
-        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
     }
 
     [Fact]

@@ -63,18 +63,6 @@ public sealed class SandboxPolicy
     /// </summary>
     [JsonPropertyName("telemetry")]
     public TelemetrySettings? Telemetry { get; set; }
-
-    /// <summary>
-    /// Convenience projection for <see cref="Telemetry"/>. Serializes through
-    /// the canonical nested <c>telemetry.enabled</c> field. The native FFI
-    /// rejects the legacy top-level <c>telemetryEnabled</c> alias.
-    /// </summary>
-    [JsonIgnore]
-    public bool? TelemetryEnabled
-    {
-        get => Telemetry?.Enabled;
-        set => Telemetry = value is null ? null : new TelemetrySettings { Enabled = value.Value };
-    }
 }
 
 /// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>

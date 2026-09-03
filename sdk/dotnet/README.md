@@ -484,7 +484,10 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 1. the user has explicitly granted MXC-owned consent, and
 2. the caller opts this invocation in via telemetry settings.
 
-Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
+Telemetry remains off by default unless the caller opts in with
+`SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }` (or the
+equivalent phase-level `TelemetryEnabled` setting for state-aware requests)
+and applicable Windows consent/policy gates permit collection.
 
 The .NET consent APIs are UI-agnostic: `MxcTelemetry.RequestConsent` supplies
 the canonical resource to a host callback, while `GetConsentStatus`,

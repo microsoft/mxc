@@ -460,10 +460,9 @@ for the full design.
 
 The crate is UI-agnostic: it does not render a prompt. A host may call
 `request_consent()` or `request_consent_async()` and render every field of the
-canonical prompt supplied to its presenter callback verbatim. The prompt text
-comes from the versioned `wxc_common` consent resource. MXC persists a grant
-only from the typed decision returned by that callback. If the host never
-requests consent, telemetry remains off. See the normative
+canonical prompt supplied to its presenter callback verbatim. MXC persists a
+grant only from the typed decision returned by that callback. If the host
+never requests consent, telemetry remains off. See the normative
 [SDK presenter requirements](../../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
 for control mappings, dismissal behavior, learn-more handling, status, and
 withdrawal.
@@ -496,9 +495,6 @@ Off Windows `get_consent()` always returns `ConsentState::NotApplicable`,
 `ConsentActionResult::NotApplicable` — MXC neither collects nor offers consent
 for telemetry there, so a host can call these unconditionally without
 special-casing the platform.
-
-`ConsentState` and `PolicyState` are SDK-owned facades over the shared
-telemetry implementation.
 
 ### Administrative policy
 
