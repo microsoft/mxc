@@ -20,9 +20,9 @@
     <MxcTestCargoFeatures>test-support</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
-    <MxcTestNativeOutput Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/mxc_ffi.dll</MxcTestNativeOutput>
-    <MxcTestNativeOutput Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.dylib</MxcTestNativeOutput>
-    <MxcTestNativeOutput Condition="'$(MxcTestNativeOutput)' == ''">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.so</MxcTestNativeOutput>
+    <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>
+    <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcTestNativeFileName>
+    <MxcTestNativeFileName Condition="'$(MxcTestNativeFileName)' == ''">libmxc_ffi.so</MxcTestNativeFileName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,8 +32,27 @@
   <Target Name="BuildMxcTestSupportNativeLibrary"
           AfterTargets="Build"
           Condition="'$(DesignTimeBuild)' != 'true'">
-    <Message Importance="high" Text="mxc: building isolated test-support native library" />
-    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; $(MxcTestCargoProfileArg) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
+    <Exec Command="rustc -vV"
+          WorkingDirectory="$(MxcSrcDir)"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="MxcTestRustcVersion" />
+    </Exec>
+    <ItemGroup>
+      <MxcTestRustcHostLine Include="@(MxcTestRustcVersion)"
+                            Condition="$([MSBuild]::ValueOrDefault('%(Identity)', '').StartsWith('host: '))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <MxcTestRustcHostLine>@(MxcTestRustcHostLine)</MxcTestRustcHostLine>
+    </PropertyGroup>
+    <Error Condition="'$(MxcTestRustcHostLine)' == ''"
+           Text="mxc: 'rustc -vV' reported no host triple, so the isolated test-support build cannot be pinned to this host. Ensure the Rust toolchain is installed and on PATH." />
+    <PropertyGroup>
+      <MxcTestRustHostTriple>$(MxcTestRustcHostLine.Replace('host: ', '').Trim())</MxcTestRustHostTriple>
+      <MxcTestNativeOutput>$(MxcTestCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/$(MxcTestNativeFileName)</MxcTestNativeOutput>
+    </PropertyGroup>
+    <Message Importance="high" Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
+    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) $(MxcTestCargoProfileArg) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
     <Error Condition="!Exists('$(MxcTestNativeOutput)')"
            Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
     <Copy SourceFiles="$(MxcTestNativeOutput)"

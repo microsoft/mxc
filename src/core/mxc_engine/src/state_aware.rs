@@ -29,7 +29,7 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase
 use wxc_common::telemetry;
 
 use crate::error::Error;
-use crate::wrap_state_aware_telemetry_process_with_kind;
+use crate::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
 
 #[cfg(not(all(target_os = "windows", feature = "wslc")))]
 fn wslc_unavailable() -> MxcError {
@@ -531,6 +531,7 @@ pub fn exec_state_aware_json(
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
         .unwrap_or(false);
+    let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -545,7 +546,7 @@ pub fn exec_state_aware_json(
             let process = crate::ProcessWithWarnings::wrap(process, init_warnings);
             Ok(wrap_state_aware_telemetry_process_with_kind(
                 process,
-                telemetry_active,
+                telemetry_registration.transfer(),
                 backend,
                 phase.as_str().to_string(),
                 correlation,
@@ -556,7 +557,7 @@ pub fn exec_state_aware_json(
         Err(error) => {
             let outcome = Err(error.clone());
             telemetry::emit_sdk_state_aware_with_kind(
-                telemetry_active,
+                telemetry_registration.transfer(),
                 requested_sandbox_kind,
                 telemetry::TelemetryContext {
                     backend: &backend,

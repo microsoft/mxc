@@ -1431,13 +1431,63 @@ pub mod test_support {
         let path = std::env::var_os(LOCAL_APPDATA_OVERRIDE_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)?;
-        let owner_pid = std::env::var(LOCAL_APPDATA_OVERRIDE_OWNER_ENV)
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok());
-        if owner_pid == Some(std::process::id()) {
-            return None;
+        scoped_local_app_data_override(
+            path,
+            std::env::var_os(LOCAL_APPDATA_OVERRIDE_OWNER_ENV),
+            direct_parent_process_id(),
+        )
+    }
+
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    fn scoped_local_app_data_override(
+        path: PathBuf,
+        owner: Option<std::ffi::OsString>,
+        parent_process_id: Option<u32>,
+    ) -> Option<PathBuf> {
+        let owner = owner?.to_str()?.parse::<u32>().ok()?;
+        (Some(owner) == parent_process_id).then_some(path)
+    }
+
+    #[cfg(all(
+        target_os = "windows",
+        any(test, all(feature = "test-support", debug_assertions))
+    ))]
+    fn direct_parent_process_id() -> Option<u32> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut parent = None;
+        unsafe {
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    if entry.th32ProcessID == std::process::id() {
+                        parent = Some(entry.th32ParentProcessID);
+                        break;
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
         }
-        Some(path)
+        parent
+    }
+
+    #[cfg(all(
+        not(target_os = "windows"),
+        any(test, all(feature = "test-support", debug_assertions))
+    ))]
+    fn direct_parent_process_id() -> Option<u32> {
+        None
     }
 
     #[cfg(test)]
@@ -1454,6 +1504,30 @@ pub mod test_support {
             *LOCAL_APP_DATA_OVERRIDE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = self.previous_override.clone();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::scoped_local_app_data_override;
+        use std::path::PathBuf;
+
+        #[test]
+        fn inherited_override_requires_direct_parent_owner() {
+            let path = PathBuf::from("isolated");
+            assert_eq!(
+                scoped_local_app_data_override(path.clone(), Some("41".into()), Some(41)),
+                Some(path.clone())
+            );
+            assert_eq!(
+                scoped_local_app_data_override(path.clone(), Some("42".into()), Some(41)),
+                None
+            );
+            assert_eq!(
+                scoped_local_app_data_override(path.clone(), Some("invalid".into()), Some(41)),
+                None
+            );
+            assert_eq!(scoped_local_app_data_override(path, None, Some(41)), None);
         }
     }
 }

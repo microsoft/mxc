@@ -297,6 +297,7 @@ public static class MxcTelemetry
     {
         internal required Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> Presenter { get; init; }
         internal required CancellationToken CancellationToken { get; init; }
+        internal SynchronizationContext? SynchronizationContext { get; init; }
         internal Exception? Error;
     }
 
@@ -313,7 +314,8 @@ public static class MxcTelemetry
         return RequestConsentCore(
             prompt => ValueTask.FromResult(presenter(prompt)),
             locale,
-            CancellationToken.None);
+            CancellationToken.None,
+            synchronizationContext: null);
     }
 
     /// <summary>
@@ -338,8 +340,13 @@ public static class MxcTelemetry
         {
             return Task.FromResult(NotApplicableOutcome());
         }
+        var synchronizationContext = SynchronizationContext.Current;
         return Task.Factory.StartNew(
-            () => RequestConsentCore(presenter, locale, cancellationToken),
+            () => RequestConsentCore(
+                presenter,
+                locale,
+                cancellationToken,
+                synchronizationContext),
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
@@ -418,7 +425,8 @@ public static class MxcTelemetry
     private static TelemetryConsentOutcome RequestConsentCore(
         Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
         string? locale,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SynchronizationContext? synchronizationContext)
     {
         try
         {
@@ -427,6 +435,7 @@ public static class MxcTelemetry
             {
                 Presenter = presenter,
                 CancellationToken = cancellationToken,
+                SynchronizationContext = synchronizationContext,
             };
             var result = nativeApi.RequestConsent(
                 locale,
@@ -435,8 +444,10 @@ public static class MxcTelemetry
                     try
                     {
                         var prompt = ParseConsentPrompt(promptJson);
-                        return context.Presenter(prompt)
-                            .AsTask()
+                        return InvokePresenterAsync(
+                                context.Presenter,
+                                prompt,
+                                context.SynchronizationContext)
                             .WaitAsync(context.CancellationToken)
                             .GetAwaiter()
                             .GetResult() switch
@@ -476,6 +487,42 @@ public static class MxcTelemetry
                 "telemetry consent request failed",
                 ex);
         }
+    }
+
+    private static Task<TelemetryConsentDecision> InvokePresenterAsync(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        TelemetryConsentPrompt prompt,
+        SynchronizationContext? synchronizationContext)
+    {
+        if (synchronizationContext is null)
+        {
+            return presenter(prompt).AsTask();
+        }
+
+        var completion = new TaskCompletionSource<TelemetryConsentDecision>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            synchronizationContext.Post(
+                async _ =>
+                {
+                    try
+                    {
+                        completion.SetResult(await presenter(prompt));
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.SetException(ex);
+                    }
+                },
+                null);
+        }
+        catch (Exception ex)
+        {
+            completion.SetException(ex);
+        }
+
+        return completion.Task;
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]

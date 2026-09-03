@@ -896,6 +896,262 @@ describe('createConfigFromPolicy', () => {
         restore();
       }
     });
+
+    it('should forward schema 0.8 directional rules unchanged for the default process containment', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: {
+              default: 'deny',
+              allow: [{
+                to: [{ cidr: '203.0.113.0/24', except: ['203.0.113.5/32'] }],
+                ports: [{ protocol: 'tcp', port: 443 }],
+              }],
+              deny: [{ to: [{ cidr: '198.51.100.0/24' }] }],
+            },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.strictEqual(config.containment, 'process');
+        assert.strictEqual(config.lxc, undefined);
+        assert.deepStrictEqual(config.network, {
+          egress: {
+            default: 'deny',
+            allow: [{
+              to: [{ cidr: '203.0.113.0/24', except: ['203.0.113.5/32'] }],
+              ports: [{ protocol: 'tcp', port: 443 }],
+            }],
+            deny: [{ to: [{ cidr: '198.51.100.0/24' }] }],
+          },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        });
+        // The legacy-only fields must stay absent: directional configs carry
+        // no defaultPolicy, and applyLinuxNetworkPolicy must not promote
+        // enforcementMode off directional rules (it keys off allowedHosts /
+        // blockedHosts, which directional authoring never populates).
+        assert.strictEqual(config.network!.defaultPolicy, undefined);
+        assert.strictEqual(config.network!.allowLocalNetwork, undefined);
+        assert.strictEqual(config.network!.enforcementMode, undefined);
+        assert.strictEqual(config.processContainer, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward schema 0.8 directional rules unchanged for explicit bubblewrap containment', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(
+          {
+            version: '0.8.0-alpha',
+            network: {
+              egress: { default: 'allow', deny: [{ to: [{ cidr: '10.0.0.0/8' }] }] },
+              ingress: { default: 'deny', hostLoopback: 'deny' },
+            },
+          },
+          'bubblewrap',
+        );
+
+        assert.strictEqual(config.containment, 'bubblewrap');
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'allow', deny: [{ to: [{ cidr: '10.0.0.0/8' }] }] },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        });
+        assert.strictEqual(config.network!.enforcementMode, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward runtimeConfig.networkProxy for bubblewrap containment', () => {
+      mockLinux();
+      try {
+        for (const containment of ['process', 'bubblewrap'] as const) {
+          const config = createConfigFromPolicy(
+            {
+              version: '0.8.0-alpha',
+              network: {
+                egress: { default: 'deny' },
+                ingress: { default: 'deny', hostLoopback: 'deny' },
+              },
+              runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+            },
+            containment,
+          );
+
+          assert.deepStrictEqual(config.runtimeConfig, {
+            networkProxy: 'http://127.0.0.1:8080',
+          });
+          assert.deepStrictEqual(config.network, {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          });
+        }
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward runtimeConfig.networkProxy on Linux for explicit lxc containment', () => {
+      // The schema 0.8 field is not wired for LXC: lxc_network_policy_support()
+      // omits RUNTIME_PROXY, so validate_runner rejects it. That is a genuine
+      // capability gap — runtimeConfig.networkProxy must name a canonical
+      // loopback host, and inside LXC's netns loopback is the container's own,
+      // which is exactly the topology the legacy `network.proxy` path rejects.
+      // Either way it is the backend's answer to give, so the SDK's directional
+      // path forwards the field verbatim rather than gating it at authoring
+      // time.
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(
+          {
+            version: '0.8.0-alpha',
+            network: {
+              egress: { default: 'deny' },
+              ingress: { default: 'deny', hostLoopback: 'deny' },
+            },
+            runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+          },
+          'lxc',
+        );
+
+        assert.strictEqual(config.containment, 'lxc');
+        assert.deepStrictEqual(config.runtimeConfig, {
+          networkProxy: 'http://127.0.0.1:8080',
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward directional rules for explicit lxc containment without a runtime proxy', () => {
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy(
+          {
+            version: '0.8.0-alpha',
+            network: {
+              egress: { default: 'deny', allow: [{ to: [{ cidr: '203.0.113.0/24' }] }] },
+              ingress: { default: 'deny', hostLoopback: 'allow' },
+            },
+          },
+          'lxc',
+        );
+
+        assert.strictEqual(config.containment, 'lxc');
+        assert.ok(config.lxc);
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'deny', allow: [{ to: [{ cidr: '203.0.113.0/24' }] }] },
+          ingress: { default: 'deny', hostLoopback: 'allow' },
+        });
+        assert.strictEqual(config.network!.enforcementMode, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward allowedProxyPeer unchanged on Linux for native rejection', () => {
+      // Bubblewrap/LXC declare no PROXY_PEER_IDENTITY support, so the native
+      // validator owns the rejection (as it does for the legacy host lists on
+      // Unix backends). The SDK must not silently drop a security-relevant
+      // field it cannot honor.
+      mockLinux();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'deny' },
+          },
+          runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+          processContainer: { network: { allowedProxyPeer: 'Contoso.Proxy_1234567890abc' } },
+        });
+
+        assert.deepStrictEqual(config.processContainer!.network, {
+          allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+        });
+        // The Windows capability derivation must not leak into Linux configs.
+        assert.strictEqual(config.processContainer!.capabilities, undefined);
+        assert.strictEqual(config.processContainer!.ui, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject mixed legacy and directional network fields on Linux', () => {
+      mockLinux();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.8.0-alpha',
+            network: {
+              allowedHosts: ['example.com'],
+              egress: { default: 'deny' },
+            },
+          }),
+          { message: /cannot mix/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward an inbound-allow ingress posture unchanged on Linux', () => {
+      // Bubblewrap refuses ingress.default='allow' and hostLoopback='allow'
+      // natively: its private netns is routed by rootless slirp4netns, which
+      // offers no route in, and the hostLoopback deny is bidirectional (it also
+      // drops egress to slirp's gateway 10.0.2.2, the host's own loopback).
+      // Those are backend-enforced postures, not authoring-time ones, so the
+      // SDK forwards the request untouched — a caller who later switches the
+      // same policy to lxc (which supports the same directional bits with a
+      // real bridge) must get the identical wire config.
+      mockLinux();
+      try {
+        const policy = {
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' as const },
+            ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+          },
+        };
+        const viaBubblewrap = createConfigFromPolicy(policy, 'bubblewrap');
+        const viaLxc = createConfigFromPolicy(policy, 'lxc');
+
+        assert.deepStrictEqual(viaBubblewrap.network!.ingress, {
+          default: 'allow',
+          hostLoopback: 'allow',
+        });
+        assert.deepStrictEqual(viaLxc.network!.ingress, viaBubblewrap.network!.ingress);
+        assert.deepStrictEqual(viaLxc.network!.egress, viaBubblewrap.network!.egress);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject schema 0.8 directional fields on older schemas on Linux', () => {
+      mockLinux();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.7.0-alpha',
+            network: { ingress: { default: 'deny' } },
+          }),
+          { message: /does not support network\.egress/ },
+        );
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.7.0-alpha',
+            runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+          }),
+          { message: /does not support network\.egress/ },
+        );
+      } finally {
+        restore();
+      }
+    });
   });
 
   describe('macOS', () => {
@@ -983,6 +1239,226 @@ describe('createConfigFromPolicy', () => {
           network: { proxy: { url: 'http://127.0.0.1:8080' } },
         });
         assert.deepStrictEqual(config.network!.proxy, { url: 'http://127.0.0.1:8080' });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward schema 0.8 directional defaults unchanged on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'allow' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.ok(config.seatbelt);
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'allow' },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        });
+        // Directional configs must not carry the legacy mapping fields the
+        // Seatbelt profile builder falls back to when they are populated.
+        assert.strictEqual(config.network!.defaultPolicy, undefined);
+        assert.strictEqual(config.network!.allowLocalNetwork, undefined);
+        assert.strictEqual(config.network!.proxy, undefined);
+        assert.strictEqual(config.processContainer, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward runtimeConfig.networkProxy unchanged on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+          runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+        });
+
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.runtimeConfig, {
+          networkProxy: 'http://127.0.0.1:8080',
+        });
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'deny' },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward egress allow/deny rules on macOS untouched, leaving their rejection to Seatbelt', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: {
+              default: 'deny',
+              allow: [{ to: [{ cidr: '203.0.113.0/24' }], ports: [{ protocol: 'tcp', port: 443 }] }],
+              deny: [{ to: [{ cidr: '203.0.113.128/25' }] }],
+            },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.deepStrictEqual(config.network!.egress, {
+          default: 'deny',
+          allow: [{ to: [{ cidr: '203.0.113.0/24' }], ports: [{ protocol: 'tcp', port: 443 }] }],
+          deny: [{ to: [{ cidr: '203.0.113.128/25' }] }],
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward allowedProxyPeer unchanged on macOS for native rejection', () => {
+      // Seatbelt declares no PROXY_PEER_IDENTITY support; the native validator
+      // owns the rejection. The Windows-only capability/UI derivation must not
+      // appear in a macOS config.
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'deny' },
+          },
+          runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+          processContainer: { network: { allowedProxyPeer: 'Contoso.Proxy_1234567890abc' } },
+        });
+
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.processContainer!.network, {
+          allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+        });
+        assert.strictEqual(config.processContainer!.capabilities, undefined);
+        assert.strictEqual(config.processContainer!.ui, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject mixed legacy and directional network fields on macOS', () => {
+      mockDarwin();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.8.0-alpha',
+            network: {
+              proxy: { url: 'http://127.0.0.1:8080' },
+              egress: { default: 'deny' },
+            },
+          }),
+          { message: /cannot mix/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject schema 0.8 directional fields on older schemas on macOS', () => {
+      mockDarwin();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.7.0-alpha',
+            network: { egress: { default: 'allow' } },
+          }),
+          { message: /does not support network\.egress/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward a hostLoopback that diverges from ingress.default on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network!.ingress, {
+          default: 'allow',
+          hostLoopback: 'deny',
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should not synthesize a hostLoopback value when the caller omits it', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'allow' },
+            ingress: { default: 'allow' },
+          },
+        });
+
+        assert.deepStrictEqual(config.network!.ingress, { default: 'allow' });
+        assert.ok(!('hostLoopback' in config.network!.ingress!));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should forward an allow ingress under a deny egress on macOS', () => {
+      mockDarwin();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'allow' },
+          },
+        });
+
+        assert.strictEqual(config.containment, 'seatbelt');
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'deny' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should emit an egress-independent ingress block on macOS', () => {
+      mockDarwin();
+      try {
+        const ingress = { default: 'deny', hostLoopback: 'deny' } as const;
+        const underDeny = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: { egress: { default: 'deny' }, ingress },
+        });
+        const underAllow = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: { egress: { default: 'allow' }, ingress },
+        });
+
+        assert.deepStrictEqual(underDeny.network!.ingress, { default: 'deny', hostLoopback: 'deny' });
+        assert.deepStrictEqual(underAllow.network!.ingress, underDeny.network!.ingress);
+        assert.strictEqual(underDeny.network!.egress!.default, 'deny');
+        assert.strictEqual(underAllow.network!.egress!.default, 'allow');
       } finally {
         restore();
       }

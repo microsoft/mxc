@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -31,9 +34,11 @@ public sealed class MxcTelemetryCollectionDefinition
 public sealed class MxcTelemetryTests : IDisposable
 {
     private const string OverrideEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE";
+    private const string OverrideOwnerEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID";
     private const string PolicyOverrideEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE";
     private const string PolicyOverrideOwnerEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID";
     private readonly string? _originalOverride;
+    private readonly string? _originalOverrideOwner;
     private readonly string? _originalPolicyOverride;
     private readonly string? _originalPolicyOverrideOwner;
     private readonly string _tempDir;
@@ -42,9 +47,16 @@ public sealed class MxcTelemetryTests : IDisposable
     public MxcTelemetryTests()
     {
         _originalOverride = Environment.GetEnvironmentVariable(OverrideEnvVar);
+        _originalOverrideOwner = Environment.GetEnvironmentVariable(OverrideOwnerEnvVar);
         _tempDir = Path.Combine(Path.GetTempPath(), $"mxc_dotnet_consent_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
         Environment.SetEnvironmentVariable(OverrideEnvVar, _tempDir);
+        if (OperatingSystem.IsWindows())
+        {
+            Environment.SetEnvironmentVariable(
+                OverrideOwnerEnvVar,
+                GetParentProcessId().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
 
         // Redirect the administrative policy read to a throwaway HKCU key too,
         // so these tests are unaffected by a real MXC telemetry policy on the
@@ -205,6 +217,7 @@ public sealed class MxcTelemetryTests : IDisposable
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(OverrideEnvVar, _originalOverride);
+        Environment.SetEnvironmentVariable(OverrideOwnerEnvVar, _originalOverrideOwner);
         Environment.SetEnvironmentVariable(PolicyOverrideEnvVar, _originalPolicyOverride);
         Environment.SetEnvironmentVariable(PolicyOverrideOwnerEnvVar, _originalPolicyOverrideOwner);
         if (OperatingSystem.IsWindows())
@@ -446,6 +459,39 @@ public sealed class MxcTelemetryTests : IDisposable
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
     }
 
+    [Fact]
+    public async Task RequestConsentAsync_PreservesCallerSynchronizationContext_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var context = new PumpSynchronizationContext();
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try
+        {
+            var callerThread = Environment.CurrentManagedThreadId;
+            var request = MxcTelemetry.RequestConsentAsync(async _ =>
+            {
+                Assert.Same(context, SynchronizationContext.Current);
+                Assert.Equal(callerThread, Environment.CurrentManagedThreadId);
+                await Task.Yield();
+                Assert.Same(context, SynchronizationContext.Current);
+                Assert.Equal(callerThread, Environment.CurrentManagedThreadId);
+                return TelemetryConsentDecision.Yes;
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+            context.RunUntilCompleted(request);
+            Assert.Equal(TelemetryConsentActionResult.Granted, (await request).Result);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
     [Theory]
     [InlineData(typeof(DllNotFoundException))]
     [InlineData(typeof(EntryPointNotFoundException))]
@@ -501,5 +547,71 @@ public sealed class MxcTelemetryTests : IDisposable
         Assert.Equal(ErrorCode.ConsentWriteFailed, ex.Code);
         Assert.Contains("could not persist", ex.ToString(), StringComparison.Ordinal);
         Assert.Contains("mxc_ffi not found", ex.ToString(), StringComparison.Ordinal);
+    }
+
+    private static int GetParentProcessId()
+    {
+        using var process = Process.GetCurrentProcess();
+        var status = NtQueryInformationProcess(
+            process.Handle,
+            processInformationClass: 0,
+            out var processInformation,
+            Marshal.SizeOf<ProcessBasicInformation>(),
+            out _);
+        if (status != 0)
+        {
+            throw new InvalidOperationException(
+                $"NtQueryInformationProcess failed with NTSTATUS 0x{status:X8}");
+        }
+
+        return checked((int)processInformation.InheritedFromUniqueProcessId);
+    }
+
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtQueryInformationProcess(
+        IntPtr processHandle,
+        int processInformationClass,
+        out ProcessBasicInformation processInformation,
+        int processInformationLength,
+        out int returnLength);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        internal IntPtr Reserved1;
+        internal IntPtr PebBaseAddress;
+        internal IntPtr Reserved2_0;
+        internal IntPtr Reserved2_1;
+        internal IntPtr UniqueProcessId;
+        internal IntPtr InheritedFromUniqueProcessId;
+    }
+
+    private sealed class PumpSynchronizationContext : SynchronizationContext, IDisposable
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> _work = new();
+        private readonly AutoResetEvent _workAvailable = new(initialState: false);
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            _work.Enqueue((callback, state));
+            _workAvailable.Set();
+        }
+
+        public void RunUntilCompleted(Task task)
+        {
+            while (!task.IsCompleted)
+            {
+                if (_work.TryDequeue(out var work))
+                {
+                    work.Callback(work.State);
+                }
+                else
+                {
+                    _workAvailable.WaitOne(TimeSpan.FromSeconds(5));
+                }
+            }
+        }
+
+        public void Dispose() => _workAvailable.Dispose();
     }
 }
