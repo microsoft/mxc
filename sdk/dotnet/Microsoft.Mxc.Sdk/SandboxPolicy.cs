@@ -72,7 +72,7 @@ public sealed class TelemetrySettings
     /// and administrative policy.
     /// </summary>
     [JsonPropertyName("enabled")]
-    public bool? Enabled { get; set; }
+    public bool Enabled { get; set; }
 }
 
 /// <summary>

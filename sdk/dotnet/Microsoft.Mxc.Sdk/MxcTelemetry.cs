@@ -216,7 +216,7 @@ public static class MxcTelemetry
     {
         try
         {
-            var category = $"{operation}:{safeResult}";
+            var category = $"{operation}:{safeResult}:{detail}";
 
             lock (ReportedFailureCategories)
             {
@@ -407,12 +407,12 @@ public static class MxcTelemetry
         {
             var result = nativeApi.WithdrawConsent();
             EnsureSuccess(result.Status, "failed to withdraw telemetry consent");
-            return ParseConsentOutcome(result.Payload);
+            return ParseConsentOutcome(result.Payload, ConsentOutcomeOperation.Withdraw);
         }
         catch (Exception ex) when (ex is not MxcException)
         {
             throw new MxcException(
-                ErrorCode.ConsentWriteFailed,
+                ErrorCode.BackendError,
                 "failed to withdraw telemetry consent",
                 ex);
         }
@@ -473,13 +473,13 @@ public static class MxcTelemetry
                     context.Error);
             }
             EnsureSuccess(result.Status, "failed to request telemetry consent");
-            return ParseConsentOutcome(result.Payload);
+            return ParseConsentOutcome(result.Payload, ConsentOutcomeOperation.Request);
         }
         catch (Exception ex) when (
             ex is not MxcException and not OperationCanceledException)
         {
             throw new MxcException(
-                ErrorCode.ConsentWriteFailed,
+                ErrorCode.BackendError,
                 "telemetry consent request failed",
                 ex);
         }
@@ -576,36 +576,132 @@ public static class MxcTelemetry
         var root = document.RootElement;
         if (!IsKnownConsentStatusReason(root.GetProperty("reason"), "GetConsentStatus"))
         {
-            return new(
-                TelemetryConsentState.Undetermined,
-                TelemetryConsentState.Undetermined,
-                TelemetryPolicyState.Blocked);
+            return FailClosedStatus();
         }
-        return new(
-            ParseConsentState(root.GetProperty("storedState").GetString(), "GetConsentStatus"),
-            ParseConsentState(root.GetProperty("effectiveState").GetString(), "GetConsentStatus"),
-            ParsePolicyState(root.GetProperty("policy").GetString(), "GetConsentStatus"));
+        if (!TryParseConsentFields(
+                root,
+                "GetConsentStatus",
+                out var storedState,
+                out var effectiveState,
+                out var policy))
+        {
+            return FailClosedStatus();
+        }
+        return new(storedState, effectiveState, policy);
     }
 
-    private static TelemetryConsentOutcome ParseConsentOutcome(string? json)
+    private enum ConsentOutcomeOperation
+    {
+        Request,
+        Withdraw,
+    }
+
+    private static TelemetryConsentOutcome ParseConsentOutcome(
+        string? json,
+        ConsentOutcomeOperation operation)
     {
         using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent outcome"));
         var root = document.RootElement;
         var result = ParseConsentActionResult(root.GetProperty("result").GetString());
-        if (result == TelemetryConsentActionResult.Unknown ||
-            !IsKnownConsentStatusReason(root.GetProperty("reason"), "ConsentOutcome"))
+        var operationName = $"{operation}Consent";
+        if (!IsResultForOperation(result, operation) ||
+            !IsKnownConsentStatusReason(root.GetProperty("reason"), operationName))
         {
-            return new(
-                TelemetryConsentActionResult.Unknown,
-                TelemetryConsentState.Undetermined,
-                TelemetryConsentState.Undetermined,
-                TelemetryPolicyState.Blocked);
+            return FailClosedOutcome();
         }
-        return new(
-            result,
-            ParseConsentState(root.GetProperty("storedState").GetString(), "ConsentOutcome"),
-            ParseConsentState(root.GetProperty("effectiveState").GetString(), "ConsentOutcome"),
-            ParsePolicyState(root.GetProperty("policy").GetString(), "ConsentOutcome"));
+        if (!TryParseConsentFields(
+                root,
+                operationName,
+                out var storedState,
+                out var effectiveState,
+                out var policy))
+        {
+            return FailClosedOutcome();
+        }
+        return new(result, storedState, effectiveState, policy);
+    }
+
+    private static bool IsResultForOperation(
+        TelemetryConsentActionResult result,
+        ConsentOutcomeOperation operation)
+    {
+        var valid = operation switch
+        {
+            ConsentOutcomeOperation.Request =>
+                result is TelemetryConsentActionResult.Granted
+                    or TelemetryConsentActionResult.Denied
+                    or TelemetryConsentActionResult.Dismissed
+                    or TelemetryConsentActionResult.AlreadyGranted
+                    or TelemetryConsentActionResult.PolicyBlocked
+                    or TelemetryConsentActionResult.PresentationUnavailable
+                    or TelemetryConsentActionResult.NotApplicable,
+            ConsentOutcomeOperation.Withdraw =>
+                result is TelemetryConsentActionResult.Withdrawn
+                    or TelemetryConsentActionResult.NotApplicable,
+            _ => false,
+        };
+        if (!valid && result != TelemetryConsentActionResult.Unknown)
+        {
+            ReportFailClosed(
+                $"{operation}Consent",
+                "Unknown",
+                $"native returned impossible result '{result}'");
+        }
+        return valid;
+    }
+
+    private static TelemetryConsentStatus FailClosedStatus() =>
+        new(
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Blocked);
+
+    private static TelemetryConsentOutcome FailClosedOutcome() =>
+        new(
+            TelemetryConsentActionResult.Unknown,
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Blocked);
+
+    private static bool TryParseConsentFields(
+        JsonElement root,
+        string operation,
+        out TelemetryConsentState storedState,
+        out TelemetryConsentState effectiveState,
+        out TelemetryPolicyState policy)
+    {
+        storedState = TelemetryConsentState.Undetermined;
+        effectiveState = TelemetryConsentState.Undetermined;
+        policy = TelemetryPolicyState.Blocked;
+
+        var storedValue = root.GetProperty("storedState").GetString();
+        var parsedStoredState = ParseKnownConsentState(storedValue);
+        if (parsedStoredState is null)
+        {
+            _ = UnrecognizedConsentState(storedValue, operation);
+            return false;
+        }
+
+        var effectiveValue = root.GetProperty("effectiveState").GetString();
+        var parsedEffectiveState = ParseKnownConsentState(effectiveValue);
+        if (parsedEffectiveState is null)
+        {
+            _ = UnrecognizedConsentState(effectiveValue, operation);
+            return false;
+        }
+
+        var policyValue = root.GetProperty("policy").GetString();
+        var parsedPolicy = ParseKnownPolicyState(policyValue);
+        if (parsedPolicy is null)
+        {
+            _ = UnrecognizedPolicyState(policyValue, operation);
+            return false;
+        }
+
+        storedState = parsedStoredState.Value;
+        effectiveState = parsedEffectiveState.Value;
+        policy = parsedPolicy.Value;
+        return true;
     }
 
     private static TelemetryConsentActionResult ParseConsentActionResult(string? value) => value switch
@@ -668,14 +764,17 @@ public static class MxcTelemetry
     /// <summary>
     /// Map the native consent string, failing closed for unknown values.
     /// </summary>
-    private static TelemetryConsentState ParseConsentState(string? value, string operation) => value switch
+    private static TelemetryConsentState? ParseKnownConsentState(string? value) => value switch
     {
         "granted" => TelemetryConsentState.Granted,
         "denied" => TelemetryConsentState.Denied,
         "undetermined" => TelemetryConsentState.Undetermined,
         "not-applicable" => TelemetryConsentState.NotApplicable,
-        _ => UnrecognizedConsentState(value, operation),
+        _ => null,
     };
+
+    private static TelemetryConsentState ParseConsentState(string? value, string operation) =>
+        ParseKnownConsentState(value) ?? UnrecognizedConsentState(value, operation);
 
     private static TelemetryConsentState UnrecognizedConsentState(string? value, string operation)
     {
@@ -686,14 +785,17 @@ public static class MxcTelemetry
     /// <summary>
     /// Map the native policy string, failing closed for unknown values.
     /// </summary>
-    private static TelemetryPolicyState ParsePolicyState(string? value, string operation) => value switch
+    private static TelemetryPolicyState? ParseKnownPolicyState(string? value) => value switch
     {
         "unrestricted" => TelemetryPolicyState.Unrestricted,
         "allowed" => TelemetryPolicyState.Allowed,
         "blocked" => TelemetryPolicyState.Blocked,
         "not-applicable" => TelemetryPolicyState.NotApplicable,
-        _ => UnrecognizedPolicyState(value, operation),
+        _ => null,
     };
+
+    private static TelemetryPolicyState ParsePolicyState(string? value, string operation) =>
+        ParseKnownPolicyState(value) ?? UnrecognizedPolicyState(value, operation);
 
     private static TelemetryPolicyState UnrecognizedPolicyState(string? value, string operation)
     {

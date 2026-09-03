@@ -145,18 +145,20 @@ function compareMappings(label, expected, actual) {
 
 const runtimePolicy = policyStates();
 const protocolPolicy = rustEnum("PolicyState");
-compareSets("Rust consent protocol policy", new Set(runtimePolicy.keys()), protocolPolicy);
+compareMappings("Rust PolicyState::as_str", protocolPolicy, runtimePolicy);
 compareSets("TypeScript policy", protocolPolicy, typescriptValues("TELEMETRY_POLICY_STATES"));
-const csharpPolicy = csharpSwitch("ParsePolicyState", "TelemetryPolicyState");
-csharpPolicy.set("blocked", "Blocked");
-compareMappings("C# ParsePolicyState", protocolPolicy, csharpPolicy);
+compareMappings(
+  "C# ParsePolicyState",
+  protocolPolicy,
+  csharpSwitch("ParseKnownPolicyState", "TelemetryPolicyState")
+);
 
 const consentStates = rustEnum("ConsentState");
 compareSets("TypeScript consent state", consentStates, typescriptValues("TELEMETRY_CONSENT_STATES"));
 compareMappings(
   "C# ParseConsentState",
   consentStates,
-  csharpSwitch("ParseConsentState", "TelemetryConsentState")
+  csharpSwitch("ParseKnownConsentState", "TelemetryConsentState")
 );
 
 const terminalResults = rustEnum("ConsentResult");

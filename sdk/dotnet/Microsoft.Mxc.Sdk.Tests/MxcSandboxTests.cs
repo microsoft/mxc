@@ -682,6 +682,24 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxPolicy_DefaultTelemetrySettingsSerializeDisabled()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.9.0-alpha",
+            Telemetry = new TelemetrySettings(),
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+
+        Assert.False(
+            document.RootElement
+                .GetProperty("telemetry")
+                .GetProperty("enabled")
+                .GetBoolean());
+    }
+
+    [Fact]
     public void SandboxPolicy_RoundTripsLegacyCaptureDenials()
     {
         const string json =

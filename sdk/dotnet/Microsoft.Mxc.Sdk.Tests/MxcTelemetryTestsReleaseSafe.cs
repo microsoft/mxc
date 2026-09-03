@@ -270,6 +270,58 @@ public sealed class MxcTelemetryTestsReleaseSafe
     }
 
     [Fact]
+    public void RequestConsent_WithdrawnResultReturnsFailClosedSentinel()
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(1, presenter(ConsentPromptJson()));
+                return new(
+                    (int)ErrorCode.Success,
+                    ConsentOutcomeJson("withdrawn", "granted", "granted", "allowed"));
+            },
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var outcome = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+
+        Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
+    }
+
+    [Theory]
+    [InlineData("granted")]
+    [InlineData("denied")]
+    [InlineData("dismissed")]
+    [InlineData("alreadyGranted")]
+    [InlineData("policyBlocked")]
+    [InlineData("presentationUnavailable")]
+    public void WithdrawConsent_RequestResultReturnsFailClosedSentinel(string result)
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            WithdrawConsentImpl = () => new(
+                (int)ErrorCode.Success,
+                ConsentOutcomeJson(result, "granted", "granted", "allowed")),
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var outcome = MxcTelemetry.WithdrawConsent();
+
+        Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
+    }
+
+    [Fact]
     public void RequestConsent_UnknownWireReasonReturnsFailClosedSentinel()
     {
         var native = new FakeTelemetryNativeApi
@@ -292,6 +344,30 @@ public sealed class MxcTelemetryTestsReleaseSafe
         Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
         Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("{")]
+    [InlineData("""{"result":"granted"}""")]
+    public void RequestConsent_MalformedSuccessPayloadIsBackendError(string? payload)
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(1, presenter(ConsentPromptJson()));
+                return new((int)ErrorCode.Success, payload);
+            },
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var ex = Assert.Throws<MxcException>(
+            () => MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes));
+        Assert.Equal(ErrorCode.BackendError, ex.Code);
+        Assert.NotNull(ex.InnerException);
     }
 
     [Theory]
@@ -332,6 +408,63 @@ public sealed class MxcTelemetryTestsReleaseSafe
         Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
         Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
+    }
+
+    [Theory]
+    [InlineData("future-state", "granted", "allowed")]
+    [InlineData("granted", "future-state", "allowed")]
+    [InlineData("granted", "granted", "future-policy")]
+    public void GetConsentStatus_UnknownFieldReturnsWholeFailClosedSentinel(
+        string storedState,
+        string effectiveState,
+        string policy)
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            GetConsentStatusImpl = () => new(
+                (int)ErrorCode.Success,
+                ConsentStatusJson(storedState, effectiveState, policy)),
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var status = MxcTelemetry.GetConsentStatus();
+
+        Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
+        Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
+    }
+
+    [Theory]
+    [InlineData("future-state", "granted", "allowed")]
+    [InlineData("granted", "future-state", "allowed")]
+    [InlineData("granted", "granted", "future-policy")]
+    public void RequestConsent_UnknownFieldReturnsWholeFailClosedSentinel(
+        string storedState,
+        string effectiveState,
+        string policy)
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(1, presenter(ConsentPromptJson()));
+                return new(
+                    (int)ErrorCode.Success,
+                    ConsentOutcomeJson("granted", storedState, effectiveState, policy));
+            },
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var outcome = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+
+        Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
     }
 
     [Fact]
@@ -392,7 +525,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
     [InlineData(null)]
     [InlineData("{")]
     [InlineData("""{"result":"withdrawn"}""")]
-    public void WithdrawConsent_MalformedSuccessPayloadIsWrapped(string? payload)
+    public void WithdrawConsent_MalformedSuccessPayloadIsBackendError(string? payload)
     {
         var native = new FakeTelemetryNativeApi
         {
@@ -403,8 +536,32 @@ public sealed class MxcTelemetryTestsReleaseSafe
         using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
 
         var ex = Assert.Throws<MxcException>(() => MxcTelemetry.WithdrawConsent());
-        Assert.Equal(ErrorCode.ConsentWriteFailed, ex.Code);
+        Assert.Equal(ErrorCode.BackendError, ex.Code);
         Assert.NotNull(ex.InnerException);
+    }
+
+    [Fact]
+    public void ConsentWriteFailureStatusIsPreservedAcrossRequestAndWithdrawal()
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(1, presenter(ConsentPromptJson()));
+                return new((int)ErrorCode.ConsentWriteFailed, null);
+            },
+            WithdrawConsentImpl = () => new((int)ErrorCode.ConsentWriteFailed, null),
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var request = Assert.Throws<MxcException>(
+            () => MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes));
+        Assert.Equal(ErrorCode.ConsentWriteFailed, request.Code);
+
+        var withdraw = Assert.Throws<MxcException>(() => MxcTelemetry.WithdrawConsent());
+        Assert.Equal(ErrorCode.ConsentWriteFailed, withdraw.Code);
     }
 
     private sealed class FakeTelemetryNativeApi : MxcTelemetry.ITelemetryNativeApi
