@@ -61,7 +61,9 @@ after supported-SF2 qualification confirms the matching MSI and SDK hashes and
 the inbox `IsoSessionCore.dll` contract.
 
 After approval, the same run can publish the SDK to the restricted Azure
-Artifacts feed and submit the x64 and ARM64 MSIs to ESRP CDN. It does not
-publish to NuGet.org or GitHub Releases. Public release still requires review
-of the copied license/bootstrapper assets, redistribution approval, compliance
-evidence, and a separately approved public-promotion path.
+Artifacts feed. The production-signed x64 and ARM64 MSI/bootstrapper files
+remain internal ADO pipeline artifacts unless `publishMsiToEsrp=true` is
+explicitly selected. ESRP CDN publication may create externally accessible
+links and therefore remains disabled until that destination is approved for
+the intended visibility. The pipeline does not publish to NuGet.org or GitHub
+Releases.

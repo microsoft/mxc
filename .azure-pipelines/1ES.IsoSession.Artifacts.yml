@@ -53,6 +53,10 @@ parameters:
   displayName: Publish the aggregated SDK NuGet to Azure Artifacts
   type: boolean
   default: false
+- name: publishMsiToEsrp
+  displayName: Publish signed MSIs to ESRP CDN
+  type: boolean
+  default: false
 - name: publishFeedUrl
   displayName: Azure Artifacts NuGet v3 feed URL for the final SDK package
   type: string
@@ -264,16 +268,17 @@ extends:
                     -FeedUrl '${{ parameters.publishFeedUrl }}'
               displayName: Publish the final SDK NuGet
 
-        - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
-          parameters:
-            archTag: x64
-            monthId: ${{ parameters.monthId }}
-            dependsOnJob: validate_and_publish_isosession_sdk
-            ESRPInfo: ${{ parameters.ESRPInfo }}
+        - ${{ if eq(parameters.publishMsiToEsrp, true) }}:
+          - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
+            parameters:
+              archTag: x64
+              monthId: ${{ parameters.monthId }}
+              dependsOnJob: validate_and_publish_isosession_sdk
+              ESRPInfo: ${{ parameters.ESRPInfo }}
 
-        - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
-          parameters:
-            archTag: arm64
-            monthId: ${{ parameters.monthId }}
-            dependsOnJob: validate_and_publish_isosession_sdk
-            ESRPInfo: ${{ parameters.ESRPInfo }}
+          - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
+            parameters:
+              archTag: arm64
+              monthId: ${{ parameters.monthId }}
+              dependsOnJob: validate_and_publish_isosession_sdk
+              ESRPInfo: ${{ parameters.ESRPInfo }}

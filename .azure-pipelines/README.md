@@ -41,8 +41,11 @@ signs once, then waits on both a manual validation step and the configured
 Azure Pipelines environment before publishing those exact bytes. After
 supported-SF2 qualification, resume the validation and approve the environment
 check. Set `publishToRestrictedFeed` on the same run to publish the aggregated
-SDK NuGet to the configured internal Azure Artifacts feed before the x64 and
-ARM64 MSI release jobs submit the signed installers to ESRP CDN.
+SDK NuGet to the configured internal Azure Artifacts feed. Keep
+`publishMsiToEsrp=false` while the release must remain Microsoft-internal; the
+production-signed MSI/bootstrapper files remain available as internal ADO
+pipeline artifacts. Set `publishMsiToEsrp=true` only after the ESRP CDN
+destination is approved for the intended external visibility.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull
