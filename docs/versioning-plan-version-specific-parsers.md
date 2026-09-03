@@ -2361,12 +2361,14 @@ production diff. Three changes land in non-test code:
 | Command splice replaces `allow_missing_command` at the CLI entry point | Behavior-visible, entry point only | 7.1 |
 | Script becomes a build-time argument to `build_request`, removing the second `allow_missing_command` consumer | Behavior-visible, `mxc-sdk` and `mxc_ffi` | 7.1 |
 | `normalize_state_aware` extracted from `convert_wire_state_aware` | Behavior-preserving refactor | 7.2 |
-| Exact-contract path added, dead in production | Compiled but uncalled | 7.3 |
+| Exact-contract JSON parser added, dead in production | Compiled but uncalled | 7.3 |
 | `OptionalField::present` added to each contract primitive module | New explicit construction surface | 7.3 |
 | Hidden typed one-shot contract bridge added for `mxc_engine` | Workspace-internal cross-crate API | 7.3 |
+| Per-version exact policy builders replace rolling JSON synthesis | Behavior-preserving production routing change | 7.3 |
 
-Nothing else moves: no call site of the rolling parser changes and no runtime
-behavior differs. `wxc_common` adds only a `#[doc(hidden)]` exact one-shot
+No user-authored JSON call site moves: the rolling parser remains authoritative,
+and the exact builder parity tests pin the produced runtime model.
+`wxc_common` adds only a `#[doc(hidden)]` exact one-shot
 contract enum and normalization function because Rust has no friend-crate
 visibility and `mxc_engine` must cross the crate boundary without exposing the
 adapter modules or adding implicit public conversions. The seam in particular
@@ -2689,17 +2691,21 @@ branch.
 
 ##### Phase 7.3: Add the private exact-contract path
 
-Add a private path in `config_parser` that probes the version, dispatches to
-the exact registry, calls `dev::adapt_request`, and produces the same runtime
-model:
+Status: complete on
+`user/gudge/version_specific_config_parsers_phase7c` at `764a9850`, stacked on
+the Phase 7.2 branch.
+
+The implementation adds a private path in `config_parser` that probes the
+version, dispatches to the exact registry, calls the applicable adapter, and
+produces the same runtime model:
 
 - one-shot results feed the existing one-shot normalization
 - state-aware results feed `normalize_state_aware` from Phase 7.2
 
-Nothing calls this path in production. It exists for the harness in Phase 7.4
-and becomes authoritative in Phase 9.
+Nothing calls the exact JSON parser path in production. It exists for the
+harness in Phase 7.4 and becomes authoritative in Phase 9.
 
-Write it as ordinary private production code carrying
+The exact JSON parser is ordinary private production code carrying
 `#[cfg_attr(not(test), allow(dead_code))]`, the idiom the adapter modules and
 `state_aware_wire` already use. That attribute means dead in a production build
 and genuinely reachable under `cargo test`, so the path is compiled, formatted,
@@ -2708,10 +2714,13 @@ change rather than a code move. Do not place the path inside `#[cfg(test)]`:
 that would force Phase 9 to move code into production at the moment it becomes
 authoritative, so the validated code would not be literally the shipped code.
 
-Keep the existing `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
-adapter modules and on `state_aware_wire`. They are still required: an uncalled
-exact path leaves everything it calls dead in production too. Phase 9 removes
-all of them together when the router first calls the exact path.
+The production Rust policy builders make the published one-shot adapters
+reachable before parser cutover, so the v0.6/v0.7/v0.8 adapter modules no
+longer carry dead-code suppressions. The development adapter retains its
+module-level suppression because its state-aware mappings remain staging code,
+although its one-shot mapping is production-reachable. `state_aware_wire` and
+the exact JSON parser retain their suppressions until Phase 9 makes exact
+dispatch authoritative.
 
 This step also adds explicit `OptionalField::present` construction to each
 independent contract primitive module plus a narrow `#[doc(hidden)]`
@@ -2722,7 +2731,32 @@ conversion from contract requests to `wire::MxcConfig` is added. Unlike the
 parser path, the builder is live in production immediately: it is not a shadow,
 it is the only way that entry point reaches a request.
 
-Suggested commit boundary: `Add the shadow exact-contract parser path`.
+The direct builders live under `mxc_engine::policy::exact`: `mod.rs` owns
+version selection and shared preparation, while `v0_6.rs`, `v0_7.rs`,
+`v0_8.rs`, and `v0_9.rs` own their contract-specific construction and mapping.
+The former rolling `serde_json::Value` builder remains only under `cfg(test)` as
+a runtime-model parity oracle. Safe `NonEmptyString::new` and
+`NonEmptyVec::new` constructors are exposed where typed construction needs
+them; this changes Rust implementation surface without changing a published
+JSON shape.
+
+The requested Phase 7c commit boundaries are:
+
+| Step | Commit | Content |
+| --- | --- | --- |
+| 7c-a | `771e6968` | Explicit construction primitives and hidden exact one-shot bridge |
+| 7c-b | `75fc3869` | Private exact-contract parser and version dispatch |
+| 7c-c | `b7c1be07` | Comprehensive exact parser coverage |
+| 7c-d | `990cfe95` | Direct per-version Rust policy builders and rolling parity oracle |
+| 7c-e | `f20c657b` | SDK, authoring, versioning, and architecture documentation |
+
+The follow-up `764a9850` removes obsolete dead-code suppressions from the
+published adapters after their production reachability changed.
+
+The full Rust workspace format, compile, clippy, and test gates pass. The
+`aarch64-apple-darwin` cross-target check passes for `mxc_engine` and
+`mxc-sdk`; cross-target clippy reaches an unrelated existing
+`clippy::let_and_return` warning in `mxc-sdk/tests/streaming.rs`.
 
 ##### Phase 7.4: Build the equivalence harness and classify differences
 
