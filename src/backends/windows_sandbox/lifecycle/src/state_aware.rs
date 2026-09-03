@@ -762,7 +762,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         _config: Option<()>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        // Before any work: this backend relays to the executor's stdio, so it
+        // Before any work: this backend relays to the calling process's stdio, so it
         // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
         if stdio == ExecStdio::Piped {
@@ -1063,7 +1063,7 @@ mod tests {
     /// something that already took effect.
     ///
     /// `extract_token` would reject this id, and there is no live daemon behind
-    /// it either — so any error other than the refusal means the consumer check
+    /// it either — so any error other than the refusal means the check
     /// came too late.
     #[test]
     fn a_piped_exec_is_refused_before_the_workload_runs() {

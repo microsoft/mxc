@@ -240,7 +240,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     /// Executes the workload inside the running isolation session.
     ///
-    /// **The two consumers get different shapes, deliberately** — see
+    /// **The two topologies get different shapes, deliberately** — see
     /// [`ExecStdio`]. Under `Relayed` this keeps the backend's own relay:
     /// `create_process` blocks, bridging the guest's pipes to the calling
     /// process's stdio
@@ -265,7 +265,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     /// termination — on a host running the OS-side service, which CI and most
     /// dev machines do not have, so those tests skip elsewhere.
     ///
-    /// Pinned host-independently: the consumer split itself
+    /// Pinned host-independently: the topology split itself
     /// (`wants_interactive_console`), and — in `wxc_common` — that
     /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
     /// is the deadlock this branch would otherwise arm.
@@ -382,11 +382,11 @@ mod tests {
     // silently swallow every per-phase config (the field would still
     // deserialize from the containment slot via models.rs's serde
     // rename — only the experimental block would go missing).
-    // ====== Consumer-conditional stdio ======
+    // ====== Stdio topology ======
 
-    /// A library caller must never get a ConPTY — **including on a host whose
+    /// A piped exec must never get a ConPTY — **including on a host whose
     /// stdout is a terminal**, which is the only case that can distinguish a
-    /// correct implementation from one that ignores the consumer.
+    /// correct implementation from one that always follows the host.
     ///
     /// Allocating one here would be doubly wrong: a pseudo-console merges
     /// stderr into stdout, so the caller would silently lose the separate
@@ -400,16 +400,16 @@ mod tests {
                 probed = true;
                 true
             }),
-            "a terminal host must not leak a console into the library path"
+            "a terminal host must not leak a console into the piped path"
         );
         assert!(
             !probed,
-            "the library path must not even evaluate the host probe -- passing the \
+            "the piped path must not even evaluate the host probe -- passing the \
              probe's value rather than a closure would run it eagerly"
         );
     }
 
-    /// The executor path is the only one allowed to act on the probe, and it
+    /// The relayed path is the only one allowed to act on the probe, and it
     /// must actually follow it rather than hardcoding either answer.
     ///
     /// Both host answers are asserted, so hardcoding `true` *or* `false` fails.

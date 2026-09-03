@@ -141,7 +141,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<()>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        // Before any work: this backend relays to the executor's stdio, so it
+        // Before any work: this backend relays to the calling process's stdio, so it
         // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
         if stdio == ExecStdio::Piped {

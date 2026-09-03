@@ -599,7 +599,7 @@ fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
 /// Wrap a readable pipe as a **cancellable** reader plus its closer, so a
 /// discard of it can be ended on demand rather than abandoned.
 ///
-/// Separate from [`wrap_read`] because the executor's relay does not need a
+/// Separate from [`wrap_read`] because the relay does not need a
 /// closer — it has its own mute-and-abandon path — and only the streaming
 /// adapter stores one.
 #[cfg(target_os = "windows")]
@@ -714,7 +714,7 @@ pub(crate) fn wrap_read_checked(
 
 /// Cancellable counterpart of [`wrap_read_checked`], for the streaming adapter.
 ///
-/// Module-private: unlike [`wrap_read_checked`], which the executor's relay also
+/// Module-private: unlike [`wrap_read_checked`], which the relay also
 /// calls, this one has a single caller in this file.
 fn wrap_cancellable_read_checked(
     handle: PipeHandle,
@@ -871,7 +871,7 @@ mod tests {
         };
 
         let err = match ExecSandboxProcess::from_exec_handle(handle) {
-            Ok(_) => panic!("a backend exposing no streams cannot serve a library caller"),
+            Ok(_) => panic!("a backend exposing no streams cannot serve a piped exec"),
             Err(err) => err,
         };
         assert!(

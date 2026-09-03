@@ -67,8 +67,8 @@ pub fn run_state_aware(
 
 /// Streaming counterpart of the exec phase of [`dispatch_state_aware`]: run the
 /// exec phase up to (and including) [`StatefulSandboxBackend::exec`] and return
-/// the resulting [`ExecHandle`] to the caller **without** relaying it to the
-/// executor's stdio.
+/// the resulting [`ExecHandle`] to the caller **without** relaying it to
+/// this process's stdio.
 ///
 /// This is what lets the library / FFI streaming path drive an exec live —
 /// wrapping the returned handle in a [`SandboxProcess`](crate::sandbox_process::SandboxProcess)
@@ -196,7 +196,7 @@ fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     }
 }
 
-/// Streams the running process's pipes to executor stdio and waits for exit.
+/// Streams the running process's pipes to this process's stdio and waits for exit.
 ///
 /// Relay threads start **before** the waiter runs: a child that fills its
 /// stdout pipe buffer would otherwise block forever, since nothing would be
@@ -334,7 +334,7 @@ fn relay_prepared_streams(
     match outcome {
         Ok(ExecOutcome::Exited(code)) => Ok(code),
         Ok(ExecOutcome::TimedOut) => Err(MxcError::backend_error(
-            "backend reported a timeout to the executor relay, which has no way \
+            "backend reported a timeout to the relay, which has no way \
              to represent one; a backend serving ExecStdio::Relayed must \
              report ExecOutcome::Exited",
         )),
@@ -602,9 +602,8 @@ mod tests {
         validate_stop_calls: Cell<u32>,
         validate_deprovision_calls: Cell<u32>,
         /// The [`ExecStdio`] the dispatcher passed to the most recent
-        /// `exec`. Recorded so the caller-intent split can be asserted --
-        /// swapping the two would otherwise compile and silently change
-        /// behaviour on both paths.
+        /// `exec`. Swapping the two variants would compile and silently
+        /// change behaviour on both paths.
         last_exec_stdio: Cell<Option<ExecStdio>>,
         provision_error: Option<MxcError>,
         validate_provision_error: Option<MxcError>,
@@ -1164,15 +1163,16 @@ mod tests {
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
-    // ===== caller-intent split =============================================
+    // ===== stdio topology per entry point ===================================
     //
-    // Which mode each entry point sends is the whole point of the parameter,
-    // and getting it backwards would compile: the executor would lose its
-    // interactive console, and an embedded caller would have its own console
-    // written to by a sandbox. Both directions are pinned.
+    // Which topology each entry point sends is the whole point of the parameter,
+    // and getting it backwards would compile: a relayed exec would lose its
+    // console, and a piped caller would have its own console written to by a
+    // sandbox. Both directions are pinned.
 
-    /// The executor path relays the handle to its own stdio, so the backend is
-    /// told a human is on the other end and a pseudo-console is legitimate.
+    /// The relayed path relays the handle to this process's stdio, so the backend
+    /// may probe this process's terminal state to decide whether to allocate a
+    /// pseudo-console.
     #[test]
     fn dispatch_state_aware_asks_for_relayed_stdio() {
         let mut b = StubBackend::new();
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(
             b.last_exec_stdio.get(),
             Some(ExecStdio::Relayed),
-            "the executor path must not ask a backend for caller-owned pipes"
+            "the relayed path must not ask a backend for caller-owned pipes"
         );
     }
 
@@ -1234,13 +1234,10 @@ mod tests {
         assert_eq!(relay_exec_to_stdio(handle).unwrap(), 42);
     }
 
-    /// A backend that reports a timeout to the executor relay has broken the
+    /// A backend that reports a timeout to the relay has broken the
     /// contract, and the relay says so rather than inventing an exit code.
     ///
-    /// `ExecOutcome::TimedOut` is unreachable here by construction — a backend
-    /// serving `ExecStdio::Relayed` has run the workload to completion
-    /// before returning, and `ScriptResponse` has no timeout field to carry one
-    /// anyway. The regression this pins is the tempting alternative: mapping it
+    /// The regression this pins is the tempting alternative: mapping it
     /// to some sentinel code, which the CLI would then report as the workload's
     /// own exit status.
     #[test]
@@ -1253,8 +1250,7 @@ mod tests {
             waiter: Box::new(|| Ok(ExecOutcome::TimedOut)),
             terminator: Box::new(|| Ok(())),
         };
-        let err =
-            relay_exec_to_stdio(handle).expect_err("the executor relay cannot represent a timeout");
+        let err = relay_exec_to_stdio(handle).expect_err("the relay cannot represent a timeout");
         assert!(
             err.message.contains("ExecStdio::Relayed"),
             "the refusal should name the contract it is enforcing: {}",

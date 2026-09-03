@@ -1207,26 +1207,19 @@ pub trait StatefulSandboxBackend {
 
     /// Required. Must execute the workload and return a handle.
     ///
-    /// `stdio` is the caller's intent and is authoritative. This is
-    /// deliberately not `StdioMode`: that enum's `Inherit` means the OS hands
-    /// the child the executor's own handles, which no state-aware backend can
-    /// do, since the workload runs inside an isolation session, a VM, or
-    /// behind an SDK callback. What matters here is who is on the other end,
-    /// because that fixes the topology of the returned streams.
+    /// `stdio` is authoritative and fixes the topology of the returned streams.
     ///
-    /// `Piped` (the library / FFI streaming path) means the caller drives
-    /// the streams itself, so an implementation must surface separate raw pipe
+    /// `Piped` means the caller drives the streams itself, so an
+    /// implementation must surface separate raw pipe
     /// handles, allocate no pseudo-console, and not touch the host console.
-    /// `Relayed` (the relay path) means the handle is relayed to **the calling
+    /// `Relayed` means the handle is relayed to **the calling
     /// process's** own stdio, where a pseudo-console is legitimate and stderr may
     /// therefore arrive merged into stdout, leaving `ExecHandle::stderr` null. A
     /// backend that probes the host to decide how to wire stdio must confine that
     /// probe to the `Relayed` case, where the probing process is the relay
     /// target.
     ///
-    /// The variant names describe the caller each was written for, not the
-    /// rule. What separates them is who consumes the streams; "in-process" does
-    /// not imply `Piped`.
+    /// Topology, not caller identity: "in-process" does not imply `Piped`.
     ///
     /// A backend that cannot serve `Piped` at all — because it relays the
     /// workload's output to the *host process's* own stdio rather than
@@ -1338,7 +1331,7 @@ pub struct ExecHandle {
     /// Stderr pipe handle from the running process. The relay path writes it to
     /// the calling process's own stderr.
     pub stderr: PipeHandle,
-    /// Stdin pipe handle. Not consumed by the executor relay, which forwards
+    /// Stdin pipe handle. Not consumed by the relay, which forwards
     /// no input; the streaming path hands it to an in-process caller.
     pub stdin: PipeHandle,
     /// Function to wait for exit; returns how the exec finished.
@@ -1359,7 +1352,8 @@ pub struct ExecHandle {
 /// Deliberately not "the backend killed it": a workload that overruns its
 /// deadline and then exits on its own has still missed it, and how far the
 /// termination reaches is the backend's to state. Only `ExecStdio::Piped`
-/// can observe `TimedOut`; the executor relay has no field to carry it.
+/// can observe `TimedOut`; a backend serving `ExecStdio::Relayed` reports
+/// `Exited`.
 pub enum ExecOutcome {
     Exited(i32),
     TimedOut,
