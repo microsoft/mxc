@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -153,6 +154,50 @@ public sealed class MxcTelemetryTestsReleaseSafe
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+    }
+
+    [Fact]
+    public async Task RequestConsentAsync_CancellationBeforeUiDispatchSkipsPresenter()
+    {
+        var synchronizationContext = new QueuedSynchronizationContext();
+        var presenterCalls = 0;
+        var native = new FakeTelemetryNativeApi
+        {
+            RequestConsentImpl = (_locale, presenter) =>
+            {
+                Assert.Equal(-1, presenter(ConsentPromptJson()));
+                return new((int)ErrorCode.BackendError, null);
+            },
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+        using var cancellation = new CancellationTokenSource();
+
+        var previousContext = SynchronizationContext.Current;
+        Task<TelemetryConsentOutcome> request;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(synchronizationContext);
+            request = MxcTelemetry.RequestConsentAsync(
+                _ =>
+                {
+                    presenterCalls += 1;
+                    return ValueTask.FromResult(TelemetryConsentDecision.Yes);
+                },
+                cancellationToken: cancellation.Token);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+
+        await synchronizationContext.WaitForPostAsync(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+
+        synchronizationContext.RunAll();
+        Assert.Equal(0, presenterCalls);
     }
 
     [Fact]
@@ -600,5 +645,29 @@ public sealed class MxcTelemetryTestsReleaseSafe
 
         public MxcTelemetry.NativePayloadResult RequestConsent(string? locale, Func<string, int> presenter) =>
             RequestConsentImpl(locale, presenter);
+    }
+
+    private sealed class QueuedSynchronizationContext : SynchronizationContext
+    {
+        private readonly ConcurrentQueue<(SendOrPostCallback Callback, object? State)> callbacks = new();
+        private readonly TaskCompletionSource posted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override void Post(SendOrPostCallback callback, object? state)
+        {
+            callbacks.Enqueue((callback, state));
+            posted.TrySetResult();
+        }
+
+        public Task WaitForPostAsync(CancellationToken cancellationToken) =>
+            posted.Task.WaitAsync(cancellationToken);
+
+        public void RunAll()
+        {
+            while (callbacks.TryDequeue(out var item))
+            {
+                item.Callback(item.State);
+            }
+        }
     }
 }

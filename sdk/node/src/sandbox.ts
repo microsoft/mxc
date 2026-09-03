@@ -306,6 +306,7 @@ export function createConfigFromPolicy(
             commandLine: '',
             timeout: policy.timeoutMs ?? 0,
         },
+        telemetry: policy.telemetry === undefined ? undefined : { ...policy.telemetry },
     };
 
     // Microvm: delegate to dedicated builder

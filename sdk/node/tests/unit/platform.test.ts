@@ -398,6 +398,31 @@ describe('findWxcExecutable failure modes', () => {
     _setWxcExecutableVerifier((candidate) => candidate.startsWith(process.env.MXC_BIN_DIR!));
     assert.ok(findWxcExecutable()?.startsWith(process.env.MXC_BIN_DIR));
   });
+
+  it('honors an MXC_BIN_DIR override configured after a cached lookup', () => {
+    delete process.env.MXC_BIN_DIR;
+    _setWxcExecutableVerifier(() => true);
+    const initial = findWxcExecutable();
+    assert.ok(initial);
+
+    const override = path.join(os.tmpdir(), `mxc-sdk-unit-override-${process.pid}`);
+    process.env.MXC_BIN_DIR = override;
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved?.startsWith(override));
+    assert.notStrictEqual(resolved, initial);
+  });
+
+  it('revalidates a cached executable before returning it', () => {
+    let cachedPath: string | null = null;
+    _setWxcExecutableVerifier((candidate) => candidate !== cachedPath);
+    cachedPath = findWxcExecutable();
+    assert.ok(cachedPath);
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved);
+    assert.notStrictEqual(resolved, cachedPath);
+  });
 });
 
 // IsolationSession availability is now reported by the native probe

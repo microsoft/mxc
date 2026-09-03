@@ -1938,6 +1938,15 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
     });
 
+    it('propagates SandboxPolicy telemetry through the primary one-shot API', () => {
+      const payload = buildSandboxPayload('echo hi', {
+        version: '0.9.0-alpha',
+        telemetry: { enabled: true },
+      });
+
+      assert.deepStrictEqual(payload.telemetry, { enabled: true });
+    });
+
     it('leaves config telemetry schema validation to the native parser', () => {
       const config = makeConfig('process');
       config.telemetry = { enabled: true };

@@ -509,8 +509,16 @@ using Microsoft.Mxc.Sdk;
 
 var outcome = MxcTelemetry.RequestConsent(prompt =>
 {
-    return TelemetryConsentDecision.Yes;
+    return ShowTelemetryConsentDialog(
+        title: prompt.Title.Text,
+        body: prompt.Body.Text,
+        affirmativeLabel: prompt.AffirmativeLabel.Text,
+        negativeLabel: prompt.NegativeLabel.Text,
+        learnMoreLabel: prompt.LearnMoreLabel.Text,
+        learnMoreUrl: prompt.LearnMoreUrl);
 });
+// ShowTelemetryConsentDialog returns Yes, No, or Dismissed from the user's
+// action; closing or cancelling the dialog must return Dismissed.
 
 TelemetryConsentStatus status = MxcTelemetry.GetConsentStatus();
 MxcTelemetry.WithdrawConsent();

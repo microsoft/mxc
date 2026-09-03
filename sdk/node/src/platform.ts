@@ -36,7 +36,7 @@ const bwrapProbeScriptDirectory = fs.existsSync(
   ? __dirname
   : path.join(getSdkPackageRoot(), 'dist');
 let windowsSandboxAvailableCache: boolean | undefined;
-let wxcExecutableCache: string | null | undefined;
+let wxcExecutableCache: { binDir: string | undefined; executable: string } | undefined;
 let wxcExecutableVerifier = verifyWxcExecutable;
 
 /**
@@ -738,15 +738,23 @@ function getDarwinRustTargetTriple(): string {
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
-  if (wxcExecutableCache !== undefined) {
-    return wxcExecutableCache;
+  const binDir = process.env.MXC_BIN_DIR;
+  const cached = wxcExecutableCache;
+  if (
+    cached !== undefined
+    && cached.binDir === binDir
+    && wxcExecutableVerifier(cached.executable)
+  ) {
+    return cached.executable;
   }
+  wxcExecutableCache = undefined;
+
   // Allow override for bundled deployments (debugging/testing)
-  if (process.env.MXC_BIN_DIR) {
-    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'wxc-exec.exe');
+  if (binDir) {
+    const overridePath = path.join(binDir, getSdkArch(), 'wxc-exec.exe');
     if (wxcExecutableVerifier(overridePath)) {
-      wxcExecutableCache = overridePath;
-      return wxcExecutableCache;
+      wxcExecutableCache = { binDir, executable: overridePath };
+      return overridePath;
     }
   }
 
@@ -769,8 +777,8 @@ export function findWxcExecutable(): string | null {
 
   for (const wxcPath of possiblePaths) {
     if (wxcExecutableVerifier(wxcPath)) {
-      wxcExecutableCache = wxcPath;
-      return wxcExecutableCache;
+      wxcExecutableCache = { binDir, executable: wxcPath };
+      return wxcPath;
     }
   }
 

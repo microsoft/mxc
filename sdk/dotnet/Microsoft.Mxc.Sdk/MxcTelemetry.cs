@@ -443,7 +443,8 @@ public static class MxcTelemetry
                         return InvokePresenterAsync(
                                 context.Presenter,
                                 prompt,
-                                context.SynchronizationContext)
+                                context.SynchronizationContext,
+                                context.CancellationToken)
                             .WaitAsync(context.CancellationToken)
                             .GetAwaiter()
                             .GetResult() switch
@@ -488,10 +489,12 @@ public static class MxcTelemetry
     private static Task<TelemetryConsentDecision> InvokePresenterAsync(
         Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
         TelemetryConsentPrompt prompt,
-        SynchronizationContext? synchronizationContext)
+        SynchronizationContext? synchronizationContext,
+        CancellationToken cancellationToken)
     {
         if (synchronizationContext is null)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return presenter(prompt).AsTask();
         }
 
@@ -502,6 +505,11 @@ public static class MxcTelemetry
             synchronizationContext.Post(
                 async _ =>
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        completion.TrySetCanceled(cancellationToken);
+                        return;
+                    }
                     try
                     {
                         completion.SetResult(await presenter(prompt));

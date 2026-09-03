@@ -507,9 +507,10 @@ emission (never a Windows-level setting like Diagnostics & feedback). See
 [`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md)
 for the full design.
 
-Telemetry is additionally off unless a one-shot `ContainerConfig` using schema
-0.9 or later includes `telemetry: { enabled: true }`, or a state-aware call
-passes `config.telemetry: { enabled: true }`. This switch does not require
+Telemetry is additionally off unless a one-shot `SandboxPolicy` or
+`ContainerConfig` using schema 0.9 or later includes
+`telemetry: { enabled: true }`, or a state-aware call passes
+`config.telemetry: { enabled: true }`. This switch does not require
 `options.experimental` and cannot bypass consent or administrative policy.
 
 The SDK does not ship a consent UI. It passes the canonical prompt to your
@@ -525,10 +526,20 @@ import {
   withdrawTelemetryConsentAsync,
 } from '@microsoft/mxc-sdk';
 
-const outcome = await requestTelemetryConsent(async (prompt, signal) => {
-  // Dismiss any pending UI when signal?.aborted becomes true.
-  return 'yes'; // 'yes' | 'no' | 'dismissed'
-}, 'en-US');
+const outcome = await requestTelemetryConsent(
+  (prompt, signal) => showTelemetryConsentDialog({
+    title: prompt.title.text,
+    body: prompt.body.text,
+    affirmativeLabel: prompt.affirmativeLabel.text,
+    negativeLabel: prompt.negativeLabel.text,
+    learnMoreLabel: prompt.learnMoreLabel.text,
+    learnMoreUrl: prompt.learnMoreUrl,
+    signal,
+  }),
+  'en-US',
+);
+// showTelemetryConsentDialog returns 'yes', 'no', or 'dismissed' from the
+// user's action and dismisses pending UI if signal is aborted.
 
 const status = await queryTelemetryConsentAsync();
 await withdrawTelemetryConsentAsync();

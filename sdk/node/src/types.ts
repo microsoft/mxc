@@ -457,6 +457,8 @@ export type SandboxPolicy = {
   };
   /** Schema 0.8 runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
   /** Schema 0.8 ProcessContainer-specific policy. */
   processContainer?: {
       /** ProcessContainer-specific networking settings. */
