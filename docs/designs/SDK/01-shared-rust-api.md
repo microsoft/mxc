@@ -1,13 +1,13 @@
-# Layer 1: shared Rust API
+# Layer 1: Rust SDK (`mxc-sdk`)
 
 ## Decision
 
-Keep [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable layer above
+Keep the [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) crate as the only safe callable layer above
 [`mxc_engine`](../../../src/core/mxc_engine/src/lib.rs).
 
 ```mermaid
 flowchart LR
-    R[Rust SDK] --> S[mxc-sdk]
+    R[Rust application] --> S[Rust SDK: mxc-sdk]
     F[Core C FFI] --> S
     S --> E[mxc_engine]
 ```
@@ -16,59 +16,67 @@ Do not add another dispatcher crate. Do not route Rust through C.
 
 ## Responsibilities
 
-| Shared Rust API owns | `mxc_engine` owns |
+| Rust SDK (`mxc-sdk`) owns | `mxc_engine` owns |
 |---|---|
-| Public operation behavior | Backend selection |
-| Safe request and result types | Backend construction |
-| `Sandbox`, output, wait, and kill behavior | Platform execution |
+| Public `run`, `spawn_sandbox`, and state-aware functions | Backend selection |
+| Safe request, result, and error types | Backend construction |
+| `Sandbox`: the live process object returned by `spawn_sandbox` | Platform execution |
+| Taking stdin/stdout/stderr and calling try-wait, wait, or kill | Process implementation |
 | Stable SDK errors | Backend-specific errors and probes |
-| Functions called by Rust and FFI | Containment implementation |
+| Safe functions called by Rust applications and `mxc_ffi` | Containment implementation |
 
 ## Existing operation families
 
 ```mermaid
 flowchart TD
-    S[mxc-sdk]
+    S[Rust SDK: mxc-sdk]
     S --> D[Discovery]
     S --> R[Run to completion]
     S --> P[Live process]
-    S --> A[State-aware session]
+    S --> A[State-aware operations]
     D --> D1[available_backends]
     D --> D2[platform_support]
     R --> R1[run]
     P --> P1[spawn_sandbox]
     P1 --> P2[stdin, stdout, stderr]
     P1 --> P3[try_wait, wait, kill]
-    A --> A1[provision, start, stop, deprovision]
-    A --> A2[exec_sandbox]
-    A --> A3[exec_attached]
+    A --> A1[run_state_aware_json]
+    A1 --> A4[provision, start, stop, deprovision]
+    A --> A2[exec_sandbox: return live process]
+    A --> A3[exec_attached: use caller terminal]
 ```
 
 ## Terms
 
 | Term | Meaning |
 |---|---|
+| `Sandbox` | Rust live process object returned by `spawn_sandbox` or `exec_sandbox` |
+| `Output` | Result from `run`: exit outcome, buffered stdout/stderr, warnings, and metadata |
 | Run to completion | Wait internally and return exit status plus buffered stdout and stderr |
-| Live process | Return `Sandbox`; the caller drives stdio, wait, and kill |
-| State-aware session | Preserve a sandbox across provision, start, exec, stop, and deprovision |
-| Attached exec | Connect the command to the calling terminal instead of returning pipes |
+| Try-wait | Check whether the process exited without blocking |
+| Wait | Block until the process exits or reaches its configured timeout |
+| Kill | Request termination of the running process |
+| State-aware | Provision, start, exec, stop, and deprovision the same sandbox across calls |
+| `exec_attached` | Run state-aware `exec` on the caller's terminal and return its exit outcome |
 
-## Per-operation work
+## Runtime call path
 
 ```mermaid
 sequenceDiagram
-    participant Dev
-    participant SDK as mxc-sdk
+    participant Caller as Rust application or mxc_ffi
+    participant SDK as Rust SDK: mxc-sdk
     participant Engine as mxc_engine
-    Dev->>SDK: Implement one safe function
+    Caller->>SDK: Call run, spawn, or state-aware operation
     SDK->>Engine: Call existing engine operation
     Engine-->>SDK: Typed result or Error
-    SDK-->>Dev: Stable SDK result
+    SDK-->>Caller: Stable SDK result
 ```
 
-The safe function is handwritten product code. It contains the operation's behavior.
+## Per-operation handwritten work
 
-## Cleanup before generation
+An MXC API developer implements one safe Rust function in `mxc-sdk`. That function contains the product behavior.
+
+## Work required before foreign SDK generation
 
 1. Inventory every Rust, FFI, Node, and .NET operation.
 2. Add behavior tests at the `mxc-sdk` boundary.
@@ -78,19 +86,19 @@ The safe function is handwritten product code. It contains the operation's behav
 
 ## Export declaration
 
-Diplomat reads tagged bridge modules, not arbitrary crate APIs. Start with a separate bridge that delegates:
+Diplomat reads tagged bridge modules, not arbitrary crate APIs. Add a separate bridge in `mxc_ffi` that delegates:
 
 ```rust
 #[diplomat::bridge]
 mod ffi_api {
-    pub fn platform_support_json(write: &mut DiplomatWrite) {
-        write.write_str(&mxc_sdk::platform_support_json());
+    pub fn run(request: FfiRequest) -> Result<Box<FfiOutput>, FfiError> {
+        convert(mxc_sdk::run(convert(request)?))
     }
 }
 ```
 
-The body may perform only representation conversion and delegation. It must not select a backend or
-reimplement an SDK operation.
+This is illustrative. The body may only convert FFI representations and delegate to `mxc-sdk`.
+It must not select a backend or reimplement an SDK operation.
 
 ## Handwritten versus generated
 

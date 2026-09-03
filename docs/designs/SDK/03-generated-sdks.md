@@ -88,7 +88,7 @@ The current request objects serialize before the native call. Type/schema genera
 2. Run one command and return buffered stdout, stderr, exit code, timeout, warnings, and metadata.
 3. Spawn a live process without attaching it to a terminal.
 4. Read stdout/stderr, write stdin, poll, wait, kill, close, and dispose.
-5. Provision, start, stop, and deprovision a state-aware sandbox.
+5. Provision, start, stop, and deprovision the same state-aware sandbox across calls.
 6. Execute in that sandbox and return a live process.
 7. Execute attached to a terminal with input, output, resize, signals, and cancellation.
 

@@ -2,18 +2,31 @@
 
 ## Decision
 
-Use [Diplomat](https://github.com/rust-diplomat/diplomat) to generate the C ABI from tagged Rust exports.
+Use [Diplomat](https://github.com/rust-diplomat/diplomat) to generate the C ABI inside `mxc_ffi`.
+
+### Generation time
+
+```mermaid
+flowchart TD
+    B[Tagged Rust bridge in mxc_ffi] --> M[Diplomat]
+    M --> C[extern C exports compiled into mxc_ffi]
+    M --> H[Generated C header]
+    M --> D[Generated .NET binding]
+    M --> A[API description for MXC Node backend]
+```
+
+### Runtime
 
 ```mermaid
 flowchart LR
-    B[Diplomat bridge] --> C[Generated extern C functions]
-    C --> H[Generated C header]
-    C --> S[mxc-sdk]
-    N[Node native module] --> C
-    D[.NET P/Invoke] --> C
+    N[Generated Node binding] --> C[Generated C export in mxc_ffi]
+    D[Generated .NET binding] --> C
+    C --> B[Rust bridge function in mxc_ffi]
+    B --> S[Rust SDK: mxc-sdk]
+    S --> E[mxc_engine]
 ```
 
-The C ABI is the only native boundary used by Node and .NET.
+The Rust bridge and generated C exports live in `mxc_ffi`. There is no separately maintained C library.
 
 ## What Diplomat generates
 
@@ -63,7 +76,7 @@ classDiagram
     Process --> Stream
 ```
 
-State-aware calls are a second group: execute a non-`exec` phase, start an `exec` process, or run attached.
+State-aware calls are a second group: provision, start, exec, stop, deprovision, or exec on the caller's terminal.
 
 ## Generated versus handwritten
 
@@ -83,7 +96,7 @@ The handwritten column is a fixed primitive set. Adding `platform_support`-style
 sequenceDiagram
     participant SDK as Node or .NET
     participant ABI as C ABI
-    participant Rust as mxc-sdk
+    participant Rust as Rust SDK: mxc-sdk
     SDK->>ABI: Call generated function
     ABI->>Rust: Delegate
     alt Rust error
@@ -104,7 +117,7 @@ sequenceDiagram
 3. Compare symbols, results, errors, allocations, and panic behavior.
 4. Switch `run` after discovery passes on Windows, Linux, and macOS.
 5. Switch `Process` and `Stream` only after concurrency and cancellation tests pass.
-6. Switch state-aware and attached execution last.
+6. Switch provision, start, exec, stop, deprovision, and terminal-attached exec last.
 7. Remove old exports only after no SDK references them.
 
 Use [ABI rename](https://rust-diplomat.github.io/diplomat/abi.html) when a new signature must coexist with an old one.
