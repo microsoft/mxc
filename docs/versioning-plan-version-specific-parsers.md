@@ -854,7 +854,7 @@ uses a shape that its declared exact contract cannot express.
 | 8h | `sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs`, `sdk/dotnet/Microsoft.Mxc.Sdk.Tests/MxcLifecycleTests.cs`, and `sdk/dotnet/README.md` | C#, tests, and documentation | Change `SchemaVersions.StateAware` and lifecycle producer expectations to `0.9.0-alpha`; do not change `SchemaVersions.Minimum` | Not started |
 | 8i | `src/core/mxc-sdk/examples/**/*.rs`, `src/core/mxc-sdk/tests/**/*.rs`, FFI request/state-aware tests under `src/ffi/mxc_ffi`, and `tests/policy/**/*.json` | Rust, tests, and JSON changes | Migrate state-aware and development-backend producers and fixtures while retaining published-version compatibility tests | Not started |
 | 8j | `$schema` members under `tests/configs` and `tests/examples`, SDK documentation links, and editor examples | JSON and documentation changes | Make every schema reference agree with its document's selected exact version. Do not add `$schema` solely to satisfy the parser; add or change it only where the document already carries or documents an editor schema reference | Not started |
-| 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each migrated path from the exact-stricter inventory. Keep the focused non-corpus divergence tests. Any remaining corpus divergence must fail with its path and classification | Not started |
+| 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each declaration-only migration from the exact-stricter inventory. Keep the focused non-corpus divergence tests and the seven explicitly recorded development-contract tightenings below. Any unclassified, exact-looser, or runtime-model divergence must fail with its path and classification | Not started |
 | 8l | Rust workspace, `sdk/node`, `sdk/dotnet`, FFI, schema/versioning scripts, and corpus validators | Validation | Run the complete validation matrix below and repair producer expectations without weakening exact contracts or the differential harness | Not started |
 | 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Not started |
 
@@ -873,7 +873,9 @@ uses a shape that its declared exact contract cannot express.
   declaration for the shape whose invalid behavior it is intended to test.
 - The 148 currently convergent accepted documents and nine convergent rejected
   documents remain regression inputs. The 125 exact-stricter corpus documents
-  are the migration set.
+  are the migration set. Version migration resolves 118 of those divergences;
+  seven remain because the exact contract intentionally rejects structure that
+  the rolling parser either ignores or defers to backend validation.
 
 #### Phase 8 expected corpus result
 
@@ -881,15 +883,31 @@ After migration, the same 282-document corpus must produce:
 
 | Result | Expected count |
 | --- | ---: |
-| Both parsers accept with equivalent runtime models | 273 |
+| Both parsers accept with equivalent runtime models | 266 |
 | Both parsers reject | 9 |
-| Rolling accepts and exact rejects | 0 |
+| Rolling accepts and exact rejects | 7 |
 | Rolling rejects and exact accepts | 0 |
 | Both accept with different runtime models | 0 |
 
 The exact counts are tied to the Phase 7d inventory. If the corpus changes
 while Phase 8 is in progress, regenerate the report and explain the delta
 rather than editing the expected counts until the test passes.
+
+#### Phase 8 residual parser differences
+
+**Adopted 2026-09-03.** Migration exposed seven differences that cannot be
+removed without weakening the exact contract, changing rolling production
+behavior, or changing what the owning backend tests exercise:
+
+| Fixtures | Exact-contract difference | Disposition |
+| --- | --- | --- |
+| `isolation_session_configid_ignored.json`, `isolation_session_one_shot_stray_config_ignored.json` | The rolling parser ignores unknown one-shot `experimental.isolation_session` members; the recursively closed exact one-shot contract rejects them | Retain as classified rolling-compatibility inputs through Phase 8. At the Phase 9 cutover, change their expected behavior to structural rejection or retire the obsolete compatibility coverage |
+| `isolation_session_state_aware_provision_rejected_denied.json`, `isolation_session_state_aware_provision_rejected_network.json`, `isolation_session_state_aware_provision_rejected_ui.json`, `isolation_session_state_aware_provision_with_filesystem.json` | The rolling parser accepts the envelope and lets IsolationSession return `policy_validation`; the exact backend-specific provision root forbids the unsupported policy structurally | Retain the parser divergence while preserving direct backend-policy coverage. After Phase 9, the public JSON surface rejects structurally; backend validation coverage must not depend on bypassing the exact contract |
+| `wslc_state_aware_exec_rejected_filesystem.json` | The rolling parser defers immutable post-provision filesystem policy to WSLC validation; the exact exec root forbids `filesystem` structurally | Retain the parser divergence while preserving direct immutable-policy coverage. After Phase 9, expect structural JSON rejection and keep backend validation covered below the exact parser boundary |
+
+These are all exact-stricter results. The executable inventory must name each
+path and verify its expected structural diagnostic. A new residual path, an
+exact-looser acceptance, or a runtime-model difference remains a test failure.
 
 #### Phase 8 validation
 
@@ -919,9 +937,11 @@ shape beyond `version` and `$schema`.
 - State-aware and development-only producers emit `0.9.0-alpha`.
 - Stable one-shot producers retain intentional published-version coverage.
 - Every existing `$schema` reference matches the selected declaration.
-- `expected_corpus_divergences` is empty.
-- The differential corpus test reports 273 equivalent accepts, nine shared
-  rejections, and no divergence or runtime-model mismatch.
+- `expected_corpus_divergences` contains exactly the seven recorded
+  development-contract tightenings and no declaration-only migration entries.
+- The differential corpus test reports 266 equivalent accepts, nine shared
+  rejections, seven classified exact-stricter results, and no unclassified,
+  exact-looser, or runtime-model divergence.
 - All applicable validation commands pass.
 - No production parser routing, contract shape, adapter behavior, or backend
   policy behavior changes.
@@ -932,13 +952,25 @@ This step is primarily mechanical and is suitable for delegation.
 
 Replace the major/minor range check with exact registry dispatch.
 
-Add `allow_development_contract` to parser load options. Initially, the
-existing `--experimental` option authorizes parsing `0.9.0-alpha` as well as
-enabling experimental execution.
+**Adopted 2026-09-03:** the declared exact version is sufficient authorization
+to parse that registered contract. Do not add an
+`allow_development_contract` parser option and do not make registry lifecycle
+status an out-of-band parsing gate. A caller that declares `0.9.0-alpha` has
+explicitly selected the mutable development contract.
 
-Published v0.6/v0.7/v0.8 versions reject `experimental` as an ordinary unknown
-field. Development requests without opt-in receive a specific error. There is
-no fallback to the latest version.
+Contract selection and feature execution remain separate concerns:
+
+- `version` selects the exact JSON contract
+- `--experimental` authorizes execution of functionality that remains
+  experimental
+
+A v0.9 request using only stable fields therefore parses and executes without
+`--experimental`. A v0.9 request using an experimental containment or feature
+parses through the closed development contract, then the existing execution
+gate rejects it unless the caller supplied `--experimental`. Published
+v0.6/v0.7/v0.8 versions reject `experimental` as an ordinary unknown field
+because their frozen contracts do not define it. Missing and unregistered
+versions fail exact probing; there is no fallback to the latest version.
 
 After parity tests pass, remove the direct version-insensitive wire
 deserialization path.
