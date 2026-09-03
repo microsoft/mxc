@@ -665,7 +665,9 @@ public class MxcSandboxTests
 
         using var requestDocument = JsonDocument.Parse(
             MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo hi")));
-        Assert.Equal("0.8.0-alpha", requestDocument.RootElement.GetProperty("version").GetString());
+        var serializedPolicy = requestDocument.RootElement.GetProperty("policy");
+        Assert.Equal("0.8.0-alpha", serializedPolicy.GetProperty("version").GetString());
+        Assert.True(serializedPolicy.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
     }
 
     [Fact]
