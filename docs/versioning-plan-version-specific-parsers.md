@@ -9,7 +9,7 @@ legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
 reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
 PR #969. Phase 7.2 is complete on
-`user/gudge/version_specific_config_parsers_phase7.2` at `281ee81f`. Phases
+`user/gudge/version_specific_config_parsers_phase7.2` at `074a8273`. Phases
 7.3-7.5, 8-9.5, and 10-11 remain; the planned end state publishes
 `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
@@ -2194,12 +2194,13 @@ copy of a value that has already served its purpose as a check.
 
 **Required work, both small.**
 
-1. Delete the double population. The state-aware adapter currently fills both
-   `config.experimental` and `experimental_raw` with no stated precedence.
-   Emit `experimental: None` so `experimental_raw` is unambiguously the value
-   dispatch reads, which also matches the shape the rolling parser builds and
-   is what makes the Phase 7.2 test repair possible. This removes the
-   `convert_*_experimental` conversions from the state-aware path.
+1. Resolve the double population at the neutral boundary. The state-aware
+   adapter's internal phase converters retain their exhaustive
+   contract-to-`wire::Experimental` mappings and direct mapping tests as staging
+   for the typed payload migration in Phase 9.5. Before returning
+   `StateAwareWireInput`, the adapter clears `config.experimental`, so
+   `experimental_raw` is unambiguously the value dispatch reads and the exact
+   input matches the rolling parser's canonical shape.
 2. Add a parity test in `wxc_common`, which can see both definitions, asserting
    that each backend's `ProvisionConfig` round-trips through its contract
    counterpart. The asymmetry rule: the contract may be **stricter** than the
@@ -2208,16 +2209,13 @@ copy of a value that has already served its purpose as a check.
    classification entry. This mirrors the existing
    `check-dotnet-errorcode-parity.js` gate.
 
-**Telemetry must move to the seam.** The adapter currently maps
-`experimental.telemetry` into `wire::Experimental`. The rolling parser does not:
-it sets `cfg.experimental = None`, then reads telemetry back out of
-`experimental_raw` after `convert_wire_config` and writes it onto the domain
-request. Once the exact adapter emits `experimental: None`, the shared seam must
-own telemetry population for both paths, which it should anyway. Missing this
-makes telemetry silently disappear on the exact path. Note that the seam and the
-adapter are different layers: the adapter converts a contract type to
-`wire::MxcConfig` and is exact-path only, while the seam converts
-`StateAwareWireInput` to `ParsedStateAwareRequest` and is shared.
+**Telemetry must move to the seam.** The adapter's internal mapping tests retain
+the typed `wire::Experimental.telemetry` conversion, but
+`into_state_aware_wire_input` clears that copy before normalization. The shared
+seam therefore reads telemetry from `experimental_raw` and writes it onto the
+domain request for both paths. The internal mapping remains a compile-time and
+test oracle to be retargeted to the backend payload type in Phase 9.5; it is not
+a second runtime authority.
 
 **Known live divergence, and the trigger to revisit.** The two authorities
 already disagree: `models::IsolationSessionProvisionConfig` is
@@ -2591,7 +2589,7 @@ backend is known is the defect this design exists to prevent.
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7.2` at `281ee81f`.
+`user/gudge/version_specific_config_parsers_phase7.2` at `074a8273`.
 
 Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
 `experimental_raw` and the masked base JSON, a series of validations that read
@@ -2624,7 +2622,8 @@ pre-normalization value rather than the unmasked `wire::MxcConfig`
 deserialization that the state-aware pipeline never produces.
 
 Per the decision 1 resolution, the seam owns telemetry population for both
-paths, and the state-aware adapter stops emitting `config.experimental`.
+paths. The state-aware adapter clears `config.experimental` at the neutral
+boundary while retaining its tested internal mappings for Phase 9.5.
 
 Suggested commit boundary: `Extract the shared state-aware normalization seam`.
 
@@ -2638,8 +2637,9 @@ The implementation:
   seam
 - keeps rolling-only validation messages stable and moves cross-cutting
   telemetry population into the seam
-- makes `experimental_raw` the sole state-aware experimental payload and
-  removes the redundant `wire::Experimental` conversions from exact adapters
+- makes `experimental_raw` the sole payload presented to normalization while
+  retaining the exact adapters' tested `wire::Experimental` mappings as
+  compile-time staging for the typed Phase 9.5 payload
 - replaces the Phase 5D plain-wire comparison with complete
   `StateAwareWireInput` equivalence across every phase and provision backend
 - adds contract/backend parity tests for IsolationSession and WSLC provision
