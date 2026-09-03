@@ -2264,16 +2264,21 @@ rejects `null`.
 **What construction costs.** Less than it first appears. Every contract root
 field is already `pub`, `NonEmptyString::new` is public, and the `True` and
 `string_marker!` types are unit structs. The entire gap is that
-`OptionalField<T>` has no way to build a present value, so this adds one impl:
+`OptionalField<T>` has no way to build a present value, so each independent
+contract primitive module adds one explicit constructor:
 
 ```rust
-impl<T> From<Option<T>> for OptionalField<T>
+impl<T> OptionalField<T> {
+    pub fn present(value: T) -> Self;
+}
 ```
 
 The contract crate thereby becomes bidirectional — an input contract that can
-also be constructed. Record that as intentional rather than incidental. A
-feature gate (`build`) would make the boundary louder at the cost of a CI
-matrix entry; it is not required.
+also be constructed. `Default` continues to represent omission, while
+`present` makes member presence explicit; no implicit `From<Option<T>>` or
+`From<T>` conversion is added. Record that as intentional rather than
+incidental. A feature gate (`build`) would make the boundary louder at the
+cost of a CI matrix entry; it is not required.
 
 **What it buys.** Version expressibility becomes largely a compile-time
 property rather than a runtime check. A `published::v0_6_0_alpha::Request` has
@@ -2332,10 +2337,14 @@ production diff. Three changes land in non-test code:
 | Script becomes a build-time argument to `build_request`, removing the second `allow_missing_command` consumer | Behavior-visible, `mxc-sdk` and `mxc_ffi` | 7.1 |
 | `normalize_state_aware` extracted from `convert_wire_state_aware` | Behavior-preserving refactor | 7.2 |
 | Exact-contract path added, dead in production | Compiled but uncalled | 7.3 |
-| `From<Option<T>> for OptionalField<T>` added to the contract crate | New construction surface | 7.3 |
+| `OptionalField::present` added to each contract primitive module | New explicit construction surface | 7.3 |
+| Hidden typed one-shot contract bridge added for `mxc_engine` | Workspace-internal cross-crate API | 7.3 |
 
-Nothing else moves: no call site of the rolling parser changes, `wxc_common`
-grows no public API, and no runtime behavior differs. The seam in particular
+Nothing else moves: no call site of the rolling parser changes and no runtime
+behavior differs. `wxc_common` adds only a `#[doc(hidden)]` exact one-shot
+contract enum and normalization function because Rust has no friend-crate
+visibility and `mxc_engine` must cross the crate boundary without exposing the
+adapter modules or adding implicit public conversions. The seam in particular
 must be real production code rather than a test-only copy — a copy would
 validate a fork of the logic rather than the logic the rolling parser runs.
 
@@ -2679,11 +2688,14 @@ adapter modules and on `state_aware_wire`. They are still required: an uncalled
 exact path leaves everything it calls dead in production too. Phase 9 removes
 all of them together when the router first calls the exact path.
 
-This step also adds `impl<T> From<Option<T>> for OptionalField<T>` to the
-contract crate and repoints `mxc_engine::policy` at the per-version contract
-builders, per the decision 3 resolution. Unlike the parser path, that builder is
-live in production immediately: it is not a shadow, it is the only way that
-entry point reaches a request.
+This step also adds explicit `OptionalField::present` construction to each
+independent contract primitive module plus a narrow `#[doc(hidden)]`
+one-shot-contract bridge in `wxc_common`, and repoints `mxc_engine::policy` at
+the per-version contract builders, per the decision 3 resolution. Adapter
+modules and `into_wire` functions remain crate-private; no public `From`
+conversion from contract requests to `wire::MxcConfig` is added. Unlike the
+parser path, the builder is live in production immediately: it is not a shadow,
+it is the only way that entry point reaches a request.
 
 Suggested commit boundary: `Add the shadow exact-contract parser path`.
 
