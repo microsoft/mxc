@@ -109,7 +109,6 @@ describe('telemetry consent', () => {
     assert.strictEqual(asyncQuery.effectiveState, 'undetermined');
     assert.strictEqual(asyncQuery.policy, 'blocked');
     assert.strictEqual(asyncQuery.needsPrompt, false);
-    assert.strictEqual(asyncQuery.reason, undefined);
   });
 
   it('binds a synchronous presenter decision to the canonical prompt', async () => {

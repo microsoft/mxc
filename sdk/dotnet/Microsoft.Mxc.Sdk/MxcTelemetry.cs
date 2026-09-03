@@ -360,7 +360,6 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.NotApplicable,
                 TelemetryConsentState.NotApplicable,
-                TelemetryConsentStatusReason.NotApplicable,
                 TelemetryPolicyState.NotApplicable);
         }
 
@@ -377,7 +376,6 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                null,
                 TelemetryPolicyState.Blocked);
         }
         catch (MxcException ex)
@@ -386,7 +384,6 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                null,
                 TelemetryPolicyState.Blocked);
         }
         catch (Exception ex)
@@ -395,7 +392,6 @@ public static class MxcTelemetry
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                null,
                 TelemetryPolicyState.Blocked);
         }
     }
@@ -552,7 +548,6 @@ public static class MxcTelemetry
             TelemetryConsentActionResult.NotApplicable,
             TelemetryConsentState.NotApplicable,
             TelemetryConsentState.NotApplicable,
-            TelemetryConsentStatusReason.NotApplicable,
             TelemetryPolicyState.NotApplicable);
 
     private static TelemetryConsentPrompt ParseConsentPrompt(string? json)
@@ -579,19 +574,16 @@ public static class MxcTelemetry
     {
         using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent status"));
         var root = document.RootElement;
-        var reason = ParseConsentStatusReason(root.GetProperty("reason"), "GetConsentStatus");
-        if (reason == TelemetryConsentStatusReason.Unknown)
+        if (!IsKnownConsentStatusReason(root.GetProperty("reason"), "GetConsentStatus"))
         {
             return new(
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                TelemetryConsentStatusReason.Unknown,
                 TelemetryPolicyState.Blocked);
         }
         return new(
             ParseConsentState(root.GetProperty("storedState").GetString(), "GetConsentStatus"),
             ParseConsentState(root.GetProperty("effectiveState").GetString(), "GetConsentStatus"),
-            reason,
             ParsePolicyState(root.GetProperty("policy").GetString(), "GetConsentStatus"));
     }
 
@@ -600,22 +592,19 @@ public static class MxcTelemetry
         using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent outcome"));
         var root = document.RootElement;
         var result = ParseConsentActionResult(root.GetProperty("result").GetString());
-        var reason = ParseConsentStatusReason(root.GetProperty("reason"), "ConsentOutcome");
         if (result == TelemetryConsentActionResult.Unknown ||
-            reason == TelemetryConsentStatusReason.Unknown)
+            !IsKnownConsentStatusReason(root.GetProperty("reason"), "ConsentOutcome"))
         {
             return new(
                 TelemetryConsentActionResult.Unknown,
                 TelemetryConsentState.Undetermined,
                 TelemetryConsentState.Undetermined,
-                TelemetryConsentStatusReason.Unknown,
                 TelemetryPolicyState.Blocked);
         }
         return new(
             result,
             ParseConsentState(root.GetProperty("storedState").GetString(), "ConsentOutcome"),
             ParseConsentState(root.GetProperty("effectiveState").GetString(), "ConsentOutcome"),
-            reason,
             ParsePolicyState(root.GetProperty("policy").GetString(), "ConsentOutcome"));
     }
 
@@ -641,31 +630,31 @@ public static class MxcTelemetry
         return TelemetryConsentActionResult.Unknown;
     }
 
-    private static TelemetryConsentStatusReason? ParseConsentStatusReason(
+    private static bool IsKnownConsentStatusReason(
         JsonElement value,
         string operation)
     {
         if (value.ValueKind == JsonValueKind.Null)
         {
-            return null;
+            return true;
         }
 
         return value.GetString() switch
         {
-            "no-record" => TelemetryConsentStatusReason.NoRecord,
-            "store-unreadable" => TelemetryConsentStatusReason.StoreUnreadable,
-            "store-malformed" => TelemetryConsentStatusReason.StoreMalformed,
-            "consent-schema-unsupported" => TelemetryConsentStatusReason.ConsentSchemaUnsupported,
-            "prompt-version-missing" => TelemetryConsentStatusReason.PromptVersionMissing,
-            "prompt-version-unsupported" => TelemetryConsentStatusReason.PromptVersionUnsupported,
-            "policy-blocked" => TelemetryConsentStatusReason.PolicyBlocked,
-            "presentation-unavailable" => TelemetryConsentStatusReason.PresentationUnavailable,
-            "not-applicable" => TelemetryConsentStatusReason.NotApplicable,
-            var reason => UnrecognizedConsentStatusReason(reason, operation),
+            "no-record" or
+            "store-unreadable" or
+            "store-malformed" or
+            "consent-schema-unsupported" or
+            "prompt-version-missing" or
+            "prompt-version-unsupported" or
+            "policy-blocked" or
+            "presentation-unavailable" or
+            "not-applicable" => true,
+            var reason => ReportUnrecognizedConsentStatusReason(reason, operation),
         };
     }
 
-    private static TelemetryConsentStatusReason UnrecognizedConsentStatusReason(
+    private static bool ReportUnrecognizedConsentStatusReason(
         string? value,
         string operation)
     {
@@ -673,7 +662,7 @@ public static class MxcTelemetry
             operation,
             "Unknown",
             $"unrecognized consent status reason '{value ?? "<null>"}'");
-        return TelemetryConsentStatusReason.Unknown;
+        return false;
     }
 
     /// <summary>

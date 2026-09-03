@@ -4,19 +4,42 @@
 import { execFile, spawn } from 'node:child_process';
 import { findWxcExecutable } from './platform.js';
 
-export type TelemetryConsentState = 'granted' | 'denied' | 'undetermined' | 'not-applicable';
-export type TelemetryPolicyState = 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable';
-export type TelemetryConsentStatusReason =
-  | 'no-record'
-  | 'store-unreadable'
-  | 'store-malformed'
-  | 'consent-schema-unsupported'
-  | 'prompt-version-missing'
-  | 'prompt-version-unsupported'
-  | 'policy-blocked'
-  | 'presentation-unavailable'
-  | 'not-applicable';
-export type TelemetryConsentDecision = 'yes' | 'no' | 'dismissed';
+const TELEMETRY_CONSENT_STATES = ['granted', 'denied', 'undetermined', 'not-applicable'] as const;
+const TELEMETRY_POLICY_STATES = ['unrestricted', 'allowed', 'blocked', 'not-applicable'] as const;
+const TELEMETRY_CONSENT_DECISIONS = ['yes', 'no', 'dismissed'] as const;
+const TELEMETRY_CONSENT_RESULTS = [
+  'granted',
+  'denied',
+  'dismissed',
+  'withdrawn',
+  'alreadyGranted',
+  'policyBlocked',
+  'presentationUnavailable',
+  'notApplicable',
+] as const;
+const CONSENT_STATUS_REASONS = [
+  'no-record',
+  'store-unreadable',
+  'store-malformed',
+  'consent-schema-unsupported',
+  'prompt-version-missing',
+  'prompt-version-unsupported',
+  'policy-blocked',
+  'presentation-unavailable',
+  'not-applicable',
+] as const;
+const CONSENT_PROTOCOL_RESULTS = [
+  'status',
+  'presentationRequired',
+  ...TELEMETRY_CONSENT_RESULTS,
+] as const;
+
+export type TelemetryConsentState = (typeof TELEMETRY_CONSENT_STATES)[number];
+export type TelemetryPolicyState = (typeof TELEMETRY_POLICY_STATES)[number];
+export type TelemetryConsentDecision = (typeof TELEMETRY_CONSENT_DECISIONS)[number];
+export type TelemetryConsentResult = (typeof TELEMETRY_CONSENT_RESULTS)[number];
+type ConsentStatusReason = (typeof CONSENT_STATUS_REASONS)[number];
+type TelemetryConsentProtocolResult = (typeof CONSENT_PROTOCOL_RESULTS)[number];
 
 export interface TelemetryConsentMessage {
   id: string;
@@ -34,35 +57,20 @@ export interface TelemetryConsentPrompt {
   learnMoreUrl: string;
 }
 
-export type TelemetryConsentResult =
-  | 'granted'
-  | 'denied'
-  | 'dismissed'
-  | 'withdrawn'
-  | 'alreadyGranted'
-  | 'policyBlocked'
-  | 'presentationUnavailable'
-  | 'notApplicable';
-
 export interface TelemetryConsentOutcome {
   action: 'request' | 'withdraw';
   result: TelemetryConsentResult;
   storedState: TelemetryConsentState;
   effectiveState: TelemetryConsentState;
-  reason?: TelemetryConsentStatusReason | null;
   policy: TelemetryPolicyState;
   needsPrompt: boolean;
 }
-
-type TelemetryConsentProtocolResult =
-  | TelemetryConsentResult
-  | 'status'
-  | 'presentationRequired';
 
 interface TelemetryConsentProtocolResponse
   extends Omit<TelemetryConsentOutcome, 'action' | 'result'> {
   action: ConsentAction;
   result: TelemetryConsentProtocolResult;
+  reason?: ConsentStatusReason | null;
   prompt?: TelemetryConsentPrompt | null;
   challenge?: string | null;
 }
@@ -78,7 +86,6 @@ export interface TelemetryConsentQuery {
   effectiveState: TelemetryConsentState;
   needsPrompt: boolean;
   policy: TelemetryPolicyState;
-  reason?: TelemetryConsentStatusReason;
   error?: string;
 }
 
@@ -403,30 +410,24 @@ function isWindows(): boolean {
   return (platformOverride ?? process.platform) === 'win32';
 }
 
+function includes<T extends string>(values: readonly T[], value: unknown): value is T {
+  return typeof value === 'string' && values.includes(value as T);
+}
+
 function isConsentState(value: unknown): value is TelemetryConsentState {
-  return value === 'granted' || value === 'denied' || value === 'undetermined' || value === 'not-applicable';
+  return includes(TELEMETRY_CONSENT_STATES, value);
 }
 
 function isPolicyState(value: unknown): value is TelemetryPolicyState {
-  return value === 'unrestricted' || value === 'allowed' || value === 'blocked' || value === 'not-applicable';
+  return includes(TELEMETRY_POLICY_STATES, value);
 }
 
 function isDecision(value: unknown): value is TelemetryConsentDecision {
-  return value === 'yes' || value === 'no' || value === 'dismissed';
+  return includes(TELEMETRY_CONSENT_DECISIONS, value);
 }
 
-function isStatusReason(value: unknown): value is TelemetryConsentStatusReason {
-  return [
-    'no-record',
-    'store-unreadable',
-    'store-malformed',
-    'consent-schema-unsupported',
-    'prompt-version-missing',
-    'prompt-version-unsupported',
-    'policy-blocked',
-    'presentation-unavailable',
-    'not-applicable',
-  ].includes(value as string);
+function isStatusReason(value: unknown): value is ConsentStatusReason {
+  return includes(CONSENT_STATUS_REASONS, value);
 }
 
 function isConsentMessage(value: unknown): value is TelemetryConsentMessage {
@@ -458,18 +459,7 @@ function isChallenge(value: unknown): value is string {
 }
 
 function isResult(value: unknown): value is TelemetryConsentProtocolResult {
-  return [
-    'status',
-    'presentationRequired',
-    'granted',
-    'denied',
-    'dismissed',
-    'withdrawn',
-    'alreadyGranted',
-    'policyBlocked',
-    'presentationUnavailable',
-    'notApplicable',
-  ].includes(value as string);
+  return includes(CONSENT_PROTOCOL_RESULTS, value);
 }
 
 function isResultForAction(
@@ -542,7 +532,6 @@ function toConsentOutcome(response: TelemetryConsentProtocolResponse): Telemetry
     result: response.result,
     storedState: response.storedState,
     effectiveState: response.effectiveState,
-    ...(response.reason === undefined ? {} : { reason: response.reason }),
     policy: response.policy,
     needsPrompt: response.needsPrompt,
   };
@@ -576,7 +565,6 @@ function notApplicable(action: 'request' | 'withdraw'): TelemetryConsentOutcome 
     effectiveState: 'not-applicable',
     needsPrompt: false,
     policy: 'not-applicable',
-    reason: 'not-applicable',
   };
 }
 
@@ -589,7 +577,6 @@ function consentQueryFromResponse(
     effectiveState: response.effectiveState,
     needsPrompt: response.needsPrompt && response.policy !== 'blocked',
     policy: response.policy,
-    ...(response.reason === undefined || response.reason === null ? {} : { reason: response.reason }),
   };
 }
 
@@ -615,7 +602,6 @@ export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuer
       effectiveState: 'not-applicable',
       needsPrompt: false,
       policy: 'not-applicable',
-      reason: 'not-applicable',
     };
   }
   try {

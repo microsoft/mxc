@@ -25,21 +25,6 @@ public enum TelemetryConsentDecision
     Dismissed,
 }
 
-/// <summary>Why persisted consent does not currently authorize collection.</summary>
-public enum TelemetryConsentStatusReason
-{
-    Unknown,
-    NoRecord,
-    StoreUnreadable,
-    StoreMalformed,
-    ConsentSchemaUnsupported,
-    PromptVersionMissing,
-    PromptVersionUnsupported,
-    PolicyBlocked,
-    PresentationUnavailable,
-    NotApplicable,
-}
-
 /// <summary>Result of a consent request or withdrawal.</summary>
 public enum TelemetryConsentActionResult
 {
@@ -58,7 +43,6 @@ public enum TelemetryConsentActionResult
 public sealed record TelemetryConsentStatus(
     TelemetryConsentState StoredState,
     TelemetryConsentState EffectiveState,
-    TelemetryConsentStatusReason? Reason,
     TelemetryPolicyState Policy);
 
 /// <summary>Result and resulting status of a consent-changing operation.</summary>
@@ -66,5 +50,4 @@ public sealed record TelemetryConsentOutcome(
     TelemetryConsentActionResult Result,
     TelemetryConsentState StoredState,
     TelemetryConsentState EffectiveState,
-    TelemetryConsentStatusReason? Reason,
     TelemetryPolicyState Policy);

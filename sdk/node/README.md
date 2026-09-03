@@ -481,7 +481,7 @@ getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
-queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, reason?, error? }>
+queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, error? }>
 requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
@@ -547,7 +547,7 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 genuine undecided state:
 
 ```typescript
-const { effectiveState, storedState, needsPrompt, policy, reason, error } =
+const { effectiveState, storedState, needsPrompt, policy, error } =
   await queryTelemetryConsentAsync();
 if (error) {
   console.warn(`mxc: could not read telemetry consent: ${error}`);

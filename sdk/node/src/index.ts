@@ -156,7 +156,6 @@ export {
   TelemetryConsentMessage,
   TelemetryConsentResult,
   TelemetryConsentState,
-  TelemetryConsentStatusReason,
   TelemetryConsentPrompt,
   TelemetryConsentDecision,
   TelemetryConsentOutcome,

@@ -138,37 +138,15 @@ if (!csharpMappings.has("blocked")) {
   csharpMappings.set("blocked", "Blocked");
 }
 
-// --- TypeScript: the exported union ---------------------------------------
+// --- TypeScript: runtime literals also define the exported types -----------
 const tsSrc = readFileSync(tsPath, "utf8");
-const unionMatch = tsSrc.match(
-  /export type TelemetryPolicyState\s*=\s*([^;]+);/
-);
-if (!unionMatch) {
-  console.error(
-    "ERROR: could not find `TelemetryPolicyState` in telemetry.ts"
-  );
-  process.exit(1);
-}
-const tsStates = new Set();
-for (const m of unionMatch[1].matchAll(/["']([^"']+)["']/g)) {
-  tsStates.add(m[1]);
-}
 
-function parseTypeScriptUnion(name) {
-  const match = tsSrc.match(new RegExp(`export type ${name}\\s*=\\s*([^;]+);`));
-  if (!match) {
-    console.error(`ERROR: could not find TypeScript \`${name}\``);
-    process.exit(1);
-  }
-  return new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]));
-}
-
-function parseTypeScriptValidator(name) {
+function parseTypeScriptConst(name) {
   const match = tsSrc.match(
-    new RegExp(`function ${name}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n\\}`)
+    new RegExp(`const ${name}\\s*=\\s*\\[([\\s\\S]*?)\\]\\s*as const`)
   );
   if (!match) {
-    console.error(`ERROR: could not find TypeScript validator \`${name}\``);
+    console.error(`ERROR: could not find TypeScript literal set \`${name}\``);
     process.exit(1);
   }
   return new Set(
@@ -244,6 +222,22 @@ function parseCsharpSwitch(functionName, enumName) {
   return mappings;
 }
 
+function parseCsharpKnownValues(functionName) {
+  const body = csharpSrc.match(
+    new RegExp(
+      `private\\s+static\\s+bool\\s+${functionName}\\s*\\([^)]*\\)[\\s\\S]*?` +
+      `return\\s+value\\.GetString\\(\\)\\s+switch\\s*\\{([\\s\\S]*?)\\};`
+    )
+  );
+  if (!body) {
+    console.error(`ERROR: could not find \`${functionName}\` in MxcTelemetry.cs`);
+    process.exit(1);
+  }
+  return new Set(
+    [...body[1].matchAll(/"([^"]+)"/g)].map((item) => item[1])
+  );
+}
+
 function compareMappings(label, expected, actual) {
   for (const wire of expected) {
     const actualVariant = actual.get(wire);
@@ -281,25 +275,17 @@ compareSets(
   new Set(rustStates.keys()),
   protocolPolicyStates
 );
-compareSets(
-  "TypeScript isPolicyState",
-  protocolPolicyStates,
-  parseTypeScriptValidator("isPolicyState")
-);
+const tsStates = parseTypeScriptConst("TELEMETRY_POLICY_STATES");
+compareSets("TypeScript policy states", protocolPolicyStates, tsStates);
 
 const protocolConsentResults = parseRustEnum("ConsentResult");
-compareSets(
-  "TypeScript isResult",
-  protocolConsentResults,
-  parseTypeScriptValidator("isResult")
-);
 const terminalConsentResults = new Set(protocolConsentResults);
 terminalConsentResults.delete("status");
 terminalConsentResults.delete("presentationRequired");
 compareSets(
   "TypeScript TelemetryConsentResult",
   terminalConsentResults,
-  parseTypeScriptUnion("TelemetryConsentResult")
+  parseTypeScriptConst("TELEMETRY_CONSENT_RESULTS")
 );
 const consentResultMappings = parseCsharpSwitch(
   "ParseConsentActionResult",
@@ -319,37 +305,27 @@ if (!functionReturnsSentinel(
 
 const consentReasons = parseRustEnum("StatusReason");
 compareSets(
-  "TypeScript TelemetryConsentStatusReason",
+  "TypeScript private consent status reasons",
   consentReasons,
-  parseTypeScriptUnion("TelemetryConsentStatusReason")
+  parseTypeScriptConst("CONSENT_STATUS_REASONS")
 );
 compareSets(
-  "TypeScript isStatusReason",
+  "C# private consent status reasons",
   consentReasons,
-  parseTypeScriptValidator("isStatusReason")
+  parseCsharpKnownValues("IsKnownConsentStatusReason")
 );
-const reasonMappings = parseCsharpSwitch(
-  "ParseConsentStatusReason",
-  "TelemetryConsentStatusReason"
-);
-compareMappings("ParseConsentStatusReason", consentReasons, reasonMappings);
 if (!functionReturnsSentinel(
-  "UnrecognizedConsentStatusReason",
-  "TelemetryConsentStatusReason.Unknown"
+  "ReportUnrecognizedConsentStatusReason",
+  "false"
 )) {
-  errors.push("C# unknown consent status reasons must return TelemetryConsentStatusReason.Unknown");
+  errors.push("C# unknown consent status reasons must fail validation");
 }
 
 const consentStates = parseRustEnum("ConsentState");
 compareSets(
   "TypeScript TelemetryConsentState",
   consentStates,
-  parseTypeScriptUnion("TelemetryConsentState")
-);
-compareSets(
-  "TypeScript isConsentState",
-  consentStates,
-  parseTypeScriptValidator("isConsentState")
+  parseTypeScriptConst("TELEMETRY_CONSENT_STATES")
 );
 const consentStateMappings = parseCsharpSwitch(
   "ParseConsentState",
