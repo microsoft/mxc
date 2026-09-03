@@ -32,11 +32,12 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 Queue parameters include `buildGuid`, `monthId`, and `patch`. The canonical
 release contract is `monthId + patch`, rendered as MSI/bundle `YY.M.patch.0`.
 
-For non-release validation, keep `signingMode=test`,
-`signingKeyCode=CP-230072`, and `enablePromotion=false`.
+For non-release validation, keep `signingMode=test` and
+`enablePromotion=false`.
 
-For a release-candidate run, set `signingMode=production`,
-`signingKeyCode=CP-230012`, and `enablePromotion=true`. The pipeline builds and
+For a release-candidate run, set `signingMode=production` and
+`enablePromotion=true`. The pipeline derives the approved signing policy:
+`CP-230072` for test builds and `CP-230012` for production builds. It builds and
 signs once, then waits on both a manual validation step and the configured
 Azure Pipelines environment before publishing those exact bytes. After
 supported-SF2 qualification, resume the validation and approve the environment

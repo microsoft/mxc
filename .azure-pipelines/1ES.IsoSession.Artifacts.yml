@@ -45,10 +45,6 @@ parameters:
   values:
   - test
   - production
-- name: signingKeyCode
-  displayName: ESRP signing policy key code
-  type: string
-  default: CP-230072
 - name: publishToRestrictedFeed
   displayName: Publish the aggregated SDK NuGet to Azure Artifacts
   type: boolean
@@ -114,7 +110,6 @@ extends:
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.x64DropNameOverride }}
           signingMode: ${{ parameters.signingMode }}
-          signingKeyCode: ${{ parameters.signingKeyCode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
@@ -127,7 +122,6 @@ extends:
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.arm64DropNameOverride }}
           signingMode: ${{ parameters.signingMode }}
-          signingKeyCode: ${{ parameters.signingKeyCode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - job: aggregate_isosession_artifacts
