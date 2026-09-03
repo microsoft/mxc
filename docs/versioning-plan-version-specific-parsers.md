@@ -10,9 +10,10 @@ reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
 PR #969. Phase 7.2 is complete on
 `user/gudge/version_specific_config_parsers_phase7b` at `840f8c07` and is open
-as PR #1091, stacked on #969. Phases 7.3-7.5, 8-9.5, and 10-11 remain; the
-planned end state publishes `0.9.0-alpha` and opens `0.10.0-alpha`
-development.
+as PR #1091, stacked on #969. Phase 7.3 is complete in PR #1096, and Phases
+7.4 is complete in PR #1097, stacked on #1096. Phase 7.5 is complete on the
+dedicated plan branch. Phases 8-9.5 and 10-11 remain; the planned end state
+publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -1055,7 +1056,7 @@ in progress, but merge in the order below.
 | --- | --- | --- |
 | 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
 | 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders |
-| 3 | Phases 7.4-7.5 | Add the differential harness and commit its complete divergence classification together |
+| 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory |
 | 4 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references |
 | 5 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization |
 | 6 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads |
@@ -1068,6 +1069,8 @@ Phase 10's internal subphases are detailed in Appendix C. Phase 11a is
 deliberately additive so publication mechanics can be reviewed before they
 rewrite the contract lifecycle; the final publication and rolling-stack cleanup
 remain together so no intermediate tree has conflicting version authorities.
+Phase 7.5 is maintained on the dedicated plan branch rather than adding this
+planning document to an implementation PR.
 
 ## 3. Detailed implementation plans and records
 
@@ -2765,6 +2768,10 @@ The full Rust workspace format, compile, clippy, and test gates pass. The
 
 ##### Phase 7.4: Build the equivalence harness and classify differences
 
+Status: complete at `01f3c01a` on
+`user/gudge/version_specific_config_parsers_phase7d`, open as PR #1097 and
+stacked on Phase 7.3 PR #1096.
+
 Put the harness in an inline `#[cfg(test)]` module in `config_parser.rs`, the
 crate's dominant convention and the only placement that keeps the exact path
 private. An integration test under `src/core/wxc_common/tests/` can only reach
@@ -2830,11 +2837,69 @@ Suggested commit boundary: `Add rolling-versus-exact parser equivalence tests`.
 
 ##### Phase 7.5: Record the classification in this plan
 
-Fold the difference table into the plan as the input to Phase 8's migration and
-Phase 9's cutover. A difference that survives to Phase 9 unclassified is a
-break MXC would be shipping without deciding to.
+Status: complete on `user/gudge/version_specific_config_parsers_plan`.
+
+The harness examines all JSON documents under `tests/configs`,
+`tests/examples`, and `tests/policy`. The executable file-level inventory lives
+in `config_parser::tests::expected_corpus_divergences`: every divergent path is
+named, and a new or changed divergence fails until its classification is
+updated deliberately.
+
+The corpus contains 282 documents:
+
+| Result | Count |
+| --- | ---: |
+| Both parsers accept with equivalent runtime models | 148 |
+| Both parsers reject | 9 |
+| Rolling accepts and exact rejects | 125 |
+| Rolling rejects and exact accepts | 0 |
+| Both accept with different runtime models | 0 |
+
+The 125 exact-stricter corpus results are:
+
+| Classification | Count | Rolling behavior | Exact behavior | Disposition |
+| --- | ---: | --- | --- | --- |
+| Missing version | 55 | Accepts the legacy omitted declaration | Rejects the missing exact declaration | Assign a registered version based on the document's request shape |
+| Published comment rejected first | 2 | Accepts the annotation | Rejects `_comment` before reaching the development-only containment | Migrate with the owning WSLC documents and preserve the first-error classification |
+| Development containment under a published version | 45 | Accepts the rolling containment enum | Rejects the unknown published containment value | Move the documents to the development contract |
+| Experimental content under a published version | 2 | Accepts the rolling experimental extension | Rejects the unknown published field | Move the documents to the development contract |
+| State-aware request under a published version | 21 | Accepts the rolling state-aware shape | Rejects `phase` because published roots are one-shot | Move the documents to the development contract |
+
+The focused non-corpus cases classify structural and diagnostic differences:
+
+| Input | Rolling behavior | Exact behavior | Classification | Disposition |
+| --- | --- | --- | --- | --- |
+| Published v0.6 request with `experimental` | Accepts | Rejects the unknown field | Exact stricter | Intentional published-root closure |
+| Explicit `containerId: null` | Accepts as absent | Rejects the explicit null | Exact stricter | Preserve omission-versus-null distinction |
+| IsolationSession `appId: null` | Accepts as absent | Rejects the explicit null | Exact stricter | Migrate the compatibility spelling to omission |
+| Unknown IsolationSession provision member | Ignores the member | Rejects the closed payload | Exact stricter | Intentional recursive closure |
+| `sandboxId` on provision | Accepts and lifts the value | Rejects the field on the provision root | Exact stricter | Intentional phase-specific root shape |
+| Network policy on start, stop, or deprovision | Retains the supplied policy for semantic rejection | Rejects the field structurally | Exact stricter | Intentional immutable-policy shape |
+| IsolationSession filesystem or UI policy | Produces a curated backend-policy error | Rejects the field structurally | Exact stricter with diagnostic change | Structural rejection is correct; record the loss of the backend explanation |
+| `phase: null` | Rejects as a missing phase | Rejects as an invalid declaration | Diagnostic only | Both reject; retain the routing distinction |
+| Malformed JSON after a readable version | Reports JSON syntax | Reports version-probe failure | Diagnostic only | Both reject; retain the attribution difference |
+| Invalid v0.8 or v0.9 capability name | Rejects during semantic conversion | Rejects during contract construction | Diagnostic only | Both reject the same value rule |
+| Numeric `process.commandLine` with a CLI command | Leaves the invalid value for typed rejection | Leaves the invalid value for typed rejection | Convergent rejection | Preserve the command-splice behavior |
+
+The exact path also preserves every sampled rolling value-rule rejection:
+
+| Value rule | Covered inputs |
+| --- | --- |
+| Capability syntax and reserved names | Comma-separated names and case-insensitive `learningModeLogging` / `permissiveLearningMode` variants across v0.6-v0.9 |
+| Filesystem paths | Whitespace-only, quoted, and embedded-NUL paths |
+| Proxy and enforcement compatibility | Proxy combined with capabilities-only enforcement |
+| Backend section compatibility | A ProcessContainer section supplied with LXC containment |
+| Denial capture output | Relative `captureDenials.outputPath` |
+
+No exact-looser acceptance or accepted-model difference was found. The runtime
+snapshot compares the serialized `ExecutionRequest`, proxy internals, all five
+policy fields omitted from serialization, and every field on
+`ParsedStateAwareRequest`, so the equivalence assertion does not depend on
+serialization alone.
 
 #### Phase 7 tests
+
+Status: satisfied by the Phase 7a-7d test suites.
 
 1. Rolling-path behavior is unchanged, proven by the existing `wxc_common`
    suite before and after the Phase 7.2 extraction.
@@ -2849,6 +2914,8 @@ break MXC would be shipping without deciding to.
    which is the direct input to Phase 8.
 
 #### Phase 7 exit criteria
+
+Status: satisfied.
 
 - The rolling parser is still authoritative and its behavior is unchanged.
 - The exact path produces the same runtime model for every convergent input.
@@ -2865,6 +2932,10 @@ break MXC would be shipping without deciding to.
 | `serde_json::to_value` equivalence hides a difference in a skipped field | Audit `ExecutionRequest`'s `Serialize` for `skip_serializing`, or add a test-only `PartialEq` |
 | The experimental authority question is deferred again | It is decision 1 and it gates Phase 7.2; after Phase 9 the asymmetry is permanent |
 | `load_request_from_value` is discovered to have no exact path during Phase 9 | It is decision 3, resolved here rather than at cutover |
+
+The harness resolves the comparison risks: it explicitly snapshots every
+skipped runtime field, keeps production routing on the rolling parser, covers
+the hidden exact bridge, and fails on any unclassified or exact-looser result.
 
 #### Phase 7.1.1.0 tests
 
