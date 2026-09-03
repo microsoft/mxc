@@ -792,6 +792,12 @@ impl ContainerPolicy {
             &self.blocked_hosts,
         )
     }
+
+    /// Unlike [`needs_host_filtering`], also true for a list that is redundant
+    /// with the default (`block` + `blockedHosts`, `allow` + `allowedHosts`).
+    pub fn has_host_lists(&self) -> bool {
+        !self.allowed_hosts.is_empty() || !self.blocked_hosts.is_empty()
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -839,8 +845,45 @@ pub struct PortMapping {
     pub windows_port: u16,
     /// Port inside the Linux container.
     pub container_port: u16,
-    /// Protocol: "tcp" or "udp". Default: "tcp".
+    /// Transport protocol, lowercase. Always `"tcp"`: this carries a WSLc port
+    /// forward, whose `wire::TransportProtocol` has no `udp` variant.
     pub protocol: String,
+}
+
+/// Validate + convert WSLc wire port mappings. Shared by the one-shot parser
+/// and the state-aware provision phase so the two cannot drift. `path` is the
+/// caller's JSON location; the error is a bare message each caller wraps.
+pub fn validate_wslc_port_mappings(
+    mappings: &[crate::wire::PortMapping],
+    path: &str,
+) -> Result<Vec<PortMapping>, String> {
+    let mut converted = Vec::with_capacity(mappings.len());
+    for (idx, m) in mappings.iter().enumerate() {
+        if m.windows_port == 0 {
+            return Err(format!("{path}[{idx}]: 'windowsPort' must be > 0"));
+        }
+        if m.container_port == 0 {
+            return Err(format!("{path}[{idx}]: 'containerPort' must be > 0"));
+        }
+        // Only TCP is representable: the wire model is tcp-only and `udp` is
+        // rejected at deserialize (the WSLC SDK returns E_NOTIMPL for UDP).
+        converted.push(PortMapping {
+            windows_port: m.windows_port,
+            container_port: m.container_port,
+            protocol: "tcp".to_string(),
+        });
+    }
+    // Protocol stays in the key so enabling UDP later needs no change here.
+    let mut seen: std::collections::HashSet<(u16, &str)> = std::collections::HashSet::new();
+    for pm in &converted {
+        if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
+            return Err(format!(
+                "{path}: duplicate windowsPort {} for protocol '{}'",
+                pm.windows_port, pm.protocol
+            ));
+        }
+    }
+    Ok(converted)
 }
 
 /// Configuration for the WSL Container (WSLC SDK) backend.

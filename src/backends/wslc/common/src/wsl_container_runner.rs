@@ -656,14 +656,13 @@ impl ScriptRunner for WSLContainerRunner {
     /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
     /// instead of late in `execute` on the broken in-container iptables path.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request.policy.needs_host_filtering() {
+        if request.policy.has_host_lists() {
             return Err(WslcError::Rejected(
-                "WSLc: per-host egress filtering (allowedHosts with \
-                 defaultPolicy='block', or blockedHosts with defaultPolicy='allow') \
-                 is not supported. A WSLc container has no CAP_NET_ADMIN for in-container \
-                 iptables, and VM-level enforcement is not available without breaking other \
-                 security guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                 for cooperative host filtering, or remove the host lists."
+                "WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not supported. \
+                 A WSLc container has no CAP_NET_ADMIN for in-container iptables, and VM-level \
+                 enforcement is not available without breaking other security guarantees (e.g. \
+                 MDE). Use network.proxy (defaultPolicy='allow') for cooperative host filtering, \
+                 or remove the host lists."
                     .to_string(),
             )
             .into_response());
@@ -2376,6 +2375,40 @@ mod tests {
         };
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         assert!(runner.validate_runner(&request).is_err());
+    }
+
+    #[test]
+    fn validate_runner_rejects_redundant_block_with_blocked_hosts() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                blocked_hosts: vec!["evil.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("per-host egress filtering"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_redundant_allow_with_allowed_hosts() {
+        // An allowlist under an `allow` default reads as a restriction but
+        // enforces none: accepting it leaves all egress open (#824).
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allowed_hosts: vec!["github.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("per-host egress filtering"));
     }
 
     #[test]

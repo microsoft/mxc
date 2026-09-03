@@ -3,6 +3,7 @@
 
 use crate::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+    convert_wslc_port_mapping,
 };
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -207,25 +208,6 @@ fn convert_windows_sandbox(value: contract::OneShotWindowsSandbox) -> wire::Wind
         idle_timeout: idle_timeout.into_option(),
         idle_timeout_ms: idle_timeout_ms.into_option(),
         daemon_pipe_name: daemon_pipe_name.into_option(),
-    }
-}
-
-fn convert_protocol(value: contract::TransportProtocol) -> wire::TransportProtocol {
-    match value {
-        contract::TransportProtocol::Tcp => wire::TransportProtocol::Tcp,
-    }
-}
-
-fn convert_wslc_port_mapping(value: contract::PortMapping) -> wire::PortMapping {
-    let contract::PortMapping {
-        windows_port,
-        container_port,
-        protocol,
-    } = value;
-    wire::PortMapping {
-        windows_port: windows_port.get(),
-        container_port: container_port.get(),
-        protocol: protocol.into_option().map(convert_protocol),
     }
 }
 

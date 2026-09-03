@@ -921,6 +921,10 @@ export interface WslcProvision {
    * Optional path to a local container image archive.
    */
   imageTarPath?: string;
+  /**
+   * Optional host-to-container TCP port mappings. Per-container, so unlike the one-shot sizing knobs it is honored on the shared daemon session.
+   */
+  portMappings?: PortMapping[];
 }
 
 /**

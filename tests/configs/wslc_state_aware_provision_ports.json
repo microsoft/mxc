@@ -1,0 +1,18 @@
+{
+    "version": "0.8.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "network": {
+        "defaultPolicy": "allow"
+    },
+    "experimental": {
+        "wslc": {
+            "provision": {
+                "image": "alpine:latest",
+                "portMappings": [
+                    { "windowsPort": 18080, "containerPort": 80, "protocol": "tcp" }
+                ]
+            }
+        }
+    }
+}

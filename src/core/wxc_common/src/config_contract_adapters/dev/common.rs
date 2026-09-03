@@ -195,3 +195,22 @@ pub(super) fn convert_telemetry(value: contract::Telemetry) -> wire::Telemetry {
         enabled: enabled.into_option(),
     }
 }
+
+fn convert_protocol(value: contract::TransportProtocol) -> wire::TransportProtocol {
+    match value {
+        contract::TransportProtocol::Tcp => wire::TransportProtocol::Tcp,
+    }
+}
+
+pub(super) fn convert_wslc_port_mapping(value: contract::PortMapping) -> wire::PortMapping {
+    let contract::PortMapping {
+        windows_port,
+        container_port,
+        protocol,
+    } = value;
+    wire::PortMapping {
+        windows_port: windows_port.get(),
+        container_port: container_port.get(),
+        protocol: protocol.into_option().map(convert_protocol),
+    }
+}

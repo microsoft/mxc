@@ -1585,6 +1585,13 @@
         "imageTarPath": {
           "description": "Optional path to a local container image archive.",
           "type": "string"
+        },
+        "portMappings": {
+          "description": "Optional host-to-container TCP port mappings. Per-container, so unlike the one-shot sizing knobs it is honored on the shared daemon session.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
         }
       },
       "type": "object"

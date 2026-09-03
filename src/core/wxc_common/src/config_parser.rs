@@ -10,7 +10,7 @@ use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
+    NetworkPolicy, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
@@ -703,16 +703,16 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
 // silently accepted and `script_code` is left empty.
 //
-// `state_aware_wslc_exec` identifies the state-aware exec exception: network
-// mode was fixed at provision, so a proxy-only exec inherits that mode rather
-// than restating `defaultPolicy`. Backend phase validation still rejects every
-// post-provision network-mode or host-filtering field.
+// `state_aware` marks the state-aware lifecycle, where the WSLc network checks
+// below are skipped: the mode is fixed at provision, so a later phase omits
+// `defaultPolicy`, and the backend's per-phase gates reject the same inputs as
+// `policy_validation` rather than a parse error.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
-    state_aware_wslc_exec: bool,
+    state_aware: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -997,7 +997,12 @@ fn convert_wire_config(
             // MXC-run host-loopback proxy is unreachable. Accept only the
             // caller-supplied `url` form (which carries `original_url`); reject
             // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+            //
+            // One-shot only: the state-aware path reaches the same rejection
+            // through the backend exec gate (`validate_exec_policy`), which
+            // reports it as `policy_validation` rather than a parse error.
+            if !state_aware && containment == ContainmentBackend::Wslc && proxy_config.is_enabled()
+            {
                 let is_url_form = proxy_config
                     .address
                     .as_ref()
@@ -1046,9 +1051,12 @@ fn convert_wire_config(
         // host lists to it, and a 'block' default (the WSLc default) yields no
         // outbound networking / a drop-floor that can't even reach the proxy.
         // Require an 'allow' default with no host lists so the proxy is reachable.
-        if containment == ContainmentBackend::Wslc
+        //
+        // One-shot only: state-aware binds the network mode at provision, so a
+        // later phase omits `defaultPolicy`; its own per-phase gates cover proxy.
+        if !state_aware
+            && containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
-            && !state_aware_wslc_exec
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1064,18 +1072,24 @@ fn convert_wire_config(
         // WSLc cannot enforce per-host egress filtering: containers lack
         // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
         // cannot expose VM-level enforcement without breaking other security
-        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
+        // guarantees (e.g. MDE). Reject any non-empty host list up front,
+        // including one redundant with the default — an accepted-then-ignored
+        // list misstates what is enforced. The backend's validate_runner
         // enforces the same for requests that bypass this parser. Bare defaults
-        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
+        // with no host lists (full cutoff / full NAT) are enforceable, left
+        // as-is.
+        //
+        // One-shot only: the state-aware path reaches the same rejection through
+        // the backend policy gate (`reject_host_filtering`), which reports it as
+        // `policy_validation` rather than a parse error.
         if containment == ContainmentBackend::Wslc {
-            if policy.needs_host_filtering() {
-                let msg = "WSLc: per-host egress filtering (allowedHosts with \
-                           defaultPolicy='block', or blockedHosts with \
-                           defaultPolicy='allow') is not supported. A WSLc container has \
-                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
-                           enforcement is not available without breaking other security \
-                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                           for cooperative host filtering, or remove the host lists.";
+            if !state_aware && policy.has_host_lists() {
+                let msg = "WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not \
+                           supported. A WSLc container has no CAP_NET_ADMIN for in-container \
+                           iptables, and VM-level enforcement is not available without breaking \
+                           other security guarantees (e.g. MDE). Use network.proxy \
+                           (defaultPolicy='allow') for cooperative host filtering, or remove the \
+                           host lists.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1255,49 +1269,11 @@ fn convert_wire_config(
             }
             config.storage_path = cc.storage_path;
             if let Some(mappings) = cc.port_mappings {
-                let mut converted = Vec::with_capacity(mappings.len());
-                for (idx, m) in mappings.into_iter().enumerate() {
-                    if m.windows_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    if m.container_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    // Only TCP is representable in the wire model
-                    // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
-                    // UDP, so only TCP is currently supported.
-                    let protocol = "tcp".to_string();
-                    converted.push(PortMapping {
-                        windows_port: m.windows_port,
-                        container_port: m.container_port,
-                        protocol,
-                    });
-                }
-                // Reject duplicate (windowsPort, protocol) entries. Same host
-                // port on TCP+UDP would in principle be legal, but UDP is
-                // rejected at deserialize (the wire model is tcp-only); the
-                // second protocol dimension is retained in the dedupe key in
-                // case UDP support is enabled later.
-                let mut seen: std::collections::HashSet<(u16, &str)> =
-                    std::collections::HashSet::new();
-                for pm in &converted {
-                    if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
-                        let msg = format!(
-                            "experimental.wslc.portMappings: duplicate windowsPort {} \
-                             for protocol '{}'",
-                            pm.windows_port, pm.protocol
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                }
-                config.port_mappings = converted;
+                config.port_mappings = crate::models::validate_wslc_port_mappings(
+                    &mappings,
+                    "experimental.wslc.portMappings",
+                )
+                .map_err(WxcError::ConfigParse)?;
             }
             Some(config)
         } else {
@@ -1492,18 +1468,8 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let state_aware_wslc_exec = phase == Phase::Exec
-        && cfg
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request = convert_wire_config(
-        cfg,
-        logger,
-        require_process,
-        allow_missing_command,
-        state_aware_wslc_exec,
-    )?;
+    let mut request =
+        convert_wire_config(cfg, logger, require_process, allow_missing_command, true)?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -4346,6 +4312,29 @@ mod tests {
     }
 
     #[test]
+    fn proxy_wslc_non_url_form_deferred_to_backend_on_state_aware() {
+        // The exec gate (`validate_exec_policy`) rejects the same input later,
+        // as `policy_validation` rather than `malformed_request`.
+        for proxy in [r#"{"localhost": 8080}"#, r#"{"builtinTestServer": true}"#] {
+            let json = format!(
+                r#"{{
+                "version": "0.6.0-alpha",
+                "phase": "exec",
+                "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+                "process": {{"commandLine": "echo hi"}},
+                "network": {{"proxy": {proxy}}}
+            }}"#
+            );
+            let parsed = match load_mxc(&json).unwrap() {
+                MxcRequest::StateAware(parsed) => parsed,
+                MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+            };
+            assert_eq!(parsed.request.containment, ContainmentBackend::Wslc);
+            assert!(parsed.request.policy.network_proxy.is_enabled());
+        }
+    }
+
+    #[test]
     fn proxy_loopback_url_accepted_with_wslc() {
         // A WSLc container runs in its own network namespace, and the supported
         // topology puts the proxy *inside* it. `tests/configs/wslc_network_proxy.json`
@@ -4511,6 +4500,52 @@ mod tests {
             "network": {
                 "defaultPolicy": "allow",
                 "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_redundant_block_with_blocked_hosts() {
+        // A blocklist under a `block` default changes nothing, but accepting it
+        // would report per-host filtering the container never gets (#824).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_redundant_allow_with_allowed_hosts() {
+        // An allowlist under an `allow` default reads as a restriction but
+        // enforces none: accepting it leaves all egress open (#824).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowedHosts": ["github.com"]
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());

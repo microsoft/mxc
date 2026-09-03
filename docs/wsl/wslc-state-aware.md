@@ -96,6 +96,14 @@ whose value equals the default — because an explicit default is indistinguisha
 one by value alone. Only the exec-phase cooperative `proxy` is accepted after provision; a
 proxy-only `network` block (no mode fields) is therefore honored at exec.
 
+## Port forwarding
+
+`experimental.wslc.provision.portMappings` forwards host (Windows) ports to the container, mirroring
+the one-shot `experimental.wslc.portMappings` surface. Each entry is `{ windowsPort, containerPort }`
+(both 1–65535; `protocol` defaults to and only accepts `tcp` — `udp` is rejected because the WSLC
+SDK runtime returns `E_NOTIMPL`). Port mappings are per-container, applied at `WslcCreateContainer`
+during `provision`, and frozen for the sandbox's lifetime. A duplicate `windowsPort` is rejected with
+`policy_validation`. Post-provision phases carry no port config.
 ## Error mapping
 
 `state_aware.rs::map_daemon_error` maps daemon errors to the cross-backend wire error codes:

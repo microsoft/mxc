@@ -32,7 +32,7 @@
 
 import { test } from 'node:test';
 
-import type { ProcessConfig } from '../../src/types.js';
+import type { ProcessConfig, PortMapping as PublicPortMapping } from '../../src/types.js';
 
 import type {
   Phase,
@@ -139,10 +139,11 @@ type _ProvisionWireKeysNonVacuous = AssertTrue<
 // WSLc is the second state-aware backend, so the oracle must cover it too or a
 // wire-model change to the WSLc surface would regenerate `wire.ts`, pass the
 // codegen gate, and leave the SDK silently lagging with no CI signal. WSLc's
-// only per-phase wire object is provision (`image` / `imageTarPath`); start,
-// exec, stop, and deprovision have wire associated type `()` and must expose no
-// backend-specific field. `filesystem` and `network` are lifted top-level wire
-// fields (see `LiftedPhaseKey`), so they are excluded from the backend-key sets.
+// only per-phase wire object is provision (`image` / `imageTarPath` /
+// `portMappings`); start, exec, stop, and deprovision have wire associated type
+// `()` and must expose no backend-specific field. `filesystem` and `network`
+// are lifted top-level wire fields (see `LiftedPhaseKey`), so they are excluded
+// from the backend-key sets.
 type _WslcProvisionPublicKeys = AssertTrue<
   Equivalent<Exclude<BackendKeys<WslcProvisionConfig>, WireKeys<WireWslcProvisionPhase>>, never>
 >;
@@ -151,9 +152,19 @@ type _WslcProvisionWireKeys = AssertTrue<
 >;
 type _WslcProvisionFieldValueTypes = AssertTrue<
   Equivalent<
-    PublicFieldValues<WslcProvisionConfig>,
-    WireFieldValues<WireWslcProvisionPhase>
+    PublicFieldValues<WslcProvisionConfig, WslcProvisionValueKeys>,
+    WireFieldValues<WireWslcProvisionPhase, WslcProvisionValueKeys>
   >
+>;
+
+// `portMappings` is excluded from the structural value comparison above: the
+// generated wire element carries a `[k: string]: unknown` index signature and a
+// nullable `protocol` that strict `Equivalent` trips on. It is instead asserted
+// to REUSE the public one-shot leaf, whose shape the one-shot oracle already
+// pins, mirroring the `process` delegation.
+type WslcProvisionValueKeys = Exclude<BackendKeys<WslcProvisionConfig>, 'portMappings'>;
+type _WslcProvisionPortMappingsReuse = AssertTrue<
+  Equivalent<NonNullable<WslcProvisionConfig['portMappings']>, PublicPortMapping[]>
 >;
 
 type _WslcStartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcStartConfig>, never>>;
@@ -166,10 +177,10 @@ type _WslcDeprovisionNoBackendKeys = AssertTrue<
 // Non-vacuity guards (see the isolation_session pins above): pin the derived key
 // sets so a derivation bug fails the oracle rather than silently disabling it.
 type _WslcProvisionKeysNonVacuous = AssertTrue<
-  Equivalent<BackendKeys<WslcProvisionConfig>, 'image' | 'imageTarPath'>
+  Equivalent<BackendKeys<WslcProvisionConfig>, 'image' | 'imageTarPath' | 'portMappings'>
 >;
 type _WslcProvisionWireKeysNonVacuous = AssertTrue<
-  Equivalent<WireKeys<WireWslcProvisionPhase>, 'image' | 'imageTarPath'>
+  Equivalent<WireKeys<WireWslcProvisionPhase>, 'image' | 'imageTarPath' | 'portMappings'>
 >;
 
 // --- delegation to the one-shot oracle (documented, asserted) --------------
@@ -197,6 +208,7 @@ export type StateAwareWireConformanceAssertions = [
   _WslcProvisionPublicKeys,
   _WslcProvisionWireKeys,
   _WslcProvisionFieldValueTypes,
+  _WslcProvisionPortMappingsReuse,
   _WslcStartNoBackendKeys,
   _WslcExecNoBackendKeys,
   _WslcStopNoBackendKeys,

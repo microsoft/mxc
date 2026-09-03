@@ -344,27 +344,34 @@ address the container can reach:
 }
 ```
 
-The `localhost` and `builtinTestServer` proxy forms are **rejected at
-config-parse time** for WSLC (they imply a host-loopback / MXC-run proxy that
-the container cannot reach). The proxy also requires `defaultPolicy: "allow"`
-and no `allowedHosts` / `blockedHosts`: the container must have outbound
-networking to reach the proxy, and host lists are not forwarded to it — configs
-that combine the proxy with a `block` default or host lists are **rejected**.
+The `localhost` and `builtinTestServer` proxy forms are **rejected** for WSLC
+(they imply a host-loopback / MXC-run proxy that the container cannot reach) —
+at config-parse time on the one-shot surface, and by the backend's exec-phase
+policy gate on the state-aware surface. The proxy also requires
+`defaultPolicy: "allow"` and no `allowedHosts` / `blockedHosts`: the container
+must have outbound networking to reach the proxy, and host lists are not
+forwarded to it — configs that combine the proxy with a `block` default or host
+lists are **rejected**.
 
 ### Per-host filtering is not supported
 
-WSLC **cannot** enforce per-host egress filtering. `allowedHosts` with
-`defaultPolicy: "block"` (an allowlist) or `blockedHosts` with
-`defaultPolicy: "allow"` (a blocklist) would require in-container `iptables`
-rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
-`Privileged` flag does not grant it), so those rules cannot be applied — and MXC
-has no VM-level enforcement hook either (WSLC cannot expose one without breaking
-other security promises such as MDE). Rather than fail the run at exec time,
-such configs are **rejected at config-parse time**:
+WSLC has no way to enforce per-host egress filtering, so **MXC rejects any
+config that asks for it** rather than accepting the request and silently
+ignoring the lists. Any allowlist (`allowedHosts` with `defaultPolicy: "block"`)
+or blocklist (`blockedHosts` with `defaultPolicy: "allow"`) would require
+in-container `iptables` rules, but a WSLC container runs **without**
+`CAP_NET_ADMIN` (the SDK's `Privileged` flag does not grant it), so those rules
+cannot be applied — and MXC has no VM-level enforcement hook either (WSLC
+cannot expose one without breaking other security promises such as Microsoft
+Defender for Endpoint). Because the lists cannot be honoured, **any** non-empty
+`allowedHosts` or `blockedHosts` is rejected — including a list that is
+redundant with the default (`blockedHosts` under `block`, `allowedHosts` under
+`allow`), which would otherwise be silently ignored. Rather than fail the run at
+exec time, such configs are **rejected up front** (a config-parse error for
+one-shot runs; a `policy_validation` error for the state-aware lifecycle):
 
 ```
-WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
-blockedHosts with defaultPolicy='allow') is not supported. ...
+WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not supported. ...
 ```
 
 Use `network.proxy` (with `defaultPolicy: "allow"`) for cooperative host

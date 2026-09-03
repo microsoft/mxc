@@ -5,6 +5,7 @@ import {
   ContainmentBackend,
   FilesystemConfig,
   NetworkConfig,
+  PortMapping,
   ProcessConfig,
 } from './types.js';
 
@@ -186,6 +187,13 @@ export interface WslcProvisionConfig {
    * `experimental.wslc.provision.imageTarPath` on the wire.
    */
   imageTarPath?: string;
+  /**
+   * Host -> container port mappings, applied at provision and fixed for the
+   * life of the sandbox. Only TCP is supported: `protocol` defaults to `"tcp"`
+   * and `"udp"` is rejected. Nested under
+   * `experimental.wslc.provision.portMappings` on the wire.
+   */
+  portMappings?: PortMapping[];
 }
 
 export interface WslcStartConfig {
