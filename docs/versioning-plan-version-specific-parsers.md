@@ -835,6 +835,97 @@ stable-candidate directional shape in Phase 10.
 Update Node, C#, Rust SDK, FFI, examples, tests, and `$schema` references.
 State-aware producers must stop hard-coding `0.6.0-alpha`.
 
+#### Phase 8 execution breakdown
+
+The migration is selective. Do not replace every `0.6.0-alpha` occurrence:
+stable one-shot tests and examples may legitimately exercise the minimum
+published version. Change a declaration only when the document or producer
+uses a shape that its declared exact contract cannot express.
+
+| Item | File | Edit type | Work | Status |
+| --- | --- | --- | --- | --- |
+| 8a | `docs/versioning-phase8-migration-inventory.md` plus the corpus and producer directories below | Addition and audit | Regenerate the inventory from the Phase 7d tip. For each input record its request kind, current declaration, exact classification, target declaration, schema reference, and owning producer. Retain the report as the review and migration audit record | Not started |
+| 8b | `tests/configs/**/*.json`, `tests/examples/**/*.json`, `tests/policy/**/*.json` | JSON changes | Assign an exact version to all 55 documents with no declaration. Stable one-shot documents select the earliest published contract that expresses their shape; development containment, experimental, and state-aware documents select `0.9.0-alpha` | Not started |
+| 8c | The 45 explicitly inventoried development-containment documents | JSON changes | Replace their published declaration with `0.9.0-alpha`; do not change the containment or policy merely to fit an older contract | Not started |
+| 8d | The two explicitly inventoried published-experimental documents | JSON changes | Move them to `0.9.0-alpha` while preserving the experimental payload | Not started |
+| 8e | The 21 explicitly inventoried published state-aware documents | JSON changes | Move provision, start, exec, stop, and deprovision envelopes to `0.9.0-alpha` | Not started |
+| 8f | `tests/configs/wslc_destroy_on_exit_false.json`, `tests/configs/wslc_destroy_on_exit_true.json` | JSON changes | Migrate the two WSLC documents whose first exact rejection is `_comment`; preserve the annotation and record that containment becomes the next structural distinction | Not started |
+| 8g | `sdk/node/src/state-aware-helper.ts`, `sdk/node/tests/unit/state-aware.test.ts`, `sdk/node/tests/unit/state-aware-types.test.ts`, development-backend cases in `sdk/node/tests/unit/sandbox.test.ts`, and applicable Node examples/README sections | TypeScript, tests, and documentation | Change state-aware and development-only producers from `0.6.0-alpha` to `0.9.0-alpha`. Keep stable one-shot minimum-version and compatibility coverage on its published version | Not started |
+| 8h | `sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs`, `sdk/dotnet/Microsoft.Mxc.Sdk.Tests/MxcLifecycleTests.cs`, and `sdk/dotnet/README.md` | C#, tests, and documentation | Change `SchemaVersions.StateAware` and lifecycle producer expectations to `0.9.0-alpha`; do not change `SchemaVersions.Minimum` | Not started |
+| 8i | `src/core/mxc-sdk/examples/**/*.rs`, `src/core/mxc-sdk/tests/**/*.rs`, FFI request/state-aware tests under `src/ffi/mxc_ffi`, and `tests/policy/**/*.json` | Rust, tests, and JSON changes | Migrate state-aware and development-backend producers and fixtures while retaining published-version compatibility tests | Not started |
+| 8j | `$schema` members under `tests/configs` and `tests/examples`, SDK documentation links, and editor examples | JSON and documentation changes | Make every schema reference agree with its document's selected exact version. Do not add `$schema` solely to satisfy the parser; add or change it only where the document already carries or documents an editor schema reference | Not started |
+| 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each migrated path from the exact-stricter inventory. Keep the focused non-corpus divergence tests. Any remaining corpus divergence must fail with its path and classification | Not started |
+| 8l | Rust workspace, `sdk/node`, `sdk/dotnet`, FFI, schema/versioning scripts, and corpus validators | Validation | Run the complete validation matrix below and repair producer expectations without weakening exact contracts or the differential harness | Not started |
+| 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Not started |
+
+#### Phase 8 authority and compatibility boundaries
+
+- Production loaders remain on the rolling parser throughout this phase.
+- Exact contract types, adapters, schemas, and runtime behavior do not change.
+- Published v0.6/v0.7/v0.8 documents retain the Network syntax belonging to
+  their published version.
+- Development v0.9 documents retain their current Network syntax; the
+  directional-only v0.9 change is separate work.
+- Do not move a stable one-shot document to v0.9 merely because v0.9 can
+  express it. Select the earliest published version that truthfully represents
+  the document.
+- Do not alter an invalid fixture into a valid policy. Give it the exact
+  declaration for the shape whose invalid behavior it is intended to test.
+- The 148 currently convergent accepted documents and nine convergent rejected
+  documents remain regression inputs. The 125 exact-stricter corpus documents
+  are the migration set.
+
+#### Phase 8 expected corpus result
+
+After migration, the same 282-document corpus must produce:
+
+| Result | Expected count |
+| --- | ---: |
+| Both parsers accept with equivalent runtime models | 273 |
+| Both parsers reject | 9 |
+| Rolling accepts and exact rejects | 0 |
+| Rolling rejects and exact accepts | 0 |
+| Both accept with different runtime models | 0 |
+
+The exact counts are tied to the Phase 7d inventory. If the corpus changes
+while Phase 8 is in progress, regenerate the report and explain the delta
+rather than editing the expected counts until the test passes.
+
+#### Phase 8 validation
+
+Run, in order:
+
+1. `cargo fmt --all -- --check`
+2. `cargo check --workspace --all-targets`
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. `cargo test --workspace`
+5. Applicable Rust cross-target checks for files touched by the migration.
+6. From `sdk/node`: `npm run build` and `npm test`.
+7. From `sdk/dotnet`:
+   `dotnet test --solution Microsoft.Mxc.Sdk.slnx`.
+8. `node scripts/versioning/validate-configs.js`.
+9. `node scripts/versioning/check-schema-versions.js`.
+10. `node scripts/versioning/check-contract-codegen.js`.
+11. `node scripts/versioning/check-sdk-types-codegen.js`.
+
+No backend E2E run is required solely for version-declaration changes. Run the
+applicable backend suite if migration changes any policy value or serialized
+shape beyond `version` and `$schema`.
+
+#### Phase 8 exit criteria
+
+- Every config, example, policy fixture, and SDK-produced envelope declares a
+  registered version that can express its complete shape.
+- State-aware and development-only producers emit `0.9.0-alpha`.
+- Stable one-shot producers retain intentional published-version coverage.
+- Every existing `$schema` reference matches the selected declaration.
+- `expected_corpus_divergences` is empty.
+- The differential corpus test reports 273 equivalent accepts, nine shared
+  rejections, and no divergence or runtime-model mismatch.
+- All applicable validation commands pass.
+- No production parser routing, contract shape, adapter behavior, or backend
+  policy behavior changes.
+
 This step is primarily mechanical and is suitable for delegation.
 
 ### Phase 9: Enable exact dispatch
