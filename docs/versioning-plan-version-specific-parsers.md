@@ -2790,7 +2790,7 @@ branch.
 ##### Phase 7.3: Add the private exact-contract path
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7c` at `5a010c82`, stacked on
+`user/gudge/version_specific_config_parsers_phase7c` at `f790ec76`, stacked on
 the Phase 7.2 branch and open as PR #1096. The development commits were
 squashed on 2026-09-03; their original history is retained locally on
 `backup/version_specific_config_parsers_phase7c_presquash-764a9850`.
@@ -2848,7 +2848,7 @@ The Phase 7c development sequence was:
 | 7c-d | Test-only per-version Rust policy builders and rolling parity oracle |
 | 7c-e | SDK, authoring, versioning, and architecture documentation |
 
-The final amended commit is `5a010c82` (`Add private exact contract parsing`).
+The final squashed commit is `f790ec76` (`Add private exact contract parsing`).
 The earlier exact-production variant is retained locally on
 `backup/version_specific_config_parsers_phase7c_exact-production-27717182`.
 
@@ -2859,7 +2859,7 @@ The full Rust workspace format, compile, clippy, and test gates pass. The
 
 ##### Phase 7.4: Build the equivalence harness and classify differences
 
-Status: complete at `01f3c01a` on
+Status: complete at `225977f2` on
 `user/gudge/version_specific_config_parsers_phase7d`, open as PR #1097 and
 stacked on Phase 7.3 PR #1096.
 
