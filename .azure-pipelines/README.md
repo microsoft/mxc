@@ -22,7 +22,7 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 
 1. Resolves x64 and ARM64 Windows `BIN` drops from a BNS `BuildGuid`.
 2. Downloads the required IsolationSession runtime binaries and both WinMDs.
-3. Builds and test-signs x64 and ARM64 MSI/bootstrapper EXE artifacts in
+3. Builds and Microsoft-signs x64 and ARM64 MSI/bootstrapper EXE artifacts in
    parallel.
 4. Builds `Microsoft.Windows.AI.IsolationSession.SDK` from those OS outputs,
    including the x64 activation shim and version-selection sidecar.
@@ -32,9 +32,17 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 Queue parameters include `buildGuid`, `monthId`, and `patch`. The canonical
 release contract is `monthId + patch`, rendered as MSI/bundle `YY.M.patch.0`.
 
-Set `publishToRestrictedFeed` to publish the aggregated SDK NuGet to the
-configured Azure Artifacts feed. Test-signed artifacts must be
-production-signed before public release.
+For non-release validation, keep `signingMode=test`,
+`signingKeyCode=CP-230072`, and `enablePromotion=false`.
+
+For a release-candidate run, set `signingMode=production`,
+`signingKeyCode=CP-230012`, and `enablePromotion=true`. The pipeline builds and
+signs once, then waits on both a manual validation step and the configured
+Azure Pipelines environment before publishing those exact bytes. After
+supported-SF2 qualification, resume the validation and approve the environment
+check. Set `publishToRestrictedFeed` on the same run to publish the aggregated
+SDK NuGet to the configured internal Azure Artifacts feed before the x64 and
+ARM64 MSI release jobs submit the signed installers to ESRP CDN.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull

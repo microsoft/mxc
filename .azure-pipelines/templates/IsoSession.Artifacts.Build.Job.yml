@@ -17,6 +17,12 @@ parameters:
 - name: dropNameOverride
   type: string
   default: ' '
+- name: signingMode
+  type: string
+  default: test
+- name: signingKeyCode
+  type: string
+  default: CP-230072
 - name: dropServiceUri
   type: string
   default: https://microsoft.artifacts.visualstudio.com/DefaultCollection
@@ -84,6 +90,14 @@ jobs:
       if ('${{ parameters.archTag }}' -eq 'arm64' -and '${{ parameters.flavor }}' -ne 'arm64fre') {
           throw 'arm64 must use the arm64fre flavor.'
       }
+      $signingMode = '${{ parameters.signingMode }}'
+      $signingKeyCode = '${{ parameters.signingKeyCode }}'
+      if ($signingMode -eq 'production' -and $signingKeyCode -ne 'CP-230012') {
+          throw 'Production IsoSession releases must use the MXC-approved CP-230012 signing policy.'
+      }
+      if ($signingMode -eq 'test' -and $signingKeyCode -ne 'CP-230072') {
+          throw 'Test IsoSession builds must use the CP-230072 signing policy.'
+      }
       New-Item -ItemType Directory -Force -Path '$(workDirectory)' | Out-Null
       $release | ConvertTo-Json -Depth 10 |
           Set-Content -LiteralPath '$(workDirectory)\release-contract.json' -Encoding UTF8
@@ -136,7 +150,7 @@ jobs:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   - task: EsrpCodeSigning@5
-    displayName: Test sign IsoSession payload
+    displayName: Sign IsoSession payload
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
       AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -153,7 +167,7 @@ jobs:
       inlineOperation: >-
         [
           {
-            "KeyCode": "CP-230072",
+            "KeyCode": "${{ parameters.signingKeyCode }}",
             "OperationCode": "SigntoolSign",
             "ToolName": "sign",
             "ToolVersion": "1.0",
@@ -189,7 +203,7 @@ jobs:
     displayName: Build native MSI
 
   - task: EsrpCodeSigning@5
-    displayName: Test sign MSI
+    displayName: Sign MSI
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
       AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -204,7 +218,7 @@ jobs:
       inlineOperation: >-
         [
           {
-            "KeyCode": "CP-230072",
+            "KeyCode": "${{ parameters.signingKeyCode }}",
             "OperationCode": "SigntoolSign",
             "ToolName": "sign",
             "ToolVersion": "1.0",
@@ -265,7 +279,7 @@ jobs:
     displayName: Detach Burn engine for signing
 
   - task: EsrpCodeSigning@5
-    displayName: Test sign Burn engine
+    displayName: Sign Burn engine
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
       AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -280,7 +294,7 @@ jobs:
       inlineOperation: >-
         [
           {
-            "KeyCode": "CP-230072",
+            "KeyCode": "${{ parameters.signingKeyCode }}",
             "OperationCode": "SigntoolSign",
             "ToolName": "sign",
             "ToolVersion": "1.0",
@@ -329,7 +343,7 @@ jobs:
     displayName: Reattach signed Burn engine
 
   - task: EsrpCodeSigning@5
-    displayName: Test sign complete installer EXE
+    displayName: Sign complete installer EXE
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
       AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -344,7 +358,7 @@ jobs:
       inlineOperation: >-
         [
           {
-            "KeyCode": "CP-230072",
+            "KeyCode": "${{ parameters.signingKeyCode }}",
             "OperationCode": "SigntoolSign",
             "ToolName": "sign",
             "ToolVersion": "1.0",
@@ -368,7 +382,7 @@ jobs:
   - powershell: |
       $ErrorActionPreference = 'Stop'
       $signedFiles = @(
-          Get-ChildItem -LiteralPath '$(payloadBinDirectory)' -File |
+          Get-ChildItem -LiteralPath '$(payloadBinDirectory)' -Recurse -File |
               Where-Object { $_.Extension -in @('.dll', '.exe') }
           Get-ChildItem -LiteralPath '$(installerOutputDirectory)' -File |
               Where-Object { $_.Extension -in @('.msi', '.exe') }
@@ -423,56 +437,3 @@ jobs:
     inputs:
       path: $(artifactDirectory)
       artifactName: $(artifactName)
-
-- job: release_isosession_${{ parameters.archTag }}
-  displayName: Release IsoSession MSI (${{ parameters.archTag }})
-  dependsOn: build_isosession_${{ parameters.archTag }}
-  templateContext:
-    type: releaseJob
-    isProduction: true
-    inputs:
-    - input: pipelineArtifact
-      artifactName: isosession-installers-${{ parameters.archTag }}
-      targetPath: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
-  variables:
-    releaseArtifactDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
-    releaseContentDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/content
-
-  steps:
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $month = '${{ parameters.monthId }}'.Replace('.', '_')
-      $msiName = "IsoSession_${month}_${{ parameters.archTag }}.msi"
-      $msiPath = Join-Path '$(releaseArtifactDirectory)' $msiName
-      if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
-          throw "Signed MSI was not found in the build artifact: $msiPath"
-      }
-
-      $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
-      if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-          throw "MSI signature verification failed for '$msiPath': $($signature.Status)"
-      }
-
-      New-Item -ItemType Directory -Force -Path '$(releaseContentDirectory)' | Out-Null
-      Copy-Item -LiteralPath $msiPath -Destination '$(releaseContentDirectory)' -Force
-    displayName: Stage signed MSI for release
-
-  - task: EsrpRelease@12
-    displayName: Publish MSI to ESRP CDN
-    inputs:
-      connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-      usemanagedidentity: false
-      keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-      authcertname: ${{ parameters.ESRPInfo.authCertName }}
-      signcertname: ${{ parameters.ESRPInfo.signCertName }}
-      clientid: ${{ parameters.ESRPInfo.clientId }}
-      intent: filedownloadlinkgeneration
-      contenttype: binaries
-      contentsource: Folder
-      folderlocation: $(releaseContentDirectory)
-      owners: ${{ parameters.ESRPInfo.OwnersEmail }}
-      approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
-      waitforreleasecompletion: true
-      serviceendpointurl: https://api.esrp.microsoft.com
-      mainpublisher: ESRPRELPACMAN
-      domaintenantid: ${{ parameters.ESRPInfo.tenantId }}

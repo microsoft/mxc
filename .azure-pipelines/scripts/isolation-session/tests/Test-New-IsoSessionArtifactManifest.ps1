@@ -227,6 +227,22 @@ try {
         throw 'Artifact manifest did not enumerate the expected final outputs and provenance files.'
     }
 
+    $productionValidationFailed = $false
+    try {
+        & $manifestScript `
+            -ArtifactDirectory $artifactDir `
+            -MonthId $releaseInfo.monthId `
+            -Patch $releaseInfo.patch `
+            -SigningMode production
+    }
+    catch {
+        $productionValidationFailed =
+            $_.Exception.Message -match 'Production artifact signature verification failed|Production signature evidence is invalid'
+    }
+    if (-not $productionValidationFailed) {
+        throw 'Production signing mode did not reject non-production signature evidence.'
+    }
+
     Write-Host 'IsoSession artifact manifest tests passed.'
 }
 finally {

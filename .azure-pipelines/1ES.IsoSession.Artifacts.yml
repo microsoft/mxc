@@ -38,6 +38,17 @@ parameters:
   displayName: Exact ARM64 BIN drop name (optional)
   type: string
   default: ' '
+- name: signingMode
+  displayName: Artifact signing mode
+  type: string
+  default: test
+  values:
+  - test
+  - production
+- name: signingKeyCode
+  displayName: ESRP signing policy key code
+  type: string
+  default: CP-230072
 - name: publishToRestrictedFeed
   displayName: Publish the aggregated SDK NuGet to Azure Artifacts
   type: boolean
@@ -46,6 +57,21 @@ parameters:
   displayName: Azure Artifacts NuGet v3 feed URL for the final SDK package
   type: string
   default: https://pkgs.dev.azure.com/microsoft/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+- name: enablePromotion
+  displayName: Hold this run for approved internal publication
+  type: boolean
+  default: false
+- name: promotionEnvironment
+  displayName: Azure Pipelines environment that approves internal publication
+  type: string
+  default: IsoSession-Internal-Release
+- name: manualValidationNotifyUsers
+  displayName: Manual validation notification recipients
+  type: string
+  default: |
+    anisk@microsoft.com
+    sodas@microsoft.com
+    jwhites@microsoft.com
 - name: ESRPInfo
   displayName: ESRP release configuration
   type: object
@@ -83,6 +109,8 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.x64DropNameOverride }}
+          signingMode: ${{ parameters.signingMode }}
+          signingKeyCode: ${{ parameters.signingKeyCode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
@@ -94,6 +122,8 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.arm64DropNameOverride }}
+          signingMode: ${{ parameters.signingMode }}
+          signingKeyCode: ${{ parameters.signingKeyCode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - job: aggregate_isosession_artifacts
@@ -128,7 +158,7 @@ extends:
                 -OutDir '$(artifactDirectory)' `
                 -MonthId '${{ parameters.monthId }}' `
                 -Patch ${{ parameters.patch }} `
-                -SigningMode test
+                -SigningMode '${{ parameters.signingMode }}'
           displayName: Build aggregate NuGet and manifests
 
         - task: 1ES.PublishPipelineArtifact@1
@@ -137,48 +167,113 @@ extends:
             path: $(artifactDirectory)
             artifactName: $(artifactName)
 
-    - ${{ if eq(parameters.publishToRestrictedFeed, true) }}:
-      - stage: Publish_IsoSession_SDK
-        displayName: Publish IsoSession SDK NuGet
+    - ${{ if eq(parameters.enablePromotion, true) }}:
+      - stage: Promote_IsoSession_Artifacts
+        displayName: Promote approved IsoSession artifacts
         dependsOn: Build_IsoSession_Artifacts
         jobs:
-        - deployment: publish_isosession_sdk
-          displayName: Publish restricted SDK package
-          environment: IsoSession-Restricted-Feed
+        - job: wait_for_isosession_qualification
+          displayName: Wait for supported-SF2 qualification
+          pool: server
+          timeoutInMinutes: 4320
+          steps:
+          - task: ManualValidation@0
+            timeoutInMinutes: 4200
+            inputs:
+              notifyUsers: ${{ parameters.manualValidationNotifyUsers }}
+              instructions: >-
+                Resume only after the exact artifacts from this pipeline run pass
+                supported-SF2 VM qualification, including proof that
+                IsoSessionCore.dll is absent from the monthly payload and loads
+                from System32.
+              onTimeout: reject
+
+        - deployment: approve_isosession_internal_release
+          displayName: Approve qualified internal release
+          dependsOn: wait_for_isosession_qualification
+          environment: ${{ parameters.promotionEnvironment }}
           strategy:
             runOnce:
               deploy:
                 steps:
-                - checkout: self
-
-                - task: NuGetToolInstaller@1
-                  displayName: Install NuGet client
-
-                - task: NuGetAuthenticate@1
-                  displayName: Authenticate Azure Artifacts
-
-                - task: DownloadPipelineArtifact@2
-                  displayName: Download aggregated IsoSession artifact
-                  inputs:
-                    artifact: isosession-artifacts
-                    path: $(Pipeline.Workspace)\isosession-publish
+                - checkout: none
 
                 - powershell: |
-                    $ErrorActionPreference = 'Stop'
-                    if ([string]::IsNullOrWhiteSpace('${{ parameters.publishFeedUrl }}')) {
-                        throw 'publishFeedUrl must be supplied when publishToRestrictedFeed=true.'
-                    }
-                    $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
-                    $package = Get-ChildItem `
-                        -LiteralPath '$(Pipeline.Workspace)\isosession-publish' `
-                        -File `
-                        -Filter '*.nupkg' |
-                            Select-Object -First 1
-                    if (-not $package) {
-                        throw 'The aggregated artifact does not contain a NuGet package to publish.'
-                    }
-                    & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Publish-IsoSessionNuGet.ps1' `
-                        -NuGetExe $nugetExe `
-                        -PackagePath $package.FullName `
-                        -FeedUrl '${{ parameters.publishFeedUrl }}'
-                  displayName: Publish the final SDK NuGet
+                    Write-Host 'Internal release approval recorded.'
+                    Write-Host 'Approve only after the matching MSI and SDK hashes pass supported-SF2 VM qualification.'
+                  displayName: Record release approval
+
+        - job: validate_and_publish_isosession_sdk
+          displayName: Validate and publish the internal SDK package
+          dependsOn: approve_isosession_internal_release
+          variables:
+            publishDirectory: $(Pipeline.Workspace)/isosession-publish
+          steps:
+          - checkout: self
+
+          - task: DownloadPipelineArtifact@2
+            displayName: Download aggregated IsoSession artifact
+            inputs:
+              artifact: isosession-artifacts
+              path: $(publishDirectory)
+
+          - powershell: |
+              $ErrorActionPreference = 'Stop'
+              $manifestPath = Join-Path '$(publishDirectory)' 'artifact-manifest.json'
+              if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                  throw "Artifact manifest not found: '$manifestPath'."
+              }
+              $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+              if (-not $manifest.signing.productionReady) {
+                  throw 'Internal promotion requires production-signed artifacts.'
+              }
+              $packagePath = Join-Path '$(publishDirectory)' $manifest.nuget.packageFileName
+              if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+                  throw "Manifest-selected NuGet package not found: '$packagePath'."
+              }
+              $packageRecord = $manifest.artifacts |
+                  Where-Object { $_.relativePath -eq $manifest.nuget.packageFileName } |
+                  Select-Object -First 1
+              if (-not $packageRecord) {
+                  throw 'Artifact manifest does not contain the SDK NuGet hash.'
+              }
+              $actualHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actualHash -ne $packageRecord.sha256) {
+                  throw 'SDK NuGet hash does not match the approved artifact manifest.'
+              }
+              Write-Host "##vso[task.setvariable variable=packagePath]$packagePath"
+              Write-Host "Validated $($manifest.release.canonicalRelease) SDK hash $actualHash."
+            displayName: Verify approved SDK bytes
+
+          - ${{ if eq(parameters.publishToRestrictedFeed, true) }}:
+            - task: NuGetToolInstaller@1
+              displayName: Install NuGet client
+
+            - task: NuGetAuthenticate@1
+              displayName: Authenticate Azure Artifacts
+
+            - powershell: |
+                $ErrorActionPreference = 'Stop'
+                if ([string]::IsNullOrWhiteSpace('${{ parameters.publishFeedUrl }}')) {
+                    throw 'publishFeedUrl must be supplied when publishToRestrictedFeed=true.'
+                }
+                $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
+                & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Publish-IsoSessionNuGet.ps1' `
+                    -NuGetExe $nugetExe `
+                    -PackagePath '$(packagePath)' `
+                    -FeedUrl '${{ parameters.publishFeedUrl }}'
+              displayName: Publish the final SDK NuGet
+
+        - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
+          parameters:
+            archTag: x64
+            monthId: ${{ parameters.monthId }}
+            dependsOnJob: validate_and_publish_isosession_sdk
+            ESRPInfo: ${{ parameters.ESRPInfo }}
+
+        - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
+          parameters:
+            archTag: arm64
+            monthId: ${{ parameters.monthId }}
+            dependsOnJob: validate_and_publish_isosession_sdk
+            ESRPInfo: ${{ parameters.ESRPInfo }}

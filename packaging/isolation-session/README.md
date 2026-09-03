@@ -52,12 +52,16 @@ reference with a durable upstream commit identifier before a public release.
 
 ## Release status
 
-The current pipeline produces **test-signed installer and SDK artifacts**. It
-can optionally publish the SDK to the restricted Azure Artifacts feed, but
-does not publish to NuGet.org or GitHub Releases. Public release requires:
+The pipeline supports both test-signed validation artifacts and
+production-signed release candidates. Release-candidate runs use MXC's approved
+`CP-230012` production signing policy, build and sign once, publish the
+immutable pipeline artifacts, and then wait on the configured Azure Pipelines
+manual validation and environment approval. Resume and approve those gates only
+after supported-SF2 qualification confirms the matching MSI and SDK hashes and
+the inbox `IsoSessionCore.dll` contract.
 
-- production signing of the payloads and installers;
-- review of the copied license and bootstrapper assets;
-- a separate approved public-release pipeline.
-
-A successful build is not evidence that these release gates have been met.
+After approval, the same run can publish the SDK to the restricted Azure
+Artifacts feed and submit the x64 and ARM64 MSIs to ESRP CDN. It does not
+publish to NuGet.org or GitHub Releases. Public release still requires review
+of the copied license/bootstrapper assets, redistribution approval, compliance
+evidence, and a separately approved public-promotion path.

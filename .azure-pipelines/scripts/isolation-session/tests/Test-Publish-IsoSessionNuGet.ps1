@@ -56,6 +56,7 @@ exit 0
     }
 
     Write-Host 'IsoSession NuGet publish tests passed.'
+    exit 0
 }
 finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {

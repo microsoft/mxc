@@ -299,6 +299,27 @@ $signatureEvidence = [ordered]@{
         ConvertFrom-Json
 }
 
+if ($SigningMode -eq 'production') {
+    $invalidSignedArtifacts = @(
+        $files |
+            Where-Object {
+                $_.authenticode -and
+                $_.authenticode.status -ne [System.Management.Automation.SignatureStatus]::Valid.ToString()
+            })
+    if ($invalidSignedArtifacts.Count -gt 0) {
+        throw "Production artifact signature verification failed: $($invalidSignedArtifacts.relativePath -join ', ')."
+    }
+
+    foreach ($arch in @('x64', 'arm64')) {
+        $invalidEvidence = @(
+            $signatureEvidence[$arch] |
+                Where-Object { $_.status -ne [System.Management.Automation.SignatureStatus]::Valid.ToString() })
+        if ($invalidEvidence.Count -gt 0) {
+            throw "Production signature evidence is invalid for '$arch': $($invalidEvidence.name -join ', ')."
+        }
+    }
+}
+
 $manifest = [ordered]@{
     schema = 'mxc.isosession-artifacts/2'
     generatedUtc = (Get-Date).ToUniversalTime().ToString('o')

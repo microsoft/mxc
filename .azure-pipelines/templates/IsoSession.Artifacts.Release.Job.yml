@@ -1,0 +1,75 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: archTag
+  type: string
+- name: monthId
+  type: string
+- name: dependsOnJob
+  type: string
+- name: ESRPInfo
+  type: object
+  default:
+    serviceName: ''
+    tenantId: ''
+    azureKeyVaultName: ''
+    authCertName: ''
+    signCertName: ''
+    clientId: ''
+    ApproversEmail: ''
+    OwnersEmail: ''
+
+jobs:
+- job: release_isosession_${{ parameters.archTag }}
+  displayName: Release IsoSession MSI (${{ parameters.archTag }})
+  dependsOn: ${{ parameters.dependsOnJob }}
+  templateContext:
+    type: releaseJob
+    isProduction: true
+    inputs:
+    - input: pipelineArtifact
+      artifactName: isosession-installers-${{ parameters.archTag }}
+      targetPath: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
+  variables:
+    releaseArtifactDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
+    releaseContentDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/content
+
+  steps:
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $month = '${{ parameters.monthId }}'.Replace('.', '_')
+      $msiName = "IsoSession_${month}_${{ parameters.archTag }}.msi"
+      $msiPath = Join-Path '$(releaseArtifactDirectory)' $msiName
+      if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
+          throw "Signed MSI was not found in the build artifact: $msiPath"
+      }
+
+      $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
+      if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+          throw "MSI signature verification failed for '$msiPath': $($signature.Status)"
+      }
+
+      New-Item -ItemType Directory -Force -Path '$(releaseContentDirectory)' | Out-Null
+      Copy-Item -LiteralPath $msiPath -Destination '$(releaseContentDirectory)' -Force
+    displayName: Stage approved signed MSI for release
+
+  - task: EsrpRelease@12
+    displayName: Publish MSI to ESRP CDN
+    inputs:
+      connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+      usemanagedidentity: false
+      keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      signcertname: ${{ parameters.ESRPInfo.signCertName }}
+      clientid: ${{ parameters.ESRPInfo.clientId }}
+      intent: filedownloadlinkgeneration
+      contenttype: binaries
+      contentsource: Folder
+      folderlocation: $(releaseContentDirectory)
+      owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+      approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+      waitforreleasecompletion: true
+      serviceendpointurl: https://api.esrp.microsoft.com
+      mainpublisher: ESRPRELPACMAN
+      domaintenantid: ${{ parameters.ESRPInfo.tenantId }}

@@ -29,8 +29,25 @@ Set-StrictMode -Version Latest
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $installerDir = Split-Path -Parent $scriptDir
 $makeInstaller = Join-Path $installerDir 'makeinstaller.ps1'
-$payloadX64 = Join-Path $scriptDir 'payload\x64'
-$payloadArm64 = Join-Path $scriptDir 'payload\arm64'
+$payloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mkinst-payload-" + [Guid]::NewGuid())
+$payloadX64 = Join-Path $payloadRoot 'x64'
+$payloadArm64 = Join-Path $payloadRoot 'arm64'
+
+$requiredBinaries = @(
+    'IsoSessionServer.dll',
+    'IsoSessionClient.dll',
+    'IsoSessionApp.dll',
+    'IsoSessionProxyStub.dll',
+    'IsoSessionCli.exe',
+    'IsolationProxy.exe'
+)
+foreach ($payloadDirectory in @($payloadX64, $payloadArm64)) {
+    New-Item -ItemType Directory -Path $payloadDirectory -Force | Out-Null
+    foreach ($binary in $requiredBinaries) {
+        Set-Content -LiteralPath (Join-Path $payloadDirectory $binary) `
+            -Value "placeholder-$binary" -Encoding ASCII
+    }
+}
 
 $script:failures = [System.Collections.Generic.List[string]]::new()
 $script:passed = 0
@@ -81,6 +98,7 @@ function Invoke-MakeInstaller([string[]]$scriptArgs, [hashtable]$envOverrides) {
     }
 }
 
+try {
 Write-Host "`n=== Required-input failure modes (must all be NONZERO exit) ===" -ForegroundColor Cyan
 
 # 1. Missing dotnet on PATH -> nonzero exit.
@@ -417,3 +435,7 @@ if ($script:failures.Count -gt 0) {
     exit 1
 }
 exit 0
+}
+finally {
+    Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
