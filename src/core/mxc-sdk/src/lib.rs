@@ -207,7 +207,7 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 ///
 /// `experimental` is the in-process equivalent of the executor's
 /// `--experimental` flag. The experimental backends — WindowsSandbox,
-/// IsolationSession and WSLc — are refused with
+/// IsolationSession, WSLc, and Lxc — are refused with
 /// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.

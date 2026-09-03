@@ -1,0 +1,9 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "filesystem": {
+    "readonlyPaths": ["/mxc-e2e-ro"],
+    "deniedPaths": ["/mxc-e2e-denied"]
+  }
+}

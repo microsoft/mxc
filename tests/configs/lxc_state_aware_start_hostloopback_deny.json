@@ -1,0 +1,14 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}

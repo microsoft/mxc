@@ -1,0 +1,16 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "provision",
+  "containment": "lxc",
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "lxc": {
+      "provision": {
+        "distribution": "alpine",
+        "release": "3.23"
+      }
+    }
+  }
+}

@@ -277,6 +277,17 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
           });
           return result.sandboxId;
         }
+        case 'lxc': {
+          const result = await provisionSandbox(
+            'lxc',
+            {
+              distribution: 'alpine',
+              release: '3.23',
+            },
+            { experimental: true },
+          );
+          return result.sandboxId;
+        }
         default: {
           const unhandled: never = backend;
           throw new Error(`probeStateAwareRuntime: unhandled backend ${String(unhandled)}`);

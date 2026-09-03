@@ -358,8 +358,7 @@ let outcome = exec_attached(
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+Four backends implement the state-aware lifecycle: IsolationSession, WSLc, and Windows Sandbox (Windows-only), and Lxc (Linux-only).  Only IsolationSession serves `exec_sandbox`.
 
 `exec_attached` is verified against **IsolationSession** only.
 

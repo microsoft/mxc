@@ -201,6 +201,17 @@
           ],
           "description": "IsolationSession backend config (Windows)."
         },
+        "lxc": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LxcExperimental"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "LXC backend config (Linux)."
+        },
         "seatbelt": {
           "anyOf": [
             {
@@ -383,6 +394,43 @@
     "Lxc": {
       "additionalProperties": false,
       "description": "LXC container settings.",
+      "properties": {
+        "distribution": {
+          "description": "Distribution image (e.g. `alpine`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "Distribution release (e.g. `3.23`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LxcExperimental": {
+      "description": "State-aware LXC configuration. Only provision takes a config payload.",
+      "properties": {
+        "provision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LxcProvisionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "State-aware provision-phase configuration."
+        }
+      },
+      "type": "object"
+    },
+    "LxcProvisionPhase": {
+      "description": "Provision-phase LXC configuration, separate from the stable top-level `lxc` section because this surface is experimental. Filesystem mounts and network policy come from the top-level `filesystem` and `network` sections.",
       "properties": {
         "distribution": {
           "description": "Distribution image (e.g. `alpine`).",

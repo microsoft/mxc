@@ -62,6 +62,7 @@ fn require_experimental_optin(
         wxc_common::models::ContainmentBackend::WindowsSandbox
             | wxc_common::models::ContainmentBackend::IsolationSession
             | wxc_common::models::ContainmentBackend::Wslc
+            | wxc_common::models::ContainmentBackend::Lxc
     ) && !parsed.request.experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
@@ -92,6 +93,14 @@ pub fn run_state_aware(
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
+        #[cfg(target_os = "linux")]
+        wxc_common::models::ContainmentBackend::Lxc => {
+            lxc_common::state_aware::enforce_schema_version_floor(
+                parsed.request.schema_version.as_str(),
+            )?;
+            let mut runner = lxc_common::state_aware::LxcStateAwareRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
@@ -150,10 +159,51 @@ pub fn exec_state_aware(
         wxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
-        _ => Err(MxcError::unsupported_phase(format!(
-            "backend {:?} does not implement the state-aware lifecycle",
-            backend
-        ))),
+        _ => Err(exec_unsupported_error(&backend)),
+    }
+}
+
+/// The error returned when a backend cannot serve a **streaming** exec.
+///
+/// Two distinct situations reach here and the caller needs to tell them apart:
+///
+/// - The backend has no state-aware lifecycle at all, so nothing about it works
+///   through these APIs.
+/// - The backend does implement the lifecycle ([`run_state_aware`] dispatches
+///   provision/start/exec/stop/deprovision for it) but has no streaming
+///   [`SandboxProcess`], so only this one API is unavailable.
+///
+/// LXC is the second case. Reporting it as "does not implement the state-aware
+/// lifecycle" sent callers off to debug a provision path that works fine, so
+/// the message names the real gap and points at the API that does work.
+fn exec_unsupported_error(backend: &wxc_common::models::ContainmentBackend) -> MxcError {
+    if backend_has_state_aware_lifecycle(backend) {
+        MxcError::unsupported_phase(format!(
+            "backend {backend:?} implements the state-aware lifecycle but not streaming exec; \
+             use the non-streaming exec phase instead"
+        ))
+    } else {
+        MxcError::unsupported_phase(format!(
+            "backend {backend:?} does not implement the state-aware lifecycle"
+        ))
+    }
+}
+
+/// Whether `backend` has a `StatefulSandboxBackend` impl wired into
+/// [`run_state_aware`] on this target. Kept next to that `match` so the two stay
+/// in step — a backend added there without being added here would be described
+/// by the wrong error.
+fn backend_has_state_aware_lifecycle(backend: &wxc_common::models::ContainmentBackend) -> bool {
+    match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => true,
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        wxc_common::models::ContainmentBackend::IsolationSession => true,
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => true,
+        #[cfg(target_os = "linux")]
+        wxc_common::models::ContainmentBackend::Lxc => true,
+        _ => false,
     }
 }
 
@@ -324,7 +374,7 @@ fn exec_state_aware_attached_with(
 /// or [`exec_state_aware_json`] to drive the pipes yourself.
 ///
 /// `experimental` opts in to the experimental backends (WindowsSandbox,
-/// IsolationSession, WSLc); without it they are refused with
+/// IsolationSession, WSLc, Lxc); without it they are refused with
 /// `backend_unavailable` before any work is done.
 pub fn run_state_aware_json(
     request_json: &str,
@@ -399,6 +449,50 @@ mod tests {
     }
 
     #[test]
+    fn lxc_state_aware_requires_experimental_optin() {
+        let parsed = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Provision,
+            containment: Some(ContainmentBackend::Lxc),
+            sandbox_id: None,
+            correlation_vector: None,
+            experimental_raw: None,
+            source_text: None,
+        };
+
+        let error = run_state_aware(parsed, false).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("experimental"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn exec_error_distinguishes_missing_streaming_from_missing_lifecycle() {
+        // LXC dispatches the lifecycle but has no streaming SandboxProcess. The
+        // old blanket message sent callers off to debug a provision path that
+        // works, so the two cases must read differently.
+        let lxc = exec_unsupported_error(&ContainmentBackend::Lxc);
+        assert_eq!(lxc.code, MxcErrorCode::UnsupportedPhase);
+        assert!(
+            lxc.message.contains("not streaming exec"),
+            "expected the streaming-specific message, got {:?}",
+            lxc.message
+        );
+        assert!(!lxc.message.contains("does not implement"));
+
+        let bwrap = exec_unsupported_error(&ContainmentBackend::Bubblewrap);
+        assert_eq!(bwrap.code, MxcErrorCode::UnsupportedPhase);
+        assert!(
+            bwrap
+                .message
+                .contains("does not implement the state-aware lifecycle"),
+            "expected the no-lifecycle message, got {:?}",
+            bwrap.message
+        );
+    }
+
+    #[test]
     fn exec_experimental_backend_requires_optin() {
         // The streaming exec entry point applies the same opt-in gate as the
         // envelope dispatcher: a `wslc:` exec without the opt-in must be
@@ -416,6 +510,29 @@ mod tests {
         let error = match exec_state_aware(parsed) {
             Ok(_) => {
                 panic!("expected the experimental gate to reject a wslc exec without the opt-in")
+            }
+            Err(e) => e,
+        };
+
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("experimental"));
+    }
+
+    #[test]
+    fn exec_lxc_experimental_backend_requires_optin() {
+        let parsed = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Exec,
+            containment: Some(ContainmentBackend::Lxc),
+            sandbox_id: Some("lxc:00000000000000000000000000000000".to_string()),
+            correlation_vector: None,
+            experimental_raw: None,
+            source_text: None,
+        };
+
+        let error = match exec_state_aware(parsed) {
+            Ok(_) => {
+                panic!("expected the experimental gate to reject an lxc exec without the opt-in")
             }
             Err(e) => e,
         };

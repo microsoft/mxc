@@ -283,6 +283,19 @@ impl Logger {
         &self.buffer
     }
 
+    /// Switch to console logging, handing back whatever was buffered first.
+    ///
+    /// The mode has to be chosen before the request is parsed, but only the
+    /// parsed request says whether stdout is a free-form debug stream (one-shot)
+    /// or a strict JSON channel (state-aware). Starting buffered and promoting
+    /// once the answer is known keeps a debug run's diagnostics off stdout until
+    /// it is known to be safe to put them there; the returned buffer is what the
+    /// caller must emit so nothing logged before the switch is lost.
+    pub fn promote_to_console(&mut self) -> String {
+        self.mode = Mode::Console;
+        std::mem::take(&mut self.buffer)
+    }
+
     // -----------------------------------------------------------------------
     // Diagnostic sink internals
     // -----------------------------------------------------------------------
@@ -350,6 +363,24 @@ impl fmt::Write for Logger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn promotion_to_console_hands_back_everything_buffered_first() {
+        // The mode is chosen before the request is parsed, so a debug run
+        // buffers until the phase is known. Whatever accumulated in the
+        // meantime is the caller's to emit -- dropping it would lose the
+        // parser's warnings, and leaving it would print them twice.
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.log_line("a parser warning");
+
+        let carried = logger.promote_to_console();
+
+        assert_eq!(carried, "a parser warning\n");
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the buffer must be emptied so the switch cannot duplicate output"
+        );
+    }
 
     #[test]
     fn security_warnings_are_retained_outside_the_debug_buffer() {

@@ -80,6 +80,10 @@ export interface Experimental {
    */
   isolation_session?: IsolationSession | null;
   /**
+   * LXC backend config (Linux).
+   */
+  lxc?: LxcExperimental | null;
+  /**
    * Seatbelt backend config (pre-promotion alias).
    */
   seatbelt?: Seatbelt | null;
@@ -187,6 +191,32 @@ export interface Lxc {
    * Distribution release (e.g. `3.23`).
    */
   release?: string | null;
+}
+
+/**
+ * State-aware LXC configuration. Only provision takes a config payload.
+ */
+export interface LxcExperimental {
+  /**
+   * State-aware provision-phase configuration.
+   */
+  provision?: LxcProvisionPhase | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Provision-phase LXC configuration, separate from the stable top-level `lxc` section because this surface is experimental. Filesystem mounts and network policy come from the top-level `filesystem` and `network` sections.
+ */
+export interface LxcProvisionPhase {
+  /**
+   * Distribution image (e.g. `alpine`).
+   */
+  distribution?: string | null;
+  /**
+   * Distribution release (e.g. `3.23`).
+   */
+  release?: string | null;
+  [k: string]: unknown;
 }
 
 /**

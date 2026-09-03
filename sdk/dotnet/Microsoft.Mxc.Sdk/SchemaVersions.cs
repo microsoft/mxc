@@ -25,4 +25,7 @@ public static class SchemaVersions
 
     /// <summary>Default state-aware version for WSLC.</summary>
     public const string WslcStateAware = "0.8.0-alpha";
+
+    /// <summary>Default state-aware version for LXC.</summary>
+    public const string LxcStateAware = "0.8.0-alpha";
 }

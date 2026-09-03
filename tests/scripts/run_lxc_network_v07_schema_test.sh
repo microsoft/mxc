@@ -108,27 +108,37 @@ assert_no_new_mxc_chains ip6tables "$CHAINS_BEFORE_V6"
 echo "PASS: the 0.7 chain kept its DNS exemption."
 
 # ---------------------------------------------------------------------------
-# Case 2: capabilities mode installs nothing
+# Case 2: a stated posture the default mode cannot deliver is refused
 # ---------------------------------------------------------------------------
 
 echo "--- capabilities case: 0.7 defaultPolicy block, enforcementMode absent ---"
 
-CAP_OUTPUT=$("$LXC_EXEC" --debug "$CAPABILITIES_CONFIG" 2>&1 || true)
+CAP_OUTPUT=""
+CAP_STATUS=0
+CAP_OUTPUT=$("$LXC_EXEC" --debug "$CAPABILITIES_CONFIG" 2>&1) || CAP_STATUS=$?
 echo "$CAP_OUTPUT"
 
-# `capabilities` is the 0.7 default, so this is what every config that never
-# wrote `enforcementMode` gets. Installing a chain here would put a firewall on
-# configs that predate the field.
-if ! echo "$CAP_OUTPUT" | grep -Fq "requests no firewall; skipping iptables"; then
-    fail "the default enforcement mode did not skip the firewall. A 0.7 config that never asked for one is being given a chain."
-fi
+# This fixture asks for `defaultPolicy: block` and names a blocked host, and
+# `capabilities` is the 0.7 default it therefore lands in. LXC filters with
+# iptables and has nothing else to enforce with, so that combination installs no
+# rule in either direction and the container gets the host's open network. The
+# refusal is what tells the caller their block list is not in effect.
+#
+# The control for this -- a 0.7 config that names no network posture at all,
+# which still runs -- is in run_lxc_config_refusal_test.sh. It is what keeps
+# this refusal from swallowing every config written before the field existed.
+[ "$CAP_STATUS" -ne 0 ] \
+    || fail "a config asking for a block policy under the default enforcement mode exited 0; its block list is not being enforced and nothing said so."
 
-if ! echo "$CAP_OUTPUT" | grep -Fq "MXC_WORKLOAD_RAN"; then
-    fail "the workload did not run; skipping the firewall must remain a successful no-op."
+echo "$CAP_OUTPUT" | grep -Fq "names a posture LXC cannot enforce" \
+    || fail "refused, but the message never said the enforcement mode was the problem."
+
+if echo "$CAP_OUTPUT" | grep -Fq "MXC_WORKLOAD_RAN"; then
+    fail "the workload ran with an unenforced network policy."
 fi
 
 assert_no_new_mxc_chains iptables "$CHAINS_BEFORE_V4"
 assert_no_new_mxc_chains ip6tables "$CHAINS_BEFORE_V6"
 
-echo "PASS: the default 0.7 enforcement mode installed nothing."
+echo "PASS: a posture the default 0.7 enforcement mode cannot deliver was refused."
 echo "LXC schema 0.7 enforcement test complete."

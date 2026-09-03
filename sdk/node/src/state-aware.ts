@@ -102,9 +102,9 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 /**
  * Streams a script execution inside a started sandbox. Returns an
  * `IPty` for live stdout/stderr/exit handling, mirroring `spawnSandbox`.
- * On dispatch failure the executor emits a single error envelope on stdout;
- * the SDK does not parse it here — callers consuming `IPty.onData` see the
- * raw bytes. Use `execInSandboxAsync` when typed-error throwing is needed.
+ * On dispatch failure the executor emits a single error envelope on stdout
+ * (§7.3); the SDK does not parse it here — callers consuming `IPty.onData` see
+ * the raw bytes. Use `execInSandboxAsync` when typed-error throwing is needed.
  */
 export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
@@ -144,8 +144,9 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
 /**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Throws an `MxcError` (with the wire-format `code`
- * field set) when the executor reports a dispatch failure (recognised by
- * exit != 0 and stdout being a complete `{error}` envelope).
+ * field set) when the executor reports a dispatch failure, recognised by
+ * exit != 0 together with a complete `{error}` envelope on stdout, which §7.3
+ * reserves for the response envelope in every backend.
  */
 export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
@@ -163,6 +164,9 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
 
   if (exitCode !== 0) {
+    // The cross-backend contract (§7.3) reserves stdout for the response
+    // envelope in every phase, so a dispatch failure is always found there and
+    // no backend needs its own channel rule.
     const errorEnvelope = tryParseErrorEnvelope(stdout);
     if (errorEnvelope) {
       throw mxcErrorFromEnvelope(errorEnvelope.error);

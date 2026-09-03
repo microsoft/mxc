@@ -29,6 +29,9 @@ public static class MxcLifecycle
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
 
+    /// <summary>Default state-aware schema for LXC.</summary>
+    public const string LxcStateAwareVersion = SchemaVersions.LxcStateAware;
+
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
 
@@ -37,6 +40,9 @@ public static class MxcLifecycle
 
     /// <summary>WSLC containment wire key.</summary>
     public const string WslcContainment = "wslc";
+
+    /// <summary>LXC containment wire key.</summary>
+    public const string LxcContainment = "lxc";
 
     private const int ExperimentalOptIn = 1;
 
@@ -386,15 +392,18 @@ public static class MxcLifecycle
         StateAwareContainment.IsolationSession => IsolationSessionContainment,
         StateAwareContainment.WindowsSandbox => WindowsSandboxContainment,
         StateAwareContainment.Wslc => WslcContainment,
+        StateAwareContainment.Lxc => LxcContainment,
         _ => throw new MxcException(
             ErrorCode.UnsupportedContainment,
             $"unknown state-aware containment '{containment}'"),
     };
 
-    private static string DefaultVersion(StateAwareContainment containment) =>
-        containment == StateAwareContainment.Wslc
-            ? WslcStateAwareVersion
-            : StateAwareVersion;
+    private static string DefaultVersion(StateAwareContainment containment) => containment switch
+    {
+        StateAwareContainment.Wslc => WslcStateAwareVersion,
+        StateAwareContainment.Lxc => LxcStateAwareVersion,
+        _ => StateAwareVersion,
+    };
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,
@@ -459,6 +468,7 @@ public static class MxcLifecycle
             "iso" => StateAwareContainment.IsolationSession,
             "wsb" => StateAwareContainment.WindowsSandbox,
             "wslc" => StateAwareContainment.Wslc,
+            "lxc" => StateAwareContainment.Lxc,
             _ => throw new MxcException(
                 ErrorCode.UnsupportedContainment,
                 $"no state-aware backend is registered for sandbox id '{id.Value}'"),

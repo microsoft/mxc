@@ -64,6 +64,22 @@ const WSLC_REQUEST_JSON: &str = r#"{
     }
 }"#;
 
+const LXC_PROVISION_REQUEST_JSON: &str = r#"{
+    "version": "0.9.0-alpha",
+    "containment": "lxc",
+    "process": {
+        "commandLine": "echo hello"
+    },
+    "experimental": {
+        "lxc": {
+            "provision": {
+                "distribution": "alpine",
+                "release": "3.23"
+            }
+        }
+    }
+}"#;
+
 #[test]
 fn windows_sandbox_maps_expected_wire_fields() {
     let wire = adapt(WINDOWS_SANDBOX_REQUEST_JSON);
@@ -89,6 +105,7 @@ fn windows_sandbox_maps_expected_wire_fields() {
     assert!(experimental.test.is_none());
     assert!(experimental.wslc.is_none());
     assert!(experimental.isolation_session.is_none());
+    assert!(experimental.lxc.is_none());
     assert!(experimental.seatbelt.is_none());
     assert!(experimental.telemetry.is_none());
 }
@@ -110,6 +127,7 @@ fn test_feature_and_telemetry_map_expected_wire_fields() {
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.wslc.is_none());
     assert!(experimental.isolation_session.is_none());
+    assert!(experimental.lxc.is_none());
     assert!(experimental.seatbelt.is_none());
 }
 
@@ -156,8 +174,23 @@ fn wslc_maps_expected_wire_fields() {
     assert!(experimental.test.is_none());
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.isolation_session.is_none());
+    assert!(experimental.lxc.is_none());
     assert!(experimental.seatbelt.is_none());
     assert!(experimental.telemetry.is_none());
+}
+
+#[test]
+fn lxc_is_rejected_as_a_one_shot_experimental_section() {
+    // A one-shot run never executes the provision phase this section configures,
+    // so accepting it would take a container image the caller asked for and
+    // silently drop it.
+    let error = serde_json::from_str::<super::contract::OneShotRequest>(LXC_PROVISION_REQUEST_JSON)
+        .expect_err("experimental.lxc must not be accepted on a one-shot request");
+
+    assert!(
+        error.to_string().contains("lxc"),
+        "the rejection should name the offending field, got: {error}"
+    );
 }
 
 #[test]

@@ -586,6 +586,8 @@ pub struct Experimental {
     pub wslc: Option<Wslc>,
     /// IsolationSession backend config (Windows).
     pub isolation_session: Option<IsolationSession>,
+    /// LXC backend config (Linux).
+    pub lxc: Option<LxcExperimental>,
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
@@ -733,6 +735,28 @@ pub struct IsolationSessionProvisionPhase {
     /// An unpackaged application may pass any string. Carried inside the `sandboxId`
     /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
+}
+
+/// State-aware LXC configuration. Only provision takes a config payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LxcExperimental {
+    /// State-aware provision-phase configuration.
+    pub provision: Option<LxcProvisionPhase>,
+}
+
+/// Provision-phase LXC configuration, separate from the stable top-level `lxc`
+/// section because this surface is experimental. Filesystem mounts and network
+/// policy come from the top-level `filesystem` and `network` sections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LxcProvisionPhase {
+    /// Distribution image (e.g. `alpine`).
+    pub distribution: Option<String>,
+    /// Distribution release (e.g. `3.23`).
+    pub release: Option<String>,
 }
 
 /// JSON Schema generation from the wire model, gated behind `schema-gen` so

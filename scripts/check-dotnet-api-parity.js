@@ -443,35 +443,6 @@ if (!tierMatch) {
   compare("isolation-tier wire names", managedTiers, rustTiers);
 }
 
-const rustStateAware = read(
-  "src",
-  "core",
-  "mxc_engine",
-  "src",
-  "state_aware.rs"
-).split("#[cfg(test)]")[0];
-const stateAwareMatch = /matches!\(\s*backend,\s*([\s\S]*?)\)\s*&&/.exec(
-  rustStateAware
-);
-if (!stateAwareMatch) {
-  errors.push("state_aware.rs: could not find experimental backend registry");
-} else {
-  const rustBackends = [
-    ...stateAwareMatch[1].matchAll(/ContainmentBackend::(\w+)/g),
-  ].map((match) => match[1]);
-  const managedStateAware = read(
-    "sdk",
-    "dotnet",
-    "Microsoft.Mxc.Sdk",
-    "StateAwareTypes.cs"
-  );
-  compare(
-    "state-aware containment enum",
-    enumVariants(managedStateAware, "StateAwareContainment", "csharp"),
-    rustBackends
-  );
-}
-
 const rustDispatch = read(
   "src",
   "core",
@@ -494,6 +465,23 @@ const managedPrefixes = [
   ...managedPrefixBody.matchAll(/"([^"]+)"\s*=>\s*StateAwareContainment\.(\w+)/g),
 ].map((match) => `${match[1]}:${match[2]}`);
 compare("state-aware sandbox-id prefixes", managedPrefixes, rustPrefixes);
+
+const managedStateAware = read(
+  "sdk",
+  "dotnet",
+  "Microsoft.Mxc.Sdk",
+  "StateAwareTypes.cs"
+);
+const managedContainments = enumVariants(
+  managedStateAware,
+  "StateAwareContainment",
+  "csharp"
+);
+compare(
+  "state-aware containment enum",
+  managedContainments,
+  rustPrefixes.map((prefix) => prefix.split(":")[1])
+);
 
 if (errors.length > 0) {
   console.error("C# API parity FAILED:");

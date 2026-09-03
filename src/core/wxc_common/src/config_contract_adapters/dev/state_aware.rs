@@ -54,6 +54,7 @@ fn convert_isolation_session_provision_experimental(
         isolation_session: isolation_session
             .into_option()
             .map(convert_state_aware_isolation_session),
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -85,6 +86,7 @@ fn convert_windows_sandbox_provision_experimental(
         windows_sandbox: None,
         wslc: None,
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -125,6 +127,7 @@ fn convert_wslc_provision_experimental(
         windows_sandbox: None,
         wslc: wslc.into_option().map(convert_state_aware_wslc),
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -137,6 +140,7 @@ fn convert_start_experimental(value: contract::StartExperimental) -> wire::Exper
         windows_sandbox: None,
         wslc: None,
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -149,6 +153,7 @@ fn convert_exec_experimental(value: contract::ExecExperimental) -> wire::Experim
         windows_sandbox: None,
         wslc: None,
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -161,6 +166,7 @@ fn convert_stop_experimental(value: contract::StopExperimental) -> wire::Experim
         windows_sandbox: None,
         wslc: None,
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }
@@ -175,6 +181,7 @@ fn convert_deprovision_experimental(
         windows_sandbox: None,
         wslc: None,
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }

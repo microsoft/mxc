@@ -1,0 +1,8 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "network": {
+    "allowedHosts": []
+  }
+}

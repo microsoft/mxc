@@ -206,7 +206,15 @@ pub fn configure_filesystem_mounts(
     policy: &ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<(), String> {
+    // Derive the whole mount set first, then commit it in one config rewrite.
+    // liblxc accumulates `lxc.mount.entry` lines across restarts, so the
+    // previous run's MXC mounts have to go; committing the replacement one
+    // entry at a time meant a crash or a rejected path partway through left a
+    // durable config matching no policy anyone wrote. Only MXC's own entries
+    // are replaced -- baseline mounts the distribution template or the operator
+    // placed in the config carry no marker and survive.
     let mounts = resolve_mount_order(policy);
+    let mut entries: Vec<String> = Vec::with_capacity(mounts.len());
 
     // Container-side paths of every re-bound (rw/ro) mount, used to decide
     // whether a denied *directory* must be masked with a writable tmpfs so a
@@ -236,7 +244,7 @@ pub fn configure_filesystem_mounts(
                     "Adding rw bind mount: {} -> /{}",
                     host_path, container_path
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
             FsIntent::ReadOnly => {
                 let mount_entry = format!(
@@ -247,7 +255,7 @@ pub fn configure_filesystem_mounts(
                     "Adding ro bind mount: {} -> /{}",
                     host_path, container_path
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
             FsIntent::Denied => {
                 // Resolve the denied path through symlinks to its real host
@@ -301,12 +309,12 @@ pub fn configure_filesystem_mounts(
                     "Masking denied path: /{} ({})",
                     container_path, create_type
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
         }
     }
 
-    Ok(())
+    container.replace_mxc_mount_entries(&entries)
 }
 
 /// Remove filesystem mount configuration.
@@ -355,6 +363,55 @@ mod tests {
     #[test]
     fn test_validate_path_accepts_normal() {
         assert!(validate_path("/mnt/shared").is_ok());
+    }
+
+    #[test]
+    fn configure_filesystem_mounts_replaces_not_accumulates() {
+        use wxc_common::logger::Mode;
+
+        // Real config file so set_config_item/clear_config_item operate on disk.
+        let base = std::env::temp_dir().join(format!(
+            "mxc-fs-mounts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let name = "box";
+        std::fs::create_dir_all(base.join(name)).unwrap();
+        let container = LxcContainer::new(name, Some(base.to_str().unwrap()));
+        std::fs::write(container.config_file_path(), "lxc.arch = amd64\n").unwrap();
+
+        let mut logger = Logger::new(Mode::Buffer);
+
+        // First start: broad policy binds /host/broad.
+        let policy_a = ContainerPolicy {
+            readwrite_paths: vec!["/host/broad".to_string()],
+            ..Default::default()
+        };
+        configure_filesystem_mounts(&container, &policy_a, &mut logger).unwrap();
+
+        // Second start (simulated restart): narrower policy binds /host/narrow.
+        let policy_b = ContainerPolicy {
+            readonly_paths: vec!["/host/narrow".to_string()],
+            ..Default::default()
+        };
+        configure_filesystem_mounts(&container, &policy_b, &mut logger).unwrap();
+
+        let cfg = std::fs::read_to_string(container.config_file_path()).unwrap();
+        assert!(
+            !cfg.contains("/host/broad"),
+            "restart must not inherit the previous run's mount, got:\n{cfg}"
+        );
+        assert!(
+            cfg.contains("/host/narrow"),
+            "restart must apply the new policy's mount, got:\n{cfg}"
+        );
+        // Non-mount config lines are preserved across the clear/reapply.
+        assert!(cfg.contains("lxc.arch = amd64"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

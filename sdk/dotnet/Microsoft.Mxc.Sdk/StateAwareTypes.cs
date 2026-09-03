@@ -19,6 +19,9 @@ public enum StateAwareContainment
 
     /// <summary>Windows Subsystem for Linux container.</summary>
     Wslc,
+
+    /// <summary>Linux container managed by LXC.</summary>
+    Lxc,
 }
 
 /// <summary>The default action for traffic with no matching rule.</summary>

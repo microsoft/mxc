@@ -5,10 +5,11 @@
 //! (`run_state_aware_json` / `exec_sandbox`).
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
-//! live host backend. All three state-aware backends — IsolationSession, WSLc
-//! and Windows Sandbox — are Windows-only, and IsolationSession additionally
-//! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
-//! exercised by the executor E2E suites instead.
+//! live host backend. The state-aware backends — IsolationSession, WSLc, and
+//! Windows Sandbox (all Windows-only) and Lxc (Linux-only) — all require a
+//! live host environment, and IsolationSession additionally needs the OS-side
+//! IsoSessionOps service, so the real lifecycle paths are exercised by the
+//! executor E2E suites instead.
 //!
 //! Those suites drive the `ExecStdio::Relayed` path. The
 //! `ExecStdio::Piped` path [`exec_sandbox`] uses is covered end-to-end by
