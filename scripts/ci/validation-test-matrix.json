@@ -110,7 +110,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "1es-mxc-e2e-windows-25h2-scalsettest",
+          "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
             "process-t3",
             "wslc",
@@ -398,14 +398,6 @@
       }
     ],
     "weekly": [],
-    "enabled": [
-      {
-        "os": "windows-25h2",
-        "backends": [
-          "process-t3",
-          "wslc"
-        ]
-      }
-    ]
+    "enabled": []
   }
 }

@@ -33,4 +33,4 @@ jobs:
     needs: [windows, linux, macos]
     uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
-      plan: enabled
+      plan: nightly
