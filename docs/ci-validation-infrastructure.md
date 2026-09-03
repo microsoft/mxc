@@ -181,13 +181,12 @@ because Seatbelt has no wired suite.
 
 ### `backendDelayedStart`
 
-Optional, and **currently empty** — no backend is staggered today, so every job
-starts as soon as its runner is ready. The section staggers the start of jobs
+Optional. This section staggers the start of jobs
 for a named backend instead of letting them all begin at once:
 
 ```json
 "backendDelayedStart": [
-  { "backend": "wslc", "seconds": 300 }
+  { "backend": "wslc", "seconds": 30 }
 ]
 ```
 
@@ -198,29 +197,9 @@ answer with rate limiting and stalled downloads.
 
 `seconds` is the gap between consecutive jobs of that backend, counted per
 backend and following the resolved job order. With the example entry above,
-four WSLC jobs would start at 0, 300, 600, and 900 seconds.
+four WSLC jobs would start at 0, 30, 60, and 90 seconds.
 
-The resolver puts the offset on every matrix entry as
-`startup_delay_seconds` — `0` where no stagger applies, which is every entry
-while the section is empty — and the job sleeps that long before its first
-network step. Job timeout is a flat 180 minutes, with plenty of room for any
-wait you'd reasonably configure.
-
-Leave the section out (or empty) and every job starts as soon as its runner is
-ready. A backend id that no plan schedules is accepted; it just never applies.
-
-Do keep in mind that the runner is held while it sleeps — Actions can't defer
-allocating a matrix job, so the wait has to happen inside it. Use no more than
-the contention calls for. This spreads simultaneous load and nothing else; a
-single download that stalls on its own is unaffected.
-
-Leave the section out (or empty) and every job starts as soon as its runner is
-ready. A backend id that no plan schedules is accepted; it just never applies.
-
-Do keep in mind that the runner is held while it sleeps — Actions can't defer
-allocating a matrix job, so the wait has to happen inside it. Use no more than
-the contention calls for. This spreads simultaneous load and nothing else; a
-single download that stalls on its own is unaffected.
+Avoid long delays since idle runners might be harvested.
 
 ## Backend status
 
