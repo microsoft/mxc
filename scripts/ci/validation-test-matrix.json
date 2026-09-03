@@ -400,7 +400,8 @@
     "weekly": [],
     "enabled": [
       {
-        "windows-25h2": [
+        "os": "windows-25h2",
+        "backends": [
           "process-t3",
           "wslc"
         ]
