@@ -8,8 +8,8 @@ capabilities parity remediation in PR #966. Phase 6 merged in PR #968. The
 legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
 reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
-PR #969. Phases 7.2-7.5 and Phases 8-11 remain; the planned end state publishes
-`0.9.0-alpha` and opens `0.10.0-alpha` development.
+PR #969. Phases 7.2-7.5, 8-9.5, and 10-11 remain; the planned end state
+publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -840,6 +840,53 @@ removes legacy Network syntax. This sequencing protects all published
 v0.6/v0.7/v0.8 callers from the version-insensitive breaking-change failure
 mode that caused PR #676 to be reverted.
 
+### Phase 9.5: Replace raw state-aware dispatch payloads
+
+Phase 9 makes exact contracts authoritative, which removes the rolling parser's
+open experimental subtree from the production trust boundary. Phase 9.5 then
+replaces the temporary `experimental_raw` bridge with a typed state-aware
+backend payload before Phase 10 changes the v0.9 policy surface.
+
+The exact contract remains the structural authority and backend configuration
+types remain the semantic authority. The adapter between them becomes static:
+
+```text
+exact phase/backend request
+    |
+    v
+typed state-aware backend payload
+    |
+    v
+StatefulSandboxBackend phase validation and execution
+```
+
+Implement:
+
+- define a neutral typed payload representation covering every supported
+  state-aware backend and phase
+- adapt exact contract payloads directly into the backend-facing configuration
+  types, preserving exhaustive field mapping
+- carry the typed payload on `ParsedStateAwareRequest` or its replacement
+- update state-aware dispatch to consume the typed payload rather than calling
+  `deserialize_config<C>` over raw JSON
+- preserve structural source diagnostics at exact contract deserialization and
+  semantic diagnostics at backend validation
+- delete `experimental_raw`, the phase-fragment locator and reparsing path, and
+  `source_text` where it has no remaining consumer
+- retain telemetry as a cross-cutting value populated by the shared Phase 7.2
+  normalization seam rather than embedding it in the backend payload
+- add exhaustive parity tests for IsolationSession, Windows Sandbox, and WSLC
+  across every lifecycle phase
+
+This phase changes no published contract and no user-visible JSON shape. It is
+an internal representation and dispatch migration made safe by the Phase 9
+cutover: production requests have already passed a closed exact contract, so
+the rolling parser's lossless open-object preservation is no longer required.
+
+Done when state-aware dispatch receives no raw backend JSON, no production code
+calls `ParsedStateAwareRequest::deserialize_config`, and removing the raw
+representation changes neither accepted exact requests nor backend behavior.
+
 ### Phase 10: Finalize the v0.9 stable candidate
 
 Directional networking shipped in v0.8 through the rolling stack and is already
@@ -969,6 +1016,31 @@ Good tasks to delegate:
 - generated artifact regeneration
 - SDK constants and documentation sweeps
 - CI JavaScript updates
+
+### Remaining implementation PR plan
+
+**Adopted 2026-09-02.** The remaining work uses ten reviewable PRs rather than
+one PR per fine-grained work item or one very large PR per major phase. Each PR
+must build and test green on its own; later PRs may be stacked while review is
+in progress, but merge in the order below.
+
+| PR | Plan scope | Boundary |
+| --- | --- | --- |
+| 1 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
+| 2 | Phase 7.3 | Add the private exact parser path and versioned policy builders |
+| 3 | Phases 7.4-7.5 | Add the differential harness and commit its complete divergence classification together |
+| 4 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references |
+| 5 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization |
+| 6 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads |
+| 7 | Phase 10a | Add the IsolationSession acknowledgment and canonical runtime preparation without removing legacy v0.9 input yet |
+| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation |
+| 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state |
+| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling metadata |
+
+Phase 10's internal subphases are detailed in Appendix C. Phase 11a is
+deliberately additive so publication mechanics can be reviewed before they
+rewrite the contract lifecycle; the final publication and rolling-stack cleanup
+remain together so no intermediate tree has conflicting version authorities.
 
 ## 3. Detailed implementation plans and records
 
@@ -2060,7 +2132,7 @@ Resolve these before implementation; each changes the shape of the work.
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority; dispatch keeps reading `experimental_raw`. See "Phase 7 decision 1 resolved" below |
+| 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority. Dispatch keeps reading `experimental_raw` through Phase 9; Phase 9.5 replaces the bridge with a typed payload. See "Phase 7 decision 1 resolved" below |
 | 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable. Test-only does not mean the phase has no production diff: see "Phase 7 production surface" below |
 | 3 | How `load_request_from_value` reaches an exact contract | **Resolved.** Construct the declared version's contract root directly in Rust and adapt it, rather than round-tripping JSON. See "Phase 7 decision 3 resolved" below |
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
@@ -2102,8 +2174,9 @@ is confined to dispatch plumbing — `StatefulSandboxBackend::ProvisionConfig`,
 the six `deserialize_config` call sites in `state_aware_dispatch.rs`, the three
 backend impls, and `state_aware_request.rs`. It touches no contract module, no
 adapter destructuring, no published contract, and no generated artifact. Option
-C adds no coupling that B must later unpick, and Phase 11 never freezes
-state-aware types, so no deadline forces the choice.
+C adds no coupling that B must later unpick. Phase 9.5 is now the explicit
+retirement point: exact dispatch is authoritative first, then the raw bridge is
+removed before the v0.9 stable-candidate cleanup.
 
 **Enforcement is not weakened by dropping the duplicate payload.** Validation
 is a property of parsing, not of adaptation:
@@ -2154,10 +2227,11 @@ first, so `"appId": null` becomes a parse error; record it in the Phase 7.4
 classification.
 
 What option C does not guarantee is that the value dispatch acts on is the one
-the contract produced. That is a non-issue while the payloads are plain strings
-with no normalization — `appId`, `image`, `imageTarPath`. The moment a payload
-field gains defaulting or canonicalization, the two authorities could interpret
-the same bytes differently, and that is the trigger to move to option B.
+the contract produced. That is tolerable while the payloads are plain strings
+with no normalization — `appId`, `image`, `imageTarPath` — and while the
+differential harness guards the two interpretations. Phase 9.5 moves to option
+B before Phase 10 evolves the v0.9 surface, rather than waiting for a future
+defaulting or canonicalization change to expose the drift.
 
 ##### Phase 7 decision 3 resolved: build the declared version's contract root
 
@@ -2776,14 +2850,15 @@ though the override machinery itself is identical in both.
 | Differential validation | Compare rolling and exact paths in tests rather than dual-running both parsers in production |
 | Programmatic policy construction | Build the selected version's typed contract directly rather than round-tripping synthesized JSON |
 | Command overrides | Resolve and splice the command before exact parsing so every effective request satisfies the required process shape |
+| State-aware backend payload transport | Preserve `experimental_raw` through exact-dispatch cutover, then replace it with typed payloads in Phase 9.5 |
 | Publication mechanics | Future publication freezes contract, adapter, and policy builder together and adds immutable artifact/digest checks |
 
 ### Publication and version-transition decision record
 
 The current forward sequence is Phase 8 migration, Phase 9 exact dispatch,
-Phase 10 removal of legacy v0.9 Network fields and stable-candidate completion,
-then Phase 11 publication of `0.9.0-alpha` with `0.10.0-alpha` opened for
-development.
+Phase 9.5 typed state-aware payload migration, Phase 10 removal of legacy v0.9
+Network fields and stable-candidate completion, then Phase 11 publication of
+`0.9.0-alpha` with `0.10.0-alpha` opened for development.
 
 The historical sequence that established the v0.8/v0.9 starting point was
 agreed 2026-08-20, after PR #961 shipped directional networking on the rolling
@@ -3047,3 +3122,79 @@ that. They guard against a mapping that points at the wrong value, which is
 exactly what the wire-equivalence comparison detects best. Write them for enum
 arms and for fields whose types are interchangeable, and do not pad them with
 presence assertions the build already guarantees.
+
+### Appendix C: Phase 10 detailed implementation plan
+
+Phase 10 removes the legacy Network vocabulary from v0.9 only. Directional
+networking already shipped through the rolling v0.8 stack and is present in the
+published v0.8 and development v0.9 exact contracts; this phase makes that
+directional representation the sole v0.9 surface while preserving every
+published v0.6/v0.7/v0.8 contract.
+
+The removed v0.9 fields are:
+
+```text
+network.defaultPolicy
+network.enforcementMode
+network.allowedHosts
+network.blockedHosts
+network.allowLocalNetwork
+network.proxy
+```
+
+Their behavior must move to directional egress and ingress, runtime proxy
+configuration, ProcessContainer proxy-peer identity, the dedicated
+IsolationSession acknowledgment, or an explicit migration error. No adapter,
+builder, SDK, or backend may silently discard a removed field.
+
+| # | Work item | Primary files or surfaces | Change | Completion condition |
+| --- | --- | --- | --- | --- |
+| 1 | Require authoritative exact dispatch | Phase 9 parser router | Dependency | Declared v0.6/v0.7/v0.8 requests already dispatch through their immutable contracts before v0.9 removes syntax |
+| 2 | Design the IsolationSession acknowledgment | Contract, SDKs, backend validation, docs | Addition and change | A dedicated field and type honestly acknowledge unrestricted networking without borrowing unenforceable Network policy values |
+| 3 | Remove legacy fields from the v0.9 one-shot contract | `mxc_config_contract::dev::network`, `dev::one_shot` | Deletion and change | No v0.9 one-shot request can structurally express any removed field |
+| 4 | Remove legacy fields from v0.9 state-aware roots | `dev::state_aware::exec`, WSLC provision, IsolationSession provision | Deletion and change | Exec and provision expose only directional policy, runtime proxy, or the dedicated acknowledgment |
+| 5 | Replace the current IsolationSession marker pair | IsolationSession provision contract | Deletion and addition | The exact `defaultPolicy=allow` plus `allowLocalNetwork=true` pair is gone and the acknowledgment is required instead |
+| 6 | Regenerate exact v0.9 artifacts | Exact development schema and generated TypeScript oracle | Generated change | Both artifacts expose no legacy v0.9 fields and include the acknowledgment |
+| 7 | Add a recursive publication guard | Contract schema tests and `check-contract-codegen.js` | Test addition | Publication fails if a removed field remains reachable from any v0.9 request root |
+| 8 | Update v0.9 development adapters | Development common, one-shot, and state-aware adapters | Change and deletion | Directional fields, runtime proxy, and acknowledgment map exhaustively into the canonical runtime representation |
+| 9 | Preserve published-version adapters | v0.6, v0.7, and v0.8 adapters | Change only when runtime types require it | Published legacy syntax remains accepted and translates without loss |
+| 10 | Finalize the canonical runtime network model | `wxc_common::models`, wire compatibility types, network parser | Change and deletion | Backend-facing policy is independent of whether input used published legacy or v0.9 directional syntax |
+| 11 | Preserve field-presence information | `ContainerPolicy`, adapters, normalization | Change and tests | Network, network-mode, runtime-proxy, and UI presence remain distinguishable from explicit defaults |
+| 12 | Add explicit migration diagnostics | Exact parser and contract error rendering | Addition | Removed v0.9 fields produce actionable migration errors where practical |
+| 13 | Move proxy configuration to its v0.9 location | Contract, adapters, runtime configuration, SDKs | Change and deletion | Cooperative runtime proxy behavior uses `runtimeConfig.networkProxy`; `network.proxy` is unreachable in v0.9 |
+| 14 | Update IsolationSession validation | Shared policy validation plus one-shot and state-aware runners | Change | Provision and one-shot consume the acknowledgment; later phases reject redeclaration |
+| 15 | Update WSLC policy handling | WSLC backend, state-aware normalization and dispatch, SDKs | Change | Provision uses directional posture and exec uses runtime proxy without restating immutable network mode |
+| 16 | Update ProcessContainer policy mapping | AppContainer and BaseContainer configuration and validation | Change | Directional egress, ingress, host loopback, runtime proxy, and peer identity remain correctly lowered |
+| 17 | Update Seatbelt, Bubblewrap, and LXC translations | Backend policy builders and validators | Change | Each backend receives canonical directional policy while published legacy inputs retain behavior through adapters |
+| 18 | Update per-version Rust policy builders | Versioned builders introduced in Phase 7.3 | Change and addition | Published builders emit their frozen syntax and the v0.9 builder emits directional-only syntax |
+| 19 | Update the Node SDK surface | Public types, one-shot builder, state-aware types, helpers, tests | Change and deletion | v0.9 emitters cannot generate legacy fields and expose runtime proxy plus acknowledgment |
+| 20 | Update the C# SDK surface | Policy POCOs, lifecycle types, converters, tests | Change and deletion | C# emits the same v0.9 shape and acknowledgment as Rust and Node |
+| 21 | Confirm FFI behavior | Rust FFI and managed parity gates | Tests and possible change | No ABI change occurs unless required; JSON crossing FFI follows the selected exact version builder |
+| 22 | Migrate every v0.9 configuration | Configs, examples, exact fixtures, state-aware envelopes | Change | No document declaring v0.9 uses legacy Network syntax |
+| 23 | Update invalid and migration fixtures | Contract fixtures and parser tests | Addition and change | Every removed field is rejected on each applicable v0.9 root while published acceptance remains pinned |
+| 24 | Add adapter and runtime equivalence tests | Versioned adapters and parser tests | Addition | Equivalent published-legacy and v0.9-directional policies normalize to equivalent runtime behavior |
+| 25 | Update backend unit and integration tests | Rust backend crates | Addition and change | Every backend proves directional enforcement, presence handling, proxy behavior, and acknowledgment validation |
+| 26 | Update SDK tests | Node and C# unit and integration suites | Addition and change | Serialization and lifecycle tests prove SDKs emit no legacy v0.9 fields |
+| 27 | Update applicable E2E tests | Backend validation scripts and `wxc_e2e_tests` | Change | Representative one-shot and state-aware v0.9 directional requests execute on each applicable platform |
+| 28 | Update documentation | Schema, networking specification, backend docs, SDK READMEs, examples, this plan | Change and deletion | All v0.9 guidance is directional-only and explains acknowledgment and migration |
+| 29 | Run codegen and versioning gates | Contract and SDK generation scripts | Execution | Exact artifacts match Rust and published artifacts remain immutable |
+| 30 | Run the cross-platform quality gate | Rust, Node, C#, backend and E2E suites | Execution | Format, compile, lint, unit, SDK, contract, and applicable platform tests all pass |
+
+#### Phase 10 delivery subphases
+
+The work remains conceptually divided into four subphases, but the adopted PR
+plan uses two PRs to limit review latency without creating an inconsistent
+intermediate contract.
+
+| Subphase | Scope | PR boundary |
+| --- | --- | --- |
+| 10a | Add the dedicated IsolationSession acknowledgment and prepare the canonical runtime representation additively while legacy v0.9 input remains accepted | Remaining implementation PR 7 |
+| 10b | Remove legacy fields from the v0.9 contract, update generated artifacts, adapters, policy builders, and migration diagnostics | Remaining implementation PR 8 |
+| 10c | Update backend validation and enforcement plus Rust, Node, C#, and FFI producer surfaces | Remaining implementation PR 8 |
+| 10d | Migrate the corpus, add publication guards, update documentation, and run the cross-platform quality gate | Remaining implementation PR 8 |
+
+PR 7 is deliberately additive and leaves all existing requests valid. PR 8 is
+the atomic cutover: contract removal, producer migration, generated artifacts,
+backend behavior, tests, and documentation land together so no merged tree
+declares v0.9 fields that its SDKs still emit or removes fields its corpus still
+uses.
