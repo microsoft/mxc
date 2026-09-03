@@ -163,6 +163,19 @@ function parseTypeScriptUnion(name) {
   return new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]));
 }
 
+function parseTypeScriptValidator(name) {
+  const match = tsSrc.match(
+    new RegExp(`function ${name}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n\\}`)
+  );
+  if (!match) {
+    console.error(`ERROR: could not find TypeScript validator \`${name}\``);
+    process.exit(1);
+  }
+  return new Set(
+    [...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1])
+  );
+}
+
 function parseRustEnum(name) {
   const match = rustConsentProtocolSrc.match(
     new RegExp(
@@ -268,8 +281,19 @@ compareSets(
   new Set(rustStates.keys()),
   protocolPolicyStates
 );
+compareSets(
+  "TypeScript isPolicyState",
+  protocolPolicyStates,
+  parseTypeScriptValidator("isPolicyState")
+);
 
-const terminalConsentResults = parseRustEnum("ConsentResult");
+const protocolConsentResults = parseRustEnum("ConsentResult");
+compareSets(
+  "TypeScript isResult",
+  protocolConsentResults,
+  parseTypeScriptValidator("isResult")
+);
+const terminalConsentResults = new Set(protocolConsentResults);
 terminalConsentResults.delete("status");
 terminalConsentResults.delete("presentationRequired");
 compareSets(
@@ -299,6 +323,11 @@ compareSets(
   consentReasons,
   parseTypeScriptUnion("TelemetryConsentStatusReason")
 );
+compareSets(
+  "TypeScript isStatusReason",
+  consentReasons,
+  parseTypeScriptValidator("isStatusReason")
+);
 const reasonMappings = parseCsharpSwitch(
   "ParseConsentStatusReason",
   "TelemetryConsentStatusReason"
@@ -309,6 +338,29 @@ if (!functionReturnsSentinel(
   "TelemetryConsentStatusReason.Unknown"
 )) {
   errors.push("C# unknown consent status reasons must return TelemetryConsentStatusReason.Unknown");
+}
+
+const consentStates = parseRustEnum("ConsentState");
+compareSets(
+  "TypeScript TelemetryConsentState",
+  consentStates,
+  parseTypeScriptUnion("TelemetryConsentState")
+);
+compareSets(
+  "TypeScript isConsentState",
+  consentStates,
+  parseTypeScriptValidator("isConsentState")
+);
+const consentStateMappings = parseCsharpSwitch(
+  "ParseConsentState",
+  "TelemetryConsentState"
+);
+compareMappings("ParseConsentState", consentStates, consentStateMappings);
+if (!functionReturnsSentinel(
+  "UnrecognizedConsentState",
+  "TelemetryConsentState.Undetermined"
+)) {
+  errors.push("C# unknown consent states must return TelemetryConsentState.Undetermined");
 }
 
 // --- Compare ---------------------------------------------------------------
@@ -359,5 +411,6 @@ if (errors.length > 0) {
 
 console.log(
   `Telemetry wire parity OK: ${rustStates.size} policy states, ` +
-    `${terminalConsentResults.size} terminal results, and ${consentReasons.size} status reasons match`
+    `${consentStates.size} consent states, ${terminalConsentResults.size} terminal results, ` +
+    `and ${consentReasons.size} status reasons match`
 );

@@ -116,10 +116,12 @@ describe('telemetry consent', () => {
       assert.strictEqual(queryTelemetryConsent().effectiveState, 'undetermined');
       assert.strictEqual(queryTelemetryConsent().effectiveState, 'undetermined');
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
+      _setTelemetryConsentAsyncRunner(async () => 'different invalid output');
+      assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
     } finally {
       console.warn = originalWarn;
     }
-    assert.strictEqual(warnings.length, 2);
+    assert.strictEqual(warnings.length, 3);
     assert.ok(warnings.every((warning) => /fail-closed/.test(warning)));
   });
 
@@ -156,6 +158,7 @@ describe('telemetry consent', () => {
     assert.strictEqual(asyncQuery.effectiveState, 'undetermined');
     assert.strictEqual(asyncQuery.policy, 'blocked');
     assert.strictEqual(asyncQuery.needsPrompt, false);
+    assert.strictEqual(asyncQuery.reason, undefined);
   });
 
   it('binds a synchronous presenter decision to the canonical prompt', async () => {

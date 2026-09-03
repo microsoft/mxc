@@ -361,6 +361,11 @@ async function defaultConsentProtocolRunner(
         if (settled) return;
         clearProtocolDeadline();
         if (stdout.trim() !== '') {
+          protocolLines += 1;
+          if (protocolLines > MAX_CONSENT_PROTOCOL_LINES) {
+            fail(new Error('telemetry consent process exceeded the protocol line limit'));
+            return;
+          }
           await processLine(stdout);
           if (settled) return;
         }
@@ -584,7 +589,7 @@ const reportedFailureCategories = new Set<string>();
 
 function reportFailClosed(operation: string, safeResult: string, detail: string): void {
   try {
-    const category = `${operation}:${safeResult}`;
+    const category = `${operation}:${safeResult}:${detail}`;
     const message = `mxc-sdk: ${operation} failed and is reporting '${safeResult}' to stay fail-closed: ${detail}`;
     if (!reportedFailureCategories.has(category)) {
       reportedFailureCategories.add(category);
@@ -634,7 +639,6 @@ function failedConsentQuery(operation: string, error: unknown): TelemetryConsent
     effectiveState: 'undetermined',
     needsPrompt: false,
     policy: 'blocked',
-    reason: 'store-unreadable',
     error: `failed to read telemetry consent: ${detail}`,
   };
 }

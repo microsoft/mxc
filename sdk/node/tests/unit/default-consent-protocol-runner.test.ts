@@ -535,6 +535,19 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     assert.strictEqual(child.killed, true);
   });
 
+  it('counts an unterminated final line against the protocol limit', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(`${'\n'.repeat(16)}partial`);
+    child.emitClose(0);
+
+    await assert.rejects(promise, /protocol line limit/);
+    assert.strictEqual(child.killed, true);
+  });
+
   it('aborts a pending presenter when the child fails', async () => {
     const box = installFakeChildFactory();
     let observedSignal: AbortSignal | undefined;
