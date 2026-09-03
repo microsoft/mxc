@@ -15,7 +15,6 @@ import {
   _setTelemetryPlatform,
   _setTelemetryConsentChildFactory,
   _setTelemetryConsentProtocolRunner,
-  _setTelemetryConsentRunner,
   _setTelemetryConsentTimeoutMs,
   type TelemetryConsentPrompt,
 } from '../../src/telemetry.js';
@@ -141,14 +140,12 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     _setTelemetryPlatform('win32');
     // Ensure the DEFAULT runner is exercised, not one previously injected.
     _setTelemetryConsentProtocolRunner(null);
-    _setTelemetryConsentRunner(null);
   });
 
   afterEach(() => {
     _setTelemetryPlatform(null);
     _setTelemetryConsentChildFactory(null);
     _setTelemetryConsentProtocolRunner(null);
-    _setTelemetryConsentRunner(null);
     _setTelemetryConsentTimeoutMs(null);
   });
 

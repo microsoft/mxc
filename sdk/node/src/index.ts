@@ -163,12 +163,7 @@ export {
   TelemetryConsentPresenter,
   TelemetryConsentQuery,
   TelemetryPolicyState,
-  getTelemetryConsent,
-  queryTelemetryConsent,
-  needsTelemetryConsentPrompt,
-  getTelemetryPolicy,
   requestTelemetryConsent,
   queryTelemetryConsentAsync,
-  withdrawTelemetryConsent,
   withdrawTelemetryConsentAsync,
 } from './telemetry.js';

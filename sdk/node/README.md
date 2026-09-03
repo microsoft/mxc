@@ -481,14 +481,9 @@ getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
-getTelemetryConsent()             → TelemetryConsentState
-queryTelemetryConsent()           → { storedState, effectiveState, needsPrompt, policy, reason?, error? }
 queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, reason?, error? }>
-needsTelemetryConsentPrompt()     → boolean
 requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
-withdrawTelemetryConsent()        → TelemetryConsentOutcome
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
-getTelemetryPolicy()              → TelemetryPolicyState
 
 // Capability types
 UiCapabilitySupport
@@ -547,15 +542,9 @@ If the API is never called, the presenter fails, or it returns `dismissed`,
 telemetry remains off. On non-Windows hosts requests and withdrawals return
 `notApplicable` without invoking the presenter or child process.
 
-The synchronous query/getter and withdrawal APIs are retained for startup and
-compatibility code, but may block the Node event loop for up to five seconds.
-Prefer `queryTelemetryConsentAsync()` and `withdrawTelemetryConsentAsync()`.
-
-`getTelemetryConsent()` never throws: any failure to reach `wxc-exec` reads
-back as `'undetermined'` (fail-closed — never `'granted'`). If you need to
-tell a genuine "user has not decided yet" apart from a broken install, use
-`queryTelemetryConsentAsync()`, which returns the same state plus a diagnostic
-`error` string when the state was forced by a failure:
+`queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
+`'granted'`. Its diagnostic `error` field distinguishes that result from a
+genuine undecided state:
 
 ```typescript
 const { effectiveState, storedState, needsPrompt, policy, reason, error } =
@@ -571,13 +560,11 @@ older than this SDK and does not report the field, it fails closed to `false`.
 ### Administrative policy
 
 An IT administrator can block MXC telemetry device-wide via MXC's own
-Group Policy / MDM setting. `getTelemetryPolicy()` (also the `policy` field
-above) reports the result:
+Group Policy / MDM setting. The query result's `policy` field reports the
+result:
 
 ```typescript
-import { getTelemetryPolicy } from '@microsoft/mxc-sdk';
-
-const policy = getTelemetryPolicy();
+const { policy } = await queryTelemetryConsentAsync();
 // 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable'
 if (policy === 'blocked') {
   // Don't show a consent toggle; telemetry is unavailable on this device.

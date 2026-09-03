@@ -4,16 +4,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import {
-  getTelemetryConsent,
-  queryTelemetryConsent,
   queryTelemetryConsentAsync,
-  needsTelemetryConsentPrompt,
-  getTelemetryPolicy,
   requestTelemetryConsent,
-  withdrawTelemetryConsent,
   withdrawTelemetryConsentAsync,
   _setTelemetryConsentAsyncRunner,
-  _setTelemetryConsentRunner,
   _setTelemetryConsentProtocolRunner,
   _setTelemetryPlatform,
   _resetTelemetryFailureReporting,
@@ -52,54 +46,31 @@ describe('telemetry consent', () => {
   });
 
   afterEach(() => {
-    _setTelemetryConsentRunner(null);
     _setTelemetryConsentAsyncRunner(null);
     _setTelemetryConsentProtocolRunner(null);
     _setTelemetryPlatform(null);
   });
 
-  it('parses typed stored/effective status', () => {
-    _setTelemetryConsentRunner(() => status('granted', 'allowed'));
-    assert.deepStrictEqual(queryTelemetryConsent(), {
+  it('parses typed stored/effective status', async () => {
+    _setTelemetryConsentAsyncRunner(async () => status('granted', 'allowed'));
+    assert.deepStrictEqual(await queryTelemetryConsentAsync(), {
       state: 'granted',
       storedState: 'granted',
       effectiveState: 'granted',
       needsPrompt: false,
       policy: 'allowed',
     });
-    assert.strictEqual(getTelemetryConsent(), 'granted');
-    assert.strictEqual(getTelemetryPolicy(), 'allowed');
   });
 
-  it('queries status through the dedicated consent command', () => {
+  it('queries status through the dedicated consent command', async () => {
     let args: readonly string[] = [];
-    _setTelemetryConsentRunner((value) => {
+    _setTelemetryConsentAsyncRunner(async (value) => {
       args = value;
       return status('undetermined', 'unrestricted', true);
     });
-    assert.strictEqual(needsTelemetryConsentPrompt(), true);
+    assert.strictEqual((await queryTelemetryConsentAsync()).needsPrompt, true);
     assert.deepStrictEqual(args, ['--telemetry-consent', 'status']);
     assert.ok(!args.includes('--config-base64'));
-  });
-
-  it('coalesces convenience getters for one turn without caching explicit queries', async () => {
-    let calls = 0;
-    _setTelemetryConsentRunner(() => {
-      calls += 1;
-      return status('granted', 'allowed');
-    });
-
-    assert.strictEqual(getTelemetryConsent(), 'granted');
-    assert.strictEqual(getTelemetryPolicy(), 'allowed');
-    assert.strictEqual(needsTelemetryConsentPrompt(), false);
-    assert.strictEqual(calls, 1);
-
-    assert.strictEqual(queryTelemetryConsent().effectiveState, 'granted');
-    assert.strictEqual(calls, 2);
-
-    await Promise.resolve();
-    assert.strictEqual(getTelemetryConsent(), 'granted');
-    assert.strictEqual(calls, 3);
   });
 
   it('deduplicates each fail-closed diagnostic category', async () => {
@@ -108,44 +79,24 @@ describe('telemetry consent', () => {
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
     try {
-      _setTelemetryConsentRunner(() => 'not json');
       _setTelemetryConsentAsyncRunner(async () => 'not json');
-      assert.strictEqual(getTelemetryConsent(), 'undetermined');
-      assert.strictEqual(getTelemetryPolicy(), 'blocked');
-      assert.strictEqual(needsTelemetryConsentPrompt(), false);
-      assert.strictEqual(queryTelemetryConsent().effectiveState, 'undetermined');
-      assert.strictEqual(queryTelemetryConsent().effectiveState, 'undetermined');
+      assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
       _setTelemetryConsentAsyncRunner(async () => 'different invalid output');
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
     } finally {
       console.warn = originalWarn;
     }
-    assert.strictEqual(warnings.length, 3);
+    assert.strictEqual(warnings.length, 2);
     assert.ok(warnings.every((warning) => /fail-closed/.test(warning)));
   });
 
-  it('never reports a prompt alongside blocked policy', () => {
-    _setTelemetryConsentRunner(() => status('undetermined', 'blocked', true));
-    assert.strictEqual(needsTelemetryConsentPrompt(), false);
+  it('never reports a prompt alongside blocked policy', async () => {
+    _setTelemetryConsentAsyncRunner(async () => status('undetermined', 'blocked', true));
+    assert.strictEqual((await queryTelemetryConsentAsync()).needsPrompt, false);
   });
 
   it('fails status queries closed for mismatched actions and invalid results', async () => {
-    _setTelemetryConsentRunner(() => JSON.stringify({
-      action: 'request',
-      result: 'status',
-      storedState: 'granted',
-      effectiveState: 'granted',
-      needsPrompt: false,
-      policy: 'allowed',
-    }));
-    const syncQuery = queryTelemetryConsent();
-    assert.strictEqual(syncQuery.storedState, 'undetermined');
-    assert.strictEqual(syncQuery.effectiveState, 'undetermined');
-    assert.strictEqual(syncQuery.policy, 'blocked');
-    assert.strictEqual(syncQuery.needsPrompt, false);
-    assert.match(syncQuery.error ?? '', /unrecognised telemetry consent output/);
-
     _setTelemetryConsentAsyncRunner(async () => JSON.stringify({
       action: 'status',
       result: 'withdrawn',
@@ -185,31 +136,6 @@ describe('telemetry consent', () => {
     assert.strictEqual(outcome.result, 'granted');
   });
 
-  it('invalidates convenience query state around a consent request', async () => {
-    let currentState: 'denied' | 'granted' = 'denied';
-    let queryCalls = 0;
-    _setTelemetryConsentRunner(() => {
-      queryCalls += 1;
-      return status(currentState);
-    });
-    _setTelemetryConsentProtocolRunner(async () => {
-      currentState = 'granted';
-      return {
-        action: 'request',
-        result: 'granted',
-        storedState: 'granted',
-        effectiveState: 'granted',
-        needsPrompt: false,
-        policy: 'unrestricted',
-      };
-    });
-
-    assert.strictEqual(getTelemetryConsent(), 'denied');
-    await requestTelemetryConsent(() => 'yes');
-    assert.strictEqual(getTelemetryConsent(), 'granted');
-    assert.strictEqual(queryCalls, 2);
-  });
-
   it('supports an asynchronous presenter and propagates presenter failure', async () => {
     _setTelemetryConsentProtocolRunner(async (_locale, presenter) => {
       await presenter(prompt);
@@ -222,25 +148,6 @@ describe('telemetry consent', () => {
       }),
       /UI unavailable/,
     );
-  });
-
-  it('withdraws through the dedicated consent command', () => {
-    let args: readonly string[] = [];
-    _setTelemetryConsentRunner((value) => {
-      args = value;
-      return JSON.stringify({
-        action: 'withdraw',
-        result: 'withdrawn',
-        storedState: 'denied',
-        effectiveState: 'denied',
-        needsPrompt: false,
-        policy: 'blocked',
-      });
-    });
-    const outcome = withdrawTelemetryConsent();
-    assert.strictEqual(outcome.result, 'withdrawn');
-    assert.deepStrictEqual(args, ['--telemetry-consent', 'withdraw']);
-    assert.ok(!args.includes('--config-base64'));
   });
 
   it('queries and withdraws through the non-blocking runner', async () => {
@@ -267,16 +174,6 @@ describe('telemetry consent', () => {
   });
 
   it('rejects withdrawal responses with mismatched actions or invalid results', async () => {
-    _setTelemetryConsentRunner(() => JSON.stringify({
-      action: 'status',
-      result: 'withdrawn',
-      storedState: 'denied',
-      effectiveState: 'denied',
-      needsPrompt: false,
-      policy: 'blocked',
-    }));
-    assert.throws(withdrawTelemetryConsent, /unrecognised telemetry consent output/);
-
     _setTelemetryConsentAsyncRunner(async () => JSON.stringify({
       action: 'withdraw',
       result: 'status',
@@ -294,7 +191,6 @@ describe('telemetry consent', () => {
 
 describe('telemetry consent is Windows-only', () => {
   afterEach(() => {
-    _setTelemetryConsentRunner(null);
     _setTelemetryConsentAsyncRunner(null);
     _setTelemetryConsentProtocolRunner(null);
     _setTelemetryPlatform(null);
@@ -304,7 +200,7 @@ describe('telemetry consent is Windows-only', () => {
     it(`does not query or present consent on ${platform}`, async () => {
       _setTelemetryPlatform(platform);
       let called = false;
-      _setTelemetryConsentRunner(() => {
+      _setTelemetryConsentAsyncRunner(async () => {
         called = true;
         throw new Error('must not run');
       });
@@ -313,13 +209,11 @@ describe('telemetry consent is Windows-only', () => {
         throw new Error('must not run');
       });
 
-      assert.strictEqual(getTelemetryConsent(), 'not-applicable');
       const request = await requestTelemetryConsent(() => {
         called = true;
         return 'yes';
       });
       assert.strictEqual(request.result, 'notApplicable');
-      assert.strictEqual(withdrawTelemetryConsent().result, 'notApplicable');
       assert.strictEqual((await queryTelemetryConsentAsync()).state, 'not-applicable');
       assert.strictEqual((await withdrawTelemetryConsentAsync()).result, 'notApplicable');
       assert.strictEqual(called, false);

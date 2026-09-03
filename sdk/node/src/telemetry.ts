@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { findWxcExecutable } from './platform.js';
 
 export type TelemetryConsentState = 'granted' | 'denied' | 'undetermined' | 'not-applicable';
@@ -82,7 +82,6 @@ export interface TelemetryConsentQuery {
   error?: string;
 }
 
-type ConsentRunner = (args: readonly string[]) => string;
 type ConsentAsyncRunner = (args: readonly string[]) => Promise<string>;
 type ConsentAction = 'request' | 'withdraw' | 'status';
 type ConsentProtocolRunner = (
@@ -120,15 +119,6 @@ function executable(): string {
     throw new Error('wxc-exec was not found; the MXC native binary is missing from this installation');
   }
   return path;
-}
-
-function defaultConsentRunner(args: readonly string[]): string {
-  return execFileSync(executable(), args, {
-    timeout: 5000,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
 }
 
 function defaultConsentAsyncRunner(args: readonly string[]): Promise<string> {
@@ -380,39 +370,13 @@ async function defaultConsentProtocolRunner(
   });
 }
 
-let consentRunner: ConsentRunner = defaultConsentRunner;
 let consentAsyncRunner: ConsentAsyncRunner = defaultConsentAsyncRunner;
 let protocolRunner: ConsentProtocolRunner = defaultConsentProtocolRunner;
 let platformOverride: NodeJS.Platform | null = null;
-let convenienceQueryCache: TelemetryConsentQuery | undefined;
-let convenienceCacheClearScheduled = false;
-
-function invalidateConvenienceQueryCache(): void {
-  convenienceQueryCache = undefined;
-}
-
-function convenienceTelemetryConsentQuery(): TelemetryConsentQuery {
-  convenienceQueryCache ??= queryTelemetryConsent();
-  if (!convenienceCacheClearScheduled) {
-    convenienceCacheClearScheduled = true;
-    queueMicrotask(() => {
-      convenienceQueryCache = undefined;
-      convenienceCacheClearScheduled = false;
-    });
-  }
-  return convenienceQueryCache;
-}
-
-/** @internal Test-only. */
-export function _setTelemetryConsentRunner(runner: ConsentRunner | null): void {
-  consentRunner = runner ?? defaultConsentRunner;
-  invalidateConvenienceQueryCache();
-}
 
 /** @internal Test-only. */
 export function _setTelemetryConsentAsyncRunner(runner: ConsentAsyncRunner | null): void {
   consentAsyncRunner = runner ?? defaultConsentAsyncRunner;
-  invalidateConvenienceQueryCache();
 }
 
 /** @internal Test-only. */
@@ -433,7 +397,6 @@ export function _setTelemetryConsentTimeoutMs(timeoutMs: number | null): void {
 /** @internal Test-only. */
 export function _setTelemetryPlatform(platform: NodeJS.Platform | null): void {
   platformOverride = platform;
-  invalidateConvenienceQueryCache();
 }
 
 function isWindows(): boolean {
@@ -643,14 +606,8 @@ function failedConsentQuery(operation: string, error: unknown): TelemetryConsent
   };
 }
 
-/**
- * Read persisted/effective consent and policy synchronously.
- *
- * This compatibility API starts a subprocess and can block the event loop for
- * up to five seconds. Prefer {@link queryTelemetryConsentAsync} outside
- * startup-only code.
- */
-export function queryTelemetryConsent(): TelemetryConsentQuery {
+/** Read persisted/effective consent and policy without blocking the event loop. */
+export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuery> {
   if (!isWindows()) {
     return {
       state: 'not-applicable',
@@ -663,40 +620,11 @@ export function queryTelemetryConsent(): TelemetryConsentQuery {
   }
   try {
     return consentQueryFromResponse(
-      parseMaintenanceResponse(consentRunner(maintenanceArgs('status')), 'status'),
-    );
-  } catch (error) {
-    return failedConsentQuery('queryTelemetryConsent', error);
-  }
-}
-
-/** Read persisted/effective consent and policy without blocking the event loop. */
-export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuery> {
-  if (!isWindows()) {
-    return queryTelemetryConsent();
-  }
-  try {
-    return consentQueryFromResponse(
       parseMaintenanceResponse(await consentAsyncRunner(maintenanceArgs('status')), 'status'),
     );
   } catch (error) {
     return failedConsentQuery('queryTelemetryConsentAsync', error);
   }
-}
-
-/** Synchronous compatibility getter; may block for up to five seconds. */
-export function getTelemetryConsent(): TelemetryConsentState {
-  return convenienceTelemetryConsentQuery().effectiveState;
-}
-
-/** Synchronous compatibility getter; may block for up to five seconds. */
-export function needsTelemetryConsentPrompt(): boolean {
-  return convenienceTelemetryConsentQuery().needsPrompt;
-}
-
-/** Synchronous compatibility getter; may block for up to five seconds. */
-export function getTelemetryPolicy(): TelemetryPolicyState {
-  return convenienceTelemetryConsentQuery().policy;
 }
 
 /** Request consent with the versioned canonical consent resource. */
@@ -707,38 +635,7 @@ export async function requestTelemetryConsent(
   if (!isWindows()) {
     return notApplicable('request');
   }
-  invalidateConvenienceQueryCache();
-  try {
-    return await protocolRunner(locale, presenter);
-  } finally {
-    invalidateConvenienceQueryCache();
-  }
-}
-
-/**
- * Idempotently withdraw telemetry consent synchronously.
- *
- * This compatibility API can block the event loop for up to five seconds.
- * Prefer {@link withdrawTelemetryConsentAsync}.
- */
-export function withdrawTelemetryConsent(): TelemetryConsentOutcome {
-  if (!isWindows()) {
-    return notApplicable('withdraw');
-  }
-  invalidateConvenienceQueryCache();
-  try {
-    const outcome = parseMaintenanceResponse(
-      consentRunner(maintenanceArgs('withdraw')),
-      'withdraw',
-    );
-    invalidateConvenienceQueryCache();
-    return toConsentOutcome(outcome);
-  } catch (error) {
-    invalidateConvenienceQueryCache();
-    throw new Error(
-      `failed to withdraw telemetry consent: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  return protocolRunner(locale, presenter);
 }
 
 /** Idempotently withdraw telemetry consent without blocking the event loop. */
@@ -746,7 +643,6 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
   if (!isWindows()) {
     return notApplicable('withdraw');
   }
-  invalidateConvenienceQueryCache();
   try {
     return toConsentOutcome(parseMaintenanceResponse(
       await consentAsyncRunner(maintenanceArgs('withdraw')),
@@ -756,7 +652,5 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
     throw new Error(
       `failed to withdraw telemetry consent: ${error instanceof Error ? error.message : String(error)}`,
     );
-  } finally {
-    invalidateConvenienceQueryCache();
   }
 }
