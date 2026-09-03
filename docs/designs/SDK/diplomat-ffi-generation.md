@@ -42,6 +42,22 @@ The Rust bridge and generated C exports live in `mxc_ffi`. There is no separatel
 Diplomat also generates .NET bindings. See its
 [.NET backend](https://rust-diplomat.github.io/diplomat/backends/dotnet.html).
 
+## Fit with the current MXC FFI types
+
+| Current MXC value | Diplomat representation | Fit |
+|---|---|---|
+| JSON request string | `&str` or `&DiplomatStr` | Direct |
+| Status, exit code, timeout | Integers, `bool`, or C-like enum | Direct |
+| `MxcSandbox` and stream handles | [Opaque types][opaque-types] | Direct |
+| `try_wait` out parameters | Small value struct or enum | Reshape |
+| `MxcErrorDetail` string pointers | `Result` plus an opaque error with getters | Reshape |
+| `MxcRunResult` string pointers | Opaque result with output and metadata getters | Reshape |
+| Stream read and write buffers | [Byte slices](https://rust-diplomat.github.io/diplomat/types/slices.html) | Direct |
+
+Diplomat supports the required values. It should generate a new ABI shape, not wrap today's raw pointers unchanged.
+
+[opaque-types]: https://rust-diplomat.github.io/diplomat/types/opaque.html
+
 ## ABI surface
 
 ```mermaid
