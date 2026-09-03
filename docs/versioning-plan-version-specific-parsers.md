@@ -8,8 +8,10 @@ capabilities parity remediation in PR #966. Phase 6 merged in PR #968. The
 legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
 reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
-PR #969. Phases 7.2-7.5, 8-9.5, and 10-11 remain; the planned end state
-publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
+PR #969. Phase 7.2 is complete on
+`user/gudge/version_specific_config_parsers_phase7.2` at `281ee81f`. Phases
+7.3-7.5, 8-9.5, and 10-11 remain; the planned end state publishes
+`0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -2588,12 +2590,15 @@ backend is known is the defect this design exists to prevent.
 
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
-`convert_wire_state_aware` currently interleaves three concerns: recovering
+Status: complete on
+`user/gudge/version_specific_config_parsers_phase7.2` at `281ee81f`.
+
+Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
 `experimental_raw` and the masked base JSON, a series of validations that read
 the raw block, and the normalization into `ParsedStateAwareRequest`.
 
-Extract the third concern into a function over the neutral value both parsers
-can produce:
+The phase extracts the third concern into a function over the neutral value
+both parsers can produce:
 
 ```rust
 fn normalize_state_aware(
@@ -2602,11 +2607,11 @@ fn normalize_state_aware(
 ) -> Result<ParsedStateAwareRequest, WxcError>
 ```
 
-Keep this behavior-preserving: the rolling parser must produce byte-identical
-results before and after, proven by the existing `wxc_common` tests. Do not
-fold the exact path in yet.
+The extraction is behavior-preserving: the rolling parser produces the same
+results before and after, proven by the existing `wxc_common` tests. The exact
+path is not folded in yet.
 
-Note which of the interleaved validations become structurally impossible for
+The interleaved validations that become structurally impossible for
 exact input — the non-object `experimental` guard, the moved-to-stable
 `seatbelt` / `macos_sandbox` check, the stray one-shot section rejection, and
 the `containment`-on-non-provision rejection are all closed by the contract
@@ -2614,15 +2619,37 @@ roots. They stay in the seam for the rolling path; for exact input they are
 unreachable, and the difference in the resulting *error message* is Phase 7.4
 classification material.
 
-Repair the Phase 5D state-aware equivalence tests in this step. They currently
-compare against the unmasked `wire::MxcConfig` deserialization, which the
-rolling state-aware pipeline never produces; once the seam exposes the real
-pre-normalization value, point them at it.
+The Phase 5D state-aware equivalence tests now compare against the real rolling
+pre-normalization value rather than the unmasked `wire::MxcConfig`
+deserialization that the state-aware pipeline never produces.
 
 Per the decision 1 resolution, the seam owns telemetry population for both
 paths, and the state-aware adapter stops emitting `config.experimental`.
 
 Suggested commit boundary: `Extract the shared state-aware normalization seam`.
+
+The implementation:
+
+- characterizes every state-aware phase, all three provision backends, raw
+  experimental and source retention, telemetry, and post-provision Network
+  presence before the refactor
+- adds `parse_rolling_state_aware_wire_input` as the rolling source adapter and
+  `normalize_state_aware` as the shared validation and runtime-normalization
+  seam
+- keeps rolling-only validation messages stable and moves cross-cutting
+  telemetry population into the seam
+- makes `experimental_raw` the sole state-aware experimental payload and
+  removes the redundant `wire::Experimental` conversions from exact adapters
+- replaces the Phase 5D plain-wire comparison with complete
+  `StateAwareWireInput` equivalence across every phase and provision backend
+- adds contract/backend parity tests for IsolationSession and WSLC provision
+  payloads and records the known exact-stricter `null` and unknown-field cases;
+  Windows Sandbox remains a unit provision payload
+- confirms dispatch continues to deserialize backend phase config from
+  `experimental_raw`, which remains the temporary transport until Phase 9.5
+
+The full Rust workspace format, compile, clippy, and test gates pass on the
+branch.
 
 ##### Phase 7.3: Add the private exact-contract path
 
