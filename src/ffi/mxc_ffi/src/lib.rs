@@ -87,16 +87,11 @@ pub const MXC_TELEMETRY_CONSENT_PRESENTER_ERROR: i32 = -1;
 ///
 /// # Safety
 ///
-/// **The callback must not unwind across the FFI boundary.** Only Rust panics
-/// are caught by [`std::panic::catch_unwind`] on the Rust side; a C++
-/// exception, a .NET/CLR exception, an Objective-C exception, a Go panic, or
-/// any other foreign unwind mechanism escaping this callback into Rust is
-/// undefined behavior. Binding authors wrapping this callback (C#, Node
-/// native addons, C++ hosts, and so on) must wrap the trampoline that invokes
-/// the caller's presenter in a `try` / `catch (...)` (or the runtime's
-/// equivalent) that catches every foreign exception and returns
+/// **The callback must not unwind across the FFI boundary.** Every callback
+/// or trampoline, including one written in Rust, must contain failures
+/// internally and return
 /// [`MXC_TELEMETRY_CONSENT_PRESENTER_ERROR`] instead of allowing the exception
-/// to propagate.
+/// or panic to propagate.
 pub type MxcTelemetryConsentPresenter =
     Option<unsafe extern "C" fn(prompt_json_utf8: *const c_char, context: *mut c_void) -> i32>;
 
