@@ -231,7 +231,7 @@ Successful non-dry-run audits require capture metadata, actionable denials JSON,
 
 ## Telemetry
 
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
 Telemetry requires:
 1. Top-level `"telemetry": { "enabled": true }` in the JSON config
@@ -247,44 +247,21 @@ On non-Windows platforms, all telemetry functions are no-ops.
 
 ### Data Collection
 
-The software may collect information about you and your use of the software and
-send it to Microsoft when telemetry is enabled and all consent and policy gates
-permit collection. Microsoft may use this information to provide services and
-improve our products and services. Telemetry is off by default, and MXC does
-not treat use of the software as consent. On Windows, the host application must
-provide an appropriate notice and obtain explicit user consent before enabling
-telemetry, and must provide a way to review or revoke that choice. If you use
-these features to collect data from users of your applications, you must comply
-with applicable law, including providing appropriate notices to your users
-together with a copy of Microsoft's privacy statement. Our privacy statement
-is located at https://go.microsoft.com/fwlink/?LinkID=824704. You can learn
-more about data collection and use in the help documentation and our privacy
-statement.
+The software may collect information about you and your use of the software and send it to Microsoft. Microsoft may use this information to provide services and improve our products and services. You may turn off the telemetry as described in the repository. There are also some features in the software that may enable you and Microsoft to collect data from users of your applications. If you use these features, you must comply with applicable law, including providing appropriate notices to users of your applications together with a copy of Microsoft's privacy statement. Our privacy statement is located at https://go.microsoft.com/fwlink/?LinkID=824704. You can learn more about data collection and use in the help documentation and our privacy statement. Your use of the software operates as your consent to these practices.
 
 #### How to turn telemetry off
 
-Telemetry is **off by default**. MXC emits telemetry only when top-level
-`"telemetry": { "enabled": true }` is present in the JSON config, so no
-action is required to keep it disabled.
+Telemetry is **off by default**. To keep it off, do not set
+`"telemetry": { "enabled": true }` for the run.
 
-In addition to specifying that telemetry is enabled, on Windows explicit
-per-user consent and an administrative policy that permits collection are also
-required. Omitting any required gate (the default) turns telemetry off
-entirely. On non-Windows platforms all telemetry functions are no-ops and
-consent is not applicable.
+If telemetry is enabled in config, collection still does not occur unless
+Windows user consent is granted and administrative policy allows collection.
 
 #### What official builds send
 
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution` and `MXC.Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution` and `MXC.Error` events to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
-No PII is collected. Events contain only execution metrics (duration, backend
-type, exit code) and a bounded error category (`error_type`). Free-form error
-message text is never emitted, so paths, usernames, and credentials cannot
-leak through telemetry. The SDKs expose presenter-bound consent requests,
-typed consent status, and explicit withdrawal. SDK hosts render the canonical
-MXC consent resource through their native UI and return the user's decision;
-MXC owns persistence. See the normative
-[SDK presenter requirements](docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
+No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and a bounded error category (`error_type`). Free-form error message text is never emitted, so paths, usernames, and credentials cannot leak through telemetry. If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
 

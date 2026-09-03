@@ -512,15 +512,11 @@ Telemetry is additionally off unless a one-shot `ContainerConfig` using schema
 passes `config.telemetry: { enabled: true }`. This switch does not require
 `options.experimental` and cannot bypass consent or administrative policy.
 
-The SDK does not ship a consent UI. It passes the versioned canonical resource
-from the native layer to your presenter. Render its supplied fields verbatim
-and return a typed decision. Follow the
+The SDK does not ship a consent UI. It passes the canonical prompt to your
+presenter. Render its supplied fields verbatim and return a typed decision.
+Follow the
 [SDK presenter requirements](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
 for control mappings, dismissal behavior, and withdrawal:
-
-Consent maintenance uses the executor's dedicated `--telemetry-consent`
-control plane. It is separate from sandbox execution configuration and is
-never encoded in `MxcConfig` or passed through `--config-base64`.
 
 ```typescript
 import {
@@ -540,7 +536,7 @@ await withdrawTelemetryConsentAsync();
 
 If the API is never called, the presenter fails, or it returns `dismissed`,
 telemetry remains off. On non-Windows hosts requests and withdrawals return
-`notApplicable` without invoking the presenter or child process.
+`notApplicable` without invoking the presenter.
 
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
 `'granted'`. Its diagnostic `error` field distinguishes that result from a
@@ -553,9 +549,6 @@ if (error) {
   console.warn(`mxc: could not read telemetry consent: ${error}`);
 }
 ```
-
-`needsPrompt` is supplied by the native layer. If the resolved `wxc-exec` is
-older than this SDK and does not report the field, it fails closed to `false`.
 
 ### Administrative policy
 

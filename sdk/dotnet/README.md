@@ -484,8 +484,8 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 1. the user has explicitly granted MXC-owned consent, and
 2. the caller opts this invocation in via telemetry settings.
 
-`MxcTelemetry` is UI-agnostic: it passes the native canonical prompt resource
-to your presenter and persists only the typed decision you return.
+`MxcTelemetry` is UI-agnostic: it passes the canonical prompt to your
+presenter and persists only the typed decision you return.
 `GetConsentStatus`, `NeedsConsentPrompt`, and `WithdrawConsent` provide the
 remaining maintenance operations. Dismissal and failures never grant consent.
 For presenter rules and consent semantics, see
@@ -534,14 +534,9 @@ if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
 ```
 
 `Allowed` does not grant user consent, while `Blocked` disables collection and
-the consent prompt. The policy query fails closed to `Blocked` if the native
-library cannot be loaded; non-Windows hosts return `NotApplicable`. See
+the consent prompt. Failures return a fail-closed state and never grant
+consent; non-Windows hosts return `NotApplicable`. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md).
-
-`GetConsent()` never throws for a missing, mismatched, or outdated native
-library: those fail closed to `TelemetryConsentState.Undetermined` (never
-`Granted`). Only a genuine failure reported by the native layer surfaces as
-`MxcException`.
 
 ## Projects
 
@@ -560,10 +555,7 @@ library: those fail closed to `TelemetryConsentState.Undetermined` (never
 
 Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
-Run the tests in the **Debug** configuration. The telemetry-consent tests
-redirect the consent store via `MXC_TEST_LOCALAPPDATA_OVERRIDE`, which the
-native library compiles out in release builds; under `dotnet test -c Release`
-they fail loudly rather than touch the real per-user consent file.
+Run native telemetry-consent integration tests in the **Debug** configuration.
 
 ## Native library loading
 
