@@ -9,7 +9,7 @@ legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
 reconstructed its exact Rust contract and advanced exact development to
 `0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
 PR #969. Phase 7.2 is complete on
-`user/gudge/version_specific_config_parsers_phase7b` at `401ba0c2` and is open
+`user/gudge/version_specific_config_parsers_phase7b` at `840f8c07` and is open
 as PR #1091, stacked on #969. Phases 7.3-7.5, 8-9.5, and 10-11 remain; the
 planned end state publishes `0.9.0-alpha` and opens `0.10.0-alpha`
 development.
@@ -851,12 +851,11 @@ no fallback to the latest version.
 After parity tests pass, remove the direct version-insensitive wire
 deserialization path.
 
-Remove the `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
-adapter modules, on `state_aware_wire`, and on the Phase 7.3 exact path. This
-is the first phase in which the router calls the exact path, so it is the first
-phase in which any of that code is reachable in a production build. Removing
-them earlier would produce dead-code warnings, since an uncalled exact path
-leaves everything it calls dead too.
+Remove the remaining `#[cfg_attr(not(test), allow(dead_code))]` suppressions on
+the development adapter, `state_aware_wire`, and the Phase 7.3 exact path.
+Published one-shot adapters are already referenced by the hidden construction
+bridge, but no public production entry point calls that bridge before this
+phase. Phase 9 is when the router first calls the exact parser path.
 
 Exact dispatch must be authoritative before the v0.9 stable-candidate contract
 removes legacy Network syntax. This sequencing protects all published
@@ -1055,7 +1054,7 @@ in progress, but merge in the order below.
 | PR | Plan scope | Boundary |
 | --- | --- | --- |
 | 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
-| 2 | Phase 7.3 | Add the private exact parser path and versioned policy builders |
+| 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders |
 | 3 | Phases 7.4-7.5 | Add the differential harness and commit its complete divergence classification together |
 | 4 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references |
 | 5 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization |
@@ -2162,7 +2161,7 @@ Resolve these before implementation; each changes the shape of the work.
 | --- | --- | --- |
 | 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority. Dispatch keeps reading `experimental_raw` through Phase 9; Phase 9.5 replaces the bridge with a typed payload. See "Phase 7 decision 1 resolved" below |
 | 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable. Test-only does not mean the phase has no production diff: see "Phase 7 production surface" below |
-| 3 | How `load_request_from_value` reaches an exact contract | **Resolved.** Construct the declared version's contract root directly in Rust and adapt it, rather than round-tripping JSON. See "Phase 7 decision 3 resolved" below |
+| 3 | How `load_request_from_value` reaches an exact contract | **Resolved.** Add a test-only builder that constructs the declared version's contract root directly and adapts it for differential validation. Keep the existing rolling builder authoritative in production until Phase 9 cuts every public surface over together. See "Phase 7 decision 3 resolved" below |
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
 | 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
 | 6 | When the script reaches `mxc_engine::policy` | **Resolved.** At build time. `build_request` and `build_request_with_containment` take the script as an argument, so the required `process.commandLine` is satisfied structurally. See "Phase 7 decision 3 resolved" below |
@@ -2259,22 +2258,25 @@ differential harness guards the two interpretations. Phase 9.5 moves to option
 B before Phase 10 evolves the v0.9 surface, rather than waiting for a future
 defaulting or canonicalization change to expose the drift.
 
-##### Phase 7 decision 3 resolved: build the declared version's contract root
+##### Phase 7 decision 3 resolved: prepare direct exact construction without early cutover
 
-**Resolution.** `mxc_engine::policy` constructs the contract root for the
-version the policy declares, then reuses the existing per-version adapter to
-reach `wire::MxcConfig` and the normal semantic validation. It does not
-serialize to text, and it does not deserialize a synthesized `Value`. The
-script becomes a build-time argument, so the root's required
-`process.commandLine` is satisfied structurally.
+**Resolution.** A test-only `mxc_engine::policy::exact` builder constructs the
+contract root for the version the policy declares, then reuses the existing
+per-version adapter to reach `wire::MxcConfig` and the normal semantic
+validation. It does not serialize to text or deserialize a synthesized
+`Value`. Production `build_request` continues to synthesize rolling wire JSON
+and call the same rolling parser as the executor until Phase 9 cuts the Rust
+SDK, FFI, executor, Node SDK, and state-aware surfaces over together. The
+script remains a build-time argument on both paths, so the required
+`process.commandLine` is satisfied before either parser runs.
 
-**Why this path is different from every other entry point.** The `Value` this
-caller passes today is entirely synthesized by `build_wire_config` from typed
-Rust — `json!` literals over `SandboxPolicy`, `Containment`, and
-`WslcSection`. No user-authored JSON text exists anywhere on this path, so
-there are no source positions to preserve and nothing is lost by never
-producing text. There is exactly one production caller, at `policy.rs:848`;
-the other occurrence is in `mod tests`.
+**Why keep this exact counterpart.** The production `Value` is entirely
+synthesized by `build_wire_config` from typed Rust — `json!` literals over
+`SandboxPolicy`, `Containment`, and `WslcSection`. No user-authored JSON text
+exists on that path, so a direct typed exact builder is the intended Phase 9
+replacement. Keeping it test-only in Phase 7 allows parity work without giving
+SDK callers a different structural contract from `wxc-exec` or state-aware
+callers.
 
 **Why not deserialize a synthesized `Value` into the version's root.** That
 alternative needs no new construction API and keeps one builder, but it
@@ -2305,11 +2307,11 @@ also be constructed. `Default` continues to represent omission, while
 incidental. A feature gate (`build`) would make the boundary louder at the
 cost of a CI matrix entry; it is not required.
 
-**What it buys.** Version expressibility becomes largely a compile-time
-property rather than a runtime check. A `published::v0_6_0_alpha::Request` has
-no `wslc` field, so a WSLC section under a `0.6.0-alpha` policy cannot be
-written at all. The declared version stops being an assertion about the
-document and becomes the thing that selects the type.
+**What it buys.** The harness can prove that version expressibility will become
+largely a compile-time property at cutover. A
+`published::v0_6_0_alpha::Request` has no `wslc` field, so the exact builder
+cannot write a WSLC section under a `0.6.0-alpha` policy. Phase 9 promotes this
+tested path only after the rolling-versus-exact classifications are complete.
 
 **Recurring cost, accepted.** One builder per supported version — published
 v0.6/v0.7/v0.8 plus mutable v0.9, then another mutable builder when publication
@@ -2364,16 +2366,18 @@ production diff. Three changes land in non-test code:
 | Exact-contract JSON parser added, dead in production | Compiled but uncalled | 7.3 |
 | `OptionalField::present` added to each contract primitive module | New explicit construction surface | 7.3 |
 | Hidden typed one-shot contract bridge added for `mxc_engine` | Workspace-internal cross-crate API | 7.3 |
-| Per-version exact policy builders replace rolling JSON synthesis | Behavior-preserving production routing change | 7.3 |
+| Per-version exact policy builders added beside rolling JSON synthesis | Test-only differential infrastructure | 7.3 |
 
-No user-authored JSON call site moves: the rolling parser remains authoritative,
-and the exact builder parity tests pin the produced runtime model.
+No public production call site moves: the Rust SDK and FFI continue through
+the rolling builder, and user-authored JSON continues through the rolling
+parser. The exact builder parity tests pin the runtime model before the common
+Phase 9 cutover.
 `wxc_common` adds only a `#[doc(hidden)]` exact one-shot
 contract enum and normalization function because Rust has no friend-crate
 visibility and `mxc_engine` must cross the crate boundary without exposing the
-adapter modules or adding implicit public conversions. The seam in particular
-must be real production code rather than a test-only copy — a copy would
-validate a fork of the logic rather than the logic the rolling parser runs.
+adapter modules or adding implicit public conversions. The bridge and parser
+path are compiled production staging code, while `mxc_engine` invokes the
+bridge only from its test-only exact builders until Phase 9.
 
 #### Phase 7 status
 
@@ -2626,7 +2630,7 @@ backend is known is the defect this design exists to prevent.
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7b` at `401ba0c2`; open as
+`user/gudge/version_specific_config_parsers_phase7b` at `840f8c07`; open as
 PR #1091, stacked on Phase 7a PR #969.
 
 Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
@@ -2692,8 +2696,10 @@ branch.
 ##### Phase 7.3: Add the private exact-contract path
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7c` at `764a9850`, stacked on
-the Phase 7.2 branch.
+`user/gudge/version_specific_config_parsers_phase7c` at `5a010c82`, stacked on
+the Phase 7.2 branch and open as PR #1096. The development commits were
+squashed on 2026-09-03; their original history is retained locally on
+`backup/version_specific_config_parsers_phase7c_presquash-764a9850`.
 
 The implementation adds a private path in `config_parser` that probes the
 version, dispatches to the exact registry, calls the applicable adapter, and
@@ -2714,44 +2720,43 @@ change rather than a code move. Do not place the path inside `#[cfg(test)]`:
 that would force Phase 9 to move code into production at the moment it becomes
 authoritative, so the validated code would not be literally the shipped code.
 
-The production Rust policy builders make the published one-shot adapters
-reachable before parser cutover, so the v0.6/v0.7/v0.8 adapter modules no
-longer carry dead-code suppressions. The development adapter retains its
-module-level suppression because its state-aware mappings remain staging code,
-although its one-shot mapping is production-reachable. `state_aware_wire` and
-the exact JSON parser retain their suppressions until Phase 9 makes exact
-dispatch authoritative.
+The hidden one-shot bridge references the published adapters, so the
+v0.6/v0.7/v0.8 adapter modules no longer carry dead-code suppressions even
+though no public production entry point calls the bridge yet. The development
+adapter retains its module-level suppression because its state-aware mappings
+remain staging code. `state_aware_wire` and the exact JSON parser retain their
+suppressions until Phase 9 makes exact dispatch authoritative.
 
 This step also adds explicit `OptionalField::present` construction to each
 independent contract primitive module plus a narrow `#[doc(hidden)]`
 one-shot-contract bridge in `wxc_common`, and repoints `mxc_engine::policy` at
-the per-version contract builders, per the decision 3 resolution. Adapter
-modules and `into_wire` functions remain crate-private; no public `From`
-conversion from contract requests to `wire::MxcConfig` is added. Unlike the
-parser path, the builder is live in production immediately: it is not a shadow,
-it is the only way that entry point reaches a request.
+test-only per-version contract builders, per the decision 3 resolution.
+Production `build_request` remains on `build_wire_config` and
+`load_request_from_value`. Adapter modules and `into_wire` functions remain
+crate-private; no public `From` conversion from contract requests to
+`wire::MxcConfig` is added.
 
-The direct builders live under `mxc_engine::policy::exact`: `mod.rs` owns
-version selection and shared preparation, while `v0_6.rs`, `v0_7.rs`,
-`v0_8.rs`, and `v0_9.rs` own their contract-specific construction and mapping.
-The former rolling `serde_json::Value` builder remains only under `cfg(test)` as
-a runtime-model parity oracle. Safe `NonEmptyString::new` and
-`NonEmptyVec::new` constructors are exposed where typed construction needs
-them; this changes Rust implementation surface without changing a published
-JSON shape.
+The test-only direct builders live under `mxc_engine::policy::exact`: `mod.rs`
+owns version selection and shared preparation, while `v0_6.rs`, `v0_7.rs`,
+`v0_8.rs`, and `v0_9.rs` own contract-specific construction and mapping. The
+rolling `serde_json::Value` builder remains the production path and the parity
+oracle. Safe `NonEmptyString::new` and `NonEmptyVec::new` constructors are
+exposed where typed construction needs them; this changes Rust implementation
+surface without changing a published JSON shape.
 
-The requested Phase 7c commit boundaries are:
+The Phase 7c development sequence was:
 
-| Step | Commit | Content |
-| --- | --- | --- |
-| 7c-a | `771e6968` | Explicit construction primitives and hidden exact one-shot bridge |
-| 7c-b | `75fc3869` | Private exact-contract parser and version dispatch |
-| 7c-c | `b7c1be07` | Comprehensive exact parser coverage |
-| 7c-d | `990cfe95` | Direct per-version Rust policy builders and rolling parity oracle |
-| 7c-e | `f20c657b` | SDK, authoring, versioning, and architecture documentation |
+| Step | Content |
+| --- | --- |
+| 7c-a | Explicit construction primitives and hidden exact one-shot bridge |
+| 7c-b | Private exact-contract parser and version dispatch |
+| 7c-c | Comprehensive exact parser coverage |
+| 7c-d | Test-only per-version Rust policy builders and rolling parity oracle |
+| 7c-e | SDK, authoring, versioning, and architecture documentation |
 
-The follow-up `764a9850` removes obsolete dead-code suppressions from the
-published adapters after their production reachability changed.
+The final amended commit is `5a010c82` (`Add private exact contract parsing`).
+The earlier exact-production variant is retained locally on
+`backup/version_specific_config_parsers_phase7c_exact-production-27717182`.
 
 The full Rust workspace format, compile, clippy, and test gates pass. The
 `aarch64-apple-darwin` cross-target check passes for `mxc_engine` and
@@ -2948,7 +2953,7 @@ though the override machinery itself is identical in both.
 | v0.9 Network surface | Remove legacy Network fields from every v0.9 one-shot and state-aware root before publication; published v0.6/v0.7/v0.8 contracts retain their immutable syntax |
 | Contract authority | Versioned Rust types own structure and local value rules; shared conversion and validators own cross-field and backend semantics |
 | Differential validation | Compare rolling and exact paths in tests rather than dual-running both parsers in production |
-| Programmatic policy construction | Build the selected version's typed contract directly rather than round-tripping synthesized JSON |
+| Programmatic policy construction | Prepare direct typed exact builders under tests in Phase 7, keep rolling construction authoritative, and promote the exact builders with the common Phase 9 cutover |
 | Command overrides | Resolve and splice the command before exact parsing so every effective request satisfies the required process shape |
 | State-aware backend payload transport | Preserve `experimental_raw` through exact-dispatch cutover, then replace it with typed payloads in Phase 9.5 |
 | Freeze model | Published JSON shapes are fixed now; Phase 11 freezes contract-to-runtime behavior as well, while permitting behavior-equivalent source refactoring and security hardening |
@@ -3267,7 +3272,7 @@ builder, SDK, or backend may silently discard a removed field.
 | 15 | Update WSLC policy handling | WSLC backend, state-aware normalization and dispatch, SDKs | Change | Provision uses directional posture and exec uses runtime proxy without restating immutable network mode |
 | 16 | Update ProcessContainer policy mapping | AppContainer and BaseContainer configuration and validation | Change | Directional egress, ingress, host loopback, runtime proxy, and peer identity remain correctly lowered |
 | 17 | Update Seatbelt, Bubblewrap, and LXC translations | Backend policy builders and validators | Change | Each backend receives canonical directional policy while published legacy inputs retain behavior through adapters |
-| 18 | Update per-version Rust policy builders | Versioned builders introduced in Phase 7.3 | Change and addition | Published builders emit their frozen syntax and the v0.9 builder emits directional-only syntax |
+| 18 | Update per-version Rust policy builders | Test-only builders introduced in Phase 7.3 | Change and addition | Published builders emit their frozen syntax and the v0.9 builder emits directional-only syntax |
 | 19 | Update the Node SDK surface | Public types, one-shot builder, state-aware types, helpers, tests | Change and deletion | v0.9 emitters cannot generate legacy fields and expose runtime proxy plus acknowledgment |
 | 20 | Update the C# SDK surface | Policy POCOs, lifecycle types, converters, tests | Change and deletion | C# emits the same v0.9 shape and acknowledgment as Rust and Node |
 | 21 | Confirm FFI behavior | Rust FFI and managed parity gates | Tests and possible change | No ABI change occurs unless required; JSON crossing FFI follows the selected exact version builder |
