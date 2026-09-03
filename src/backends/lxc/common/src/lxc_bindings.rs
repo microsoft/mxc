@@ -147,6 +147,42 @@ fn build_attach_args_with_env_control(
     args
 }
 
+/// Take away the workload's power to undo the network policy confining it.
+///
+/// The request's network policy is carried by firewall rules that sit in the
+/// container's own network namespace, so a workload holding `CAP_NET_ADMIN`
+/// can take its own interface down or delete the rules outright.
+///
+/// Dropping it from the *caller's* bounding set is what reaches the workload.
+/// `lxc-attach` reads the container init's live bounding set and issues drops
+/// to match, never restoring a bit its caller already gave up, and a
+/// bounding-set drop survives `execve` and cannot be undone. Container init
+/// keeps everything, so the guest's own DHCP client still configures the
+/// interface at boot.
+///
+/// Every attach goes through here, including this backend's own `/etc/hosts`
+/// housekeeping, which edits a file. The rules themselves are installed from
+/// the host with `nsenter`, on a different process that this never touches.
+#[cfg(target_os = "linux")]
+fn confine_network_capabilities(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // `libc` does not export this; the value is from linux/capability.h.
+    const CAP_NET_ADMIN: libc::c_ulong = 12;
+
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `prctl` is a bare syscall and this
+    // closure allocates nothing and captures nothing.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 /// enum to tell LXC to block all network, or
 /// configure the network based on the configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,6 +538,7 @@ impl LxcContainer {
             command,
             force_clear_env,
         ));
+        confine_network_capabilities(&mut cmd);
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,

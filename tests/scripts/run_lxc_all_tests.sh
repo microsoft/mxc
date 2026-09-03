@@ -133,6 +133,7 @@ run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_pol
 run_test "LXC Network Reuse Tightening" "$SCRIPT_DIR/run_lxc_network_reuse_tighten_test.sh"
 run_test "LXC Network Reuse Loosening" "$SCRIPT_DIR/run_lxc_network_reuse_loosen_test.sh"
 run_test "LXC Inbound Default-Deny" "$SCRIPT_DIR/run_lxc_inbound_deny_test.sh"
+run_test "LXC Workload Capability Confinement" "$SCRIPT_DIR/run_lxc_capability_confinement_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 run_test "LXC Network Legacy Default-Allow v0.8 Compatibility" "$SCRIPT_DIR/run_lxc_network_legacy_v08_compat_test.sh"
