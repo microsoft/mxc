@@ -174,13 +174,6 @@ public class StateAwarePhaseOptions
     public TelemetrySettings? Telemetry { get; set; }
 }
 
-/// <summary>
-/// Compatibility alias for <see cref="StateAwarePhaseOptions"/> used at start.
-/// </summary>
-public sealed class StartSandboxOptions : StateAwarePhaseOptions
-{
-}
-
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
 public class StateAwareExecOptions
 {

@@ -601,7 +601,7 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildStartEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StartSandboxOptions
+        var options = new StateAwarePhaseOptions
         {
             Telemetry = new TelemetrySettings { Enabled = true },
         };
@@ -643,7 +643,7 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildStartEnvelope_LeavesExplicitTelemetryVersionForNativeValidation()
     {
-        var options = new StartSandboxOptions
+        var options = new StateAwarePhaseOptions
         {
             Version = SchemaVersions.LatestStable,
             Telemetry = new TelemetrySettings { Enabled = false },
