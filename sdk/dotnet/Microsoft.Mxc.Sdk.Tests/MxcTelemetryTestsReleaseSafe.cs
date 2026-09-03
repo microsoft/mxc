@@ -70,6 +70,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
     {
         var native = new FakeTelemetryNativeApi
         {
+            GetConsentImpl = () => new((int)ErrorCode.Panic, null),
             NeedsConsentPromptImpl = () => new((int)ErrorCode.Panic, false),
             GetPolicyImpl = () => throw new DllNotFoundException("missing mxc_ffi"),
             GetConsentStatusImpl = () => new((int)ErrorCode.Success, "{"),
@@ -78,12 +79,27 @@ public sealed class MxcTelemetryTestsReleaseSafe
         using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
         using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
 
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
         Assert.False(MxcTelemetry.NeedsConsentPrompt());
         Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
         var status = MxcTelemetry.GetConsentStatus();
         Assert.Equal(TelemetryConsentState.Undetermined, status.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, status.EffectiveState);
         Assert.Equal(TelemetryPolicyState.Blocked, status.Policy);
+    }
+
+    [Fact]
+    public void GetConsent_UnexpectedReadFailureFailsClosed()
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            GetConsentImpl = () => throw new InvalidOperationException("unexpected read failure"),
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
     }
 
     [Fact]

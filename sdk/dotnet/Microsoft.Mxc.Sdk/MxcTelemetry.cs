@@ -162,13 +162,9 @@ public static class MxcTelemetry
 
     /// <summary>
     /// Read persisted telemetry consent. Returns <see cref="TelemetryConsentState.NotApplicable"/>
-    /// off Windows and <see cref="TelemetryConsentState.Undetermined"/> when the native library
-    /// cannot load; other native failures throw <see cref="MxcException"/>.
+    /// off Windows and <see cref="TelemetryConsentState.Undetermined"/> when the consent state
+    /// cannot be read.
     /// </summary>
-    /// <exception cref="MxcException">
-    /// The native call returned a non-success status — an FFI-local fault
-    /// (null out-pointer, caught panic), not an ordinary consent outcome.
-    /// </exception>
     public static TelemetryConsentState GetConsent()
     {
         if (!IsWindowsHost)
@@ -182,19 +178,10 @@ public static class MxcTelemetry
             EnsureSuccess(result.Status, "failed to read telemetry consent state");
             return ParseConsentState(result.Payload, "GetConsent");
         }
-        catch (Exception ex) when (IsNativeLoadFailure(ex))
+        catch (Exception ex)
         {
             ReportFailClosed("GetConsent", "Undetermined", ex);
             return TelemetryConsentState.Undetermined;
-        }
-        catch (MxcException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            ReportFailClosed("GetConsent", "MxcException", ex);
-            throw new MxcException(ErrorCode.BackendError, "failed to read telemetry consent state", ex);
         }
     }
 

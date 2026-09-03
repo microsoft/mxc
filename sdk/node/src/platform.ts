@@ -739,10 +739,14 @@ function getDarwinRustTargetTriple(): string {
  */
 export function findWxcExecutable(): string | null {
   const binDir = process.env.MXC_BIN_DIR;
+  const overridePath = binDir
+    ? path.join(binDir, getSdkArch(), 'wxc-exec.exe')
+    : undefined;
   const cached = wxcExecutableCache;
   if (
     cached !== undefined
     && cached.binDir === binDir
+    && (overridePath === undefined || cached.executable === overridePath)
     && wxcExecutableVerifier(cached.executable)
   ) {
     return cached.executable;
@@ -750,8 +754,7 @@ export function findWxcExecutable(): string | null {
   wxcExecutableCache = undefined;
 
   // Allow override for bundled deployments (debugging/testing)
-  if (binDir) {
-    const overridePath = path.join(binDir, getSdkArch(), 'wxc-exec.exe');
+  if (overridePath !== undefined) {
     if (wxcExecutableVerifier(overridePath)) {
       wxcExecutableCache = { binDir, executable: overridePath };
       return overridePath;
