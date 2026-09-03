@@ -24,13 +24,13 @@
 //! its `waiter`/`terminator`, which may also reference them) are untouched — so
 //! there is no double-close even for a backend that keeps and closes its own
 //! pipe ends. IsolationSession is exactly that case under
-//! [`ExecConsumer::Library`]: it is the only state-aware backend that returns
+//! [`ExecStdio::Piped`]: it is the only state-aware backend that returns
 //! real pipe handles, and it closes its own ends when its process object drops.
-//! Under [`ExecConsumer::Executor`] it relays internally and returns null
-//! handles, as do Windows Sandbox and WSLc — which under [`ExecConsumer::Library`]
+//! Under [`ExecStdio::Relayed`] it relays internally and returns null
+//! handles, as do Windows Sandbox and WSLc — which under [`ExecStdio::Piped`]
 //! return no handle at all, refusing it up front. A handle with *all three*
 //! streams null is refused here rather than wrapped: it means the backend has
-//! not implemented the `Library` contract, and a stream-less `SandboxProcess`
+//! not implemented the `Piped` contract, and a stream-less `SandboxProcess`
 //! would hide that.
 //!
 //! Each readable duplicate is wrapped as a **cancellable** reader, so a read on
@@ -41,8 +41,8 @@
 //! [`stdout_closer`](SandboxProcess::stdout_closer).
 //!
 //! [`try_clone_to_owned`]: std::os::windows::io::BorrowedHandle::try_clone_to_owned
-//! [`ExecConsumer::Library`]: crate::state_aware_backend::ExecConsumer::Library
-//! [`ExecConsumer::Executor`]: crate::state_aware_backend::ExecConsumer::Executor
+//! [`ExecStdio::Piped`]: crate::state_aware_backend::ExecStdio::Piped
+//! [`ExecStdio::Relayed`]: crate::state_aware_backend::ExecStdio::Relayed
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -154,22 +154,22 @@ impl ExecSandboxProcess {
         } = handle;
 
         // A handle with nothing on any stream is a backend that has not
-        // implemented the `Library` contract — it relayed internally and ran the
-        // workload to completion, which is the `Executor` shape. Wrapping it
+        // implemented the `Piped` contract — it relayed internally and ran the
+        // workload to completion, which is the `Relayed` shape. Wrapping it
         // would hand the caller a `SandboxProcess` whose `take_stdout` is `None`
         // and whose `wait` returns an exit code the backend already had, while
         // the sandbox's output went wherever the backend chose — for the
         // internally-relaying backends, the *host application's* own stdout.
         //
         // This is a **backstop, not the guard that matters**. The backends that
-        // cannot serve `Library` refuse it up front instead (see
-        // `unsupported_library_exec`), so reaching this branch means a backend
-        // returned an all-null handle for a `Library` exec anyway — hence the
+        // cannot serve `Piped` refuse it up front instead (see
+        // `unsupported_piped_exec`), so reaching this branch means a backend
+        // returned an all-null handle for a `Piped` exec anyway — hence the
         // distinct wording, so the two are told apart in a log.
         //
         // **The process is not assumed to have finished.** The comment above
         // describes the shape this usually means, not a guarantee: the
-        // IsolationSession `Library` path starts a process and passes through
+        // IsolationSession `Piped` path starts a process and passes through
         // whatever handles the service gave it, so an all-zero set can name a
         // process that is very much alive. Reaping is therefore conditional on
         // the kill being accepted, exactly as on every other teardown path — a
@@ -847,7 +847,7 @@ mod tests {
     /// This test previously asserted the opposite — that the all-null shape
     /// yielded a stream-less process carrying the waiter's exit code. That was
     /// the contract when no backend surfaced real pipes; it is now the signature
-    /// of a backend that has not implemented the `Library` path, and handing the
+    /// of a backend that has not implemented the `Piped` path, and handing the
     /// caller a `SandboxProcess` with no streams hides that behind an object
     /// that looks live. The exec is reaped on the way out, so refusing does not
     /// orphan it.
@@ -1216,7 +1216,7 @@ mod tests {
     ///
     /// The regression this pins: the backstop reaped unconditionally on the
     /// assumption that an all-null handle always means a finished process. It
-    /// does not — the IsolationSession `Library` path starts a process and
+    /// does not — the IsolationSession `Piped` path starts a process and
     /// passes through whatever handles the service returned, so an all-zero set
     /// can name a live one. With a refused kill and no deadline, reaping it
     /// hangs `from_exec_handle`, which the caller cannot interrupt because it

@@ -19,7 +19,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult,
+    null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
@@ -139,13 +139,13 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
-        consumer: ExecConsumer,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
         // Before any work: this backend relays to the executor's stdio, so it
         // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
-        if consumer == ExecConsumer::Library {
-            return Err(wxc_common::state_aware_backend::unsupported_library_exec(
+        if stdio == ExecStdio::Piped {
+            return Err(wxc_common::state_aware_backend::unsupported_piped_exec(
                 "WSLc",
             ));
         }
@@ -218,7 +218,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             // already run the workload to completion by the time it returns, so
             // `exit_code` is whatever the container reported — including for a
             // workload the daemon timed out. Reporting a timeout as such needs
-            // the `Library` path this backend does not have yet.
+            // the `Piped` path this backend does not have yet.
             waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
             // Nothing to terminate: the workload is already gone. `Ok(())` is
             // the truthful answer here, not a placeholder.
@@ -437,7 +437,7 @@ mod tests {
     use super::*;
     use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
 
-    /// A `Library` exec is refused before the backend touches the daemon.
+    /// A `Piped` exec is refused before the backend touches the daemon.
     ///
     /// This backend writes the workload's output to *this process's* stdout and
     /// stderr, so it cannot return exec streams to the caller. The refusal has to come
@@ -449,14 +449,14 @@ mod tests {
     /// to connect to. Any error other than the refusal means the guard ran too
     /// late — the code reached the daemon before checking who was asking.
     #[test]
-    fn a_library_exec_is_refused_before_the_workload_runs() {
+    fn a_piped_exec_is_refused_before_the_workload_runs() {
         let mut runner = WslcStateAwareRunner::new();
         let err = runner
             .exec(
                 "wslc:0123456789abcdef0123456789abcdef",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Library,
+                ExecStdio::Piped,
             )
             .expect_err("a streams-consuming caller must be refused");
         assert!(

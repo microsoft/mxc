@@ -28,7 +28,7 @@ use crate::id::parse_sandbox_id_prefix;
 use crate::models::ContainmentBackend;
 use crate::mxc_error::{MxcError, ResponseEnvelope};
 use crate::state_aware_backend::{
-    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 use crate::state_aware_request::{ParsedStateAwareRequest, Phase};
@@ -94,7 +94,7 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
     backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
     // The caller drives the returned streams itself, so the backend must
     // surface real pipes and leave this process's console alone.
-    backend.exec(&sandbox_id, &request, config, ExecConsumer::Library)
+    backend.exec(&sandbox_id, &request, config, ExecStdio::Piped)
 }
 
 /// Per-backend phase router. The `run_state_aware` arm for a participating
@@ -140,7 +140,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
             }
-            let handle = backend.exec(&sandbox_id, &request, config, ExecConsumer::Executor)?;
+            let handle = backend.exec(&sandbox_id, &request, config, ExecStdio::Relayed)?;
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
@@ -216,7 +216,7 @@ fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
 ///   documents both hazards and solves them with
 ///   `create_relay_thread_with_stop`; the generic path will need an equivalent.
 ///
-///   Until that exists, a backend under [`ExecConsumer::Executor`] **must not
+///   Until that exists, a backend under [`ExecStdio::Relayed`] **must not
 ///   give the child a stdin pipe whose write end it keeps**. Nothing here writes
 ///   to that pipe and nothing can close it, so a workload that reads stdin
 ///   blocks forever -- and it does so while this function is inside `waiter()`,
@@ -329,13 +329,13 @@ fn relay_prepared_streams(
     // Drain what the child wrote before it exited. Bounded -- see `drain_pumps`.
     drain_pumps(pumps);
 
-    // A backend serving `ExecConsumer::Executor` reports `Exited`, so a timeout
+    // A backend serving `ExecStdio::Relayed` reports `Exited`, so a timeout
     // here is a contract violation.
     match outcome {
         Ok(ExecOutcome::Exited(code)) => Ok(code),
         Ok(ExecOutcome::TimedOut) => Err(MxcError::backend_error(
             "backend reported a timeout to the executor relay, which has no way \
-             to represent one; a backend serving ExecConsumer::Executor must \
+             to represent one; a backend serving ExecStdio::Relayed must \
              report ExecOutcome::Exited",
         )),
         Err(error) => Err(error),
@@ -601,11 +601,11 @@ mod tests {
         validate_exec_calls: Cell<u32>,
         validate_stop_calls: Cell<u32>,
         validate_deprovision_calls: Cell<u32>,
-        /// The [`ExecConsumer`] the dispatcher passed to the most recent
+        /// The [`ExecStdio`] the dispatcher passed to the most recent
         /// `exec`. Recorded so the caller-intent split can be asserted --
         /// swapping the two would otherwise compile and silently change
         /// behaviour on both paths.
-        last_exec_consumer: Cell<Option<ExecConsumer>>,
+        last_exec_stdio: Cell<Option<ExecStdio>>,
         provision_error: Option<MxcError>,
         validate_provision_error: Option<MxcError>,
     }
@@ -623,7 +623,7 @@ mod tests {
                 validate_exec_calls: Cell::new(0),
                 validate_stop_calls: Cell::new(0),
                 validate_deprovision_calls: Cell::new(0),
-                last_exec_consumer: Cell::new(None),
+                last_exec_stdio: Cell::new(None),
                 provision_error: None,
                 validate_provision_error: None,
             }
@@ -671,10 +671,10 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
-            consumer: ExecConsumer,
+            stdio: ExecStdio,
         ) -> Result<ExecHandle, MxcError> {
             self.exec_calls.set(self.exec_calls.get() + 1);
-            self.last_exec_consumer.set(Some(consumer));
+            self.last_exec_stdio.set(Some(stdio));
             Err(MxcError::backend_error("stub exec not wired"))
         }
         fn stop(
@@ -789,7 +789,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
-            _consumer: ExecConsumer,
+            _stdio: ExecStdio,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("typed stub exec not wired"))
         }
@@ -1174,13 +1174,13 @@ mod tests {
     /// The executor path relays the handle to its own stdio, so the backend is
     /// told a human is on the other end and a pseudo-console is legitimate.
     #[test]
-    fn executor_dispatch_passes_executor_consumer_to_exec() {
+    fn dispatch_state_aware_asks_for_relayed_stdio() {
         let mut b = StubBackend::new();
         let _ = dispatch_state_aware(&mut b, parsed_runnable_exec("stubd:abc"), false);
         assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
         assert_eq!(
-            b.last_exec_consumer.get(),
-            Some(ExecConsumer::Executor),
+            b.last_exec_stdio.get(),
+            Some(ExecStdio::Relayed),
             "the executor path must not ask a backend for caller-owned pipes"
         );
     }
@@ -1188,13 +1188,13 @@ mod tests {
     /// The streaming path hands the caller the streams, so the backend must be
     /// told to surface separate raw pipes and leave the host console alone.
     #[test]
-    fn streaming_dispatch_passes_library_consumer_to_exec() {
+    fn dispatch_state_aware_exec_asks_for_piped_stdio() {
         let mut b = StubBackend::new();
         let _ = dispatch_state_aware_exec(&mut b, parsed_runnable_exec("stubd:abc"));
         assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
         assert_eq!(
-            b.last_exec_consumer.get(),
-            Some(ExecConsumer::Library),
+            b.last_exec_stdio.get(),
+            Some(ExecStdio::Piped),
             "the streaming path must never let a backend touch the caller's console"
         );
     }
@@ -1238,7 +1238,7 @@ mod tests {
     /// contract, and the relay says so rather than inventing an exit code.
     ///
     /// `ExecOutcome::TimedOut` is unreachable here by construction — a backend
-    /// serving `ExecConsumer::Executor` has run the workload to completion
+    /// serving `ExecStdio::Relayed` has run the workload to completion
     /// before returning, and `ScriptResponse` has no timeout field to carry one
     /// anyway. The regression this pins is the tempting alternative: mapping it
     /// to some sentinel code, which the CLI would then report as the workload's
@@ -1256,7 +1256,7 @@ mod tests {
         let err =
             relay_exec_to_stdio(handle).expect_err("the executor relay cannot represent a timeout");
         assert!(
-            err.message.contains("ExecConsumer::Executor"),
+            err.message.contains("ExecStdio::Relayed"),
             "the refusal should name the contract it is enforcing: {}",
             err.message
         );

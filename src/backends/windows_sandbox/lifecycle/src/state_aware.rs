@@ -18,7 +18,7 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::process_util::resolve_sibling_binary;
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
@@ -760,13 +760,13 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
-        consumer: ExecConsumer,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
         // Before any work: this backend relays to the executor's stdio, so it
         // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
-        if consumer == ExecConsumer::Library {
-            return Err(wxc_common::state_aware_backend::unsupported_library_exec(
+        if stdio == ExecStdio::Piped {
+            return Err(wxc_common::state_aware_backend::unsupported_piped_exec(
                 "Windows Sandbox",
             ));
         }
@@ -810,7 +810,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             stdin_closer: None,
             // `Exited`, not `TimedOut`: this backend runs the workload to
             // completion inside `exec` and reports what the guest returned, so
-            // there is no live process left to have timed out. A `Library` path
+            // there is no live process left to have timed out. A `Piped` path
             // that could distinguish the two does not exist here yet.
             waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
             // Nothing to terminate: the workload is already gone.
@@ -1055,7 +1055,7 @@ mod tests {
     use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
 
-    /// A `Library` exec is refused before the backend looks for the daemon.
+    /// A `Piped` exec is refused before the backend looks for the daemon.
     ///
     /// This backend relays the workload's output to *this process's* stdio, so
     /// it cannot return exec streams to the caller. The refusal has to precede any
@@ -1066,14 +1066,14 @@ mod tests {
     /// it either — so any error other than the refusal means the consumer check
     /// came too late.
     #[test]
-    fn a_library_exec_is_refused_before_the_workload_runs() {
+    fn a_piped_exec_is_refused_before_the_workload_runs() {
         let mut runner = WindowsSandboxRunner::new();
         let err = runner
             .exec(
                 "not-a-valid-sandbox-id",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Library,
+                ExecStdio::Piped,
             )
             .expect_err("a streams-consuming caller must be refused");
         assert!(
@@ -1343,7 +1343,7 @@ mod tests {
                 "wsb:abcd1234",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Executor,
+                ExecStdio::Relayed,
             )
             .unwrap_err();
         // With no daemon holding the sandbox, exec reports NotStarted rather
@@ -1359,7 +1359,7 @@ mod tests {
                 "iso:abc",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Executor,
+                ExecStdio::Relayed,
             )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
@@ -1576,7 +1576,7 @@ mod tests {
                 "wsb:cccc3333",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Executor,
+                ExecStdio::Relayed,
             )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::NotStarted);
