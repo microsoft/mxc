@@ -239,7 +239,6 @@ public static class MxcSandbox
     internal static string SerializePolicy(SandboxPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        ValidateTelemetryVersion(policy);
         return JsonSerializer.Serialize(policy, JsonOptions);
     }
 
@@ -251,7 +250,6 @@ public static class MxcSandbox
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)
     {
-        ValidateTelemetryVersion(request.Policy);
 #pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
         var legacyCaptureDenials = request.Policy.CaptureDenials;
 #pragma warning restore MXC0001
@@ -284,23 +282,6 @@ public static class MxcSandbox
             Environment = new Dictionary<string, string>(request.Environment),
             Experimental = request.Experimental,
         };
-    }
-
-    private static void ValidateTelemetryVersion(SandboxPolicy policy)
-    {
-        if (policy.Telemetry is null)
-        {
-            return;
-        }
-
-        var coreVersion = policy.Version.Split('-', 2)[0];
-        if (Version.TryParse(coreVersion, out var version)
-            && version < new Version(0, 9, 0))
-        {
-            throw new MxcException(
-                ErrorCode.MalformedRequest,
-                $"telemetry requires schema version {SchemaVersions.MaximumSupported} or later; got {policy.Version}");
-        }
     }
 
     private static ProcessContainerContainment CloneProcessContainer(

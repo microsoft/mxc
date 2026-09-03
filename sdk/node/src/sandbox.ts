@@ -11,7 +11,6 @@ import {
     ContainerConfig,
     ContainmentType,
     ContainmentBackend,
-    TelemetryConfig,
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
@@ -475,12 +474,6 @@ export interface SandboxSpawnOptions {
    * Enable experimental features
    */
   experimental?: boolean;
-
-  /**
-   * Stable per-phase telemetry configuration for state-aware calls.
-   * One-shot calls use `ContainerConfig.telemetry`.
-   */
-  telemetry?: TelemetryConfig;
 
   /**
    * Allow testing-only, deliberately-permissive features that must never run

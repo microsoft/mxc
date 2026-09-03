@@ -603,7 +603,7 @@ public class MxcLifecycleTests
     {
         var options = new StartSandboxOptions
         {
-            TelemetryEnabled = true,
+            Telemetry = new TelemetrySettings { Enabled = true },
         };
         var root = MxcLifecycle
             .BuildStartEnvelope(new SandboxId("iso:abc"), options);
@@ -619,7 +619,7 @@ public class MxcLifecycleTests
     {
         var options = new StateAwareOperationOptions
         {
-            TelemetryEnabled = true,
+            Telemetry = new TelemetrySettings { Enabled = true },
         };
         var root = MxcLifecycle.BuildExecEnvelope(
             new SandboxId("iso:abc"),
@@ -633,19 +633,17 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildStartEnvelope_RejectsTelemetryWithOlderExplicitVersion()
+    public void BuildStartEnvelope_LeavesExplicitTelemetryVersionForNativeValidation()
     {
         var options = new StartSandboxOptions
         {
             Version = SchemaVersions.LatestStable,
-            TelemetryEnabled = false,
+            Telemetry = new TelemetrySettings { Enabled = false },
         };
 
-        var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options));
-
-        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
-        Assert.Contains(SchemaVersions.MaximumSupported, ex.Message);
+        var root = MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options);
+        Assert.Equal(SchemaVersions.LatestStable, root["version"]?.GetValue<string>());
+        Assert.False(root["telemetry"]?["enabled"]?.GetValue<bool>());
     }
 
     [Fact]

@@ -497,7 +497,8 @@ Per-invocation opt-in:
 - One-shot (`Run`/`Spawn`): set
   `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }`.
   An explicit policy version must be `0.9.0-alpha` or later.
-- State-aware phases: set each phase's `TelemetryEnabled = true` independently.
+- State-aware phases: set each phase's
+  `Telemetry = new TelemetrySettings { Enabled = true }` independently.
   `ProvisionResult` contains the sandbox identity used by later phases; no
   telemetry context needs to be forwarded between phases.
 

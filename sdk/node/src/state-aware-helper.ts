@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 import { spawn } from 'child_process';
-import { parse as semverParse } from 'semver';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
@@ -87,7 +86,6 @@ export interface BuildEnvelopeArgs {
   backendKey: StateAwareContainmentBackend;
   containment?: StateAwareContainmentBackend; // provision only
   sandboxId?: string;                        // non-provision only
-  telemetry?: TelemetryConfig;               // stable cross-cutting config
   config?: Record<string, unknown>;
 }
 
@@ -103,7 +101,6 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
     backendKey,
     containment,
     sandboxId,
-    telemetry,
     config,
   } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
@@ -111,29 +108,9 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
-  const configTelemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
-  if (
-    telemetry !== undefined
-    && configTelemetry !== undefined
-    && (telemetry.enabled ?? false) !== (configTelemetry.enabled ?? false)
-  ) {
-    throw mxcErrorFromCode(
-      'malformed_request',
-      'telemetry was supplied with conflicting values in config and options',
-    );
-  }
-  const effectiveTelemetry = telemetry ?? configTelemetry;
-  const hasTelemetry = effectiveTelemetry !== undefined;
+  const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
+  const hasTelemetry = telemetry !== undefined;
   const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
-  if (hasTelemetry && suppliedVersion) {
-    const parsed = semverParse(suppliedVersion);
-    if (parsed && parsed.major === 0 && parsed.minor < 9) {
-      throw mxcErrorFromCode(
-        'malformed_request',
-        `telemetry requires schema version ${TELEMETRY_STATE_AWARE_VERSION} or later; got ${suppliedVersion}`,
-      );
-    }
-  }
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };
@@ -143,8 +120,8 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
   }
-  if (effectiveTelemetry !== undefined) {
-    envelope.telemetry = effectiveTelemetry;
+  if (telemetry !== undefined) {
+    envelope.telemetry = telemetry;
     delete backendSpecific.telemetry;
   }
 

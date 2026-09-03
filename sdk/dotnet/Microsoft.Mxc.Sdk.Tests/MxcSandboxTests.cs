@@ -651,7 +651,7 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void SandboxPolicy_RejectsTelemetryBeforeSchema09()
+    public void SandboxPolicy_LeavesTelemetryVersionForNativeValidation()
     {
         var policy = new SandboxPolicy
         {
@@ -659,13 +659,13 @@ public class MxcSandboxTests
             Telemetry = new TelemetrySettings { Enabled = true },
         };
 
-        var error = Assert.Throws<MxcException>(() => MxcSandbox.SerializePolicy(policy));
-        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
-        Assert.Contains("telemetry requires schema version 0.9.0-alpha", error.Message);
+        using var policyDocument = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.Equal("0.8.0-alpha", policyDocument.RootElement.GetProperty("version").GetString());
+        Assert.True(policyDocument.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
 
-        error = Assert.Throws<MxcException>(
-            () => MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo hi")));
-        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+        using var requestDocument = JsonDocument.Parse(
+            MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo hi")));
+        Assert.Equal("0.8.0-alpha", requestDocument.RootElement.GetProperty("version").GetString());
     }
 
     [Fact]

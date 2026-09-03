@@ -1938,34 +1938,17 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
     });
 
-    it('rejects config telemetry with an explicitly older schema', () => {
+    it('leaves config telemetry schema validation to the native parser', () => {
       const config = makeConfig('process');
       config.telemetry = { enabled: true };
-      assert.throws(
-        () => resolveExecutableAndArgs(config, {
-          executablePath: fakeExe,
-          skipPlatformCheck: true,
-        }),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'malformed_request' &&
-          error.message.includes('telemetry requires schema version 0.9.0-alpha'),
-      );
-    });
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
 
-    it('rejects the state-aware telemetry option on one-shot calls', () => {
-      const config = makeConfig('process');
-      assert.throws(
-        () => resolveExecutableAndArgs(config, {
-          executablePath: fakeExe,
-          skipPlatformCheck: true,
-          telemetry: { enabled: true },
-        }),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'malformed_request' &&
-          error.message.includes('state-aware only'),
-      );
+      const serialized = decodeConfig(args);
+      assert.deepStrictEqual(serialized.telemetry, { enabled: true });
+      assert.strictEqual(serialized.version, config.version);
     });
   });
 });

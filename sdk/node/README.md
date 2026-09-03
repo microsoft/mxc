@@ -514,7 +514,7 @@ for the full design.
 
 Telemetry is additionally off unless a one-shot `ContainerConfig` using schema
 0.9 or later includes `telemetry: { enabled: true }`, or a state-aware call
-passes `options.telemetry: { enabled: true }`. This switch does not require
+passes `config.telemetry: { enabled: true }`. This switch does not require
 `options.experimental` and cannot bypass consent or administrative policy.
 
 The SDK does not ship a consent UI. It passes the versioned canonical resource

@@ -142,7 +142,7 @@ public static class MxcLifecycle
                 break;
         }
 
-        ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
 
         return envelope;
     }
@@ -164,7 +164,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         var envelope = BuildIdEnvelope("start", id, options?.Version);
-        ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -286,7 +286,7 @@ public static class MxcLifecycle
         {
             envelope["network"] = SerializeToNode(network);
         }
-        ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -388,7 +388,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         var envelope = BuildIdEnvelope("stop", id, options?.Version);
-        ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -413,7 +413,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
-        ApplyTelemetry(envelope, options?.TelemetryEnabled, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -436,35 +436,22 @@ public static class MxcLifecycle
         ["phase"] = phase,
     };
 
-    // Stable, top-level `telemetry.enabled` opt-in for this phase. Consent and
+    // Stable, top-level telemetry request for this phase. Consent and
     // administrative policy still gate emission independently. Never carries a
     // caller-supplied correlationVector — that identifier is internal-only.
     private static void ApplyTelemetry(
         JsonObject envelope,
-        bool? telemetryEnabled,
+        TelemetrySettings? telemetry,
         string? suppliedVersion)
     {
-        if (telemetryEnabled is not null)
+        if (telemetry is not null)
         {
             if (suppliedVersion is null)
             {
                 envelope["version"] = SchemaVersions.MaximumSupported;
             }
-            else if (!SupportsStableTelemetry(suppliedVersion))
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    $"telemetry requires schema version {SchemaVersions.MaximumSupported} or later; got {suppliedVersion}");
-            }
-            envelope["telemetry"] = new JsonObject { ["enabled"] = telemetryEnabled.Value };
+            envelope["telemetry"] = SerializeToNode(telemetry);
         }
-    }
-
-    private static bool SupportsStableTelemetry(string version)
-    {
-        var coreVersion = version.Split('-', 2)[0];
-        return Version.TryParse(coreVersion, out var parsed)
-            && parsed >= new Version(0, 9, 0);
     }
 
     private static string ContainmentKey(StateAwareContainment containment) => containment switch

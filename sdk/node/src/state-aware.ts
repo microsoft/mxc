@@ -65,7 +65,6 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
     phase: 'provision',
     backendKey: containment,
     containment,
-    telemetry: options.telemetry,
     config: config as Record<string, unknown> | undefined,
   });
   const result = await nonExecCall<{
@@ -92,7 +91,6 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
     phase: 'start',
     backendKey,
     sandboxId,
-    telemetry: options.telemetry,
     config: config as Record<string, unknown> | undefined,
   });
   return nonExecCall<StartResult<C>>(envelope, options);
@@ -115,7 +113,6 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
     phase: 'exec',
     backendKey,
     sandboxId,
-    telemetry: options.telemetry,
     config: config as unknown as Record<string, unknown>,
   });
   const { executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options);
@@ -156,7 +153,6 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
     phase: 'exec',
     backendKey,
     sandboxId,
-    telemetry: options.telemetry,
     config: config as unknown as Record<string, unknown>,
   });
   const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
@@ -185,7 +181,6 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
     phase: 'stop',
     backendKey,
     sandboxId,
-    telemetry: options.telemetry,
     config: config as Record<string, unknown> | undefined,
   });
   return nonExecCall<StopResult<C>>(envelope, options);
@@ -205,7 +200,6 @@ export async function deprovisionSandbox<C extends StateAwareContainmentBackend>
     phase: 'deprovision',
     backendKey,
     sandboxId,
-    telemetry: options.telemetry,
     config: config as Record<string, unknown> | undefined,
   });
   return nonExecCall<DeprovisionResult<C>>(envelope, options);

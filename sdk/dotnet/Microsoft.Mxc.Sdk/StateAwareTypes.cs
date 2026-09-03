@@ -73,11 +73,10 @@ public abstract class StateAwareProvisionOptions
     public string? Version { get; set; }
 
     /// <summary>
-    /// Optional per-phase telemetry opt-in. Emission is still gated by the
+    /// Optional per-phase telemetry request. Emission is still gated by the
     /// MXC-owned user consent and administrative policy.
     /// </summary>
-    public bool? TelemetryEnabled { get; set; }
-
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>IsolationSession provision options.</summary>
@@ -169,10 +168,10 @@ public class StateAwarePhaseOptions
     public string? Version { get; set; }
 
     /// <summary>
-    /// Optional per-phase telemetry opt-in. Emission is still gated by the
+    /// Optional per-phase telemetry request. Emission is still gated by the
     /// MXC-owned user consent and administrative policy.
     /// </summary>
-    public bool? TelemetryEnabled { get; set; }
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>
