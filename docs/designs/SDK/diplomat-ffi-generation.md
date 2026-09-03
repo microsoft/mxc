@@ -103,7 +103,7 @@ sequenceDiagram
         Rust-->>ABI: Error
         ABI-->>SDK: Stable status and detail
     else Rust panic
-        ABI-->>SDK: Panic status; never unwind
+        ABI-->>SDK: Return panic status without unwinding
     else Success
         Rust-->>ABI: Result
         ABI-->>SDK: Owned result
