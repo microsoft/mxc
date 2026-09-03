@@ -22,22 +22,6 @@ internal static class NativeLibraryResolver
     /// Register the resolver once. Called from the static constructor of the
     /// SDK's public entry points so it runs before the first P/Invoke.
     /// </summary>
-    /// <remarks>
-    /// Never throws. <see cref="NativeLibrary.SetDllImportResolver"/> throws if
-    /// a resolver is already registered for this assembly (for example, when a
-    /// host application registers its own). Because this runs from a static
-    /// constructor, letting that escape would raise
-    /// <c>TypeInitializationException</c> on *every* subsequent member access
-    /// and permanently poison the type — breaking the never-throw contract of
-    /// members such as <c>MxcTelemetry.NeedsConsentPrompt</c> and
-    /// <c>MxcTelemetry.GetPolicy</c>.
-    ///
-    /// Swallowing is also the semantically correct outcome: this resolver only
-    /// *adds* dev/test search paths. If registration fails, the default loader
-    /// (and any resolver the host registered) still resolves the library, and a
-    /// genuinely missing library is already handled fail-closed at each call
-    /// site.
-    /// </remarks>
     internal static void Initialize()
     {
         if (Interlocked.Exchange(ref _initialized, 1) != 0)
@@ -51,12 +35,6 @@ internal static class NativeLibraryResolver
         }
         catch (Exception ex)
         {
-            // Deliberately not rethrown; see the remarks above. Reported once
-            // (the _initialized latch above guarantees single entry) so the
-            // failure is diagnosable rather than silent. The report is itself
-            // best-effort: a host may have replaced or closed Console.Error,
-            // and letting *that* throw would re-poison the static ctor this
-            // catch exists to protect.
             try
             {
                 Console.Error.WriteLine(
@@ -65,7 +43,6 @@ internal static class NativeLibraryResolver
             }
             catch
             {
-                // Nothing left to report with. Swallow.
             }
         }
     }
@@ -91,30 +68,16 @@ internal static class NativeLibraryResolver
 
     private static IEnumerable<string> CandidatePaths()
     {
-        var overrideDir = Environment.GetEnvironmentVariable("MXC_FFI_DIR");
-        foreach (var path in CandidatePathsForTesting(
-                     AppContext.BaseDirectory,
-                     RuntimeInformation.RuntimeIdentifier,
-                     overrideDir))
-        {
-            yield return path;
-        }
-    }
-
-    internal static IReadOnlyList<string> CandidatePathsForTesting(
-        string baseDir,
-        string runtimeIdentifier,
-        string? overrideDir = null)
-    {
         var file = NativeFileName();
-        var paths = new List<string>();
+        var overrideDir = Environment.GetEnvironmentVariable("MXC_FFI_DIR");
         if (!string.IsNullOrEmpty(overrideDir))
         {
-            paths.Add(Path.Combine(overrideDir, file));
+            yield return Path.Combine(overrideDir, file);
         }
 
-        paths.Add(Path.Combine(baseDir, file));
-        paths.Add(Path.Combine(baseDir, "runtimes", runtimeIdentifier, "native", file));
+        var baseDir = AppContext.BaseDirectory;
+        yield return Path.Combine(baseDir, file);
+        yield return Path.Combine(baseDir, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", file);
 
         var dir = new DirectoryInfo(baseDir);
         var depth = 0;
@@ -124,15 +87,14 @@ internal static class NativeLibraryResolver
                 File.Exists(Path.Combine(dir.FullName, "src", "Cargo.toml")))
             {
 #if DEBUG
-                paths.Add(Path.Combine(dir.FullName, "src", "target", "debug", file));
+                yield return Path.Combine(dir.FullName, "src", "target", "debug", file);
 #endif
-                paths.Add(Path.Combine(dir.FullName, "src", "target", "release", file));
-                break;
+                yield return Path.Combine(dir.FullName, "src", "target", "release", file);
+                yield break;
             }
 
             dir = dir.Parent;
         }
-        return paths;
     }
 
     private static string NativeFileName()
