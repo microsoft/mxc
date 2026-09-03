@@ -14,7 +14,7 @@ use serde::Serialize;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
@@ -59,23 +59,20 @@ fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
 ///
 /// `host_is_terminal` is a **closure**, not a value, and that is load-bearing:
 /// Rust evaluates arguments eagerly, so passing the probe's result would run the
-/// probe on the `Library` path too — contradicting the contract this function
-/// exists to enforce. Taking a closure makes "never probes under `Library`" a
+/// probe on the `Piped` path too — contradicting the contract this function
+/// exists to enforce. Taking a closure makes "never probes under `Piped`" a
 /// property of the code rather than a claim in a comment, and one a test can
 /// actually observe.
 ///
-/// The rule itself: only [`ExecConsumer::Executor`] may consult the host. Under
-/// `Library` an embedded host's stdout says nothing about the sandbox, and
+/// The rule itself: only [`ExecStdio::Relayed`] may consult the host. Under
+/// `Piped` an embedded host's stdout says nothing about the sandbox, and
 /// allocating a pseudo-console would both merge stderr into stdout — destroying
 /// the separate streams the caller asked for — and touch console state the
 /// caller owns.
-fn wants_interactive_console(
-    consumer: ExecConsumer,
-    host_is_terminal: impl FnOnce() -> bool,
-) -> bool {
-    match consumer {
-        ExecConsumer::Executor => host_is_terminal(),
-        ExecConsumer::Library => false,
+fn wants_interactive_console(stdio: ExecStdio, host_is_terminal: impl FnOnce() -> bool) -> bool {
+    match stdio {
+        ExecStdio::Relayed => host_is_terminal(),
+        ExecStdio::Piped => false,
     }
 }
 
@@ -243,8 +240,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
     /// Executes the workload inside the running isolation session.
     ///
-    /// **The two consumers get different shapes, deliberately** — see
-    /// [`ExecConsumer`]. Under `Executor` this keeps the backend's own relay:
+    /// **The two topologies get different shapes, deliberately** — see
+    /// [`ExecStdio`]. Under `Relayed` this keeps the backend's own relay:
     /// `create_process` blocks, bridging the guest's pipes to the calling
     /// process's stdio
     /// through internal threads that also manage the ConPTY, the raw-VT console
@@ -255,7 +252,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     /// handles plus a waiter yielding the already-captured exit code, and the
     /// dispatcher's relay stays a call-through.
     ///
-    /// Under `Library` the caller drives the streams, so this starts the process
+    /// Under `Piped` the caller drives the streams, so this starts the process
     /// without waiting and hands back its real pipe handles, a waiter that
     /// blocks on exit, and a terminator that actually kills. It performs **no**
     /// console probe: an embedded host's stdout says nothing about the sandbox,
@@ -263,12 +260,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ///
     /// # Coverage
     ///
-    /// The `Library` branch is exercised end-to-end by `mxc-sdk`'s
+    /// The `Piped` branch is exercised end-to-end by `mxc-sdk`'s
     /// `tests/isolation_session.rs` — streaming, exit-code propagation and
     /// termination — on a host running the OS-side service, which CI and most
     /// dev machines do not have, so those tests skip elsewhere.
     ///
-    /// Pinned host-independently: the consumer split itself
+    /// Pinned host-independently: the topology split itself
     /// (`wants_interactive_console`), and — in `wxc_common` — that
     /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
     /// is the deadlock this branch would otherwise arm.
@@ -277,17 +274,17 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
-        consumer: ExecConsumer,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
 
-        match consumer {
-            ExecConsumer::Executor => {
+        match stdio {
+            ExecStdio::Relayed => {
                 let options = build_process_options(
                     request,
-                    wants_interactive_console(consumer, || std::io::stdout().is_terminal()),
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
                 );
 
                 let exit_code = manager
@@ -304,7 +301,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     stdin: null,
                     stdin_closer: None,
                     // `Exited`, never `TimedOut`: a backend serving
-                    // `ExecConsumer::Executor` reports an exit code, and the
+                    // `ExecStdio::Relayed` reports an exit code, and the
                     // relay rejects anything else.
                     waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
                     // Nothing to terminate: `create_process` returned only once
@@ -312,10 +309,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     terminator: Box::new(|| Ok(())),
                 })
             }
-            ExecConsumer::Library => {
+            ExecStdio::Piped => {
                 let options = build_process_options(
                     request,
-                    wants_interactive_console(consumer, || std::io::stdout().is_terminal()),
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
                 );
                 // The caller's deadline, enforced by our own wait below. The
                 // service timer is armed with a margin so it cannot fire first
@@ -385,45 +382,45 @@ mod tests {
     // silently swallow every per-phase config (the field would still
     // deserialize from the containment slot via models.rs's serde
     // rename — only the experimental block would go missing).
-    // ====== Consumer-conditional stdio ======
+    // ====== Stdio topology ======
 
-    /// A library caller must never get a ConPTY — **including on a host whose
+    /// A piped exec must never get a ConPTY — **including on a host whose
     /// stdout is a terminal**, which is the only case that can distinguish a
-    /// correct implementation from one that ignores the consumer.
+    /// correct implementation from one that always follows the host.
     ///
     /// Allocating one here would be doubly wrong: a pseudo-console merges
     /// stderr into stdout, so the caller would silently lose the separate
     /// stream it asked for, and setting it up touches console state the caller
     /// owns.
     #[test]
-    fn a_library_caller_never_gets_an_interactive_console() {
+    fn a_piped_exec_never_gets_an_interactive_console() {
         let mut probed = false;
         assert!(
-            !wants_interactive_console(ExecConsumer::Library, || {
+            !wants_interactive_console(ExecStdio::Piped, || {
                 probed = true;
                 true
             }),
-            "a terminal host must not leak a console into the library path"
+            "a terminal host must not leak a console into the piped path"
         );
         assert!(
             !probed,
-            "the library path must not even evaluate the host probe -- passing the \
+            "the piped path must not even evaluate the host probe -- passing the \
              probe's value rather than a closure would run it eagerly"
         );
     }
 
-    /// The executor path is the only one allowed to act on the probe, and it
+    /// The relayed path is the only one allowed to act on the probe, and it
     /// must actually follow it rather than hardcoding either answer.
     ///
     /// Both host answers are asserted, so hardcoding `true` *or* `false` fails.
     #[test]
-    fn the_executor_path_follows_the_host() {
+    fn a_relayed_exec_follows_the_host() {
         assert!(
-            wants_interactive_console(ExecConsumer::Executor, || true),
+            wants_interactive_console(ExecStdio::Relayed, || true),
             "a terminal host must still get an interactive console"
         );
         assert!(
-            !wants_interactive_console(ExecConsumer::Executor, || false),
+            !wants_interactive_console(ExecStdio::Relayed, || false),
             "a piped host must not get one"
         );
     }

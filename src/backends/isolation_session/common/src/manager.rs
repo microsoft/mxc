@@ -356,7 +356,7 @@ impl IsolationSessionManager {
     /// return it **without waiting**.
     ///
     /// Split out of [`Self::create_process`] so the caller chooses how the
-    /// streams are consumed: the executor path bridges them with its own relay
+    /// streams are consumed: the relayed path bridges them with its own relay
     /// threads and blocks (see `create_process`), while an in-process SDK
     /// caller takes the raw handles and drives them itself.
     pub(super) fn start_process(
@@ -658,7 +658,7 @@ impl StartedProcess {
     /// Block until the process exits and yield its exit code, escalating
     /// through the graceful-shutdown ladder if it outlives `timeout_ms`.
     ///
-    /// The *instruction sequence* is the one the executor path runs inline, but
+    /// The *instruction sequence* is the one the relayed path runs inline, but
     /// the ladder's first two tiers are **inert for a consumer that holds
     /// duplicates of the pipe handles**:
     ///
@@ -666,7 +666,7 @@ impl StartedProcess {
     ///   only when *every* write end is closed, so tier 1 alone does not
     ///   produce EOF.
     /// - Tier 2 (`SendCtrlClose`) is ConPTY-only and returns `E_NOTIMPL`
-    ///   otherwise, and a library consumer never allocates one.
+    ///   otherwise, and a piped exec never allocates one.
     ///
     /// The ladder therefore degrades to the full 5s + 3s stall followed by
     /// tier 3's hard terminate.
@@ -947,7 +947,7 @@ impl Drop for RelayScope<'_> {
 /// it goes out of scope.
 ///
 /// Close-on-drop is **opt-in per consumer** rather than a property of
-/// [`StartedProcess`] itself, because the two consumers need opposite things:
+/// [`StartedProcess`] itself, because the two topologies need opposite things:
 ///
 /// - The streaming consumer has no other teardown point — it hands the handles
 ///   to an in-process caller and never returns to this crate — so without this
