@@ -89,7 +89,12 @@ export interface TelemetryConsentQuery {
   error?: string;
 }
 
-type ConsentAsyncRunner = (args: readonly string[]) => Promise<string>;
+interface ConsentCommandOutput {
+  stdout: string;
+  stderr: string;
+}
+
+type ConsentAsyncRunner = (args: readonly string[]) => Promise<ConsentCommandOutput>;
 type ConsentAction = 'request' | 'withdraw' | 'status';
 type ConsentProtocolRunner = (
   locale: string | undefined,
@@ -128,7 +133,7 @@ function executable(): string {
   return path;
 }
 
-function defaultConsentAsyncRunner(args: readonly string[]): Promise<string> {
+function defaultConsentAsyncRunner(args: readonly string[]): Promise<ConsentCommandOutput> {
   return new Promise((resolve, reject) => {
     execFile(
       executable(),
@@ -138,11 +143,11 @@ function defaultConsentAsyncRunner(args: readonly string[]): Promise<string> {
         encoding: 'utf-8',
         windowsHide: true,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error) {
           reject(error);
         } else {
-          resolve(stdout);
+          resolve({ stdout, stderr });
         }
       },
     );
@@ -370,6 +375,7 @@ async function defaultConsentProtocolRunner(
           fail(new Error(`telemetry consent process failed (${code ?? 'no exit code'}): ${stderr.trim()}`));
           return;
         }
+        reportNativeDiagnostic('requestTelemetryConsent', stderr);
         settled = true;
         resolve(finalResponse);
       })().catch(fail);
@@ -552,6 +558,22 @@ function reportFailClosed(operation: string, safeResult: string, detail: string)
   }
 }
 
+function reportNativeDiagnostic(operation: string, stderr: string): void {
+  const detail = stderr.trim();
+  if (detail === '') {
+    return;
+  }
+  try {
+    const category = `${operation}:native:${detail}`;
+    if (!reportedFailureCategories.has(category)) {
+      reportedFailureCategories.add(category);
+      console.warn(`mxc-sdk: ${operation} native diagnostic: ${detail}`);
+    }
+  } catch {
+    // Reporting must not affect the native result.
+  }
+}
+
 /** @internal Test-only. */
 export function _resetTelemetryFailureReporting(): void {
   reportedFailureCategories.clear();
@@ -605,8 +627,10 @@ export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuer
     };
   }
   try {
+    const output = await consentAsyncRunner(maintenanceArgs('status'));
+    reportNativeDiagnostic('queryTelemetryConsentAsync', output.stderr);
     return consentQueryFromResponse(
-      parseMaintenanceResponse(await consentAsyncRunner(maintenanceArgs('status')), 'status'),
+      parseMaintenanceResponse(output.stdout, 'status'),
     );
   } catch (error) {
     return failedConsentQuery('queryTelemetryConsentAsync', error);
@@ -630,8 +654,10 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
     return notApplicable('withdraw');
   }
   try {
+    const output = await consentAsyncRunner(maintenanceArgs('withdraw'));
+    reportNativeDiagnostic('withdrawTelemetryConsentAsync', output.stderr);
     return toConsentOutcome(parseMaintenanceResponse(
-      await consentAsyncRunner(maintenanceArgs('withdraw')),
+      output.stdout,
       'withdraw',
     ));
   } catch (error) {

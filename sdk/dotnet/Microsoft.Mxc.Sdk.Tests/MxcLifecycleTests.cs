@@ -617,7 +617,7 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildExecEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StateAwareOperationOptions
+        var options = new StateAwareExecOptions
         {
             Telemetry = new TelemetrySettings { Enabled = true },
         };
@@ -630,6 +630,14 @@ public class MxcLifecycleTests
         Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
         Assert.Equal(SchemaVersions.MaximumSupported, root["version"]?.GetValue<string>());
         Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void ExecOptions_AreNotAcceptedByNonExecPhases()
+    {
+        Assert.False(
+            typeof(StateAwarePhaseOptions).IsAssignableFrom(
+                typeof(StateAwareExecOptions)));
     }
 
     [Fact]

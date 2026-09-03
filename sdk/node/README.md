@@ -550,8 +550,10 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 `notApplicable` without invoking the presenter.
 
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
-`'granted'`. Its diagnostic `error` field distinguishes that result from a
-genuine undecided state:
+`'granted'`. Its `error` field is present when the command fails or returns an
+invalid response. A valid native fail-closed response can return
+`'undetermined'` or a blocked policy without `error`; any accompanying native
+diagnostic is reported once through `console.warn`:
 
 ```typescript
 const { effectiveState, storedState, needsPrompt, policy, error } =

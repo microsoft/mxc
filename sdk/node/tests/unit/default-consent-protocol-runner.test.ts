@@ -16,6 +16,7 @@ import {
   _setTelemetryConsentChildFactory,
   _setTelemetryConsentProtocolRunner,
   _setTelemetryConsentTimeoutMs,
+  _resetTelemetryFailureReporting,
   type TelemetryConsentPrompt,
 } from '../../src/telemetry.js';
 
@@ -140,6 +141,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     _setTelemetryPlatform('win32');
     // Ensure the DEFAULT runner is exercised, not one previously injected.
     _setTelemetryConsentProtocolRunner(null);
+    _resetTelemetryFailureReporting();
   });
 
   afterEach(() => {
@@ -179,6 +181,32 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     assert.strictEqual(outcome.result, 'granted');
     assert.strictEqual(Object.hasOwn(outcome, 'challenge'), false);
     assert.strictEqual(Object.hasOwn(outcome, 'prompt'), false);
+  });
+
+  it('reports successful native request diagnostics once', async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+    try {
+      const box = installFakeChildFactory();
+      const promise = requestTelemetryConsent(() => 'yes');
+      await new Promise((r) => setImmediate(r));
+      const child = box.current;
+
+      child.writeStderr('mxc: telemetry administrative policy failure\n');
+      child.writeStdout(presentationLine());
+      await waitFor(() => child.stdinEnded);
+      child.writeStdout(grantedLine());
+      child.emitClose(0);
+
+      assert.strictEqual((await promise).result, 'granted');
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.deepStrictEqual(warnings, [
+      'mxc-sdk: requestTelemetryConsent native diagnostic: '
+        + 'mxc: telemetry administrative policy failure',
+    ]);
   });
 
   it('passes the requested locale only on the dedicated request command', async () => {

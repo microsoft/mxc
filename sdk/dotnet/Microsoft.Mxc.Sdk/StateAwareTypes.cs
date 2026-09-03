@@ -181,19 +181,18 @@ public sealed class StartSandboxOptions : StateAwarePhaseOptions
 {
 }
 
-/// <summary>
-/// Compatibility alias for <see cref="StateAwareExecOptions"/> used at exec,
-/// stop, and deprovision phases. Derives from <see cref="StateAwareExecOptions"/>
-/// so it is directly accepted where an exec-phase options bag is expected;
-/// unused exec fields simply default to null and are elided from the wire.
-/// </summary>
-public sealed class StateAwareOperationOptions : StateAwareExecOptions
-{
-}
-
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
-public class StateAwareExecOptions : StateAwarePhaseOptions
+public class StateAwareExecOptions
 {
+    /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
+    public string? Version { get; set; }
+
+    /// <summary>
+    /// Optional per-phase telemetry request. Emission is still gated by the
+    /// MXC-owned user consent and administrative policy.
+    /// </summary>
+    public TelemetrySettings? Telemetry { get; set; }
+
     /// <summary>Working directory inside the sandbox.</summary>
     public string? WorkingDirectory { get; set; }
 

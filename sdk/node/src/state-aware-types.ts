@@ -34,7 +34,10 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
 interface StateAwareConfig {
-  /** Schema version. When omitted, the SDK selects the backend default. */
+  /**
+   * Schema version. When omitted, the SDK selects `0.9.0-alpha` if telemetry
+   * is present; otherwise it selects the backend default.
+   */
   version?: string;
   /** Optional telemetry request for this phase. */
   telemetry?: TelemetryConfig;

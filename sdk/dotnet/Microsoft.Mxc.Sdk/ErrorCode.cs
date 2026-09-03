@@ -59,11 +59,6 @@ public enum ErrorCode
     /// <summary>The native side panicked and was caught at the boundary (FFI-local).</summary>
     Panic = 102,
 
-    /// <summary>
-    /// Telemetry consent could not be persisted because %LOCALAPPDATA% is
-    /// unavailable or unwritable (FFI-local). MXC only
-    /// collects telemetry on Windows and only with persisted, explicit consent;
-    /// see docs/telemetry/telemetry-consent-design.md.
-    /// </summary>
+    /// <summary>Telemetry consent could not be persisted (FFI-local).</summary>
     ConsentWriteFailed = 103,
 }
