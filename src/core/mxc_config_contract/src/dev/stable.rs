@@ -348,6 +348,9 @@ pub struct Seatbelt {
     /// Whether macOS Keychain access is allowed.
     #[serde(default)]
     pub keychain_access: OptionalField<bool>,
+    /// Whether system sleep/wake notifications and power assertions are allowed.
+    #[serde(default)]
+    pub system_power_access: OptionalField<bool>,
     /// Additional Mach service global names the process may resolve.
     #[serde(default)]
     pub extra_mach_lookups: OptionalField<Vec<String>>,

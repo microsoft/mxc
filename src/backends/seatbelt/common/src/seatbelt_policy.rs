@@ -15,6 +15,32 @@ use wxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
 };
 
+const SYSTEM_POWER_ACCESS_VERSION_ERROR: &str =
+    "seatbelt.systemPowerAccess requires schema version 0.9 or later";
+
+fn system_power_access_support(version: &str) -> Option<bool> {
+    semver::Version::parse(version)
+        .ok()
+        .map(|version| version.major > 0 || version.minor >= 9)
+}
+
+/// Reject system power access when the request predates its 0.9 contract.
+///
+/// This validation runs at execution time so requests changed after parsing,
+/// including through the Rust SDK setters, cannot bypass the version boundary.
+pub fn validate_system_power_access(request: &ExecutionRequest) -> Result<(), String> {
+    let enabled = request
+        .seatbelt
+        .as_ref()
+        .is_some_and(|seatbelt| seatbelt.system_power_access);
+
+    if enabled && !system_power_access_support(&request.schema_version).unwrap_or(false) {
+        return Err(SYSTEM_POWER_ACCESS_VERSION_ERROR.to_string());
+    }
+
+    Ok(())
+}
+
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
 /// policy leaves UI enabled, since every GUI grant is emitted alongside the
 /// WindowServer allows. Single source of truth so the profile builder and the
@@ -231,6 +257,28 @@ mod tests {
             )),
             builtin_test_server: false,
         }
+    }
+
+    #[test]
+    fn system_power_access_support_starts_at_v09() {
+        assert_eq!(system_power_access_support("0.8.0-alpha"), Some(false));
+        assert_eq!(system_power_access_support("0.9.0-alpha"), Some(true));
+        assert_eq!(system_power_access_support("invalid"), None);
+    }
+
+    #[test]
+    fn system_power_access_validation_rejects_pre_v09_requests() {
+        let request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            seatbelt: Some(SeatbeltConfig {
+                system_power_access: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let error = validate_system_power_access(&request).unwrap_err();
+        assert!(error.contains("schema version 0.9"), "got: {error}");
     }
 
     #[test]

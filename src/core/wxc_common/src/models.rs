@@ -184,6 +184,12 @@ pub struct SeatbeltConfig {
     #[serde(rename = "keychainAccess", default)]
     pub keychain_access: bool,
 
+    /// Allow system sleep/wake notifications and power assertions.
+    /// Adds access to the RootDomain IOKit user client and the power
+    /// management Mach services. Defaults to `false`.
+    #[serde(rename = "systemPowerAccess", default)]
+    pub system_power_access: bool,
+
     /// Additional Mach service global-names to allow `mach-lookup` for.
     /// Escape hatch for callers that need to talk to a system service
     /// the baseline doesn't cover (e.g. opt-in agent integrations).
@@ -209,6 +215,7 @@ impl Default for SeatbeltConfig {
             launch_method: LaunchMethod::default(),
             nested_pty: true,
             keychain_access: false,
+            system_power_access: false,
             extra_mach_lookups: Vec::new(),
         }
     }

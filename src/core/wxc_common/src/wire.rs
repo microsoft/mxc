@@ -552,6 +552,8 @@ pub struct Seatbelt {
     pub nested_pty: Option<bool>,
     /// Allow Keychain access.
     pub keychain_access: Option<bool>,
+    /// Allow system sleep/wake notifications and power assertions.
+    pub system_power_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
 }

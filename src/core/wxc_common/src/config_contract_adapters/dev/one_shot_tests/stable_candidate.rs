@@ -147,6 +147,7 @@ const SEATBELT_REQUEST_JSON: &str = r#"{
         "launchMethod": "open",
         "nestedPty": true,
         "keychainAccess": true,
+        "systemPowerAccess": true,
         "extraMachLookups": ["com.example.service"]
     }
 }"#;
@@ -216,6 +217,7 @@ const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
         "launchMethod": "open",
         "nestedPty": true,
         "keychainAccess": true,
+        "systemPowerAccess": true,
         "extraMachLookups": ["com.example.service"]
     }
 }"#;
@@ -647,6 +649,7 @@ fn seatbelt_request_maps_expected_wire_fields() {
     ));
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
+    assert_eq!(seatbelt.system_power_access, Some(true));
     assert_eq!(
         seatbelt.extra_mach_lookups.unwrap().as_slice(),
         &["com.example.service"]
@@ -730,6 +733,7 @@ fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
     assert!(seatbelt.launch_method.is_none());
     assert!(seatbelt.nested_pty.is_none());
     assert!(seatbelt.keychain_access.is_none());
+    assert!(seatbelt.system_power_access.is_none());
     assert!(seatbelt.extra_mach_lookups.is_none());
 }
 
@@ -975,6 +979,7 @@ fn macos_sandbox_section_alias_maps_expected_wire_fields() {
     ));
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
+    assert_eq!(seatbelt.system_power_access, Some(true));
     assert_eq!(
         seatbelt.extra_mach_lookups.unwrap().as_slice(),
         &["com.example.service"]

@@ -84,7 +84,7 @@ cannot mix both formats in one request.
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current development: "0.9.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -196,6 +196,7 @@ cannot mix both formats in one request.
         "launchMethod": "exec",            // "exec" or "open" (LaunchServices, for Apple-constrained apps)
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        "systemPowerAccess": false,        // Allow sleep/wake notifications and power assertions
         "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
     },
 

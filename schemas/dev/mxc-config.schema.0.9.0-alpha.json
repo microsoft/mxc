@@ -1273,6 +1273,10 @@
         "profileOverride": {
           "description": "Optional override of the generated sandbox profile.",
           "type": "string"
+        },
+        "systemPowerAccess": {
+          "description": "Whether system sleep/wake notifications and power assertions are allowed.",
+          "type": "boolean"
         }
       },
       "type": "object"

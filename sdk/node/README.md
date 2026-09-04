@@ -284,6 +284,11 @@ Backend-specific tuning lives on the returned `ContainerConfig`. The full set of
 
 Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.6.0-alpha.json`) and look up `processContainer`, `lxc`, `experimental.wslc`, `experimental.windows_sandbox`, etc.
 
+On macOS, set `seatbelt.systemPowerAccess: true` when a workload must prevent
+sleep or receive sleep/wake notifications. This option is available with schema
+`0.9.0-alpha` or later and is off by default because it opens host
+power-management services.
+
 For Windows ProcessContainer configs, `processContainer.learningMode: true`
 enables deny-and-record learning mode: failed accesses are logged but remain
 denied. The internal `learningModeLogging` and `permissiveLearningMode`

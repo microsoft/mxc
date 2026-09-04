@@ -701,6 +701,10 @@ export interface Seatbelt {
    * Optional override of the generated sandbox profile.
    */
   profileOverride?: string;
+  /**
+   * Whether system sleep/wake notifications and power assertions are allowed.
+   */
+  systemPowerAccess?: boolean;
 }
 
 /**

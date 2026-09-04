@@ -178,6 +178,7 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         launch_method,
         nested_pty,
         keychain_access,
+        system_power_access,
         extra_mach_lookups,
     } = value;
     wire::Seatbelt {
@@ -186,6 +187,7 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         launch_method: launch_method.into_option().map(convert_launch_method),
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
+        system_power_access: system_power_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
     }
 }

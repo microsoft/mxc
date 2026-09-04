@@ -2121,6 +2121,7 @@ name = "seatbelt_common"
 version = "0.8.0"
 dependencies = [
  "libc",
+ "semver",
  "wxc_common",
 ]
 

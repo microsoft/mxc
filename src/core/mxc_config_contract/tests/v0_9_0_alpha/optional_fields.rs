@@ -157,6 +157,11 @@ fn rejects_null_optional_fields() {
                 r#""seatbelt": {"keychainAccess": null}"#,
             ),
             (
+                "seatbelt.systemPowerAccess",
+                version_and_process.as_str(),
+                r#""seatbelt": {"systemPowerAccess": null}"#,
+            ),
+            (
                 "seatbelt.extraMachLookups",
                 version_and_process.as_str(),
                 r#""seatbelt": {"extraMachLookups": null}"#,

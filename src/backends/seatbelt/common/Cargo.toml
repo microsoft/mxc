@@ -9,6 +9,7 @@ license.workspace = true
 # the ScriptRunner trait that seatbelt_runner implements. Same dep that
 # lxc_common uses.
 wxc_common = { workspace = true }
+semver = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }

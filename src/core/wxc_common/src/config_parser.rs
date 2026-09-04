@@ -130,7 +130,7 @@ pub fn load_request_with_options(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         let raw: serde_json::Value = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_one_shot_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
     })();
@@ -154,7 +154,7 @@ pub fn load_request_from_value(
         let raw = config.clone();
         let cfg: wire::MxcConfig = config_deserialize::from_value(config)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_one_shot_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command, false)
     })();
@@ -247,7 +247,7 @@ fn parse_mxc_request_json(
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-        validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
+        validate_one_shot_field_versions(&raw).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, allow_missing_command, false)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
@@ -277,6 +277,45 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
 
     if has_directional_network || has_runtime_config || has_process_container_network {
         return Err(directional_network_version_error());
+    }
+    Ok(())
+}
+
+fn validate_one_shot_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
+    validate_directional_network_field_versions(config)?;
+    validate_system_power_access_field_version(config)
+}
+
+const SYSTEM_POWER_ACCESS_VERSION_ERROR: &str =
+    "seatbelt.systemPowerAccess requires schema version 0.9 or later";
+
+fn system_power_access_support(version: &str) -> Option<bool> {
+    semver::Version::parse(version)
+        .ok()
+        .map(|version| version.major > 0 || version.minor >= 9)
+}
+
+fn validate_system_power_access_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
+        match system_power_access_support(version) {
+            None | Some(true) => return Ok(()),
+            Some(false) => {}
+        }
+    }
+
+    let has_system_power_access = ["seatbelt", "macos_sandbox"]
+        .into_iter()
+        .filter_map(|key| config.get(key))
+        .filter_map(serde_json::Value::as_object)
+        .any(|seatbelt| seatbelt.contains_key("systemPowerAccess"));
+
+    if has_system_power_access {
+        return Err(WxcError::ConfigParse(
+            SYSTEM_POWER_ACCESS_VERSION_ERROR.to_string(),
+        ));
     }
     Ok(())
 }
@@ -611,6 +650,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         launch_method,
         nested_pty,
         keychain_access,
+        system_power_access,
         extra_mach_lookups,
     } = sb;
     SeatbeltConfig {
@@ -619,6 +659,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
+        system_power_access: system_power_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
     }
 }
@@ -2295,6 +2336,22 @@ mod tests {
             let mut logger = test_logger();
             assert!(load_request_from_value(config, &mut logger, false).is_err());
         }
+    }
+
+    #[test]
+    fn load_request_from_value_rejects_system_power_access_before_v09() {
+        let config = serde_json::json!({
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "macos_sandbox": {"systemPowerAccess": true}
+        });
+        let mut logger = test_logger();
+
+        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        assert!(
+            error.to_string().contains("schema version 0.9"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -5592,6 +5649,26 @@ mod tests {
     }
 
     #[test]
+    fn malformed_schema_version_precedes_system_power_access_gate() {
+        let json = r#"{
+            "version": "0.9x",
+            "process": {"commandLine": "echo hi"},
+            "seatbelt": {"systemPowerAccess": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Invalid schema version"), "got: {error}");
+        assert!(
+            !error.contains("requires schema version 0.9"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
     fn malformed_schema_version_precedes_directional_field_gate() {
         let json = r#"{
             "version": "0.8x",
@@ -6085,11 +6162,12 @@ mod tests {
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(cfg.nested_pty);
         assert!(!cfg.keychain_access);
+        assert!(!cfg.system_power_access);
     }
 
     #[test]
-    fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+    fn seatbelt_options_pass_through() {
+        let json = r#"{"version": "0.9.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true, "systemPowerAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -6097,6 +6175,38 @@ mod tests {
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
+        assert!(cfg.system_power_access);
+    }
+
+    #[test]
+    fn one_shot_loaders_reject_system_power_access_before_v09() {
+        for version in ["0.7.0-alpha", "0.8.0-alpha"] {
+            let json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "process": {{"commandLine": "echo hi"}},
+                    "containment": "seatbelt",
+                    "seatbelt": {{"systemPowerAccess": true}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let load_error = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                load_error.to_string().contains("schema version 0.9"),
+                "load_request accepted {version}: {load_error}"
+            );
+
+            let parse_error = match load_mxc_request_from_json(&json, &mut logger) {
+                Err(ParseError::OneShot(error)) => error,
+                other => panic!("expected one-shot rejection for {version}, got: {other:?}"),
+            };
+            assert!(
+                parse_error.to_string().contains("schema version 0.9"),
+                "load_mxc_request_from_json accepted {version}: {parse_error}"
+            );
+        }
     }
 
     #[test]
