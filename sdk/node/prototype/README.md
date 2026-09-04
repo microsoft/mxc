@@ -23,11 +23,12 @@ operation-specific code:
 | `native/generated/operations.{h,cc}` | Node-API callbacks, C ABI symbol selection, opaque result/error conversion, and async operation descriptors |
 | `native/generated/ffi-symbols.inc` and `ffi-library.h` | The C ABI symbol list and library basename consumed by the handwritten dynamic loader |
 
-Handwritten files are intentionally restricted to addon discovery
-(`src/runtime.ts`), native dynamic-library loading, opaque-handle lifetime, and
-generic `napi_async_work` scheduling (`native/runtime.{h,cc}`). The runtime
-does not contain a list of SDK operations or operation-specific parameter,
-result, or error mappings.
+Handwritten files are restricted to addon discovery (`src/runtime.ts`), public
+handle wrappers (`src/handles.ts`), native dynamic-library loading, generic
+`napi_async_work` scheduling (`native/runtime.{h,cc}`), and generated opaque
+pointer ownership (`native/handles.cc`). The runtime does not contain a list
+of value-returning SDK operations or their parameter, result, or error
+mappings.
 
 `runSandboxSync` invokes the C ABI on the calling thread. `runSandbox` invokes
 that same generated C ABI function through `napi_async_work`, so the blocking
@@ -63,12 +64,13 @@ codegen backend: it parses the emitted C headers rather than consuming
 Diplomat's HIR directly. Productization requires a shared Rust/HIR manifest
 consumed by both Node and .NET, replacing the remaining handwritten
 Node-specific operation mapping while preserving the same generated outputs.
-The generated bridge currently targets `MxcDiplomat_version`,
-`MxcDiplomat_discover`, and `MxcDiplomat_run`. It owns each generated opaque
-handle through its corresponding generated destructor and collects variable
-text through `DiplomatWrite` buffers before returning to JavaScript.
+The generated bridge targets the complete prototype surface: discovery,
+run-to-completion, live spawn, state-aware phases, streaming exec, attached
+exec, sandbox control, and stream I/O. It owns every generated opaque handle
+through its corresponding generated destructor and collects variable text
+through `DiplomatWrite` buffers before returning to JavaScript.
 
-## Phase 1 state-aware surface
+## State-aware and live-process surfaces
 
 The generated static phase also exposes synchronous and Promise APIs for
 `provisionSandbox`, `startSandbox`, `stopSandbox`, `deprovisionSandbox`, and
@@ -81,7 +83,17 @@ Provision/start/stop/deprovision return the
 generated response envelope JSON, while ExecAttached returns the generated
 `{ timedOut, exitCode }` value.
 
-Live `Sandbox`, `InputStream`, and `OutputStream` handles returned by Spawn
-and Exec are intentionally Phase 2 work. That phase must wrap generated
-opaque pointers with JavaScript finalizers, preserve them across async waits
-or stream I/O, and serialize or reject concurrent state transitions.
+`spawnSandboxSync` / `spawnSandbox` and `execSandboxSync` / `execSandbox`
+return a live `Sandbox`. Its stdin, stdout, and stderr are take-once
+`SandboxInput` and `SandboxOutput` handles. Each JavaScript handle owns a
+shared native control block with an explicit `dispose()` and a finalizer.
+Async work retains that control block until completion, so disposal cannot
+free a pointer while native work is active; the generated destructor runs
+once after the final owner releases it.
+
+Stream operations are serialized per stream. Concurrent sandbox state
+transitions use the Rust bridge's nonblocking ownership check: if `wait`
+currently owns the handle, `kill` and `tryWait` fail promptly with a typed
+`backend_error` instead of deadlocking. Supporting kill-during-wait requires
+an interruptible `mxc-sdk` wait primitive or a dedicated sandbox-owning actor;
+the prototype deliberately does not imply that capability.

@@ -14,8 +14,18 @@ export type {
   StateAwareOptions,
   StateAwareRequest,
   ExecAttachedOptions,
+  PollResult,
   WaitResult,
 } from './types.js';
+export {
+  Sandbox,
+  SandboxInput,
+  SandboxOutput,
+  execSandbox,
+  execSandboxSync,
+  spawnSandbox,
+  spawnSandboxSync,
+} from './handles.js';
 export {
   getAvailableBackends,
   getPlatformSupport,

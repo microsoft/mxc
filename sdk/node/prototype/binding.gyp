@@ -7,6 +7,7 @@
       "target_name": "mxc_node_ffi",
       "sources": [
         "native/addon.cc",
+        "native/handles.cc",
         "native/runtime.cc",
         "native/generated/operations.cc"
       ],

@@ -29,6 +29,10 @@ export interface WaitResult {
   exitCode: number;
 }
 
+export interface PollResult extends WaitResult {
+  isRunning: boolean;
+}
+
 export interface RunSandboxResult {
   exitCode: number;
   timedOut: boolean;

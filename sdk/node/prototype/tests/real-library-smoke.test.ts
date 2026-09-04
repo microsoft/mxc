@@ -18,10 +18,14 @@ import {
   deprovisionSandboxSync,
   execAttachedSandbox,
   execAttachedSandboxSync,
+  execSandbox,
+  execSandboxSync,
   provisionSandbox,
   provisionSandboxSync,
   runSandbox,
   runSandboxSync,
+  spawnSandbox,
+  spawnSandboxSync,
   startSandbox,
   startSandboxSync,
   stopSandbox,
@@ -98,6 +102,17 @@ describe('generated Diplomat mxc_ffi ABI', () => {
     );
   });
 
+  it('maps malformed streaming Exec requests consistently for sync and async APIs', async () => {
+    assert.throws(
+      () => execSandboxSync('{', { experimental: true }),
+      (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
+    );
+    await assert.rejects(
+      execSandbox('{', { experimental: true }),
+      (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
+    );
+  });
+
   it('throws TypeError for direct-addon request and state-aware flag conversion failures', () => {
     assert.throws(
       () => nativeAddon.runSandboxSync(Symbol('not-json')),
@@ -115,5 +130,77 @@ describe('generated Diplomat mxc_ffi ABI', () => {
       () => nativeAddon.execAttachedSandboxSync('{}', 'true'),
       { name: 'TypeError', message: /experimental must be a boolean/ },
     );
+  });
+
+  it('owns a live sandbox and its take-once streams through generated handles', async () => {
+    const sandbox = await spawnSandbox(
+      '{"policy":{"version":"0.8.0-alpha"},' +
+        '"command":"cmd /c \\"echo stdout & echo stderr 1>&2 & exit /b 23\\""}',
+    );
+    const stdin = sandbox.takeStdin();
+    const stdout = sandbox.takeStdout();
+    const stderr = sandbox.takeStderr();
+    assert.ok(stdin);
+    assert.ok(stdout);
+    assert.ok(stderr);
+    assert.equal(sandbox.takeStdin(), undefined);
+    assert.equal(sandbox.takeStdout(), undefined);
+    assert.equal(sandbox.takeStderr(), undefined);
+
+    stdin.dispose();
+    const [stdoutBytes, stderrBytes, outcome] = await Promise.all([
+      stdout.read(),
+      stderr.read(),
+      sandbox.wait(),
+    ]);
+    assert.match(stdoutBytes.toString('utf8'), /stdout/);
+    assert.match(stderrBytes.toString('utf8'), /stderr/);
+    assert.deepEqual(outcome, { timedOut: false, exitCode: 23 });
+
+    stdout.dispose();
+    stderr.dispose();
+    sandbox.dispose();
+    assert.throws(() => sandbox.tryWait(), /disposed/);
+  });
+
+  it('writes and flushes stdin through the synchronous handle surface', () => {
+    const sandbox = spawnSandboxSync(
+      '{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c findstr ."}',
+    );
+    const stdin = sandbox.takeStdin();
+    assert.ok(stdin);
+
+    assert.equal(stdin.writeSync(Buffer.from('from stdin\r\n')), 12);
+    stdin.flushSync();
+    stdin.dispose();
+    assert.throws(() => stdin.flushSync(), /disposed/);
+
+    const outcome = sandbox.waitSync();
+    assert.equal(outcome.timedOut, false);
+
+    sandbox.dispose();
+  });
+
+  it('rejects a concurrent kill promptly while wait owns the sandbox', async () => {
+    const sandbox = await spawnSandbox(
+      '{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c set /p X="}',
+    );
+    const stdin = sandbox.takeStdin();
+    assert.ok(stdin);
+    const wait = sandbox.wait();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const started = Date.now();
+    await assert.rejects(
+      sandbox.kill(),
+      (error: unknown) => error instanceof MxcError &&
+        error.code === 'backend_error' &&
+        error.operation === 'Diplomat handle synchronization' &&
+        /busy/.test(error.message),
+    );
+    assert.ok(Date.now() - started < 1_000);
+    stdin.dispose();
+    assert.equal((await wait).timedOut, false);
+    sandbox.dispose();
   });
 });

@@ -11,7 +11,10 @@
 #include <MxcDiplomat.h>
 #include <MxcDiplomatDiscovery.h>
 #include <MxcDiplomatError.h>
+#include <MxcDiplomatInputStream.h>
+#include <MxcDiplomatOutputStream.h>
 #include <MxcDiplomatRunResult.h>
+#include <MxcDiplomatSandbox.h>
 #include <MxcDiplomatStateAwareEnvelope.h>
 #include <MxcDiplomatVersion.h>
 #include <MxcDiplomatWaitResult.h>
@@ -25,11 +28,13 @@ using DiplomatBufferWriteDestroy = void (*)(DiplomatWrite*);
 using MxcDiplomatVersionCall = MxcDiplomat_version_result (*)();
 using MxcDiplomatDiscoverCall = MxcDiplomat_discover_result (*)();
 using MxcDiplomatRunCall = MxcDiplomat_run_result (*)(DiplomatStringView);
+using MxcDiplomatSpawnCall = MxcDiplomat_spawn_result (*)(DiplomatStringView);
 using MxcDiplomatProvisionCall = MxcDiplomat_provision_result (*)(DiplomatStringView, bool, bool);
 using MxcDiplomatStartCall = MxcDiplomat_start_result (*)(DiplomatStringView, bool, bool);
 using MxcDiplomatStopCall = MxcDiplomat_stop_result (*)(DiplomatStringView, bool, bool);
 using MxcDiplomatDeprovisionCall = MxcDiplomat_deprovision_result (*)(DiplomatStringView, bool, bool);
 using MxcDiplomatExecAttachedCall = MxcDiplomat_exec_attached_result (*)(DiplomatStringView, bool);
+using MxcDiplomatExecCall = MxcDiplomat_exec_result (*)(DiplomatStringView, bool);
 using MxcDiplomatVersionValue = MxcDiplomatVersion_value_result (*)(
     const MxcDiplomatVersion*, DiplomatWrite*);
 using MxcDiplomatVersionDestroy = void (*)(MxcDiplomatVersion*);
@@ -71,6 +76,27 @@ using MxcDiplomatStateAwareEnvelopeResponseJson =
     MxcDiplomatStateAwareEnvelope_response_json_result (*)(
         const MxcDiplomatStateAwareEnvelope*, DiplomatWrite*);
 using MxcDiplomatStateAwareEnvelopeDestroy = void (*)(MxcDiplomatStateAwareEnvelope*);
+using MxcDiplomatSandboxTakeStdin = MxcDiplomatSandbox_take_stdin_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxTakeStdout = MxcDiplomatSandbox_take_stdout_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxTakeStderr = MxcDiplomatSandbox_take_stderr_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxTryWait = MxcDiplomatSandbox_try_wait_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxWait = MxcDiplomatSandbox_wait_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxKill = MxcDiplomatSandbox_kill_result (*)(
+    const MxcDiplomatSandbox*);
+using MxcDiplomatSandboxDestroy = void (*)(MxcDiplomatSandbox*);
+using MxcDiplomatInputStreamWrite = MxcDiplomatInputStream_write_result (*)(
+    const MxcDiplomatInputStream*, DiplomatU8View);
+using MxcDiplomatInputStreamFlush = MxcDiplomatInputStream_flush_result (*)(
+    const MxcDiplomatInputStream*);
+using MxcDiplomatInputStreamDestroy = void (*)(MxcDiplomatInputStream*);
+using MxcDiplomatOutputStreamRead = MxcDiplomatOutputStream_read_result (*)(
+    const MxcDiplomatOutputStream*, DiplomatU8ViewMut);
+using MxcDiplomatOutputStreamDestroy = void (*)(MxcDiplomatOutputStream*);
 
 struct NativeOutcome {
   bool succeeded;

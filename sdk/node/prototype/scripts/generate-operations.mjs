@@ -80,13 +80,19 @@ function entry(method) {
 const version = entry('version');
 const discover = entry('discover');
 const run = entry('run');
+const spawn = entry('spawn');
+const exec = entry('exec');
 const stateAware = ['provision', 'start', 'stop', 'deprovision'].map(entry);
 invariant(version.parameters === 'void', 'MxcDiplomat_version must not take arguments');
 invariant(discover.parameters === 'void', 'MxcDiplomat_discover must not take arguments');
 invariant(run.parameters === 'DiplomatStringView request_json', 'MxcDiplomat_run request changed');
+invariant(spawn.parameters === 'DiplomatStringView request_json', 'MxcDiplomat_spawn request changed');
+invariant(exec.parameters === 'DiplomatStringView request_json, bool experimental', 'MxcDiplomat_exec request changed');
 invariant(version.handle === 'MxcDiplomatVersion', 'MxcDiplomat_version result changed');
 invariant(discover.handle === 'MxcDiplomatDiscovery', 'MxcDiplomat_discover result changed');
 invariant(run.handle === 'MxcDiplomatRunResult', 'MxcDiplomat_run result changed');
+invariant(spawn.handle === 'MxcDiplomatSandbox', 'MxcDiplomat_spawn result changed');
+invariant(exec.handle === 'MxcDiplomatSandbox', 'MxcDiplomat_exec result changed');
 for (const operation of stateAware) {
   invariant(
     operation.parameters === 'DiplomatStringView request_json, bool dry_run, bool experimental' &&
@@ -125,6 +131,18 @@ const bridge = {
   errorDestroy: destructor('MxcDiplomatError'),
   stateAwareResponse: writer('MxcDiplomatStateAwareEnvelope', 'response_json'),
   stateAwareDestroy: destructor('MxcDiplomatStateAwareEnvelope'),
+  sandboxTakeStdin: 'MxcDiplomatSandbox_take_stdin',
+  sandboxTakeStdout: 'MxcDiplomatSandbox_take_stdout',
+  sandboxTakeStderr: 'MxcDiplomatSandbox_take_stderr',
+  sandboxTryWait: 'MxcDiplomatSandbox_try_wait',
+  sandboxWait: 'MxcDiplomatSandbox_wait',
+  sandboxKill: 'MxcDiplomatSandbox_kill',
+  sandboxDestroy: destructor('MxcDiplomatSandbox'),
+  inputWrite: 'MxcDiplomatInputStream_write',
+  inputFlush: 'MxcDiplomatInputStream_flush',
+  inputDestroy: destructor('MxcDiplomatInputStream'),
+  outputRead: 'MxcDiplomatOutputStream_read',
+  outputDestroy: destructor('MxcDiplomatOutputStream'),
 };
 
 function assertExactSymbols(label, actual, expected) {
@@ -140,6 +158,14 @@ function exportedMembers(handle) {
   return new Set([...header(`${handle}.h`).matchAll(
     new RegExp(`\\b(${handle}_[A-Za-z0-9_]+)\\s*\\(`, 'g'),
   )].map((match) => match[1]));
+}
+
+function assertFunctionSignature(handle, result, symbol, parameters) {
+  const normalized = header(`${handle}.h`).replace(/\s+/g, ' ');
+  invariant(
+    normalized.includes(`${result} ${symbol}(${parameters});`),
+    `${symbol} signature drifted`,
+  );
 }
 
 assertExactSymbols(
@@ -178,6 +204,50 @@ assertExactSymbols('MxcDiplomatError methods', exportedMembers('MxcDiplomatError
 assertExactSymbols('MxcDiplomatStateAwareEnvelope methods',
   exportedMembers('MxcDiplomatStateAwareEnvelope'),
   new Set([bridge.stateAwareResponse, bridge.stateAwareDestroy]));
+assertExactSymbols('MxcDiplomatSandbox methods', exportedMembers('MxcDiplomatSandbox'),
+  new Set([
+    bridge.sandboxTakeStdin, bridge.sandboxTakeStdout, bridge.sandboxTakeStderr,
+    bridge.sandboxTryWait, bridge.sandboxWait, bridge.sandboxKill, bridge.sandboxDestroy,
+  ]));
+assertExactSymbols('MxcDiplomatInputStream methods', exportedMembers('MxcDiplomatInputStream'),
+  new Set([bridge.inputWrite, bridge.inputFlush, bridge.inputDestroy]));
+assertExactSymbols('MxcDiplomatOutputStream methods', exportedMembers('MxcDiplomatOutputStream'),
+  new Set([bridge.outputRead, bridge.outputDestroy]));
+assertFunctionSignature(
+  'MxcDiplomatSandbox',
+  'MxcDiplomatSandbox_take_stdin_result',
+  bridge.sandboxTakeStdin,
+  'const MxcDiplomatSandbox* self',
+);
+for (const [result, symbol] of [
+  ['MxcDiplomatSandbox_take_stdout_result', bridge.sandboxTakeStdout],
+  ['MxcDiplomatSandbox_take_stderr_result', bridge.sandboxTakeStderr],
+  ['MxcDiplomatSandbox_try_wait_result', bridge.sandboxTryWait],
+  ['MxcDiplomatSandbox_wait_result', bridge.sandboxWait],
+  ['MxcDiplomatSandbox_kill_result', bridge.sandboxKill],
+]) {
+  assertFunctionSignature(
+    'MxcDiplomatSandbox', result, symbol, 'const MxcDiplomatSandbox* self',
+  );
+}
+assertFunctionSignature(
+  'MxcDiplomatInputStream',
+  'MxcDiplomatInputStream_write_result',
+  bridge.inputWrite,
+  'const MxcDiplomatInputStream* self, DiplomatU8View bytes',
+);
+assertFunctionSignature(
+  'MxcDiplomatInputStream',
+  'MxcDiplomatInputStream_flush_result',
+  bridge.inputFlush,
+  'const MxcDiplomatInputStream* self',
+);
+assertFunctionSignature(
+  'MxcDiplomatOutputStream',
+  'MxcDiplomatOutputStream_read_result',
+  bridge.outputRead,
+  'const MxcDiplomatOutputStream* self, DiplomatU8ViewMut bytes',
+);
 
 const runtimeHeader = header('diplomat_runtime.h');
 for (const symbol of [
@@ -233,6 +303,20 @@ const description = {
       { symbol: bridge.errorDestroy, signature: 'MxcDiplomatErrorDestroy' },
       { symbol: bridge.stateAwareResponse, signature: 'MxcDiplomatStateAwareEnvelopeResponseJson' },
       { symbol: bridge.stateAwareDestroy, signature: 'MxcDiplomatStateAwareEnvelopeDestroy' },
+      { symbol: spawn.symbol, signature: 'MxcDiplomatSpawnCall' },
+      { symbol: exec.symbol, signature: 'MxcDiplomatExecCall' },
+      { symbol: bridge.sandboxTakeStdin, signature: 'MxcDiplomatSandboxTakeStdin' },
+      { symbol: bridge.sandboxTakeStdout, signature: 'MxcDiplomatSandboxTakeStdout' },
+      { symbol: bridge.sandboxTakeStderr, signature: 'MxcDiplomatSandboxTakeStderr' },
+      { symbol: bridge.sandboxTryWait, signature: 'MxcDiplomatSandboxTryWait' },
+      { symbol: bridge.sandboxWait, signature: 'MxcDiplomatSandboxWait' },
+      { symbol: bridge.sandboxKill, signature: 'MxcDiplomatSandboxKill' },
+      { symbol: bridge.sandboxDestroy, signature: 'MxcDiplomatSandboxDestroy' },
+      { symbol: bridge.inputWrite, signature: 'MxcDiplomatInputStreamWrite' },
+      { symbol: bridge.inputFlush, signature: 'MxcDiplomatInputStreamFlush' },
+      { symbol: bridge.inputDestroy, signature: 'MxcDiplomatInputStreamDestroy' },
+      { symbol: bridge.outputRead, signature: 'MxcDiplomatOutputStreamRead' },
+      { symbol: bridge.outputDestroy, signature: 'MxcDiplomatOutputStreamDestroy' },
     ],
   },
   operations: [
@@ -302,7 +386,12 @@ const signatures = new Set([
   'MxcDiplomatErrorDestroy',
   'MxcDiplomatStateAwareEnvelopeResponseJson', 'MxcDiplomatStateAwareEnvelopeDestroy',
   'MxcDiplomatProvisionCall', 'MxcDiplomatStartCall', 'MxcDiplomatStopCall',
-  'MxcDiplomatDeprovisionCall', 'MxcDiplomatExecAttachedCall',
+  'MxcDiplomatDeprovisionCall', 'MxcDiplomatExecAttachedCall', 'MxcDiplomatSpawnCall',
+  'MxcDiplomatExecCall', 'MxcDiplomatSandboxTakeStdin', 'MxcDiplomatSandboxTakeStdout',
+  'MxcDiplomatSandboxTakeStderr', 'MxcDiplomatSandboxTryWait', 'MxcDiplomatSandboxWait',
+  'MxcDiplomatSandboxKill', 'MxcDiplomatSandboxDestroy', 'MxcDiplomatInputStreamWrite',
+  'MxcDiplomatInputStreamFlush', 'MxcDiplomatInputStreamDestroy',
+  'MxcDiplomatOutputStreamRead', 'MxcDiplomatOutputStreamDestroy',
 ]);
 const symbols = [...description.ffi.supportSymbols];
 for (const operation of description.operations) {
