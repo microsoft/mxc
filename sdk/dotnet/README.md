@@ -132,12 +132,53 @@ every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
-`BackendCapability.CaptureDenials`.
+`BackendCapability.CaptureDenials` and `BackendCapability.ProxyEnforcement`.
+`Warnings` carries diagnostics for a capability the host cannot offer — but not
+for every absent one: only checks that produce a reason contribute. Bubblewrap's
+`ProxyEnforcement` does (see below); Windows omits `CaptureDenials` without a
+warning.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
 Cross-check `GetPlatformSupport()` and continue handling
 `ErrorCode.BackendUnavailable`.
+
+#### Bubblewrap proxy-only egress (Linux)
+
+Schema `0.8.0-alpha`+ `network.proxy` needs host tooling and kernel permissions
+that not every Linux host grants. Bubblewrap reports whether this host can
+enforce it as the `ProxyEnforcement` capability, and names what is missing in
+`Warnings` when it cannot. The TypeScript and Rust SDKs surface the same answer
+as a `bubblewrapNetwork` field; the C# SDK reports it through the backend array:
+
+```csharp
+AvailableBackend? bubblewrap = MxcSandbox.GetAvailableBackends()
+    .FirstOrDefault(backend => backend.Backend == ContainmentBackend.Bubblewrap);
+
+if (bubblewrap is null)
+{
+    Console.Error.WriteLine("Bubblewrap is not available on this host.");
+}
+else if (bubblewrap.Capabilities.Contains(BackendCapability.ProxyEnforcement))
+{
+    // Safe to send a 0.8 network.proxy policy.
+}
+else
+{
+    // Warnings name the dependency that is missing or unusable.
+    Console.Error.WriteLine(string.Join(Environment.NewLine, bubblewrap.Warnings));
+}
+```
+
+The capability is **fail closed** — a probe that cannot run leaves it absent
+with a warning rather than reporting support — and advisory, since the runner
+probes again at launch. A request the host cannot satisfy fails rather than
+degrading to weaker isolation.
+
+Host requirements are in
+[`docs/bwrap-support/bubblewrap-backend.md`](../../docs/bwrap-support/bubblewrap-backend.md);
+the discovery API is in
+[`docs/backend-support-probe-api-plan.md`](../../docs/backend-support-probe-api-plan.md).
 
 ### Full requests and explicit containment
 

@@ -357,3 +357,19 @@ fn available_tools_policy_filters_system_critical() {
         result.readonly_paths
     );
 }
+
+/// The nested bubblewrap-network types must be nameable from the SDK facade
+/// alone; a consumer should never need `mxc_engine` as a direct dependency.
+#[test]
+fn bubblewrap_network_types_are_reachable_from_the_facade() {
+    use mxc_sdk::{BubblewrapNetworkSupport, ProxyEnforcement};
+
+    let network: Option<BubblewrapNetworkSupport> = platform_support().bubblewrap_network;
+    if let Some(network) = network {
+        assert!(
+            network.proxy_enforcement == ProxyEnforcement::Supported
+                || !network.warnings.is_empty(),
+            "an unsupported result must carry the reason (fail-closed contract)"
+        );
+    }
+}

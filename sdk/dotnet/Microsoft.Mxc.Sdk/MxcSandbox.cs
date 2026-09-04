@@ -65,10 +65,22 @@ public static class MxcSandbox
             var json = ReadOwnedJson(
                 NativeMethods.mxc_available_backends_json(),
                 "probing available backends");
-            var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
-                ?? throw new JsonException("Native backend discovery returned null JSON.");
-            return backends.Select(MapAvailableBackend).ToArray();
+            return ParseAvailableBackends(json);
         }
+    }
+
+    /// <summary>
+    /// Map the native backend-discovery array onto the public model.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="GetAvailableBackends"/> so the projection is
+    /// testable against a fixed native payload.
+    /// </remarks>
+    internal static IReadOnlyList<AvailableBackend> ParseAvailableBackends(string json)
+    {
+        var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
+            ?? throw new JsonException("Native backend discovery returned null JSON.");
+        return backends.Select(MapAvailableBackend).ToArray();
     }
 
     /// <summary>
@@ -335,6 +347,7 @@ public static class MxcSandbox
             Backend = ParseBackend(backend.Backend),
             Tier = backend.Tier is null ? null : ParseIsolationTier(backend.Tier),
             Capabilities = backend.Capabilities.Select(ParseBackendCapability).ToArray(),
+            Warnings = backend.Warnings.ToArray(),
         };
 
     internal static ContainmentBackend ParseBackend(string value) =>
@@ -364,6 +377,7 @@ public static class MxcSandbox
         value switch
         {
             "captureDenials" => BackendCapability.CaptureDenials,
+            "proxyEnforcement" => BackendCapability.ProxyEnforcement,
             _ => BackendCapability.Unknown,
         };
 

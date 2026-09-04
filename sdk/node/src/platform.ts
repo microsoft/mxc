@@ -1,12 +1,18 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Worker, type WorkerOptions } from 'node:worker_threads';
-import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import {
+  BubblewrapNetworkSupport,
+  ContainmentBackend,
+  IsolationTier,
+  PlatformSupport,
+  UiCapabilitySupport,
+} from './types.js';
 import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -74,11 +80,13 @@ function isWindowsSandboxAvailable(): boolean {
  *
  * On Windows, this also invokes `wxc-exec --probe` to populate
  * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
- * capability facts. Linux and macOS currently do not expose native probe data,
- * so `uiCapabilities` is omitted on those platforms. On Linux,
- * `unavailableReasons` contains per-backend diagnostics for unavailable LXC
- * or Bubblewrap backends. The result is cached for the lifetime of the SDK
- * module — the underlying machine state is not expected to change at runtime.
+ * capability facts. On Linux, `unavailableReasons` contains per-backend
+ * diagnostics for unavailable LXC or Bubblewrap backends, and — when
+ * bubblewrap is available — `lxc-exec --available-backends` is invoked to
+ * populate `bubblewrapNetwork`. macOS currently does not expose native probe
+ * data. `uiCapabilities` is omitted outside Windows. The result is cached for
+ * the lifetime of the SDK module — the underlying machine state is not
+ * expected to change at runtime.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -188,6 +196,141 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
   }
 }
 
+/**
+ * Linux probe runner injection seam. Spawns `lxc-exec --available-backends` and
+ * returns its stdout. Replaceable in unit tests via {@link _setLinuxProbeRunner}.
+ */
+type LinuxProbeRunner = () => string;
+
+let linuxProbeRunner: LinuxProbeRunner = defaultLinuxProbeRunner;
+
+/**
+ * Worst case for the native `--available-backends` walk on Linux, whose probes
+ * run **sequentially**: 5s `bwrap --version` (`BWRAP_VERSION_TIMEOUT`) + 3s
+ * proxy dependency walk (`PRE_FLIGHT_BUDGET`) + 3s `lxc-ls --version` (LXC
+ * `PROBE_TIMEOUT`). Keep in sync with those Rust constants.
+ */
+const NATIVE_PROBE_WORST_CASE_MS = 5_000 + 3_000 + 3_000;
+
+/**
+ * Backstop for the whole probe process, well above
+ * {@link NATIVE_PROBE_WORST_CASE_MS} plus startup and serialization.
+ *
+ * Killing the probe here is reported the same way as an unsupported host, so a
+ * backstop below the native total would misreport a *successful* proxy walk
+ * that happened to be followed by a slow `lxc-ls`.
+ */
+const LINUX_PROBE_TIMEOUT_MS = NATIVE_PROBE_WORST_CASE_MS + 9_000;
+
+/** @internal Test-only: override the Linux probe runner. */
+export function _setLinuxProbeRunner(runner: LinuxProbeRunner | null): void {
+  linuxProbeRunner = runner ?? defaultLinuxProbeRunner;
+}
+
+/** @internal Test-only: the backstop and the native total it must exceed. */
+export const _linuxProbeTimeouts = {
+  backstopMs: LINUX_PROBE_TIMEOUT_MS,
+  nativeWorstCaseMs: NATIVE_PROBE_WORST_CASE_MS,
+} as const;
+
+/**
+ * The `execFileSync` call the default runner makes.
+ *
+ * Injectable so a test can assert the spawn options actually reach the child.
+ * Asserting the timeout *constant* is not enough — the option can stop being
+ * passed while every constant-level assertion stays green.
+ */
+type LinuxProbeExec = (
+  file: string,
+  args: string[],
+  options: ExecFileSyncOptionsWithStringEncoding,
+) => string;
+
+let linuxProbeExec: LinuxProbeExec = execFileSync;
+
+/** @internal Test-only: observe or stub the probe's `execFileSync` call. */
+export function _setLinuxProbeExec(exec: LinuxProbeExec | null): void {
+  linuxProbeExec = exec ?? (execFileSync as LinuxProbeExec);
+}
+
+/**
+ * Spawn the probe at an already-resolved path.
+ *
+ * @internal Test-only export: split from {@link defaultLinuxProbeRunner} so the
+ * spawn options are testable without a real `lxc-exec` on disk.
+ */
+export function _runLinuxProbe(lxcPath: string): string {
+  return linuxProbeExec(lxcPath, ['--available-backends'], {
+    // A backstop, not the real deadline: the native probe bounds each of its
+    // own checks. Killing it here is indistinguishable from an unsupported
+    // host, so stay above the native total rather than racing it.
+    timeout: LINUX_PROBE_TIMEOUT_MS,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function defaultLinuxProbeRunner(): string {
+  const lxcPath = findLxcExecutable();
+  if (!lxcPath) {
+    throw new Error('lxc-exec not found');
+  }
+  return _runLinuxProbe(lxcPath);
+}
+
+/**
+ * Ask `lxc-exec --available-backends` whether this host can enforce Bubblewrap
+ * proxy-only egress.
+ *
+ * Unlike the Windows isolation probe, this reports **fail closed**: a missing
+ * binary, timeout, or malformed payload yields `'unsupported'` with the reason
+ * as a warning, never an absent field. Reporting "unknown" as "supported"
+ * would let a caller launch a 0.8 proxy policy the host cannot satisfy, and
+ * that policy has no fallback.
+ */
+export function _probeBubblewrapNetwork(): BubblewrapNetworkSupport {
+  let stdout: string;
+  try {
+    stdout = linuxProbeRunner();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    diagLog(`getPlatformSupport: bubblewrap network probe failed — ${reason}`);
+    return { proxyEnforcement: 'unsupported', warnings: [`probe failed: ${reason}`] };
+  }
+
+  let backends: unknown;
+  try {
+    backends = JSON.parse(stdout);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    diagLog(`getPlatformSupport: bubblewrap network probe returned invalid JSON — ${reason}`);
+    return { proxyEnforcement: 'unsupported', warnings: [`probe returned invalid JSON: ${reason}`] };
+  }
+
+  if (!Array.isArray(backends)) {
+    return { proxyEnforcement: 'unsupported', warnings: ['probe returned an unexpected payload'] };
+  }
+  const entry = backends.find(
+    (b: unknown): b is Record<string, unknown> =>
+      !!b && typeof b === 'object' && (b as Record<string, unknown>).backend === 'bubblewrap',
+  );
+  if (!entry) {
+    return { proxyEnforcement: 'unsupported', warnings: ['probe did not report bubblewrap'] };
+  }
+
+  const capabilities = Array.isArray(entry.capabilities) ? entry.capabilities : [];
+  const warnings = Array.isArray(entry.warnings)
+    ? entry.warnings.filter((w: unknown): w is string => typeof w === 'string')
+    : [];
+  if (capabilities.includes('proxyEnforcement')) {
+    return { proxyEnforcement: 'supported', warnings: [] };
+  }
+  return {
+    proxyEnforcement: 'unsupported',
+    warnings: warnings.length > 0 ? warnings : ['proxy-only egress is not supported on this host'],
+  };
+}
+
 function computeSupport(): PlatformSupport {
   const platform = os.platform();
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
@@ -221,6 +364,7 @@ function computeSupport(): PlatformSupport {
     const bubblewrap = _probeBubblewrap();
     if (bubblewrap.available) {
       methods.push('bubblewrap');
+      support.bubblewrapNetwork = _probeBubblewrapNetwork();
     } else {
       support.unavailableReasons = {
         ...support.unavailableReasons,
