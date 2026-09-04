@@ -1552,6 +1552,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "tempfile",
  "windows",
  "windows_sandbox_lifecycle",
  "wslc_common",
@@ -3201,6 +3202,7 @@ version = "0.8.0"
 dependencies = [
  "base64",
  "cidr",
+ "filetime",
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",

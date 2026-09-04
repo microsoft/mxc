@@ -260,9 +260,10 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `warnings()` returns policy warnings detected while spawning the sandbox —
-  security warnings such as `permissiveLearningMode` weakening deny-by-default,
-  and warnings such as a network rule that installs but cannot carry traffic.
+- `warnings()` returns policy and operational warnings detected while spawning
+  the sandbox, such as `permissiveLearningMode` weakening deny-by-default, a
+  network rule that installs but cannot carry traffic, or telemetry being
+  unavailable/routed only to local ETW.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose
@@ -277,7 +278,7 @@ The handle is modelled on [`std::process::Child`]:
   `Exited(code)` or `TimedOut` if the timeout elapses (`Err` is reserved for an
   actual OS/wait failure).
 - `wait_with_output()` consumes the handle and returns an `Output` with the
-  `WaitOutcome`, policy security `warnings`, and captured `stdout`/`stderr` — it
+  `WaitOutcome`, policy/operational `warnings`, and captured `stdout`/`stderr` — it
   also includes structured `output_metadata` produced during backend teardown.
   The method
   drains both streams concurrently for you, the safe alternative to
@@ -313,7 +314,9 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 - `exec_attached(request_json, experimental)` runs the `exec` phase **attached
   to this process's stdio**, blocking until the workload exits and returning a
   `WaitOutcome`. See *Pty allocation* for the terminal requirement and what each
-  backend does with the streams.
+  backend does with the streams. Parser and telemetry-initialization warnings
+  are written to the attached host stderr because this API returns no process
+  handle with a `warnings()` channel.
 - `exec_sandbox(request_json, experimental)` runs the same `exec` phase as a
   **live streaming** `Sandbox` (the same handle `spawn_sandbox` returns), for a
   caller that drives the pipes itself. The child sees no TTY and this process's

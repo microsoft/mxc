@@ -63,10 +63,10 @@ fn accepts_provision_request_with_optional_fields() {
             "network": {
                 "defaultPolicy": "block"
             },
+            "telemetry": {
+                "enabled": true
+            },
             "experimental": {
-                "telemetry": {
-                    "enabled": true
-                },
                 "wslc": {
                     "provision": {
                         "image": "alpine:latest",
@@ -84,7 +84,7 @@ fn accepts_empty_optional_objects() {
         r#""filesystem": {}"#,
         r#""network": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"wslc": {}}"#,
         r#""experimental": {"wslc": {"provision": {}}}"#,
     ] {
@@ -96,7 +96,7 @@ fn accepts_empty_optional_objects() {
 fn accepts_telemetry_enabled_values() {
     for enabled in [true, false] {
         assert_valid(&request_with_additional_fields(&format!(
-            r#""experimental": {{"telemetry": {{"enabled": {enabled}}}}}"#
+            r#""telemetry": {{"enabled": {enabled}}}"#
         )));
     }
 }
@@ -212,8 +212,8 @@ fn rejects_null_optional_fields() {
         r#""network": null"#,
         r#""network": {"defaultPolicy": null}"#,
         r#""experimental": null"#,
-        r#""experimental": {"telemetry": null}"#,
-        r#""experimental": {"telemetry": {"enabled": null}}"#,
+        r#""telemetry": null"#,
+        r#""telemetry": {"enabled": null}"#,
         r#""experimental": {"wslc": null}"#,
         r#""experimental": {"wslc": {"provision": null}}"#,
         r#""experimental": {"wslc": {"provision": {"image": null}}}"#,
@@ -230,7 +230,7 @@ fn rejects_unknown_fields_at_each_object_level() {
         r#""filesystem": {"unknownField": true}"#,
         r#""network": {"unknownField": true}"#,
         r#""experimental": {"unknownField": true}"#,
-        r#""experimental": {"telemetry": {"unknownField": true}}"#,
+        r#""telemetry": {"unknownField": true}"#,
         r#""experimental": {"wslc": {"unknownField": true}}"#,
         r#""experimental": {"wslc": {"provision": {"unknownField": true}}}"#,
     ] {
@@ -303,7 +303,7 @@ fn rejects_duplicate_nested_fields() {
     for field in [
         r#""filesystem": {"readwritePaths": [], "readwritePaths": []}"#,
         r#""network": {"defaultPolicy": "block", "defaultPolicy": "allow"}"#,
-        r#""experimental": {"telemetry": {}, "telemetry": {}}"#,
+        r#""telemetry": {}, "telemetry": {}"#,
         r#""experimental": {"wslc": {}, "wslc": {}}"#,
         r#""experimental": {"wslc": {"provision": {}, "provision": {}}}"#,
         r#""experimental": {"wslc": {"provision": {"image": "a", "image": "b"}}}"#,
@@ -362,7 +362,7 @@ fn rejects_invalid_optional_object_types() {
             format!(r#""filesystem": {value}"#),
             format!(r#""network": {value}"#),
             format!(r#""experimental": {value}"#),
-            format!(r#""experimental": {{"telemetry": {value}}}"#),
+            format!(r#""telemetry": {value}"#),
             format!(r#""experimental": {{"wslc": {value}}}"#),
             format!(r#""experimental": {{"wslc": {{"provision": {value}}}}}"#),
         ] {
@@ -419,7 +419,7 @@ fn rejects_non_string_provision_fields() {
 fn rejects_non_boolean_telemetry_enabled() {
     for value in ["123", r#""true""#, "[]", "{}"] {
         assert_invalid(&request_with_additional_fields(&format!(
-            r#""experimental": {{"telemetry": {{"enabled": {value}}}}}"#
+            r#""telemetry": {{"enabled": {value}}}"#
         )));
     }
 }

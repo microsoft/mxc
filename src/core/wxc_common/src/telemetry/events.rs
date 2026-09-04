@@ -54,7 +54,6 @@ impl std::fmt::Display for FailureReason {
 #[derive(Debug, Clone, Copy)]
 pub struct TelemetryContext<'a> {
     pub backend: &'a str,
-    pub sandbox_kind: &'a str,
     /// State-aware lifecycle phase — one of `provision|start|exec|stop|
     /// deprovision`, or `""` for one-shot (non-state-aware) executions.
     pub phase: &'a str,
@@ -64,9 +63,10 @@ pub struct TelemetryContext<'a> {
     pub correlation_vector: &'a str,
 }
 
-/// Data for an MXC.Execution ETW event.
+/// Data for an Execution ETW event.
 pub struct ExecutionEvent<'a> {
     pub backend: &'a str,
+    /// Containment kind requested by the caller before host-specific resolution.
     pub sandbox_kind: &'a str,
     pub exit_code: i32,
     pub outcome: &'a str,
@@ -84,7 +84,7 @@ pub struct ExecutionEvent<'a> {
     pub correlation_vector: &'a str,
 }
 
-/// Log an MXC.Execution ETW event.
+/// Log an Execution ETW event.
 ///
 /// Delegates to the `mxc_telemetry` provider which adds common fields
 /// (Version, Channel, IsDebugging, UTCReplace_AppSessionGuid).
@@ -106,17 +106,23 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
     test_sink::record_execution(event);
 }
 
-/// Log an MXC.Error ETW event.
+/// Log an Error ETW event.
 ///
 /// To avoid leaking PII (paths, usernames, credentials embedded in error
 /// strings), MXC deliberately does **not** emit the free-form error message.
 /// The event carries only the bounded `error_type` category, the process
-/// `exit_code`, and the [`TelemetryContext`] attribution (backend, lifecycle
-/// phase, and correlation vector — the latter two empty for one-shot).
-pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code: i32) {
+/// `exit_code`, the caller-requested `sandbox_kind`, and the
+/// [`TelemetryContext`] attribution (backend, lifecycle phase, and correlation
+/// vector — the latter two empty for one-shot).
+pub fn log_error(
+    ctx: TelemetryContext<'_>,
+    sandbox_kind: &str,
+    error_type: FailureReason,
+    exit_code: i32,
+) {
     mxc_telemetry::log_error(
         ctx.backend,
-        ctx.sandbox_kind,
+        sandbox_kind,
         error_type.as_str(),
         exit_code,
         ctx.phase,
@@ -124,7 +130,7 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
     );
 
     #[cfg(test)]
-    test_sink::record_error(ctx, error_type, exit_code);
+    test_sink::record_error(ctx, sandbox_kind, error_type, exit_code);
 }
 
 /// Emit a process lifecycle event required by the Windows diagnostics
@@ -141,7 +147,7 @@ pub enum ProcessEvent<'a> {
 }
 
 fn requirement_emission_allowed() -> bool {
-    super::emit_active() && super::emission_is_authorized()
+    super::process_can_emit()
 }
 
 pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
@@ -318,7 +324,7 @@ pub(super) mod test_sink {
     /// for its capture window.
     pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Owned copy of an `MXC.Execution` record as captured for a test.
+    /// Owned copy of an `Execution` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedExecution {
         pub backend: String,
@@ -331,7 +337,7 @@ pub(super) mod test_sink {
         pub correlation_vector: String,
     }
 
-    /// Owned copy of an `MXC.Error` record as captured for a test.
+    /// Owned copy of an `Error` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
         pub backend: String,
@@ -379,12 +385,12 @@ pub(super) mod test_sink {
             .clear();
     }
 
-    /// Drain and return the captured `MXC.Execution` records.
+    /// Drain and return the captured `Execution` records.
     pub fn take_executions() -> Vec<CapturedExecution> {
         std::mem::take(&mut *EXECUTIONS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Drain and return the captured `MXC.Error` records.
+    /// Drain and return the captured `Error` records.
     pub fn take_errors() -> Vec<CapturedError> {
         std::mem::take(&mut *ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -466,6 +472,7 @@ pub(super) mod test_sink {
 
     pub(super) fn record_error(
         ctx: TelemetryContext<'_>,
+        sandbox_kind: &str,
         error_type: FailureReason,
         exit_code: i32,
     ) {
@@ -477,7 +484,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedError {
                 backend: ctx.backend.to_owned(),
-                sandbox_kind: ctx.sandbox_kind.to_owned(),
+                sandbox_kind: sandbox_kind.to_owned(),
                 error_type,
                 exit_code,
                 phase: ctx.phase.to_owned(),
@@ -509,7 +516,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         super::super::reset_for_test();
         super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
-        super::super::TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
+        super::super::TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
         test_sink::install();
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
         log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
@@ -719,7 +726,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         super::super::reset_for_test();
         super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
-        super::super::TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(false)));
+        super::super::TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(false)));
         test_sink::install();
 
         log_process_event("opaque", 42, ProcessEvent::Exited(0));

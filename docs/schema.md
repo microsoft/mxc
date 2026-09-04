@@ -199,6 +199,11 @@ cannot mix both formats in one request.
         "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
     },
 
+    "telemetry": {                         // Telemetry (Windows only)
+        "enabled": true                    // Request emission for this run; MXC-owned user consent
+                                           // and a permitting administrative policy are also required
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -210,9 +215,6 @@ cannot mix both formats in one request.
             "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
-        },
-        "telemetry": {                // Telemetry (Windows only)
-            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }

@@ -92,7 +92,7 @@ fn rejects_duplicate_test_fields() {
 fn accepts_empty_telemetry_object() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "experimental": {"telemetry": {}},
+        "telemetry": {},
         "process": {"commandLine": "echo"}
     }"#;
 
@@ -105,10 +105,8 @@ fn accepts_telemetry_enabled_values() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }},
                 "process": {{"commandLine": "echo"}}
             }}"#
@@ -124,10 +122,8 @@ fn rejects_non_boolean_telemetry_enabled_values() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }},
                 "process": {{"commandLine": "echo"}}
             }}"#
@@ -141,10 +137,8 @@ fn rejects_non_boolean_telemetry_enabled_values() {
 fn rejects_unknown_telemetry_field() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "experimental": {
-            "telemetry": {
-                "unknownField": "value"
-            }
+        "telemetry": {
+            "unknownField": "value"
         },
         "process": {"commandLine": "echo"}
     }"#;
@@ -159,16 +153,16 @@ fn rejects_duplicate_telemetry_fields() {
     assert_invalid_cases(
         [
             (
-                "experimental.telemetry",
+                "telemetry",
                 version_and_process,
-                r#""experimental": {"telemetry": {}, "telemetry": {}}"#,
+                r#""telemetry": {}, "telemetry": {}"#,
             ),
             (
-                "experimental.telemetry.enabled",
+                "telemetry.enabled",
                 version_and_process,
-                r#""experimental": {"telemetry": {"enabled": true, "enabled": false}}"#,
+                r#""telemetry": {"enabled": true, "enabled": false}"#,
             ),
         ],
-        "duplicate experimental field",
+        "duplicate telemetry field",
     );
 }

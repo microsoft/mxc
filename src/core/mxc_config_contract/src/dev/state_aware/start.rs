@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::dev::experimental::Telemetry;
-use crate::dev::{OptionalField, Version};
+use crate::dev::{OptionalField, Telemetry, Version};
 use serde::Deserialize;
 
 string_marker! {
@@ -14,11 +13,7 @@ string_marker! {
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StartExperimental {
-    /// Optional telemetry override.
-    #[serde(default)]
-    pub telemetry: OptionalField<Telemetry>,
-}
+pub struct StartExperimental {}
 
 /// A complete state-aware `start` request.
 #[derive(Debug, Deserialize)]
@@ -38,9 +33,9 @@ pub struct StartRequest {
     /// Identifier returned by the provision phase.
     pub sandbox_id: String,
 
-    /// Optional correlation vector relayed from provision.
+    /// Optional telemetry configuration.
     #[serde(default)]
-    pub correlation_vector: OptionalField<String>,
+    pub telemetry: OptionalField<Telemetry>,
 
     /// Optional closed post-provision experimental settings.
     #[serde(default)]

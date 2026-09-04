@@ -144,6 +144,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         policy,
         lxc_config,
         seatbelt,
+        // Telemetry settings do not affect enforcement.
+        telemetry: _excluded_telemetry,
         experimental_enabled,
         experimental,
         // --- deliberately excluded; see the module docs ---
@@ -231,8 +233,6 @@ fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
         wslc,
         // A placeholder feature with no enforcement effect.
         test: _excluded_test_feature,
-        // Telemetry settings do not affect enforcement.
-        telemetry: _excluded_telemetry,
     } = experimental;
 
     let mut out = Map::new();
@@ -566,8 +566,9 @@ mod tests {
     fn telemetry_settings_do_not_change_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
-        changed.experimental.telemetry = Some(crate::models::TelemetryConfig {
+        changed.telemetry = Some(crate::models::TelemetryConfig {
             enabled: Some(true),
+            requested_sandbox_kind: Some("process"),
         });
         assert_eq!(
             baseline,

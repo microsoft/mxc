@@ -230,23 +230,22 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -267,9 +266,10 @@ fn main() {
             eprintln!("error: {}", e.message);
             emit_warnings(&logger);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -287,10 +287,11 @@ fn main() {
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
-    telemetry::emit_completion(
+    // ── Telemetry emit ──────────────────────────────────────────────
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

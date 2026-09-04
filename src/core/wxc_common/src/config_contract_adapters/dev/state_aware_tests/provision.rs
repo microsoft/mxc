@@ -23,14 +23,14 @@ const ISOLATION_SESSION_ALL_FIELDS_REQUEST_JSON: &str = r#"{
         "allowLocalNetwork": true,
         "defaultPolicy": "allow"
     },
+    "telemetry": {
+        "enabled": false
+    },
     "experimental": {
         "isolation_session": {
             "provision": {
                 "appId": "someAppId"
             }
-        },
-        "telemetry": {
-            "enabled": false
         }
     }
 }"#;
@@ -52,11 +52,9 @@ const WINDOWS_SANDBOX_ALL_FIELDS_REQUEST_JSON: &str = r#"{
         "readwritePaths": ["C:\\Users\\User\\Documents"],
         "deniedPaths": ["C:\\Users\\User\\Music"]
     },
-    "experimental": {
-        "telemetry": {
+    "telemetry": {
             "enabled": false
         }
-    }
 }"#;
 
 const MINIMAL_WSLC_REQUEST_JSON: &str = r#"{
@@ -86,15 +84,15 @@ const WSLC_ALL_FIELDS_REQUEST_JSON: &str = r#"{
             "url": "http://example.com/proxy"
         }
     },
+    "telemetry": {
+        "enabled": false
+    },
     "experimental": {
         "wslc": {
             "provision": {
                 "image": "someImage",
                 "imageTarPath": "someImageTarPath"
             }
-        },
-        "telemetry": {
-            "enabled": false
         }
     }
 }"#;
@@ -171,7 +169,6 @@ fn minimal_isolation_session_request_maps_expected_wire_fields() {
     assert!(network.blocked_hosts.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -223,7 +220,7 @@ fn isolation_session_request_maps_expected_wire_fields() {
         .expect("provision should be present");
     assert_eq!(provision.app_id.as_deref(), Some("someAppId"));
 
-    let telemetry = experimental.telemetry.expect("telemetry should be present");
+    let telemetry = wire.telemetry.expect("telemetry should be present");
     assert_eq!(telemetry.enabled, Some(false));
 
     assert!(experimental.test.is_none());
@@ -232,7 +229,6 @@ fn isolation_session_request_maps_expected_wire_fields() {
     assert!(experimental.seatbelt.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -260,7 +256,6 @@ fn minimal_windows_sandbox_request_maps_expected_wire_fields() {
     ));
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -309,20 +304,11 @@ fn windows_sandbox_request_maps_expected_wire_fields() {
         Some(vec!["C:\\Users\\User\\Music".to_string()])
     );
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
-
-    assert!(experimental.test.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.experimental.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -347,7 +333,6 @@ fn minimal_wslc_request_maps_expected_wire_fields() {
     assert!(matches!(wire.containment, Some(wire::Containment::Wslc)));
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -432,9 +417,7 @@ fn wslc_request_maps_expected_wire_fields() {
     assert!(wslc.storage_path.is_none());
     assert!(wslc.port_mappings.is_none());
 
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
 
     assert!(experimental.test.is_none());
@@ -443,7 +426,6 @@ fn wslc_request_maps_expected_wire_fields() {
     assert!(experimental.seatbelt.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -460,16 +442,12 @@ fn empty_isolation_session_sections_map_to_present_empty_wire_sections() {
         r#""experimental": {}"#,
     ));
     let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
     assert!(experimental.isolation_session.is_none());
 
-    let wire = adapt(&isolation_session_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&isolation_session_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 
     let wire = adapt(&isolation_session_request_with_fields(
@@ -505,16 +483,12 @@ fn empty_windows_sandbox_sections_map_to_present_empty_wire_sections() {
     let wire = adapt(&windows_sandbox_request_with_fields(
         r#""experimental": {}"#,
     ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.experimental.is_some());
+    assert!(wire.telemetry.is_none());
 
-    let wire = adapt(&windows_sandbox_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&windows_sandbox_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 }
 
@@ -537,16 +511,12 @@ fn empty_wslc_sections_map_to_present_empty_wire_sections() {
 
     let wire = adapt(&wslc_request_with_fields(r#""experimental": {}"#));
     let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
     assert!(experimental.wslc.is_none());
 
-    let wire = adapt(&wslc_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&wslc_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 
     let wire = adapt(&wslc_request_with_fields(r#""experimental": {"wslc": {}}"#));
@@ -654,7 +624,7 @@ fn wslc_request_matches_current_wire_deserialization() {
 fn empty_isolation_session_sections_match_current_wire_deserialization() {
     for fields in [
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"isolation_session": {}}"#,
         r#""experimental": {"isolation_session": {"provision": {}}}"#,
     ] {
@@ -667,7 +637,7 @@ fn empty_windows_sandbox_sections_match_current_wire_deserialization() {
     for fields in [
         r#""filesystem": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
     ] {
         assert_matches_current_wire_deserialization(&windows_sandbox_request_with_fields(fields));
     }
@@ -679,7 +649,7 @@ fn empty_wslc_sections_match_current_wire_deserialization() {
         r#""filesystem": {}"#,
         r#""network": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"wslc": {}}"#,
         r#""experimental": {"wslc": {"provision": {}}}"#,
     ] {

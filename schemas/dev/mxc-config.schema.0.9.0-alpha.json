@@ -194,12 +194,6 @@
     "DeprovisionExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `deprovision` phase.",
-      "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        }
-      },
       "type": "object"
     },
     "DeprovisionPhase": {
@@ -219,10 +213,6 @@
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
         },
-        "correlationVector": {
-          "description": "Optional correlation vector relayed from provision.",
-          "type": "string"
-        },
         "experimental": {
           "$ref": "#/definitions/DeprovisionExperimental",
           "description": "Optional closed post-provision experimental settings."
@@ -234,6 +224,10 @@
         "sandboxId": {
           "description": "Identifier of the sandbox to deprovision.",
           "type": "string"
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -250,12 +244,6 @@
     "ExecExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `exec` phase.",
-      "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        }
-      },
       "type": "object"
     },
     "ExecPhase": {
@@ -274,10 +262,6 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "correlationVector": {
-          "description": "Optional correlation vector relayed from provision.",
-          "type": "string"
         },
         "experimental": {
           "$ref": "#/definitions/ExecExperimental",
@@ -298,6 +282,10 @@
         "sandboxId": {
           "description": "Identifier of the sandbox to execute in.",
           "type": "string"
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -400,10 +388,6 @@
         "isolation_session": {
           "$ref": "#/definitions/StateAwareIsolationSession",
           "description": "Optional IsolationSession backend settings."
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
         }
       },
       "type": "object"
@@ -434,6 +418,10 @@
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
           "description": "Exact `provision` phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -876,10 +864,6 @@
       "additionalProperties": false,
       "description": "Experimental settings.",
       "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        },
         "test": {
           "$ref": "#/definitions/TestFeature",
           "description": "Optional placeholder test feature."
@@ -979,6 +963,10 @@
         "seatbelt": {
           "$ref": "#/definitions/Seatbelt",
           "description": "Optional macOS Seatbelt configuration."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "ui": {
           "$ref": "#/definitions/Ui",
@@ -1280,12 +1268,6 @@
     "StartExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `start` phase.",
-      "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        }
-      },
       "type": "object"
     },
     "StartPhase": {
@@ -1305,10 +1287,6 @@
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
         },
-        "correlationVector": {
-          "description": "Optional correlation vector relayed from provision.",
-          "type": "string"
-        },
         "experimental": {
           "$ref": "#/definitions/StartExperimental",
           "description": "Optional closed post-provision experimental settings."
@@ -1320,6 +1298,10 @@
         "sandboxId": {
           "description": "Identifier returned by the provision phase.",
           "type": "string"
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -1358,12 +1340,6 @@
     "StopExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `stop` phase.",
-      "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        }
-      },
       "type": "object"
     },
     "StopPhase": {
@@ -1383,10 +1359,6 @@
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
         },
-        "correlationVector": {
-          "description": "Optional correlation vector relayed from provision.",
-          "type": "string"
-        },
         "experimental": {
           "$ref": "#/definitions/StopExperimental",
           "description": "Optional closed post-provision experimental settings."
@@ -1398,6 +1370,10 @@
         "sandboxId": {
           "description": "Identifier returned by the provision phase.",
           "type": "string"
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -1413,7 +1389,7 @@
     },
     "Telemetry": {
       "additionalProperties": false,
-      "description": "One-shot telemetry override.",
+      "description": "Telemetry settings.",
       "properties": {
         "enabled": {
           "description": "Whether telemetry is enabled.",
@@ -1521,12 +1497,6 @@
     "WindowsSandboxExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by a Windows Sandbox provision request.",
-      "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        }
-      },
       "type": "object"
     },
     "WindowsSandboxProvisionRequest": {
@@ -1555,6 +1525,10 @@
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
           "description": "Exact `provision` phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",
@@ -1593,10 +1567,6 @@
       "additionalProperties": false,
       "description": "Experimental settings accepted by a WSLC provision request.",
       "properties": {
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry override."
-        },
         "wslc": {
           "$ref": "#/definitions/StateAwareWslc",
           "description": "Optional WSLC backend settings."
@@ -1634,6 +1604,10 @@
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
           "description": "Exact `provision` phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
         },
         "version": {
           "$ref": "#/definitions/Version",

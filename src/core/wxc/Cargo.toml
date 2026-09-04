@@ -37,6 +37,7 @@ nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 
 [features]
 default = []
+test-support = ["wxc_common/test-support"]
 microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "mxc_engine/microvm"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk", "mxc_engine/wslc"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]

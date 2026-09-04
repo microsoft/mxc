@@ -15,12 +15,9 @@ const ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "version": "0.9.0-alpha",
     "phase": "deprovision",
     "sandboxId": "sandbox-id",
-    "correlationVector": "correlation-vector",
-    "experimental": {
-        "telemetry": {
+    "telemetry": {
             "enabled": false
         }
-    }
 }"#;
 
 fn request_with_fields(fields: &str) -> String {
@@ -50,7 +47,6 @@ fn minimal_request_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Deprovision)));
     assert_eq!(wire.sandbox_id, Some("sandbox-id".to_string()));
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.containment.is_none());
     assert!(wire.process.is_none());
@@ -82,10 +78,6 @@ fn request_with_all_fields_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Deprovision)));
     assert_eq!(wire.sandbox_id, Some("sandbox-id".to_string()));
-    assert_eq!(
-        wire.correlation_vector,
-        Some("correlation-vector".to_string())
-    );
     assert!(wire.container_id.is_none());
     assert!(wire.containment.is_none());
     assert!(wire.process.is_none());
@@ -97,32 +89,20 @@ fn request_with_all_fields_maps_expected_wire_fields() {
     assert!(wire.network.is_none());
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
-
-    let experimental = wire.experimental.expect("experimental should be populated");
-
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
-
-    assert!(experimental.test.is_none());
-    assert!(experimental.windows_sandbox.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.experimental.is_none());
 }
 
 #[test]
 fn empty_experimental_sections_map_to_present_empty_wire_sections() {
     let wire = adapt(&request_with_fields(r#""experimental": {}"#));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.experimental.is_some());
+    assert!(wire.telemetry.is_none());
 
-    let wire = adapt(&request_with_fields(r#""experimental": {"telemetry": {}}"#));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 }
 
@@ -131,13 +111,11 @@ fn empty_identifier_strings_map_expected_wire_fields() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "phase": "deprovision",
-        "sandboxId": "",
-        "correlationVector": ""
+        "sandboxId": ""
     }"#;
 
     let wire = adapt(json);
     assert_eq!(wire.sandbox_id.as_deref(), Some(""));
-    assert_eq!(wire.correlation_vector.as_deref(), Some(""));
 }
 
 #[test]
@@ -171,10 +149,7 @@ fn request_with_all_fields_matches_current_wire_deserialization() {
 
 #[test]
 fn empty_experimental_sections_match_current_wire_deserialization() {
-    for fields in [
-        r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
-    ] {
+    for fields in [r#""experimental": {}"#, r#""telemetry": {}"#] {
         assert_matches_current_wire_deserialization(&request_with_fields(fields));
     }
 }
@@ -184,8 +159,7 @@ fn empty_identifier_strings_match_current_wire_deserialization() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "phase": "deprovision",
-        "sandboxId": "",
-        "correlationVector": ""
+        "sandboxId": ""
     }"#;
 
     assert_matches_current_wire_deserialization(json);

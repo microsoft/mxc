@@ -231,7 +231,7 @@ mod stable;
 mod state_aware;
 
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
+    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
     TransportProtocol,
 };
 pub use network::{
@@ -246,7 +246,8 @@ pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
-    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Ui, UiClipboard,
+    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Telemetry, Ui,
+    UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

@@ -80,13 +80,13 @@ fn accepts_provision_request_with_optional_fields() {
             "defaultPolicy": "allow",
             "allowLocalNetwork": true
         },
+        "telemetry": {
+            "enabled": true
+        },
         "experimental": {
-            "telemetry": {
-                "enabled": true
-            },
             "isolation_session": {
                 "provision": {
-                  "appId": "someAppId"
+                    "appId": "someAppId"
                 }
             }
         }
@@ -98,7 +98,7 @@ fn accepts_provision_request_with_optional_fields() {
 fn accepts_empty_provision_experimental_objects() {
     for field in [
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"isolation_session": {}}"#,
         r#""experimental": {"isolation_session": {"provision": {}}}"#,
     ] {
@@ -118,10 +118,8 @@ fn accepts_provision_telemetry_enabled_values() {
                     "defaultPolicy": "allow",
                     "allowLocalNetwork": true
                 }},
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }}
             }}"#
         );
@@ -339,10 +337,8 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
                     "defaultPolicy": "allow",
                     "allowLocalNetwork": true
                 }},
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }}
             }}"#
         );
@@ -355,8 +351,8 @@ fn rejects_null_optional_fields() {
     for field in [
         r#""$schema": null"#,
         r#""experimental": null"#,
-        r#""experimental": {"telemetry": null}"#,
-        r#""experimental": {"telemetry": {"enabled": null}}"#,
+        r#""telemetry": null"#,
+        r#""telemetry": {"enabled": null}"#,
         r#""experimental": {"isolation_session": null }"#,
         r#""experimental": {"isolation_session": {"provision": null }}"#,
         r#""experimental": {"isolation_session": {"provision": {"appId": null }}}"#,
@@ -407,11 +403,9 @@ fn rejects_unknown_provision_experimental_telemetry_fields() {
                 "defaultPolicy": "allow",
                 "allowLocalNetwork": true
             },
-            "experimental": {
-                "telemetry": {
+            "telemetry": {
                     "unknownField": "unknown"
                 }
-            }
     }"#;
     assert_invalid(json);
 }
@@ -618,8 +612,7 @@ fn rejects_invalid_experimental_object_types() {
         let json = request_with_additional_fields(&format!(r#""experimental": {value}"#));
         assert_invalid(&json);
 
-        let json =
-            request_with_additional_fields(&format!(r#""experimental": {{"telemetry": {value}}}"#));
+        let json = request_with_additional_fields(&format!(r#""telemetry": {value}"#));
         assert_invalid(&json);
 
         let json = request_with_additional_fields(&format!(

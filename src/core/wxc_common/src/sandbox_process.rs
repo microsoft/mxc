@@ -68,8 +68,9 @@ use crate::validator::{validate_common, validate_network_policy_support, Network
 ///   before touching the other can hang on output-heavy children. Taking only
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
-    /// Security warnings associated with this sandbox, such as a policy that
-    /// intentionally relaxes containment. The default is empty.
+    /// Warnings associated with this sandbox, such as a policy that
+    /// intentionally relaxes containment or an unavailable telemetry route.
+    /// The default is empty.
     fn warnings(&self) -> &[String] {
         &[]
     }

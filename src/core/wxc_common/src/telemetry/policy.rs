@@ -298,29 +298,64 @@ mod platform {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .or_else(|| {
-                same_process_policy_key_override(
+                scoped_policy_key_override(
                     std::env::var_os(super::POLICY_KEY_OVERRIDE_ENV),
                     std::env::var_os(super::POLICY_KEY_OVERRIDE_OWNER_ENV),
                     std::process::id(),
+                    direct_parent_process_id(),
                 )
             })
     }
 
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    /// Environment bridge for language-binding tests that load the debug
-    /// native library in the same process. The owner PID prevents an ambient
-    /// override from leaking into child processes.
-    fn same_process_policy_key_override(
+    /// Environment bridge for language-binding tests and smoke-test children.
+    ///
+    /// The owner PID is mandatory so an unpaired ambient key override is
+    /// ignored. It may identify this process (an in-process binding test) or
+    /// the test harness that explicitly launched this child.
+    fn scoped_policy_key_override(
         key: Option<std::ffi::OsString>,
         owner: Option<std::ffi::OsString>,
         process_id: u32,
+        parent_process_id: Option<u32>,
     ) -> Option<String> {
         let owner = owner?.to_str()?.parse::<u32>().ok()?;
-        if owner != process_id {
+        if owner != process_id && Some(owner) != parent_process_id {
             return None;
         }
         let key = key?.into_string().ok()?;
         (!key.is_empty()).then_some(key)
+    }
+
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    fn direct_parent_process_id() -> Option<u32> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut parent = None;
+        unsafe {
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    if entry.th32ProcessID == std::process::id() {
+                        parent = Some(entry.th32ParentProcessID);
+                        break;
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+        parent
     }
 
     /// The production key path is not exercised by redirected policy tests, so
@@ -356,29 +391,57 @@ mod platform {
     }
 
     #[cfg(test)]
-    mod same_process_override {
-        use super::same_process_policy_key_override;
+    mod scoped_override {
+        use super::scoped_policy_key_override;
 
         #[test]
-        fn requires_the_current_process_as_owner() {
+        fn accepts_an_explicit_same_process_or_parent_owner() {
             assert_eq!(
-                same_process_policy_key_override(
+                scoped_policy_key_override(
                     Some("Software\\MxcTest".into()),
                     Some("42".into()),
                     42,
+                    Some(41),
                 ),
                 Some("Software\\MxcTest".to_string())
             );
             assert_eq!(
-                same_process_policy_key_override(
+                scoped_policy_key_override(
                     Some("Software\\MxcTest".into()),
                     Some("41".into()),
                     42,
+                    Some(41),
+                ),
+                Some("Software\\MxcTest".to_string())
+            );
+            assert_eq!(
+                scoped_policy_key_override(
+                    Some("Software\\MxcTest".into()),
+                    Some("40".into()),
+                    42,
+                    Some(41),
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_an_unowned_or_malformed_override() {
+            assert_eq!(
+                scoped_policy_key_override(Some("Software\\MxcTest".into()), None, 42, Some(41),),
+                None
+            );
+            assert_eq!(
+                scoped_policy_key_override(
+                    Some("Software\\MxcTest".into()),
+                    Some("not-a-pid".into()),
+                    42,
+                    Some(41),
                 ),
                 None
             );
             assert_eq!(
-                same_process_policy_key_override(Some("Software\\MxcTest".into()), None, 42),
+                scoped_policy_key_override(Some("".into()), Some("42".into()), 42, Some(41)),
                 None
             );
         }

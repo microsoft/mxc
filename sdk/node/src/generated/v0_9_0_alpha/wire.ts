@@ -38,10 +38,6 @@ export type DefaultNetworkPolicy = "allow" | "block";
  * Experimental settings accepted by the `deprovision` phase.
  */
 export interface DeprovisionExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type DeprovisionPhase = "deprovision";
@@ -59,10 +55,6 @@ export interface DeprovisionRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: DeprovisionExperimental;
@@ -75,6 +67,10 @@ export interface DeprovisionRequest {
    */
   sandboxId: string;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
@@ -84,10 +80,6 @@ export interface DeprovisionRequest {
  * Experimental settings accepted by the `exec` phase.
  */
 export interface ExecExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type ExecPhase = "exec";
@@ -104,10 +96,6 @@ export interface ExecRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
-  /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
   /**
    * Optional closed exec experimental settings.
    */
@@ -128,6 +116,10 @@ export interface ExecRequest {
    * Identifier of the sandbox to execute in.
    */
   sandboxId: string;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -198,10 +190,6 @@ export interface IsolationSessionProvisionExperimental {
    * Optional IsolationSession backend settings.
    */
   isolation_session?: StateAwareIsolationSession;
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 /**
@@ -232,6 +220,10 @@ export interface IsolationSessionProvisionRequest {
    * Exact `provision` phase marker.
    */
   phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -404,10 +396,6 @@ export type OneShotContainment = "process" | "processcontainer" | "appcontainer"
  */
 export interface OneShotExperimental {
   /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
-  /**
    * Optional placeholder test feature.
    */
   test?: TestFeature;
@@ -489,6 +477,10 @@ export type OneShotRequest = {
    * Optional macOS Seatbelt configuration.
    */
   seatbelt?: Seatbelt;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Optional cross-platform user-interface policy.
    */
@@ -707,10 +699,6 @@ export interface Seatbelt {
  * Experimental settings accepted by the `start` phase.
  */
 export interface StartExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type StartPhase = "start";
@@ -728,10 +716,6 @@ export interface StartRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: StartExperimental;
@@ -743,6 +727,10 @@ export interface StartRequest {
    * Identifier returned by the provision phase.
    */
   sandboxId: string;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -773,10 +761,6 @@ export interface StateAwareWslc {
  * Experimental settings accepted by the `stop` phase.
  */
 export interface StopExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type StopPhase = "stop";
@@ -794,10 +778,6 @@ export interface StopRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: StopExperimental;
@@ -810,13 +790,17 @@ export interface StopRequest {
    */
   sandboxId: string;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
 }
 
 /**
- * One-shot telemetry override.
+ * Telemetry settings.
  */
 export interface Telemetry {
   /**
@@ -867,10 +851,6 @@ export type WindowsSandboxContainment = "windows_sandbox";
  * Experimental settings accepted by a Windows Sandbox provision request.
  */
 export interface WindowsSandboxExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 /**
@@ -902,6 +882,10 @@ export interface WindowsSandboxProvisionRequest {
    */
   phase: ProvisionPhase;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
@@ -927,10 +911,6 @@ export interface WslcProvision {
  * Experimental settings accepted by a WSLC provision request.
  */
 export interface WslcProvisionExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
   /**
    * Optional WSLC backend settings.
    */
@@ -969,6 +949,10 @@ export interface WslcProvisionRequest {
    * Exact `provision` phase marker.
    */
   phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */

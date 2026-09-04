@@ -31,14 +31,11 @@ C++ shim, WIL, or FFI is required.
 └──────────────────────────────────────────────────────┘
 ```
 
-## Why the Rust `tracelogging` Crate (Not WIL C++ Shim)
+## TraceLogging implementation
 
-An earlier design used a WIL C++ shim compiled via the `cc` crate. PR review
-feedback correctly noted that the WIL dependency added C++ compilation, NuGet
-download, FFI unsafety, and blocked non-Windows contributors from building the
-crate. The Rust `tracelogging` crate provides the core ETW primitives needed,
-and the small set of WIL features MXC actually uses can be replicated with
-Rust constants and `write_event!` struct fields.
+The Rust `tracelogging` crate provides MXC's required ETW primitives without a
+C++ build, NuGet dependency, or FFI boundary. MXC supplies the remaining
+provider metadata through Rust constants and `write_event!` struct fields.
 
 ### Feature comparison
 
@@ -183,9 +180,9 @@ Emitted on execution errors.
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
 > **No free-form error text is emitted.** Error messages can contain paths,
-> usernames, or credentials, so `MXC.Error` deliberately carries only the
-> bounded `error_type` category and the numeric `exit_code` — never the
-> message string itself.
+> usernames, or credentials, so `MXC.Error` deliberately carries only bounded
+> attribution fields, the `error_type` category, and the numeric `exit_code` —
+> never the message string itself.
 
 ### Correlating a lifecycle
 
