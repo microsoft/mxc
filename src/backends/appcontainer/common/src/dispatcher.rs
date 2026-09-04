@@ -148,6 +148,11 @@ pub enum DispatchError {
     },
     /// AppContainer SID derivation failed.
     Sid(WxcError),
+    /// Request-specific BaseContainer selection failed before tier fallback.
+    BaseContainerSelection {
+        failure_phase: wxc_common::models::FailurePhase,
+        message: String,
+    },
     /// captureDenials requires the native BaseContainer tier and cannot
     /// proceed through an AppContainer fallback.
     CaptureDenialsUnsupported { tier: IsolationTier },
@@ -177,6 +182,7 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
+            DispatchError::BaseContainerSelection { message, .. } => f.write_str(message),
             DispatchError::CaptureDenialsUnsupported { tier } => write!(
                 f,
                 "captureDenials requires the native BaseContainer backend; \
@@ -188,6 +194,16 @@ impl std::fmt::Display for DispatchError {
 }
 
 impl std::error::Error for DispatchError {}
+
+impl DispatchError {
+    /// Failure classification for callers that expose typed backend errors.
+    pub fn failure_phase(&self) -> wxc_common::models::FailurePhase {
+        match self {
+            Self::BaseContainerSelection { failure_phase, .. } => failure_phase.clone(),
+            _ => wxc_common::models::FailurePhase::BackendUnavailable,
+        }
+    }
+}
 
 impl From<FallbackError> for DispatchError {
     fn from(e: FallbackError) -> Self {
@@ -363,12 +379,37 @@ fn select_backend_with_fallback(
     ),
     DispatchError,
 > {
+    select_backend_with_fallback_using_probe(
+        request,
+        capture_factory,
+        BaseContainerRunner::is_usable_for_request,
+    )
+}
+
+fn select_backend_with_fallback_using_probe(
+    request: &ExecutionRequest,
+    capture_factory: Option<&Arc<dyn GuardedCaptureFactory>>,
+    probe_base_container: impl FnOnce(&ExecutionRequest) -> Result<bool, ScriptResponse>,
+) -> Result<
+    (
+        SelectedBackend,
+        Option<DaclManager>,
+        IsolationTier,
+        Vec<String>,
+    ),
+    DispatchError,
+> {
     // Keep the established tier fallback behavior for every schema version.
     // BaseContainerRunner prefers PSEC whenever it is available and compatible,
     // otherwise uses the transitional SBOX contract. If neither BaseContainer
     // contract is usable, detection continues to the AppContainer tiers.
-    let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
-    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
+    let prefer_base_container = probe_base_container(request).map_err(|response| {
+        DispatchError::BaseContainerSelection {
+            failure_phase: response.failure_phase,
+            message: response.error_message,
+        }
+    })?;
+    let uses_psec_capture = BaseContainerRunner::uses_psec_capture_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let decision = fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
@@ -377,7 +418,7 @@ fn select_backend_with_fallback(
         supports_deny_paths,
     )?;
     let guarded_capture_required = request.policy.capture_denials.is_some()
-        && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);
+        && (decision.tier != IsolationTier::BaseContainer || !uses_psec_capture);
     if guarded_capture_required && capture_factory.is_none() {
         return Err(DispatchError::CaptureDenialsUnsupported {
             tier: decision.tier,
@@ -992,6 +1033,56 @@ mod tests {
             .expect("AppContainer fallback should be selected");
         assert_ne!(tier, IsolationTier::BaseContainer);
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
+    }
+
+    #[test]
+    fn base_container_probe_failure_does_not_fall_back_to_appcontainer() {
+        let mut policy = empty_policy();
+        policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let request = test_request(policy);
+
+        let result = select_backend_with_fallback_using_probe(&request, None, |_| {
+            Err(ScriptResponse {
+                failure_phase: wxc_common::models::FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error("failed to determine Process Security Environment support")
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::BaseContainerSelection {
+                failure_phase: wxc_common::models::FailurePhase::BackendUnavailable,
+                message,
+            }) if message.contains("failed to determine Process Security Environment support")
+        ));
+    }
+
+    #[test]
+    fn unsupported_host_loopback_does_not_fall_back_to_appcontainer() {
+        let mut policy = empty_policy();
+        policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let request = test_request(policy);
+
+        let result = select_backend_with_fallback_using_probe(&request, None, |_| {
+            Err(ScriptResponse {
+                failure_phase: wxc_common::models::FailurePhase::Rejected,
+                ..ScriptResponse::error("host loopback is unsupported")
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::BaseContainerSelection {
+                failure_phase: wxc_common::models::FailurePhase::Rejected,
+                message,
+            }) if message == "host loopback is unsupported"
+        ));
     }
 
     #[test]

@@ -32,6 +32,16 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Reads the test override for whether PSEC denial-capture APIs are available.
+///
+/// The dispatcher chooses between PSEC capture and guarded WPR before a runner exists, so tests
+/// cannot inject platform support into that decision.
+pub(crate) fn native_capture_usable_override() -> Option<bool> {
+    std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE")
+        .ok()
+        .map(|value| value == "1")
+}
+
 /// RAII guard that sets `MXC_FORCE_TIER` to `value` for the lifetime
 /// of the guard and restores it on `Drop`. Acquires [`ENV_LOCK`]
 /// internally so concurrent guards serialize.

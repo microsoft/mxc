@@ -101,6 +101,18 @@ fn map_spawn_error(resp: ScriptResponse) -> MxcError {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn map_process_container_dispatch_error(
+    error: appcontainer_common::dispatcher::DispatchError,
+) -> MxcError {
+    match error.failure_phase() {
+        wxc_common::models::FailurePhase::Rejected => {
+            MxcError::policy_validation(error.to_string())
+        }
+        _ => MxcError::backend_unavailable(error.to_string()),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_bubblewrap(
     request: &ExecutionRequest,
@@ -191,7 +203,7 @@ fn spawn_process_container(
                     let _ = writeln!(logger, "dacl warning: {w}");
                 }
             }
-            Err(MxcError::backend_unavailable(format!("{e}")))
+            Err(map_process_container_dispatch_error(e))
         }
         Err(SpawnDispatchError::Spawn {
             response,
@@ -266,6 +278,8 @@ fn spawn_wslc(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::map_process_container_dispatch_error;
     use super::{ensure_host_supported, map_spawn_error, spawn_runner};
     use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
@@ -319,6 +333,27 @@ mod tests {
             map_spawn_error(spawn_failure(FailurePhase::LaunchFailed)).code,
             MxcErrorCode::BackendError
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_container_selection_phases_map_to_public_codes() {
+        let rejected = appcontainer_common::dispatcher::DispatchError::BaseContainerSelection {
+            failure_phase: wxc_common::models::FailurePhase::Rejected,
+            message: "host loopback is unsupported".to_string(),
+        };
+        let unavailable = appcontainer_common::dispatcher::DispatchError::BaseContainerSelection {
+            failure_phase: wxc_common::models::FailurePhase::BackendUnavailable,
+            message: "support query failed".to_string(),
+        };
+
+        let rejected = map_process_container_dispatch_error(rejected);
+        let unavailable = map_process_container_dispatch_error(unavailable);
+
+        assert_eq!(rejected.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(rejected.message, "host loopback is unsupported");
+        assert_eq!(unavailable.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(unavailable.message, "support query failed");
     }
 
     #[test]
