@@ -284,6 +284,11 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
 | [docs/telemetry/telemetry-consent-design.md](docs/telemetry/telemetry-consent-design.md) | Telemetry consent contract |
 | [docs/telemetry/telemetry-administrative-policy.md](docs/telemetry/telemetry-administrative-policy.md) | Administrative telemetry controls |
+| [docs/authoring-a-new-feature.md](docs/authoring-a-new-feature.md) | Step-by-step guide for adding a new feature (schema, Rust, tests) |
+| [docs/fuzzing.md](docs/fuzzing.md) | Fuzzing with `cargo-fuzz` |
+| [docs/ci-validation-infrastructure.md](docs/ci-validation-infrastructure.md) | E2E validation test infrastructure |
+| [docs/playground-limitations.md](docs/playground-limitations.md) | Playground known limitations and compatibility |
+| [docs/pull-requests.md](docs/pull-requests.md) | How PR builds are validated |
 
 ## Contributing
 
