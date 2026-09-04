@@ -16,13 +16,20 @@ $verb = $args[0]
 $packagePath = $args[1]
 $sourceIndex = [array]::IndexOf($args, '-Source')
 $feedUrl = if ($sourceIndex -ge 0) { $args[$sourceIndex + 1] } else { '' }
+$apiKeyIndex = [array]::IndexOf($args, '-ApiKey')
+$apiKey = if ($apiKeyIndex -ge 0) { $args[$apiKeyIndex + 1] } else { '' }
 
 if ($env:FAKE_NUGET_MODE -eq 'duplicate') {
     Write-Output '409 Conflict - package already exists.'
     exit 1
 }
 
-if ($verb -ne 'push' -or $sourceIndex -lt 0 -or -not $feedUrl) {
+if (
+    $verb -ne 'push' -or
+    $sourceIndex -lt 0 -or
+    -not $feedUrl -or
+    $apiKey -ne 'AzureDevOps'
+) {
     Write-Output 'unexpected invocation'
     exit 2
 }

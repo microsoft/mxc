@@ -23,7 +23,10 @@ if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
     throw "NuGet package not found: '$PackagePath'."
 }
 
-$output = & $NuGetExe push $PackagePath -Source $FeedUrl -NonInteractive 2>&1
+$output = & $NuGetExe push $PackagePath `
+    -Source $FeedUrl `
+    -ApiKey AzureDevOps `
+    -NonInteractive 2>&1
 if ($LASTEXITCODE -ne 0) {
     $outputText = ($output | Out-String).Trim()
     if ($outputText -match '409|already exists|duplicate') {
