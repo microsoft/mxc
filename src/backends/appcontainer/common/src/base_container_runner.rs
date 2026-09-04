@@ -579,6 +579,20 @@ impl BaseContainerRunner {
         })
     }
 
+    /// Whether the native PSEC plus Learning Mode API set is available.
+    ///
+    /// This does not start a Learning Mode trace. It also does not evaluate
+    /// whether a particular request is compatible with PSEC.
+    pub fn is_native_capture_available() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
+            return forced == "1";
+        }
+
+        Self::is_process_security_environment_usable()
+            && RealCapturePlatformSupport.check_apis(true).is_ok()
+    }
+
     /// Whether this host can create a PSEC environment and start a Learning Mode trace.
     ///
     /// The successful probe session is dropped immediately, which closes and discards the trace.

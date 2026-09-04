@@ -88,6 +88,21 @@ fn plm_exe_path() -> Result<std::path::PathBuf, String> {
     Ok(dir.join("plm.exe"))
 }
 
+/// Whether the guarded WPR fallback can be used without starting a capture.
+///
+/// This applies the same co-location and trust checks as launch, then releases
+/// the pin immediately. It intentionally does not attempt to elevate or start
+/// WPR because callers use it from the read-only host probe.
+pub(crate) fn is_available() -> bool {
+    plm_exe_path()
+        .and_then(|path| {
+            plm::trust::verify_and_pin_launch_binary(&path)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .is_ok()
+}
+
 /// [`GuardedCaptureSession`] backed by a live `plm::elevated::GuardedSession`.
 struct PlmGuardedCaptureSession {
     session: plm::elevated::GuardedSession,

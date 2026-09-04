@@ -756,13 +756,13 @@ fn main() {
     // (which probe doesn't need; deferring them shaves cold-start cost
     // off the SDK warm path).
     if cli.probe {
-        let policy = if let Some((data, is_b64)) = config_input(&cli) {
+        let request = if let Some((data, is_b64)) = config_input(&cli) {
             // Parse using the existing pipeline but route logger output to
             // an in-memory buffer that we discard — the probe must not
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
             match load_request(&data, &mut probe_logger, is_b64) {
-                Ok(r) => r.policy,
+                Ok(request) => request,
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
                     eprint!("{}", probe_logger.get_buffer());
@@ -770,9 +770,12 @@ fn main() {
                 }
             }
         } else {
-            wxc_common::models::ContainerPolicy::default()
+            wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(&policy);
+        let output = appcontainer_common::probe::run_probe_with_guarded_capture_availability(
+            &request,
+            mxc_engine::guarded_capture_available(),
+        );
         // appcontainer_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
