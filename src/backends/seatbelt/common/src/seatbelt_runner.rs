@@ -97,6 +97,12 @@ extern "C" {
 /// from inside the sandbox.
 const DEFAULT_SHELL: &str = "/bin/sh";
 
+/// Markers bracketing the generated profile in the log stream, so a reader can
+/// slice it out. The `Seatbelt: ` prefix cannot collide with profile content:
+/// rules start with `(` and profile comments with `;;`.
+pub const PROFILE_LOG_BEGIN: &str = "Seatbelt: --- begin generated profile ---";
+pub const PROFILE_LOG_END: &str = "Seatbelt: --- end generated profile ---";
+
 #[derive(Default)]
 pub struct SeatbeltScriptRunner;
 
@@ -166,6 +172,7 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // Build the Seatbelt profile now that the proxy address is resolved, so
         // the reachability rule can be scoped to the proxy's exact host + port.
         let profile = build_profile_with_proxy(request, proxy.address()).map_err(error_response)?;
+        log_generated_profile(&profile, logger);
 
         // Determine launch method + GUI access from the seatbelt config.
         let launch_method = request
@@ -663,6 +670,19 @@ fn build_sandbox_command(
     Ok(command)
 }
 
+/// Emit the generated profile to `logger` for `--debug` / `--log-file`.
+///
+/// One `writeln!` per line, unprefixed: the file sink stamps each write, and
+/// keeping the lines verbatim makes the block copy-pasteable into
+/// `profileOverride` or `sandbox-exec -f`.
+fn log_generated_profile(profile: &str, logger: &mut Logger) {
+    let _ = writeln!(logger, "{PROFILE_LOG_BEGIN}");
+    for line in profile.lines() {
+        let _ = writeln!(logger, "{line}");
+    }
+    let _ = writeln!(logger, "{PROFILE_LOG_END}");
+}
+
 fn error_response(message: String) -> ScriptResponse {
     ScriptResponse {
         exit_code: -1,
@@ -842,6 +862,80 @@ mod tests {
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
+    }
+
+    /// Capture what `log_generated_profile` puts into a buffering logger.
+    fn logged_profile(profile: &str) -> String {
+        use wxc_common::logger::Mode;
+        let mut logger = Logger::new(Mode::Buffer);
+        log_generated_profile(profile, &mut logger);
+        logger.get_buffer().to_string()
+    }
+
+    /// Slice the profile back out from between the markers.
+    fn extract_profile(log: &str) -> String {
+        let body = log
+            .split_once(PROFILE_LOG_BEGIN)
+            .expect("begin marker missing")
+            .1
+            .split_once(PROFILE_LOG_END)
+            .expect("end marker missing")
+            .0;
+        body.trim_matches('\n').to_string()
+    }
+
+    #[test]
+    fn logs_the_profile_verbatim_between_markers() {
+        let profile = "(version 1)\n(deny default)\n;; --- comment ---\n(allow file-read*\n    (subpath \"/tmp\")\n)\n";
+        assert_eq!(
+            extract_profile(&logged_profile(profile)),
+            profile.trim_end()
+        );
+    }
+
+    #[test]
+    fn logs_the_profile_one_line_per_write() {
+        let profile = "(version 1)\n(deny default)\n(allow process-exec)\n";
+        let log = logged_profile(profile);
+        assert_eq!(
+            log.lines().count(),
+            5,
+            "expected 3 profile lines plus 2 markers, got: {log}"
+        );
+    }
+
+    #[test]
+    fn profile_markers_cannot_collide_with_profile_content() {
+        // Slicing is only sound if no profile line can reproduce a marker.
+        for marker in [PROFILE_LOG_BEGIN, PROFILE_LOG_END] {
+            assert!(marker.starts_with("Seatbelt: "), "got: {marker}");
+            assert!(!marker.starts_with('('), "got: {marker}");
+            assert!(!marker.starts_with(";;"), "got: {marker}");
+        }
+        assert_ne!(PROFILE_LOG_BEGIN, PROFILE_LOG_END);
+    }
+
+    #[test]
+    fn logs_an_empty_profile_without_losing_the_markers() {
+        // `profileOverride: ""` is degenerate but reachable.
+        let log = logged_profile("");
+        assert!(log.contains(PROFILE_LOG_BEGIN), "got: {log}");
+        assert!(log.contains(PROFILE_LOG_END), "got: {log}");
+        assert_eq!(extract_profile(&log), "");
+    }
+
+    #[test]
+    fn logs_the_profile_the_backend_actually_built() {
+        // Guards the seam: a re-derived or stale profile must not be logged.
+        let mut request = base_request();
+        request.policy.readonly_paths = vec!["/tmp/mxc-profile-log-probe".into()];
+        let profile = build_profile_with_proxy(&request, None).expect("profile builds");
+
+        assert_eq!(
+            extract_profile(&logged_profile(&profile)),
+            profile.trim_end()
+        );
+        assert!(profile.contains("mxc-profile-log-probe"), "got: {profile}");
     }
 
     #[test]

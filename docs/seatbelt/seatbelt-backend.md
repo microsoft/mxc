@@ -490,6 +490,10 @@ Apple credentials.
 Run with `--debug` to print the generated profile — most surprises are obvious
 once you can see the rules that were emitted.
 
+`--log-file <path>` captures the same block without `--debug`, which is the
+better option when the workload's own output is what you're reading on the
+console.
+
 ### Common symptoms
 
 | Symptom | Likely cause | Fix |
