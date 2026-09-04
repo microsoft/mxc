@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
@@ -453,10 +453,10 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.process!.commandLine, 'echo hello');
     });
 
-    it('should populate experimental.wslc with default image', () => {
+    it('should populate the top-level wslc section with default image', () => {
       const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
-      assert.ok(payload.experimental?.wslc);
-      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(payload.wslc);
+      assert.strictEqual(payload.wslc!.image, 'alpine:latest');
     });
 
     it('should not set processContainer or lxc config', () => {
@@ -481,13 +481,15 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
-    assert.strictEqual(config.ui!.disable, true);
-    assert.strictEqual(config.ui!.clipboard, 'none');
-    assert.strictEqual(config.ui!.injection, false);
     assert.strictEqual(config.process!.timeout, 0);
     assert.strictEqual(config.process!.commandLine, '');
     assert.strictEqual(config.lifecycle!.destroyOnExit, true);
     assert.strictEqual(config.lifecycle!.preservePolicy, false);
+  });
+
+  it('should omit ui when the policy does not set it', () => {
+    const config = createConfigFromPolicy(defaultPolicy);
+    assert.strictEqual(config.ui, undefined);
   });
 
   it('should pass filesystem paths through', () => {
@@ -1515,11 +1517,11 @@ describe('createConfigFromPolicy', () => {
   });
 
   describe('WSLC', () => {
-    it('should set containment to wslc and populate experimental.wslc', () => {
+    it('should set containment to wslc and populate the top-level wslc section', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       assert.strictEqual(config.containment, 'wslc');
-      assert.ok(config.experimental?.wslc);
-      assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(config.wslc);
+      assert.strictEqual(config.wslc!.image, 'alpine:latest');
     });
 
     it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
@@ -1580,6 +1582,19 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.lxc, undefined);
     });
 
+    it('should omit ui for wslc when the policy does not set it', () => {
+      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      assert.strictEqual(config.ui, undefined);
+    });
+
+    it('should emit ui for wslc when the policy sets it', () => {
+      const config = createConfigFromPolicy({
+        version: '0.6.0-alpha',
+        ui: { allowWindows: true },
+      }, 'wslc');
+      assert.strictEqual(config.ui!.disable, false);
+    });
+
     it('should map filesystem paths correctly', () => {
       const config = createConfigFromPolicy({
         version: '0.6.0-alpha',
@@ -1605,24 +1620,6 @@ describe('createConfigFromPolicy', () => {
     it('should set containerId', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc', 'my-container');
       assert.strictEqual(config.containerId, 'my-container');
-    });
-
-    it('should throw from spawnSandbox when experimental backend is used via config', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
-    });
-
-    it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
     });
   });
 
@@ -1787,11 +1784,19 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     }
   });
 
-  it('should still require experimental mode for experimental backends like wslc', () => {
+  it('should still require experimental mode for experimental backends like windows_sandbox', () => {
     assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
+      () => resolveExecutableAndArgs(makeConfig('windows_sandbox'), { executablePath: fakeExe }),
       { message: /experimental mode/ },
     );
+  });
+
+  it('should NOT require experimental mode for explicit wslc containment', () => {
+    const resolved = resolveExecutableAndArgs(makeConfig('wslc'), {
+      executablePath: fakeExe,
+      skipPlatformCheck: true,
+    });
+    assert.ok(!resolved.args.includes('--experimental'));
   });
 
   it('should NOT require experimental mode for explicit lxc containment', function (this: { skip: (reason?: string) => void }) {

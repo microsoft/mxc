@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-filesystem-test",
   "containment": "wslc",
   "process": {
@@ -7,16 +7,16 @@
     "cwd": "C:\\wslcfs"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\wslcfs"]
+    "readwritePaths": [
+      "C:\\wslcfs"
+    ]
   },
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest",
-      "cpuCount": 2,
-      "memoryMb": 1024
-    }
+  "wslc": {
+    "image": "alpine:latest",
+    "cpuCount": 2,
+    "memoryMb": 1024
   }
 }

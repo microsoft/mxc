@@ -403,6 +403,7 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         network: network.into_option().map(convert_network),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
+        wslc: None,
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         experimental: None,
     }

@@ -1,20 +1,22 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-denied-dotdot-alias",
   "containment": "wslc",
   "process": {
     "commandLine": "echo SHOULD_NOT_RUN"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\ddttest\\real"],
-    "deniedPaths": ["C:\\ddttest\\link\\ghost\\sub\\..\\secret"]
+    "readwritePaths": [
+      "C:\\ddttest\\real"
+    ],
+    "deniedPaths": [
+      "C:\\ddttest\\link\\ghost\\sub\\..\\secret"
+    ]
   },
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

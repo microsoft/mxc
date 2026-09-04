@@ -154,7 +154,7 @@ export interface WindowsSandboxDeprovisionConfig {
 // may be injected per-exec.
 
 export interface WslcProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
+  /** Schema version (semver). When omitted, the SDK fills in `0.9.0-alpha`. */
   version?: string;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
@@ -178,12 +178,12 @@ export interface WslcProvisionConfig {
   /**
    * Container image reference (e.g. `alpine:latest`). Defaults to
    * `alpine:latest` when omitted. Nested under
-   * `experimental.wslc.provision.image` on the wire.
+   * `wslc.provision.image` on the wire.
    */
   image?: string;
   /**
    * Path to a local image tarball to import instead of pulling. Nested under
-   * `experimental.wslc.provision.imageTarPath` on the wire.
+   * `wslc.provision.imageTarPath` on the wire.
    */
   imageTarPath?: string;
 }

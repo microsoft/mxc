@@ -336,7 +336,7 @@ const CURRENT_SCHEMA_VERSION: &str = "0.9.0-alpha";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "isolation_session"];
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -508,12 +508,12 @@ fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
     if cfg.seatbelt.is_some() {
         push(ContainmentBackend::Seatbelt);
     }
+    if cfg.wslc.is_some() {
+        push(ContainmentBackend::Wslc);
+    }
     if let Some(experimental) = cfg.experimental.as_ref() {
         if experimental.windows_sandbox.is_some() {
             push(ContainmentBackend::WindowsSandbox);
-        }
-        if experimental.wslc.is_some() {
-            push(ContainmentBackend::Wslc);
         }
         if experimental.isolation_session.is_some() {
             push(ContainmentBackend::IsolationSession);
@@ -568,18 +568,23 @@ fn validate_experimental_backend_keys(
         return Ok(());
     };
 
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
-
     let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
         .copied()
         .filter(|key| map.contains_key(*key))
         .collect();
 
-    let rejected: Vec<&'static str> = match matching_key {
-        Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
+    let rejected: Vec<&'static str> = match containment {
+        Some(c) => match c
+            .section_path()
+            .and_then(|p| p.strip_prefix("experimental."))
+        {
+            Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
+
+            // An unrejected key is dropped when the experimental section is
+            // cleared.
+            None => present,
+        },
         None if present.len() > 1 => present,
         None => return Ok(()),
     };
@@ -1081,7 +1086,7 @@ fn convert_wire_config(
             }
 
             // WSLc cannot honor a blanket inbound-listen grant. The runner only
-            // wires explicit host->container port forwards (experimental.wslc
+            // wires explicit host->container port forwards (wslc
             // portMappings) into the WSL2 VM's NAT; it never consults
             // allowLocalNetwork. Reject `true` and point at portMappings.
             // (`false` is the default and a no-op.)
@@ -1089,7 +1094,7 @@ fn convert_wire_config(
                 let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
                            container runs in the NAT'd WSL2 VM and MXC does not honor a \
                            blanket inbound-listen grant; expose specific ports with \
-                           experimental.wslc.portMappings instead.";
+                           wslc.portMappings instead.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1239,70 +1244,12 @@ fn convert_wire_config(
             }
             config
         });
-        let wslc = if let Some(cc) = raw_exp.wslc {
-            let mut config = WslcConfig::default();
-            if let Some(os) = cc.target_os {
-                config.target_os = os;
-            }
-            if let Some(img) = cc.image {
-                config.image = img;
-            }
-            config.image_tar_path = cc.image_tar_path;
-            config.cpu_count = cc.cpu_count;
-            config.memory_mb = cc.memory_mb;
-            if let Some(gpu) = cc.gpu {
-                config.gpu = gpu;
-            }
-            config.storage_path = cc.storage_path;
-            if let Some(mappings) = cc.port_mappings {
-                let mut converted = Vec::with_capacity(mappings.len());
-                for (idx, m) in mappings.into_iter().enumerate() {
-                    if m.windows_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    if m.container_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    // Only TCP is representable in the wire model
-                    // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
-                    // UDP, so only TCP is currently supported.
-                    let protocol = "tcp".to_string();
-                    converted.push(PortMapping {
-                        windows_port: m.windows_port,
-                        container_port: m.container_port,
-                        protocol,
-                    });
-                }
-                // Reject duplicate (windowsPort, protocol) entries. Same host
-                // port on TCP+UDP would in principle be legal, but UDP is
-                // rejected at deserialize (the wire model is tcp-only); the
-                // second protocol dimension is retained in the dedupe key in
-                // case UDP support is enabled later.
-                let mut seen: std::collections::HashSet<(u16, &str)> =
-                    std::collections::HashSet::new();
-                for pm in &converted {
-                    if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
-                        let msg = format!(
-                            "experimental.wslc.portMappings: duplicate windowsPort {} \
-                             for protocol '{}'",
-                            pm.windows_port, pm.protocol
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                }
-                config.port_mappings = converted;
-            }
-            Some(config)
-        } else {
-            None
-        };
+        if raw_exp.wslc.is_some() {
+            let msg = "'experimental.wslc' has moved to the stable section; \
+                       use top-level 'wslc' instead."
+                .to_string();
+            return Err(WxcError::ConfigParse(msg));
+        }
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1315,11 +1262,81 @@ fn convert_wire_config(
         ExperimentalConfig {
             test,
             windows_sandbox,
-            wslc,
             telemetry,
         }
     } else {
         ExperimentalConfig::default()
+    };
+
+    // Top-level `wslc` config. Configs using `experimental.wslc` are rejected
+    // above.
+    let wslc = if let Some(cc) = cfg.wslc {
+        // The state-aware path clears `wslc` before delegating here, so a
+        // surviving `provision` is genuinely a one-shot request.
+        if cc.provision.is_some() {
+            return Err(WxcError::ConfigParse(
+                "One-shot requests do not accept 'wslc.provision'; it configures the \
+                 state-aware lifecycle. Remove it, or add a 'phase' field to make this \
+                 a state-aware request."
+                    .to_string(),
+            ));
+        }
+        let mut config = WslcConfig::default();
+        if let Some(os) = cc.target_os {
+            config.target_os = os;
+        }
+        if let Some(img) = cc.image {
+            config.image = img;
+        }
+        config.image_tar_path = cc.image_tar_path;
+        config.cpu_count = cc.cpu_count;
+        config.memory_mb = cc.memory_mb;
+        if let Some(gpu) = cc.gpu {
+            config.gpu = gpu;
+        }
+        config.storage_path = cc.storage_path;
+        if let Some(mappings) = cc.port_mappings {
+            let mut converted = Vec::with_capacity(mappings.len());
+            for (idx, m) in mappings.into_iter().enumerate() {
+                if m.windows_port == 0 {
+                    let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                if m.container_port == 0 {
+                    let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                // Only TCP is representable in the wire model
+                // (TransportProtocol is tcp-only); a `udp` value is rejected
+                // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
+                // UDP, so only TCP is currently supported.
+                let protocol = "tcp".to_string();
+                converted.push(PortMapping {
+                    windows_port: m.windows_port,
+                    container_port: m.container_port,
+                    protocol,
+                });
+            }
+            // Reject duplicate (windowsPort, protocol) entries. Same host
+            // port on TCP+UDP would in principle be legal, but UDP is
+            // rejected at deserialize (the wire model is tcp-only); the
+            // second protocol dimension is retained in the dedupe key in
+            // case UDP support is enabled later.
+            let mut seen: std::collections::HashSet<(u16, &str)> = std::collections::HashSet::new();
+            for pm in &converted {
+                if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
+                    let msg = format!(
+                        "wslc.portMappings: duplicate windowsPort {} for protocol '{}'",
+                        pm.windows_port, pm.protocol
+                    );
+                    return Err(WxcError::ConfigParse(msg));
+                }
+            }
+            config.port_mappings = converted;
+        }
+        Some(config)
+    } else {
+        None
     };
 
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
@@ -1353,6 +1370,7 @@ fn convert_wire_config(
         policy,
         lxc_config,
         seatbelt,
+        wslc,
         experimental_enabled: false,
         testing_features_enabled: false,
         experimental,
@@ -1430,11 +1448,15 @@ fn convert_wire_state_aware(
     // discarded (the same silent-policy-drop class as the moved-to-stable
     // sections).
     if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
-        for key in ["seatbelt", "macos_sandbox"] {
+        for (key, section) in [
+            ("seatbelt", "seatbelt"),
+            ("macos_sandbox", "seatbelt"),
+            ("wslc", "wslc"),
+        ] {
             if exp.contains_key(key) {
                 let msg = format!(
                     "'experimental.{key}' has moved to the stable section; \
-                     use top-level 'seatbelt' instead."
+                     use top-level '{section}' instead."
                 );
                 return Err(WxcError::ConfigParse(msg));
             }
@@ -1442,6 +1464,53 @@ fn convert_wire_state_aware(
     }
 
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
+
+    // Raw top-level object, retained so the dispatcher can read the per-phase
+    // config of backends promoted to the stable surface, which live at
+    // `<backend>.<phase>` instead of under `experimental`. The typed
+    // deserialize above already proved `json` is a JSON object.
+    let stable_raw = serde_json::from_str::<serde_json::Value>(json).ok();
+
+    // The state-aware lifecycle reads WSLc's provision config from
+    // `wslc.provision`, so only the one-shot-only siblings below are rejected;
+    // the daemon-backed lifecycle does not honor them.
+    if let Some(wslc) = cfg.wslc.as_ref() {
+        if phase != Phase::Provision {
+            return Err(WxcError::ConfigParse(format!(
+                "State-aware '{phase}' requests do not accept a 'wslc' section; \
+                 WSLc backend configuration is fixed at provision time."
+            )));
+        }
+        if containment != Some(ContainmentBackend::Wslc) {
+            return Err(WxcError::ConfigParse(
+                "The 'wslc' section requires 'containment': \"wslc\". Remove the section, \
+                 or set the matching containment."
+                    .to_string(),
+            ));
+        }
+        let mut one_shot_only: Vec<&'static str> = Vec::new();
+        for (present, name) in [
+            (wslc.target_os.is_some(), "targetOs"),
+            (wslc.image.is_some(), "image"),
+            (wslc.image_tar_path.is_some(), "imageTarPath"),
+            (wslc.cpu_count.is_some(), "cpuCount"),
+            (wslc.memory_mb.is_some(), "memoryMb"),
+            (wslc.gpu.is_some(), "gpu"),
+            (wslc.storage_path.is_some(), "storagePath"),
+            (wslc.port_mappings.is_some(), "portMappings"),
+        ] {
+            if present {
+                one_shot_only.push(name);
+            }
+        }
+        if !one_shot_only.is_empty() {
+            return Err(WxcError::ConfigParse(format!(
+                "State-aware lifecycle requests do not accept one-shot 'wslc' field(s): {}. \
+                 Use 'wslc.provision' for state-aware container configuration.",
+                one_shot_only.join(", ")
+            )));
+        }
+    }
 
     let sandbox_id = cfg.sandbox_id.clone();
     let correlation_vector = cfg.correlation_vector.clone();
@@ -1482,6 +1551,9 @@ fn convert_wire_state_aware(
     cfg.correlation_vector = None;
     cfg.experimental = None;
     cfg.seatbelt = None;
+    // Validated above; the shared one-shot converter has no state-aware
+    // meaning for it (`wslc.provision` is read by the dispatcher instead).
+    cfg.wslc = None;
     cfg.process_container = None;
     cfg.lxc = None;
     cfg.lifecycle = None;
@@ -1540,9 +1612,10 @@ fn convert_wire_state_aware(
         sandbox_id,
         correlation_vector,
         experimental_raw,
+        stable_raw,
         // Retain the decoded request text so the dispatcher can deserialize each
-        // `experimental.<backend>.<phase>` sub-slice positionally and report
-        // typed errors with whole-file line/column (parity with base config).
+        // per-phase config sub-slice positionally and report typed errors with
+        // whole-file line/column (parity with base config).
         source_text: Some(json.to_owned().into_boxed_str()),
     })
 }
@@ -4747,19 +4820,20 @@ mod tests {
     }
 
     #[test]
-    fn experimental_port_mapping_unknown_field_accepted() {
-        // The experimental surface is intentionally permissive (forward-compat):
-        // an unknown field on a nested experimental struct must be tolerated and
-        // the known fields preserved.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
+    fn wslc_port_mapping_unknown_field_rejected() {
+        // `wslc` is a stable section, so — unlike the permissive `experimental`
+        // subtree it was promoted out of — its nested structs are closed and an
+        // unknown field is a hard parse error rather than silently tolerated.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.expect("wslc config present");
-        assert_eq!(wslc.port_mappings.len(), 1);
-        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
-        assert_eq!(wslc.port_mappings[0].container_port, 80);
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("futureField"),
+            "unknown wslc port-mapping field should be rejected, got: {msg}"
+        );
     }
 
     #[test]
@@ -4968,6 +5042,126 @@ mod tests {
             err.contains("has moved to the stable section"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn state_aware_rejects_experimental_wslc() {
+        // `experimental.wslc` moved to the stable section; the state-aware path
+        // must reject it with the migration message rather than silently
+        // discarding the provision config.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "wslc",
+            "experimental": {"wslc": {"provision": {"image": "alpine:latest"}}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("has moved to the stable section") && err.contains("wslc"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_accepts_top_level_wslc_provision() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "wslc",
+            "wslc": {"provision": {"image": "alpine:latest"}}
+        }"#;
+        match load_mxc(json) {
+            Ok(MxcRequest::StateAware(parsed)) => {
+                assert_eq!(parsed.phase, Phase::Provision);
+                let provision = parsed
+                    .deserialize_config::<wire::WslcProvisionPhase>(
+                        crate::state_aware_request::SectionRoot::Stable,
+                        "wslc",
+                        "provision",
+                    )
+                    .expect("provision config should deserialize")
+                    .expect("provision config should be present");
+                assert_eq!(provision.image.as_deref(), Some("alpine:latest"));
+            }
+            other => panic!("expected a state-aware request, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_aware_rejects_one_shot_wslc_fields() {
+        // The daemon-backed lifecycle does not honor the one-shot sizing knobs;
+        // they must be refused rather than silently dropped.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "wslc",
+            "wslc": {"cpuCount": 4, "memoryMb": 2048}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("cpuCount") && err.contains("memoryMb"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_wslc_section_on_non_provision_phase() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "wslc": {"provision": {"image": "alpine:latest"}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("fixed at provision time"), "got: {err}");
+    }
+
+    #[test]
+    fn state_aware_rejects_wslc_section_under_foreign_containment() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "wslc": {"provision": {"image": "alpine:latest"}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("requires 'containment'"), "got: {err}");
+    }
+
+    #[test]
+    fn state_aware_rejects_foreign_experimental_block_under_wslc() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "wslc",
+            "wslc": {"provision": {"image": "alpine:latest"}},
+            "experimental": {"windows_sandbox": {"provision": {}}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("experimental.windows_sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn state_aware_rejects_foreign_experimental_block_under_stable_backend() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "experimental": {"windows_sandbox": {"provision": {}}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("experimental.windows_sandbox"), "got: {err}");
     }
 
     #[test]
@@ -5725,24 +5919,38 @@ mod tests {
 
     #[test]
     fn wslc_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
+        let wslc = req.wslc.unwrap();
         assert_eq!(wslc.image, "python:3.12");
         assert!(wslc.image_tar_path.is_none());
     }
 
     #[test]
+    fn one_shot_rejects_wslc_provision() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"provision": {"image": "alpine:latest"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wslc.provision"),
+            "one-shot 'wslc.provision' should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
     fn wslc_image_tar_path_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
+        let wslc = req.wslc.unwrap();
         assert_eq!(wslc.image, "my-image:latest");
         assert_eq!(
             wslc.image_tar_path.as_deref(),
@@ -5752,12 +5960,12 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_basic_tcp_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
+        let wslc = req.wslc.unwrap();
         assert_eq!(wslc.port_mappings.len(), 1);
         assert_eq!(wslc.port_mappings[0].windows_port, 8080);
         assert_eq!(wslc.port_mappings[0].container_port, 80);
@@ -5766,12 +5974,12 @@ mod tests {
 
     #[test]
     fn wslc_port_mappings_default_protocol_is_tcp() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
+        let wslc = req.wslc.unwrap();
         assert_eq!(wslc.port_mappings[0].protocol, "tcp");
     }
 
@@ -5780,7 +5988,7 @@ mod tests {
         // Strict enums are case-sensitive: "TCP" is not the lowercase wire
         // value "tcp", so it is rejected at deserialize as an unknown variant.
         // Only lowercase "tcp" is accepted (see wslc_port_mapping_basic_tcp_parsed).
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5797,7 +6005,7 @@ mod tests {
         // The wire model's TransportProtocol is tcp-only (the WSLC SDK runtime
         // returns E_NOTIMPL for UDP), so "udp" is rejected at
         // deserialize as an unknown enum variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5811,7 +6019,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_missing_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5825,7 +6033,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_missing_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5839,7 +6047,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_zero_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5853,7 +6061,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_zero_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5869,7 +6077,7 @@ mod tests {
     fn wslc_port_mapping_unsupported_protocol_rejected() {
         // An unknown protocol like "sctp" is rejected at deserialize: the
         // tcp-only TransportProtocol enum has no matching variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5883,7 +6091,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_duplicate_host_port_same_protocol_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5897,12 +6105,12 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_empty_list_default() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"image": "python:3.12"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
+        let wslc = req.wslc.unwrap();
         assert!(wslc.port_mappings.is_empty());
     }
 
@@ -6024,7 +6232,7 @@ mod tests {
         // `present_backend_sections` reads to detect a configured backend.
         // Pairing it with another backend section must still be refused, or
         // removing the domain slot would have silently dropped the check.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}, "wslc": {"image": "alpine:latest"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -6032,7 +6240,7 @@ mod tests {
             .expect_err("two backend sections must be refused");
         let msg = format!("{err}");
         assert!(
-            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
+            msg.contains("wslc") || msg.contains("isolation_session"),
             "expected the conflicting section to be named, got: {msg}"
         );
     }
@@ -6122,6 +6330,23 @@ mod tests {
         let msg = format!("{:?}", err);
         assert!(
             msg.contains("has moved to the stable section"),
+            "expected migration error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn experimental_wslc_errors_with_migration_message() {
+        // After promotion, configs using experimental.wslc must error rather
+        // than silently ignoring the block.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "alpine:latest"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("has moved to the stable section") && msg.contains("wslc"),
             "expected migration error, got: {}",
             msg
         );
@@ -6316,7 +6541,7 @@ mod tests {
             "containment": "isolation_session",
             "experimental": {
                 "isolation_session": {},
-                "wslc": {"image": "alpine:latest"}
+                "windows_sandbox": {"idleTimeoutMs": 1000}
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -6329,7 +6554,7 @@ mod tests {
             "error did not mention multi-backend rejection: {msg}"
         );
         assert!(
-            msg.contains("experimental.wslc"),
+            msg.contains("experimental.windows_sandbox"),
             "error did not name the foreign section: {msg}"
         );
     }

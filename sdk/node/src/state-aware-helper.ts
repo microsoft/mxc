@@ -10,16 +10,15 @@ import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
-// WSLc's state-aware surface shipped at a later schema version than the
-// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
-// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
-// backends were promoted independently, so WSLc carries its own later default.
+// WSLc envelopes carry a top-level `wslc` section, which the closed stable
+// surface first defines in 0.9. Stamping them with the `STATE_AWARE_VERSION`
+// above would claim a schema in which that section does not exist.
 // See `DEFAULT_STATE_AWARE_VERSION`.
-export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
+export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
-// nested under `experimental.<backend>.<phase>`.
+// nested under the backend's section root — see {@link BACKEND_SECTION_ROOT}.
 export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
@@ -61,6 +60,18 @@ export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = O
   ),
 );
 
+// Where a backend's per-phase section lives on the wire. Mirrors the Rust
+// `StatefulSandboxBackend::SECTION_ROOT` const: a backend that is still
+// experimental nests its phases under `experimental.<backend>.<phase>`, while
+// a promoted backend carries a closed top-level `<backend>.<phase>` section.
+// Typed exhaustively so adding a backend without declaring its root is a
+// compile error.
+export const BACKEND_SECTION_ROOT: Record<StateAwareContainmentBackend, 'experimental' | 'stable'> = {
+  isolation_session: 'experimental',
+  windows_sandbox: 'experimental',
+  wslc: 'stable',
+};
+
 /**
  * Resolves the wire-format backend key for a sandbox id by reading its
  * leading prefix segment. Throws an `MxcError` with `code: 'malformed_id'`
@@ -92,12 +103,13 @@ export interface BuildEnvelopeArgs {
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
  * (filesystem, network, ui, process) to envelope top-level; nests any
- * remaining backend-specific fields under `experimental.<backend>.<phase>`.
+ * remaining backend-specific fields under the backend's section root — either
+ * `experimental.<backend>.<phase>` or the promoted `<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
   const { phase, backendKey, containment, sandboxId, correlationVector, config } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
-  // Anything left becomes experimental.<backend>.<phase>.
+  // Anything left becomes the backend's per-phase section.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || defaultVersion;
@@ -125,7 +137,12 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
 
   if (Object.keys(backendSpecific).length > 0) {
-    envelope.experimental = { [backendKey]: { [phase]: backendSpecific } };
+    const section = { [phase]: backendSpecific };
+    if (BACKEND_SECTION_ROOT[backendKey] === 'stable') {
+      envelope[backendKey] = section;
+    } else {
+      envelope.experimental = { [backendKey]: section };
+    }
   }
 
   return envelope;

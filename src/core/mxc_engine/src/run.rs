@@ -175,18 +175,8 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
             {
-                if !request.experimental_enabled {
-                    return Err(MxcError::malformed_request(
-                        "WSLC is an experimental feature. Use --experimental flag.",
-                    ));
-                }
-                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
-                let wslc_config = request
-                    .experimental
-                    .wslc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
+                let _ = writeln!(logger, "Using WSLContainer runner");
+                let wslc_config = request.wslc.as_ref().cloned().unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
                     wslc_common::wsl_container_runner::WSLContainerRunner::new(&wslc_config),
                 )))

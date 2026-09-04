@@ -31,7 +31,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
 
-The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`, and `seatbelt`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
+The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`, `wslc`, and `seatbelt`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. `wslc` additionally needs a build with the `wslc` Cargo feature (`build.bat --with-wslc`) and a WSL2 host. **Experimental backends** (`windows_sandbox`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
 For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows 11 release (23H2 / 24H2 / 25H2 / 25H2+), see [Windows OS-version policy support](./docs/process-container/os-version-support.md).
 

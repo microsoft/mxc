@@ -11,8 +11,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# WSL Container backend (Windows only, experimental). Forwards to the engine,
-# which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
+# WSL Container backend (Windows only). Forwards to the engine, which links
+# the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
 # IsolationSession backend (Windows only, experimental).
 isolation_session = ["mxc_engine/isolation_session"]

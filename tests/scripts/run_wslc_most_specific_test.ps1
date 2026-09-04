@@ -62,7 +62,7 @@ try {
     Set-Content (Join-Path $DataDir "sibling.txt") "PARENT_SECRET"
 
     Write-Host "Running WSLC most-specific test (denied parent, rw child)..."
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) { $wxcArgs += "--debug" }
     $wxcArgs += $ConfigPath
 

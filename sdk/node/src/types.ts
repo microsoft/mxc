@@ -107,7 +107,7 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'isolation_session'];
 
 /**
  * Clipboard access policy levels
@@ -392,13 +392,13 @@ export interface ContainerConfig {
   runtimeConfig?: RuntimeConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
-    /** WSLC SDK configuration for Linux containers from Windows */
-    wslc?: WslcConfig;
     /** Telemetry configuration for experimental TraceLogging ETW support */
     telemetry?: TelemetryConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;
+  /** WSLC SDK configuration for Linux containers from Windows (Windows only) */
+  wslc?: WslcConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
 }

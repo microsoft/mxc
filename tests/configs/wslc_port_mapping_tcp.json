@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-port-mapping-tcp",
   "containment": "wslc",
   "process": {
@@ -8,12 +8,14 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "python:3.12-alpine",
-      "portMappings": [
-        { "windowsPort": 18080, "containerPort": 8080, "protocol": "tcp" }
-      ]
-    }
+  "wslc": {
+    "image": "python:3.12-alpine",
+    "portMappings": [
+      {
+        "windowsPort": 18080,
+        "containerPort": 8080,
+        "protocol": "tcp"
+      }
+    ]
   }
 }

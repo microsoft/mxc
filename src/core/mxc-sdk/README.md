@@ -322,10 +322,11 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 Both take the same request JSON and differ only in where the workload's stdio
 goes.
 
-Every state-aware backend is experimental, so `experimental` is the in-process
-equivalent of the executor's `--experimental` flag: without it the request is
-refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
-API parameter, not a field in the request JSON.
+`experimental` is the in-process equivalent of the executor's `--experimental`
+flag: an **experimental** state-aware backend (Windows Sandbox, IsolationSession)
+is refused with `ErrorCode::BackendUnavailable` before any work happens unless it
+is set. Stable state-aware backends (WSLc) do not need it. It is an API
+parameter, not a field in the request JSON.
 
 The example needs this crate's `isolation_session` feature and a host running the
 OS-side service.
@@ -398,16 +399,15 @@ Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC �
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
 still reachable here through the state-aware lifecycle.
 
-### WSLC (experimental)
+### WSLC
 
 WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
-opt-in on two axes: build this crate with its **`wslc` feature**, and call
-[`SandboxRequest::set_experimental(true)`] on the request (the library-side
-equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
-memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
-inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
-go through the same parser the executor uses — so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at build time, not at spawn.
+opt-in on one axis only: build this crate with its **`wslc` feature**. Its
+settings — image, vCPUs, memory, GPU, storage path, port forwards — are carried
+by the [`WslcSection`] inside [`Containment::Wslc`], mirroring the SDK's
+top-level `wslc` block, and go through the same parser the executor uses — so a
+rejected value (e.g. a port mapping with a zero or duplicated host port) fails
+at build time, not at spawn.
 
 ```rust,no_run
 use mxc_sdk::{
@@ -420,7 +420,7 @@ use mxc_sdk::{
 # };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-request.set_script("python3 -c 'print(42)'").set_experimental(true);
+request.set_script("python3 -c 'print(42)'");
 let output = run(request)?;
 # Ok::<(), mxc_sdk::Error>(())
 ```

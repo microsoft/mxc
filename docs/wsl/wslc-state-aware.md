@@ -10,8 +10,9 @@ It complements:
 - [`wsl-container-support-plan.md`](wsl-container-support-plan.md) — the original one-shot backend design.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
-The WSLc state-aware surface is **experimental** — it requires `--experimental` and a build with
-the `wslc` feature (`build.bat --with-wslc`).
+The WSLc state-aware surface no longer requires `--experimental` — WSLc is configured
+through the top-level `wslc` section. It still requires a build with the `wslc`
+feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
@@ -43,7 +44,7 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates the public `experimental.wslc.*` wire schema + cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates the public top-level `wslc.*` wire schema + cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
 | Policy honor matrix | `src/backends/wslc/common/src/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
 | Daemon client | `src/backends/wslc/common/src/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
 | Daemon | `src/backends/wslc/daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |

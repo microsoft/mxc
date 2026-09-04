@@ -415,10 +415,6 @@ export interface OneShotExperimental {
    * Optional one-shot Windows Sandbox compatibility settings.
    */
   windows_sandbox?: OneShotWindowsSandbox;
-  /**
-   * Optional one-shot WSLC backend settings.
-   */
-  wslc?: OneShotWslc;
 }
 
 /**
@@ -497,6 +493,10 @@ export type OneShotRequest = {
    * The exact contract version marker.
    */
   version: Version;
+  /**
+   * Optional Windows WSL container configuration.
+   */
+  wslc?: Wslc;
 } & ({ processContainer?: never } | { appContainer?: never }) & ({ seatbelt?: never } | { macos_sandbox?: never });
 
 /**
@@ -515,44 +515,6 @@ export interface OneShotWindowsSandbox {
    * Idle timeout before teardown, in milliseconds.
    */
   idleTimeoutMs?: number;
-}
-
-/**
- * One-shot WSLC backend settings.
- */
-export interface OneShotWslc {
-  /**
-   * Requested virtual CPU count.
-   */
-  cpuCount?: number;
-  /**
-   * Whether GPU passthrough is enabled.
-   */
-  gpu?: boolean;
-  /**
-   * Container image reference.
-   */
-  image?: string;
-  /**
-   * Path to a local image tarball to import.
-   */
-  imageTarPath?: string;
-  /**
-   * Requested memory limit in megabytes.
-   */
-  memoryMb?: number;
-  /**
-   * Optional host-to-container TCP port mappings.
-   */
-  portMappings?: PortMapping[];
-  /**
-   * Optional storage path override.
-   */
-  storagePath?: string;
-  /**
-   * Target operating system inside the container.
-   */
-  targetOs?: string;
 }
 
 /**
@@ -760,7 +722,7 @@ export interface StateAwareIsolationSession {
 }
 
 /**
- * State-aware WSLC experimental settings.
+ * State-aware WSLC settings, carried by the top-level `wslc` section.
  */
 export interface StateAwareWslc {
   /**
@@ -907,6 +869,44 @@ export interface WindowsSandboxProvisionRequest {
   version: Version;
 }
 
+/**
+ * Windows WSL container backend settings.
+ */
+export interface Wslc {
+  /**
+   * Requested virtual CPU count.
+   */
+  cpuCount?: number;
+  /**
+   * Whether GPU passthrough is enabled.
+   */
+  gpu?: boolean;
+  /**
+   * Container image reference.
+   */
+  image?: string;
+  /**
+   * Path to a local image tarball to import.
+   */
+  imageTarPath?: string;
+  /**
+   * Requested memory limit in megabytes.
+   */
+  memoryMb?: number;
+  /**
+   * Optional host-to-container TCP port mappings.
+   */
+  portMappings?: PortMapping[];
+  /**
+   * Optional storage path override.
+   */
+  storagePath?: string;
+  /**
+   * Target operating system inside the container.
+   */
+  targetOs?: string;
+}
+
 export type WslcContainment = "wslc";
 
 /**
@@ -931,10 +931,6 @@ export interface WslcProvisionExperimental {
    * Optional telemetry override.
    */
   telemetry?: Telemetry;
-  /**
-   * Optional WSLC backend settings.
-   */
-  wslc?: StateAwareWslc;
 }
 
 /**
@@ -973,6 +969,10 @@ export interface WslcProvisionRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional WSLC backend settings fixed at provision time.
+   */
+  wslc?: StateAwareWslc;
 }
 
 /**

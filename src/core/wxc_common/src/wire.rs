@@ -116,6 +116,10 @@ pub struct MxcConfig {
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
 
+    /// WSL container backend settings (Windows). Used when containment is
+    /// `wslc`.
+    pub wslc: Option<Wslc>,
+
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
 }
@@ -582,7 +586,7 @@ pub struct Experimental {
     pub test: Option<TestFeature>,
     /// Windows Sandbox backend config.
     pub windows_sandbox: Option<WindowsSandbox>,
-    /// WSL container backend config.
+    /// WSL container backend config (pre-promotion alias).
     pub wslc: Option<Wslc>,
     /// IsolationSession backend config (Windows).
     pub isolation_session: Option<IsolationSession>,
@@ -628,7 +632,7 @@ pub struct WindowsSandbox {
 /// WSL container backend config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Wslc {
     /// OS inside the WSL container.
     pub target_os: Option<String>,
@@ -648,16 +652,16 @@ pub struct Wslc {
     /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
     /// for UDP port mappings.
     pub port_mappings: Option<Vec<PortMapping>>,
-    /// State-aware provision-phase configuration
-    /// (`experimental.wslc.provision`). Carries the container-creation knobs
-    /// for the state-aware lifecycle; the flat sibling fields above remain the
-    /// one-shot surface. Absent on one-shot configs and non-provision phases.
+    /// State-aware provision-phase configuration (`wslc.provision`). Carries
+    /// the container-creation knobs for the state-aware lifecycle; the flat
+    /// sibling fields above remain the one-shot surface. Absent on one-shot
+    /// configs and non-provision phases.
     pub provision: Option<WslcProvisionPhase>,
 }
 
 /// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested
-/// under `experimental.wslc.provision`. Carries only what the amortized daemon
-/// session honors: the container image (or a local tarball to import).
+/// under `wslc.provision`. Carries only what the amortized daemon session
+/// honors: the container image (or a local tarball to import).
 ///
 /// Filesystem mounts and network mode derive from the top-level `policy`
 /// section (readwrite / readonly paths, network), not from here. The
@@ -668,7 +672,7 @@ pub struct Wslc {
 /// the top-level `process` section), so they have no phase struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WslcProvisionPhase {
     /// Container image reference (e.g. `alpine:latest`). Defaults to
     /// `alpine:latest` when omitted.
@@ -677,11 +681,10 @@ pub struct WslcProvisionPhase {
     pub image_tar_path: Option<String>,
 }
 
-/// A single host → container port forward. Reachable only under the permissive
-/// `experimental` surface, so unknown fields are tolerated (forward-compat).
+/// A single host → container port forward.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortMapping {
     /// Host (Windows) port.
     #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]

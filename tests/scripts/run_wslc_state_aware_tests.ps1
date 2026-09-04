@@ -159,7 +159,7 @@ function Invoke-StateAware {
 
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 
-    $argList = @('--experimental')
+    $argList = @()
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $b64)
 
@@ -228,7 +228,7 @@ function Invoke-StateAwareStreaming {
     }
 
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-    $argList = @('--experimental')
+    $argList = @()
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $b64)
 

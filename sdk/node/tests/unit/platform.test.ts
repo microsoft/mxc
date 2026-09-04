@@ -445,6 +445,79 @@ describe('isolation_session availability gate', () => {
   });
 });
 
+describe('wslc availability gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('includes wslc when the probe reports it available', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { wslcAvailable: true } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      support.availableMethods.includes('wslc'),
+      `expected wslc present, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits wslc when the probe reports it unavailable', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { wslcAvailable: false } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      !support.availableMethods.includes('wslc'),
+      `expected wslc absent, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits wslc when the probes block omits the field', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container', probes: {} }));
+    const support = getPlatformSupport();
+    assert.ok(!support.availableMethods.includes('wslc'));
+  });
+
+  it('omits wslc for a truthy non-boolean probe value', { skip: !isWindows }, () => {
+    for (const value of ['true', 1, {}, []]) {
+      _resetPlatformSupportCache();
+      _setProbeRunner(() =>
+        JSON.stringify({ tier: 'base-container', probes: { wslcAvailable: value } }),
+      );
+      assert.ok(
+        !getPlatformSupport().availableMethods.includes('wslc'),
+        `${JSON.stringify(value)} is truthy but not true, so it must not enable wslc`,
+      );
+    }
+  });
+
+  it('omits wslc when the probe fails', { skip: !isWindows }, () => {
+    _setProbeRunner(() => {
+      throw new Error('probe failed');
+    });
+    const support = getPlatformSupport();
+    assert.ok(support.isSupported, 'Windows support is independent of the probe');
+    assert.ok(!support.availableMethods.includes('wslc'));
+  });
+
+  it('gates wslc and isolation_session independently', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'base-container',
+        probes: { isolationSessionAvailable: false, wslcAvailable: true },
+      }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(support.availableMethods.includes('wslc'));
+    assert.ok(!support.availableMethods.includes('isolation_session'));
+  });
+});
+
 describe('hyperlight availability gate', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();

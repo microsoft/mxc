@@ -1,6 +1,6 @@
 {
   "_comment": "Rejection fixture: the one-shot WSLc surface refuses lifecycle.destroyOnExit=false. The container is scoped to a session this process owns, and terminating that session reaps the container regardless of the AutoRemove flag, so `false` cannot be honored. Expects a rejection before any container is created -- the payload must never run.",
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-destroy-on-exit-false-rejected",
   "containment": "wslc",
   "process": {
@@ -12,9 +12,7 @@
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

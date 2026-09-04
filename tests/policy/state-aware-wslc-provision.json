@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "provision",
   "containment": "wslc",
   "filesystem": {
@@ -10,12 +10,10 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "provision": {
-        "image": "alpine:3.20",
-        "imageTarPath": "C:\\images\\alpine.tar"
-      }
+  "wslc": {
+    "provision": {
+      "image": "alpine:3.20",
+      "imageTarPath": "C:\\images\\alpine.tar"
     }
   }
 }

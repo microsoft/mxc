@@ -230,10 +230,7 @@ mod stable;
 /// The development `0.9.0-alpha` state-aware configuration contract.
 mod state_aware;
 
-pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
-    TransportProtocol,
-};
+pub use experimental::{OneShotExperimental, OneShotWindowsSandbox, Telemetry, TestFeature};
 pub use network::{
     DefaultNetworkPolicy, Network, NetworkAction, NetworkEgress, NetworkEnforcementMode,
     NetworkIngress, NetworkPeer, NetworkPort, NetworkProtocol, NetworkProxy, NetworkRule,
@@ -245,8 +242,9 @@ pub use request::{parse_request, Request, RequestParseError};
 pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
-    Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
-    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Ui, UiClipboard,
+    PortMapping, Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
+    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, TransportProtocol,
+    Ui, UiClipboard, Wslc,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

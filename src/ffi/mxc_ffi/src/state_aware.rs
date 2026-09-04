@@ -111,7 +111,7 @@ impl MxcStateAwareResult {
 /// same reason.
 ///
 /// `experimental` is non-zero to opt in to the experimental backends
-/// (WindowsSandbox, IsolationSession, WSLc); with zero they are refused with
+/// (WindowsSandbox and IsolationSession); with zero they are refused with
 /// `backend_unavailable` before any work is done.
 ///
 /// # Safety

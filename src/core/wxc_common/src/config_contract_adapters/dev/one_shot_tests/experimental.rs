@@ -40,27 +40,26 @@ const WSLC_REQUEST_JSON: &str = r#"{
     "process": {
         "commandLine": "echo hello"
     },
-    "experimental": {
-        "wslc": {
-            "targetOs": "linux",
-            "image": "alpine:latest",
-            "imageTarPath": "C:\\images\\alpine.tar",
-            "cpuCount": 4,
-            "memoryMb": 4294967296,
-            "gpu": true,
-            "storagePath": "C:\\wslc",
-            "portMappings": [
-                {
-                    "windowsPort": 8080,
-                    "containerPort": 80
-                },
-                {
-                    "windowsPort": 8443,
-                    "containerPort": 443,
-                    "protocol": "tcp"
-                }
-            ]
-        }
+    "experimental": {},
+    "wslc": {
+        "targetOs": "linux",
+        "image": "alpine:latest",
+        "imageTarPath": "C:\\images\\alpine.tar",
+        "cpuCount": 4,
+        "memoryMb": 4294967296,
+        "gpu": true,
+        "storagePath": "C:\\wslc",
+        "portMappings": [
+            {
+                "windowsPort": 8080,
+                "containerPort": 80
+            },
+            {
+                "windowsPort": 8443,
+                "containerPort": 443,
+                "protocol": "tcp"
+            }
+        ]
     }
 }"#;
 
@@ -122,8 +121,7 @@ fn wslc_maps_expected_wire_fields() {
         Some(super::wire::Containment::Wslc)
     ));
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    let wslc = wire.wslc.expect("wslc should be populated");
 
     assert_eq!(wslc.target_os.as_deref(), Some("linux"));
     assert_eq!(wslc.image.as_deref(), Some("alpine:latest"));
@@ -153,10 +151,12 @@ fn wslc_maps_expected_wire_fields() {
         Some(super::wire::TransportProtocol::Tcp)
     ));
 
+    let experimental = wire.experimental.expect("experimental should be populated");
     assert!(experimental.test.is_none());
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.seatbelt.is_none());
+    assert!(experimental.wslc.is_none());
     assert!(experimental.telemetry.is_none());
 }
 

@@ -254,7 +254,7 @@
               "type": "null"
             }
           ],
-          "description": "WSL container backend config."
+          "description": "WSL container backend config (pre-promotion alias)."
         }
       },
       "type": "object"
@@ -710,7 +710,8 @@
       "type": "string"
     },
     "PortMapping": {
-      "description": "A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
+      "additionalProperties": false,
+      "description": "A single host → container port forward.",
       "properties": {
         "containerPort": {
           "description": "Container port.",
@@ -1067,6 +1068,7 @@
       "type": "object"
     },
     "Wslc": {
+      "additionalProperties": false,
       "description": "WSL container backend config.",
       "properties": {
         "cpuCount": {
@@ -1127,7 +1129,7 @@
               "type": "null"
             }
           ],
-          "description": "State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases."
+          "description": "State-aware provision-phase configuration (`wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases."
         },
         "storagePath": {
           "description": "Storage path override.",
@@ -1147,7 +1149,8 @@
       "type": "object"
     },
     "WslcProvisionPhase": {
-      "description": "Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).\n\nFilesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.",
+      "additionalProperties": false,
+      "description": "Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).\n\nFilesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.",
       "properties": {
         "image": {
           "description": "Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.",
@@ -1348,6 +1351,17 @@
         "string",
         "null"
       ]
+    },
+    "wslc": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Wslc"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "WSL container backend settings (Windows). Used when containment is `wslc`."
     }
   },
   "type": "object"

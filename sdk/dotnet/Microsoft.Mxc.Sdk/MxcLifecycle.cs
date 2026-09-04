@@ -493,6 +493,24 @@ public static class MxcLifecycle
         }
     }
 
+    /// <summary>
+    /// Where a backend's per-phase section lives on the wire. Mirrors the Rust
+    /// <c>StatefulSandboxBackend::SECTION_ROOT</c> const and the TypeScript
+    /// <c>BACKEND_SECTION_ROOT</c>: a backend that is still experimental nests
+    /// its phases under <c>experimental.&lt;backend&gt;.&lt;phase&gt;</c>, while a
+    /// promoted backend carries a closed top-level
+    /// <c>&lt;backend&gt;.&lt;phase&gt;</c> section.
+    /// </summary>
+    private static bool IsExperimentalSection(string backend) => backend switch
+    {
+        IsolationSessionContainment => true,
+        WindowsSandboxContainment => true,
+        WslcContainment => false,
+        _ => throw new MxcException(
+            ErrorCode.UnsupportedContainment,
+            $"no wire section root declared for state-aware backend '{backend}'"),
+    };
+
     private static void SetBackendConfig(
         JsonObject envelope,
         string backend,
@@ -500,15 +518,25 @@ public static class MxcLifecycle
         string key,
         JsonNode? value)
     {
-        if (envelope["experimental"] is not JsonObject experimental)
+        JsonObject root;
+        if (IsExperimentalSection(backend))
         {
-            experimental = new JsonObject();
-            envelope["experimental"] = experimental;
+            if (envelope["experimental"] is not JsonObject experimental)
+            {
+                experimental = new JsonObject();
+                envelope["experimental"] = experimental;
+            }
+            root = experimental;
         }
-        if (experimental[backend] is not JsonObject backendConfig)
+        else
+        {
+            root = envelope;
+        }
+
+        if (root[backend] is not JsonObject backendConfig)
         {
             backendConfig = new JsonObject();
-            experimental[backend] = backendConfig;
+            root[backend] = backendConfig;
         }
         if (backendConfig[phase] is not JsonObject phaseConfig)
         {

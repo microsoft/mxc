@@ -115,7 +115,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment

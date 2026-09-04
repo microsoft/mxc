@@ -170,8 +170,8 @@ pub(crate) fn reject_unsupported_enforcement_mode(
 }
 
 /// Reject inbound local networking at provision. Separate from the one-shot
-/// message, which points at `experimental.wslc.portMappings` — a primitive the
-/// state-aware surface does not have.
+/// message, which points at `wslc.portMappings` — a primitive the state-aware
+/// surface does not have.
 fn reject_provision_allow_local_network(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.allow_local_network {
         return Err(MxcError::policy_validation(

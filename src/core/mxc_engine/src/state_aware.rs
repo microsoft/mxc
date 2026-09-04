@@ -61,7 +61,6 @@ fn require_experimental_optin(
         backend,
         wxc_common::models::ContainmentBackend::WindowsSandbox
             | wxc_common::models::ContainmentBackend::IsolationSession
-            | wxc_common::models::ContainmentBackend::Wslc
     ) && !parsed.request.experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
@@ -323,9 +322,9 @@ fn exec_state_aware_attached_with(
 /// [`exec_state_aware_attached`] to attach the workload to this process's stdio,
 /// or [`exec_state_aware_json`] to drive the pipes yourself.
 ///
-/// `experimental` opts in to the experimental backends (WindowsSandbox,
-/// IsolationSession, WSLc); without it they are refused with
-/// `backend_unavailable` before any work is done.
+/// `experimental` opts in to the experimental backends (WindowsSandbox and
+/// IsolationSession); without it they are refused with `backend_unavailable`
+/// before any work is done.
 pub fn run_state_aware_json(
     request_json: &str,
     dry_run: bool,
@@ -389,6 +388,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
 
@@ -401,21 +401,22 @@ mod tests {
     #[test]
     fn exec_experimental_backend_requires_optin() {
         // The streaming exec entry point applies the same opt-in gate as the
-        // envelope dispatcher: a `wslc:` exec without the opt-in must be
-        // refused before reaching the backend.
+        // envelope dispatcher: an experimental-backend exec without the opt-in
+        // must be refused before reaching the backend.
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
             phase: Phase::Exec,
-            containment: Some(ContainmentBackend::Wslc),
-            sandbox_id: Some("wslc:00000000000000000000000000000000".to_string()),
+            containment: Some(ContainmentBackend::WindowsSandbox),
+            sandbox_id: Some("wsb:0123abcd".to_string()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
 
         let error = match exec_state_aware(parsed) {
             Ok(_) => {
-                panic!("expected the experimental gate to reject a wslc exec without the opt-in")
+                panic!("expected the experimental gate to reject an exec without the opt-in")
             }
             Err(e) => e,
         };

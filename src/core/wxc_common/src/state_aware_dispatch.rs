@@ -89,7 +89,8 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
     }
     let request = parsed.request.clone();
     let sandbox_id = parsed.sandbox_id_required()?.to_string();
-    let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
+    let config =
+        parsed.deserialize_config::<B::ExecConfig>(B::SECTION_ROOT, B::BACKEND_KEY, "exec")?;
     validate_exec_common(&request)?;
     backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
     // The caller drives the returned streams itself, so the backend must
@@ -108,8 +109,11 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
     let phase = parsed.phase;
     match phase {
         Phase::Provision => {
-            let config =
-                parsed.deserialize_config::<B::ProvisionConfig>(B::BACKEND_KEY, "provision")?;
+            let config = parsed.deserialize_config::<B::ProvisionConfig>(
+                B::SECTION_ROOT,
+                B::BACKEND_KEY,
+                "provision",
+            )?;
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -119,7 +123,11 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
         }
         Phase::Start => {
             let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::StartConfig>(B::BACKEND_KEY, "start")?;
+            let config = parsed.deserialize_config::<B::StartConfig>(
+                B::SECTION_ROOT,
+                B::BACKEND_KEY,
+                "start",
+            )?;
             backend.validate_start(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -129,7 +137,11 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
         }
         Phase::Exec => {
             let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
+            let config = parsed.deserialize_config::<B::ExecConfig>(
+                B::SECTION_ROOT,
+                B::BACKEND_KEY,
+                "exec",
+            )?;
             // Everything needed for exec is now owned (`request` clone, owned
             // `sandbox_id`, owned `config`); drop the parsed request so its
             // retained decoded source text and raw `experimental` tree are not
@@ -146,7 +158,11 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
         }
         Phase::Stop => {
             let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::StopConfig>(B::BACKEND_KEY, "stop")?;
+            let config = parsed.deserialize_config::<B::StopConfig>(
+                B::SECTION_ROOT,
+                B::BACKEND_KEY,
+                "stop",
+            )?;
             backend.validate_stop(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -156,8 +172,11 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
         }
         Phase::Deprovision => {
             let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config =
-                parsed.deserialize_config::<B::DeprovisionConfig>(B::BACKEND_KEY, "deprovision")?;
+            let config = parsed.deserialize_config::<B::DeprovisionConfig>(
+                B::SECTION_ROOT,
+                B::BACKEND_KEY,
+                "deprovision",
+            )?;
             backend.validate_deprovision(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -816,6 +835,7 @@ mod tests {
             sandbox_id: sandbox_id.map(String::from),
             correlation_vector: None,
             experimental_raw: exp,
+            stable_raw: None,
             source_text: None,
         }
     }
@@ -1064,6 +1084,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
@@ -1079,6 +1100,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
@@ -1094,6 +1116,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-abcd1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         assert_eq!(
@@ -1111,6 +1134,7 @@ mod tests {
             sandbox_id: Some("wsb:deadbeef".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         assert_eq!(
@@ -1128,6 +1152,7 @@ mod tests {
             sandbox_id: Some("wslc:deadbeef".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         assert_eq!(resolve_backend(&p).unwrap(), ContainmentBackend::Wslc);
@@ -1142,6 +1167,7 @@ mod tests {
             sandbox_id: Some("unknownxyz:abc".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         let err = resolve_backend(&p).unwrap_err();
@@ -1157,6 +1183,7 @@ mod tests {
             sandbox_id: Some("no-colon".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
         let err = resolve_backend(&p).unwrap_err();

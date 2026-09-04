@@ -6,7 +6,7 @@
 //! Each lifecycle phase (`provision` / `start` / `exec` / `stop` /
 //! `deprovision`) runs as a separate short-lived `wxc-exec` process. Because the
 //! WSLc SDK has no cross-process re-attach, this backend does **not** touch the
-//! SDK directly: it translates the public `experimental.wslc.*` wire model plus
+//! SDK directly: it translates the public `wslc.*` wire model plus
 //! the cross-cutting `policy` section into [`daemon_protocol`] frames and drives
 //! the long-lived `wxc-wslc-daemon` (which owns the live session/container
 //! handles) over an owner-only named pipe via [`DaemonClient`].
@@ -22,6 +22,7 @@ use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
+use wxc_common::state_aware_request::SectionRoot;
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 use wxc_common::wire::WslcProvisionPhase;
 
@@ -35,7 +36,7 @@ use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
 
-/// Default image when a provision request omits `experimental.wslc.provision.image`.
+/// Default image when a provision request omits `wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh
@@ -52,6 +53,7 @@ impl WslcStateAwareRunner {
 impl StatefulSandboxBackend for WslcStateAwareRunner {
     const ID_PREFIX: &'static str = "wslc";
     const BACKEND_KEY: &'static str = "wslc";
+    const SECTION_ROOT: SectionRoot = SectionRoot::Stable;
 
     type ProvisionConfig = WslcProvisionPhase;
     type StartConfig = ();

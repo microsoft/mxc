@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-custom-registry",
   "containment": "wslc",
   "process": {
@@ -8,9 +8,7 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
-    }
+  "wslc": {
+    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
   }
 }

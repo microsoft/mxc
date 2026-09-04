@@ -24,6 +24,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::id::mint_random_token;
 use crate::models::ExecutionRequest;
 use crate::mxc_error::MxcError;
+use crate::state_aware_request::SectionRoot;
 
 /// Platform pipe-handle wrapper used by `ExecHandle`. On Windows this is a
 /// kernel `HANDLE`; on Unix-like targets it is a raw file descriptor.
@@ -225,10 +226,16 @@ pub trait StatefulSandboxBackend {
 
     /// Wire-format `containment` value for this backend, matching the SDK's
     /// `StateAwareContainmentBackend` member name (e.g. `"isolation_session"`).
-    /// Used by the dispatcher to navigate
-    /// `experimental.<BACKEND_KEY>.<phase>` in the request envelope and to
+    /// Used by the dispatcher to navigate the per-phase config section in the
+    /// request envelope (see [`SECTION_ROOT`](Self::SECTION_ROOT)) and to
     /// resolve provision-phase requests to the right backend implementation.
     const BACKEND_KEY: &'static str;
+
+    /// Which envelope section holds this backend's per-phase config. Defaults
+    /// to the permissive `experimental.<BACKEND_KEY>` block; a backend promoted
+    /// to the stable surface overrides this to [`SectionRoot::Stable`] so its
+    /// config is read from the top-level `<BACKEND_KEY>` section instead.
+    const SECTION_ROOT: SectionRoot = SectionRoot::Experimental;
 
     type ProvisionConfig: DeserializeOwned;
     type StartConfig: DeserializeOwned;

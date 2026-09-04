@@ -75,7 +75,7 @@ impl ContainmentBackend {
             ContainmentBackend::ProcessContainer => Some("processContainer"),
             ContainmentBackend::Lxc => Some("lxc"),
             ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
-            ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
@@ -748,15 +748,12 @@ pub struct ContainerPolicy {
     /// present), captured at parse time. The twin of `network_specified`, and
     /// necessary for the same reason: `UiPolicy::default()` is full lockdown,
     /// so an absent `ui` and an explicitly-supplied lockdown `ui` are
-    /// indistinguishable from the other fields here. Parse-derived, never on
-    /// the wire.
+    /// indistinguishable by value. Parse-derived, never on the wire.
     ///
-    /// Consumed only by IsolationSession today, which has no UI-restriction
-    /// primitive and refuses a supplied UI policy rather than accepting and
-    /// dropping it. The other backends that do not enforce `policy.ui` — LXC
-    /// and Bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox — still
-    /// accept and ignore it, so this flag being set does not mean a UI policy
-    /// was honored anywhere; it means only that the caller supplied one.
+    /// Consumed by the backends that have no UI-restriction primitive
+    /// (IsolationSession and WSLc today) to refuse a supplied UI policy rather
+    /// than accept and drop it. Being set does not mean a UI policy was honored
+    /// anywhere — only that the caller supplied one.
     #[serde(skip)]
     pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
@@ -926,8 +923,6 @@ pub struct ExperimentalConfig {
     /// Windows Sandbox backend (experimental).
     #[serde(rename = "windows_sandbox")]
     pub windows_sandbox: Option<WindowsSandboxConfig>,
-    /// WSL Container (WSLC SDK) backend (experimental).
-    pub wslc: Option<WslcConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }
@@ -963,6 +958,8 @@ pub struct ExecutionRequest {
     pub lxc_config: LxcConfig,
     /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).
     pub seatbelt: Option<SeatbeltConfig>,
+    /// WSL Container (WSLC SDK) backend configuration (used when containment == Wslc).
+    pub wslc: Option<WslcConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Whether the --allow-testing-features flag was passed. Gates testing-only,

@@ -11,10 +11,11 @@
 //! `ParsedStateAwareRequest` bundles the inner `ExecutionRequest` (populated by
 //! the same parser path one-shot uses for cross-cutting fields) with the
 //! state-aware-only fields: `phase`, optional `containment`, optional
-//! `sandbox_id`, and the raw JSON `experimental` block. The dispatcher
-//! resolves the backend, deserialises the per-backend per-phase config from
-//! `experimental_raw` via `deserialize_config<C>`, and asserts
-//! `sandbox_id_required` for non-provision phases.
+//! `sandbox_id`, and the raw JSON per-backend config blocks. The dispatcher
+//! resolves the backend, deserialises the per-backend per-phase config via
+//! `deserialize_config<C>` — from `experimental_raw` for experimental backends
+//! and from `stable_raw` for backends promoted to the stable surface — and
+//! asserts `sandbox_id_required` for non-provision phases.
 
 use std::collections::HashMap;
 
@@ -67,6 +68,29 @@ impl From<crate::wire::Phase> for Phase {
     }
 }
 
+/// Where a backend's per-phase config section lives in the request envelope.
+///
+/// Experimental backends nest their section under the permissive `experimental`
+/// block; a backend promoted to the stable surface owns a top-level section of
+/// the same name. Both shapes then nest one object per lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SectionRoot {
+    /// `experimental.<backend>.<phase>`.
+    Experimental,
+    /// `<backend>.<phase>` — promoted to the stable, top-level surface.
+    Stable,
+}
+
+impl SectionRoot {
+    /// JSON path of this root's per-phase config, for error prefixes.
+    fn phase_path(self, backend_key: &str, phase_name: &str) -> String {
+        match self {
+            Self::Experimental => format!("experimental.{backend_key}.{phase_name}"),
+            Self::Stable => format!("{backend_key}.{phase_name}"),
+        }
+    }
+}
+
 /// Parsed state-aware request. Pairs the inner `ExecutionRequest` with the
 /// state-aware-only wire fields the dispatcher consumes.
 #[derive(Debug, Clone)]
@@ -94,6 +118,10 @@ pub struct ParsedStateAwareRequest {
     /// `{ <backend_key>: { <phase_name>: <typed-config>, ... }, ... }`.
     /// `deserialize_config<C>` navigates the two layers.
     pub experimental_raw: Option<Value>,
+    /// Raw top-level JSON object of the request (un-narrowed), used to reach the
+    /// per-phase config of backends promoted to the stable surface, which live
+    /// at `<backend_key>.<phase_name>` rather than under `experimental`.
+    pub stable_raw: Option<Value>,
     /// Full DECODED request text, retained so `deserialize_config<C>` can
     /// deserialize the `experimental.<backend>.<phase>` sub-slice positionally
     /// and report typed errors with whole-file (line, column) coordinates —
@@ -109,26 +137,33 @@ impl ParsedStateAwareRequest {
     ///
     /// `backend_key` is the wire-format backend name (the `containment`
     /// string, e.g. "isolation_session") — typically pulled from a trait const
-    /// at the dispatcher.
+    /// at the dispatcher. `root` selects which envelope section holds it:
+    /// `experimental.<backend_key>` for experimental backends, or the top-level
+    /// `<backend_key>` for backends promoted to the stable surface.
     pub fn deserialize_config<C: DeserializeOwned>(
         &self,
+        root: SectionRoot,
         backend_key: &str,
         phase_name: &str,
     ) -> Result<Option<C>, MxcError> {
         // Presence gate over the parsed value tree. Cheap, and preserves the
         // established "backend key or phase key absent => None" behavior
         // regardless of whether the positional path below is available.
-        let Some(exp) = self.experimental_raw.as_ref() else {
+        let section = match root {
+            SectionRoot::Experimental => self.experimental_raw.as_ref(),
+            SectionRoot::Stable => self.stable_raw.as_ref(),
+        };
+        let Some(section) = section else {
             return Ok(None);
         };
-        let Some(backend_obj) = exp.get(backend_key) else {
+        let Some(backend_obj) = section.get(backend_key) else {
             return Ok(None);
         };
         let Some(phase_value) = backend_obj.get(phase_name) else {
             return Ok(None);
         };
 
-        let prefix = format!("experimental.{backend_key}.{phase_name}");
+        let prefix = root.phase_path(backend_key, phase_name);
 
         // Preferred path: deserialize the phase config directly from its
         // sub-slice of the retained source text so typed errors carry
@@ -137,7 +172,7 @@ impl ParsedStateAwareRequest {
         // would-be typed error is never turned into a navigation panic.
         if let Some(source_text) = self.source_text.as_deref() {
             if let Some((fragment, fragment_offset)) =
-                locate_phase_fragment(source_text, backend_key, phase_name)
+                locate_phase_fragment(source_text, root, backend_key, phase_name)
             {
                 return match config_deserialize::from_str::<C>(fragment) {
                     Ok(config) => Ok(Some(config)),
@@ -174,9 +209,10 @@ impl ParsedStateAwareRequest {
     }
 }
 
-/// Navigate the retained request text to the `experimental.<backend>.<phase>`
-/// sub-slice, returning the fragment (borrowed from `source_text`) and its byte
-/// offset within `source_text`.
+/// Navigate the retained request text to the per-phase config sub-slice —
+/// `experimental.<backend>.<phase>` or the promoted top-level
+/// `<backend>.<phase>` — returning the fragment (borrowed from `source_text`)
+/// and its byte offset within `source_text`.
 ///
 /// Each layer is re-parsed as a map of owned-key → borrowed [`RawValue`], so the
 /// returned fragment is a genuine sub-slice of `source_text` whose byte offset is
@@ -194,12 +230,18 @@ impl ParsedStateAwareRequest {
 /// returned fragment still points into `source_text`.
 fn locate_phase_fragment<'a>(
     source_text: &'a str,
+    root: SectionRoot,
     backend_key: &str,
     phase_name: &str,
 ) -> Option<(&'a str, usize)> {
     let top: HashMap<String, &RawValue> = serde_json::from_str(source_text).ok()?;
-    let experimental = top.get("experimental")?;
-    let backends: HashMap<String, &RawValue> = serde_json::from_str(experimental.get()).ok()?;
+    let backends: HashMap<String, &RawValue> = match root {
+        SectionRoot::Experimental => {
+            let experimental = top.get("experimental")?;
+            serde_json::from_str(experimental.get()).ok()?
+        }
+        SectionRoot::Stable => top,
+    };
     let backend = backends.get(backend_key)?;
     let phases: HashMap<String, &RawValue> = serde_json::from_str(backend.get()).ok()?;
     let fragment = phases.get(phase_name)?.get();
@@ -250,6 +292,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: exp,
+            stable_raw: None,
             source_text: None,
         }
     }
@@ -268,6 +311,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw,
+            stable_raw: None,
             source_text: Some(source_text.to_owned().into_boxed_str()),
         }
     }
@@ -276,7 +320,11 @@ mod tests {
     fn deserialize_config_returns_none_when_no_experimental_block() {
         let p = parsed_with_experimental(None, Phase::Start);
         let r = p
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap();
         assert!(r.is_none());
     }
@@ -285,7 +333,11 @@ mod tests {
     fn deserialize_config_returns_none_when_backend_key_absent() {
         let p = parsed_with_experimental(Some(json!({})), Phase::Start);
         let r = p
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap();
         assert!(r.is_none());
     }
@@ -295,7 +347,11 @@ mod tests {
         let exp = json!({"isolation_session": {}});
         let p = parsed_with_experimental(Some(exp), Phase::Start);
         let r = p
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap();
         assert!(r.is_none());
     }
@@ -309,7 +365,11 @@ mod tests {
         });
         let p = parsed_with_experimental(Some(exp), Phase::Start);
         let r = p
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap()
             .expect("config should be present");
         assert_eq!(
@@ -328,7 +388,11 @@ mod tests {
         });
         let p = parsed_with_experimental(Some(exp), Phase::Start);
         let err = p
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(
@@ -359,7 +423,11 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
@@ -395,7 +463,11 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert!(
@@ -426,7 +498,11 @@ mod tests {
         let parsed = parsed_with_experimental(Some(exp), Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
@@ -459,14 +535,14 @@ mod tests {
         let parsed = parsed_with_experimental(Some(exp), Phase::Start);
 
         let error = parsed
-            .deserialize_config::<ArrayStartConfig>("wslc", "start")
+            .deserialize_config::<ArrayStartConfig>(SectionRoot::Experimental, "wslc", "start")
             .unwrap_err();
 
         assert_eq!(error.code, MxcErrorCode::MalformedRequest);
         assert!(
             error
                 .message
-                .contains("experimental.wslc.start.portMappings[0].windowsPort"),
+                .contains("wslc.start.portMappings[0].windowsPort"),
             "expected complete array element path, got: {}",
             error.message
         );
@@ -495,7 +571,11 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
@@ -532,7 +612,11 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         // `42` sits on whole-file line 4; serde reports the column at the end of
@@ -555,7 +639,11 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert!(
@@ -581,6 +669,7 @@ mod tests {
             experimental_raw: Some(json!({
                 "isolation_session": { "start": { "wrong_field": 42 } }
             })),
+            stable_raw: None,
             source_text: Some(
                 r#"{"experimental":{"isolation_session":5}}"#
                     .to_owned()
@@ -589,7 +678,11 @@ mod tests {
         };
 
         let err = parsed
-            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .deserialize_config::<DummyStartConfig>(
+                SectionRoot::Experimental,
+                "isolation_session",
+                "start",
+            )
             .unwrap_err();
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);

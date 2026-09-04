@@ -119,11 +119,11 @@ fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> wire::Wslc {
 fn convert_wslc_provision_experimental(
     value: contract::WslcProvisionExperimental,
 ) -> wire::Experimental {
-    let contract::WslcProvisionExperimental { wslc, telemetry } = value;
+    let contract::WslcProvisionExperimental { telemetry } = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
-        wslc: wslc.into_option().map(convert_state_aware_wslc),
+        wslc: None,
         isolation_session: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
@@ -225,6 +225,7 @@ fn isolation_session_provision_into_wire(
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }
@@ -262,6 +263,7 @@ fn windows_sandbox_provision_into_wire(
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }
@@ -275,6 +277,7 @@ fn wslc_provision_into_wire(request: contract::WslcProvisionRequest) -> wire::Mx
         containment: contract::WslcContainment,
         filesystem,
         network,
+        wslc,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -298,6 +301,7 @@ fn wslc_provision_into_wire(request: contract::WslcProvisionRequest) -> wire::Mx
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: wslc.into_option().map(convert_state_aware_wslc),
         ui: None,
     }
 }
@@ -331,6 +335,7 @@ pub(super) fn start_into_wire(request: contract::StartRequest) -> wire::MxcConfi
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }
@@ -366,6 +371,7 @@ pub(super) fn exec_into_wire(request: contract::ExecRequest) -> wire::MxcConfig 
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }
@@ -399,6 +405,7 @@ pub(super) fn stop_into_wire(request: contract::StopRequest) -> wire::MxcConfig 
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }
@@ -434,6 +441,7 @@ pub(super) fn deprovision_into_wire(request: contract::DeprovisionRequest) -> wi
         lxc: None,
         process_container: None,
         seatbelt: None,
+        wslc: None,
         ui: None,
     }
 }

@@ -1,15 +1,13 @@
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "wslc",
     "network": {
         "defaultPolicy": "block"
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest"
         }
     }
 }
