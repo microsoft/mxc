@@ -59,7 +59,12 @@ consumption stay in one workflow run:
 
 - `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point.
   The `nightly` plan runs Mon–Sat; Sunday runs `nightly` *and* `weekly`.
-  `workflow_dispatch` takes a `plan` input to run one on demand.
+  `workflow_dispatch` takes a `plan` input to run one on demand. Its
+  manual-only `copilot-cli-build` plan calls
+  `Validation.CopilotCli.Mxc.Job.yml`, which checks out the latest private
+  Copilot CLI and MXC `main` sources on the prerelease T1 1ES pool, builds the
+  CLI against the local MXC SDK, and retains only sanitized provenance. This
+  lane is separate from the backend artifact matrix.
 - `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
   takes a `plan` input. Its `resolve` job expands the plan into per-family
   matrices, then the `windows` / `linux` / `macos` jobs each download the
