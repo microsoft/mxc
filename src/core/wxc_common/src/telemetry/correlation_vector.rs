@@ -522,7 +522,7 @@ mod tests {
         let spun = spin(&parent);
         assert!(spun.starts_with(&format!("{parent}.")));
         assert!(spun.ends_with(".0"));
-        // parent had 2 parts (base, 0); spin adds the spin element and a fresh 0.
+        // parent had 2 parts; v2.1 spin adds counter, entropy, and fresh 0.
         assert_eq!(spun.split('.').count(), 5);
         assert!(is_valid(&spun));
     }
