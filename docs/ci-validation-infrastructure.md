@@ -11,7 +11,7 @@ the individual local test scripts are documented in
 
 ## At a glance
 
-- Validation tests **never build from source**. They download the artifacts
+- Backend validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
   `Build.MacOS.Job.yml` in the same workflow run, so what gets tested is exactly
   what got built.
@@ -19,7 +19,9 @@ the individual local test scripts are documented in
   only file you edit to change *what runs where*;
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
-- Validation runs **on a schedule, not on PRs**.
+- Backend validation runs **on a schedule, not on PRs**. A separate manual-only
+  Copilot CLI lane compiles the latest CLI and MXC sources without running the
+  backend matrix.
 
 ## Moving parts
 
@@ -33,22 +35,29 @@ the individual local test scripts are documented in
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
 | `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `tests/scripts/run_ci_backend_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
+| `.github/workflows/Validation.CopilotCli.Mxc.Job.yml` | `workflow_call`-only. Builds Copilot CLI against latest MXC main on the T1 pool. |
+| `scripts/ci/CopilotCliMxcBuild.psm1` | Testable PowerShell functions: prerequisite checks, MSVC setup, Cargo dependency rewriting, provenance validation, manifest creation. |
+| `scripts/ci/build-copilot-cli-with-mxc.ps1` | Orchestrates the CLI + MXC build: restore, runtime build, bundle, staging, verification. |
+| `scripts/ci/test-copilot-cli-mxc-build.ps1` | Contract tests for the build helper module (runs without private CLI source). |
 
 ### Flow
 
 ```
 Validation.Tests.Scheduled.yml
-  └─ dependency-feed-check
+  ├─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
                  ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_ci_backend_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_ci_backend_tests.sh
                  └─ macos   job (matrix) → download artifact →                            run_ci_backend_tests.sh
+  └─ copilot-cli-build  →  Validation.CopilotCli.Mxc.Job.yml
+        └─ checkout orchestration + MXC main + CLI main → build-copilot-cli-with-mxc.ps1
 ```
 
-An entry point **must** build the artifacts before calling the matrix job — the
-test jobs only ever `download-artifact`.
+An entry point that calls the backend matrix **must** build the artifacts first
+— the matrix jobs only ever `download-artifact`. The separate Copilot CLI lane
+does not call the matrix.
 
 ## Jobs
 
@@ -62,6 +71,7 @@ test jobs only ever `download-artifact`.
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit + `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
+| `copilot-cli-build` | Calls `Validation.CopilotCli.Mxc.Job.yml`. Manual dispatch only (`plan: copilot-cli-build`). Builds Copilot CLI against latest MXC main on the T1 pool; does not use or require build artifacts. |
 
 Build artifacts are kept for 1 day — they exist only to feed these jobs.
 
@@ -416,6 +426,93 @@ jobs:
     with:
       plan: # YOUR PLAN HERE
 ```
+
+
+## Copilot CLI + MXC validation lane
+
+A manually dispatched lane that checks out the latest Copilot CLI
+(`github/copilot-agent-runtime`) `main` and the latest MXC `main`, compiles
+the CLI runtime against that MXC source, stages a job-local
+`copilot-mxc-test` command, and publishes a sanitized provenance manifest.
+
+### When to use
+
+Dispatch `Validation.Tests.Scheduled.yml` with `plan: copilot-cli-build`.
+This lane is manual-only — it never runs on a schedule. It proves source
+access, combined compilation, staging, and provenance. It does not
+authenticate to Copilot or run sandbox scenarios.
+
+### Pool and runner
+
+Fixed to `1es-mxc-windows-prerelease-t1-x64` (Standard_D4s_v7: 4 vCPU,
+16 GB RAM). Cargo parallelism is capped at 2 jobs (`CARGO_BUILD_JOBS=2`,
+`CARGO_INCREMENTAL=0`) to avoid resource exhaustion on this SKU.
+
+### Latest-main semantics
+
+"Latest MXC" and "Latest CLI" both mean the `main` commit resolved by
+`actions/checkout` when the job starts. The job records the exact SHAs in
+the provenance manifest so the combination is reproducible.
+
+### Build pipeline
+
+1. **Checkouts**: orchestration scripts from the dispatched branch, MXC
+   `main` into `source/mxc`, CLI `main` into `source/cli`.
+2. **Cargo path binding**: rewrites the CLI's `mxc-sdk` dependency from
+   its registry reference to an absolute local path pointing at the MXC
+   checkout's `src/core/mxc-sdk`. Rejects zero or multiple matches.
+3. **Provenance assertion**: `cargo metadata` confirms exactly one local
+   `mxc-sdk` package with `source = null` whose `manifest_path` matches
+   the MXC checkout.
+4. **Native builds**: using the CLI checkout's pinned Rust toolchain,
+   `build:runtime` compiles the MXC-backed runtime addon and
+   `build:native-addons` compiles the CLI's other required native addon.
+5. **Bundle**: `pnpm run build` with `COPILOT_NAPI_ADDONS_PREBUILT=1`
+   produces `dist-cli/` from those exact native outputs. The staged
+   `prebuilds/win32-x64/runtime.node` must hash-equal the source runtime;
+   a mismatch fails the build.
+6. **Job-local staging**: `dist-cli` is copied to `$RUNNER_TEMP/copilot-mxc-test`
+   with a `copilot-mxc-test.cmd` launcher. The CLI never replaces a
+   machine-wide installation.
+7. **Smoke test**: both the launcher and direct `node dist-cli/index.js`
+   must return identical `--version` output.
+
+### Credential boundary
+
+`GHCP_CLI_SOURCE_READ` is an environment secret in the `copilot`
+environment. It grants read-only source access to the private CLI
+repository. It is **not** a Copilot model credential. The secret is
+consumed exclusively by `actions/checkout` with `persist-credentials: false`
+and must not be exposed to untrusted fork code, copied to `env`, printed,
+or referenced after the checkout step.
+
+### Retained evidence
+
+Only the sanitized provenance manifest JSON and a generated text summary are
+uploaded (7-day retention). They contain immutable SHAs, relative SDK paths,
+runtime hashes, CLI version, OS version, and pool name. They exclude tokens,
+environment values, absolute private-source paths, checkout URLs, Git
+configuration, and raw Cargo metadata. The combined CLI binary is **not**
+uploaded because it is derived from private source.
+
+### Image caveats
+
+- The T1 image provisioning script is best-effort and always exits zero.
+  The build script's strict preflight (`Assert-CopilotCliBuildPrerequisites`)
+  is authoritative.
+- If MSVC is missing from the image, the job fails at preflight with an
+  explicit inventory. The fix is to update the image recipe, not to hide
+  the problem with a fallback.
+- The Standard_D4s_v7 SKU (4 vCPU, 16 GB) is capacity-limited. Cargo
+  concurrency is fixed at 2 to avoid OOM.
+- The custom CLI binary is never retained as an artifact.
+
+### Separation from backend artifact validation
+
+This lane does **not** build MXC artifacts, run backend test suites, or
+call the validation test matrix. It is a compilation/provenance check only.
+Backend E2E validation continues to use the `nightly`/`weekly` plans, which
+build from MXC source and download artifacts.
 
 ## Important to Note
 

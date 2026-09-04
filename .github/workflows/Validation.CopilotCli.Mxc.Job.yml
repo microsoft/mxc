@@ -1,0 +1,167 @@
+name: Copilot CLI + MXC Build
+
+on:
+  workflow_call:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build:
+    name: Copilot CLI + latest MXC
+    environment: copilot
+    runs-on:
+      - self-hosted
+      - 1ES.Pool=1es-mxc-windows-prerelease-t1-x64
+      - JobId=cli-mxc-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 180
+    steps:
+      # Check out the orchestration ref (PR branch) at workspace root.
+      # This supplies the build scripts but is not the MXC source under test.
+      - name: Check out orchestration scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Check out latest MXC main into a dedicated directory.
+      - name: Check out MXC main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/mxc
+          ref: main
+          path: source/mxc
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Check out the private CLI main. The token comes from the copilot
+      # environment secret and is never copied to env, printed, or referenced
+      # after this step.
+      - name: Check out Copilot CLI main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/copilot-agent-runtime
+          ref: main
+          path: source/cli
+          fetch-depth: 1
+          token: ${{ secrets.GHCP_CLI_SOURCE_READ }}
+          persist-credentials: false
+
+      # Inventory the runner for diagnostics. The strict build-script preflight
+      # remains authoritative — the image provisioning script is best-effort
+      # and always exits zero.
+      - name: Inventory runner
+        shell: pwsh
+        run: |
+          Write-Host "=== Windows version ==="
+          [System.Environment]::OSVersion | Format-List *
+
+          Write-Host "=== CPU ==="
+          Get-CimInstance Win32_Processor | Format-List Name, NumberOfCores, NumberOfLogicalProcessors
+
+          Write-Host "=== Memory ==="
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "Total: $([math]::Round($os.TotalVisibleMemorySize / 1MB, 1)) GB"
+          Write-Host "Free:  $([math]::Round($os.FreePhysicalMemory / 1MB, 1)) GB"
+
+          Write-Host "=== Disk ==="
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{N='Free(GB)';E={[math]::Round($_.Free/1GB,1)}}, @{N='Used(GB)';E={[math]::Round($_.Used/1GB,1)}}
+
+          Write-Host "=== Build tools ==="
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          foreach ($tool in @('git', 'node', 'npm', 'corepack', 'cargo', 'rustc', 'rustup')) {
+              $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+              if ($cmd) {
+                  $ver = & $tool --version 2>&1
+                  Write-Host "${tool}: $ver"
+              } else {
+                  Write-Host "${tool}: NOT FOUND"
+              }
+          }
+          foreach ($tool in @('pnpm', 'cl', 'link')) {
+              $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+              Write-Host "${tool}: $(if ($cmd) { $cmd.Source } else { 'NOT FOUND' })"
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          Write-Host "vswhere: $(if (Test-Path $vswhere) { $vswhere } else { 'NOT FOUND' })"
+
+      - name: Build and stage Copilot CLI with current MXC
+        shell: pwsh
+        run: |
+          ./scripts/ci/build-copilot-cli-with-mxc.ps1 `
+            -MxcRoot "$env:GITHUB_WORKSPACE\source\mxc" `
+            -CliRoot "$env:GITHUB_WORKSPACE\source\cli" `
+            -StageRoot "$env:RUNNER_TEMP\copilot-mxc-test" `
+            -ManifestPath "$env:RUNNER_TEMP\copilot-cli-mxc-provenance.json"
+
+      - name: Generate sanitized build summary
+        if: always()
+        shell: pwsh
+        run: |
+          $manifestPath = "$env:RUNNER_TEMP\copilot-cli-mxc-provenance.json"
+          $summaryPath = "$env:RUNNER_TEMP\copilot-cli-mxc-summary.log"
+          if (Test-Path $manifestPath) {
+              $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+              @(
+                  'status=manifest-produced'
+                  "mxcSha=$($manifest.mxcSha)"
+                  "cliSha=$($manifest.cliSha)"
+                  "mxcSdkManifest=$($manifest.mxcSdkManifest)"
+                  "runtimeSourceSha256=$($manifest.runtimeSourceSha256)"
+                  "runtimeBundleSha256=$($manifest.runtimeBundleSha256)"
+                  "runtimeHashesMatch=$($manifest.runtimeHashesMatch)"
+                  "cliVersion=$($manifest.cliVersion)"
+                  "osVersion=$($manifest.osVersion)"
+                  "pool=$($manifest.pool)"
+                  "cargoBuildJobs=$($manifest.cargoBuildJobs)"
+              ) | Set-Content -LiteralPath $summaryPath -Encoding utf8NoBOM
+          } else {
+              'status=manifest-not-produced' |
+                  Set-Content -LiteralPath $summaryPath -Encoding utf8NoBOM
+          }
+
+      # Upload only the sanitized provenance manifest and generated summary —
+      # never the private
+      # source, target directories, dist-cli, the staged CLI, environment
+      # dumps, Git configuration, or arbitrary $RUNNER_TEMP content.
+      - name: Upload provenance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: copilot-cli-mxc-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/copilot-cli-mxc-provenance.json
+            ${{ runner.temp }}/copilot-cli-mxc-summary.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Clean up only the exact paths this job created. Fail visibly if an
+      # exact private-source or staged-binary path remains.
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          $cleanupFailed = $false
+          $paths = @(
+              "$env:GITHUB_WORKSPACE\source\cli"
+              "$env:GITHUB_WORKSPACE\source\mxc"
+              "$env:RUNNER_TEMP\copilot-mxc-test"
+          )
+
+          foreach ($path in $paths) {
+              if (Test-Path $path) {
+                  Write-Host "Removing $path ..."
+                  Remove-Item $path -Recurse -Force -ErrorAction Continue
+                  if (Test-Path $path) {
+                      Write-Host "::error::Cleanup incomplete — path still exists: $path"
+                      $cleanupFailed = $true
+                  } else {
+                      Write-Host "Removed: $path"
+                  }
+              } else {
+                  Write-Host "Already absent: $path"
+              }
+          }
+          if ($cleanupFailed) {
+              throw 'Cleanup failed for one or more exact job paths.'
+          }
