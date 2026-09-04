@@ -24,7 +24,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -327,7 +327,26 @@ fn spawn_open(
         Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
     };
 
-    // 2. Build environment exports for the helper script. When a proxy is
+    // 2. Resolve the working directory the way the exec path does. Terminal
+    //    runs the helper from its own directory, so the helper must `cd`
+    //    itself, and needs an absolute target. Fail here rather than inside a
+    //    Terminal window: `open -W` reports its own exit status, not the
+    //    helper's.
+    let cwd = match absolute_working_directory(&resolve_working_directory(request)) {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            let _ = fs::remove_file(&profile_path);
+            return Err(error_response(format!(
+                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
+            )));
+        }
+    };
+    if let Some(reason) = working_directory_error(&cwd) {
+        let _ = fs::remove_file(&profile_path);
+        return Err(error_response(reason));
+    }
+
+    // 3. Build environment exports for the helper script. When a proxy is
     //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
     //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
@@ -340,23 +359,17 @@ fn spawn_open(
             continue; // Skip invalid env var names
         }
         // Shell-escape the value.
-        let escaped = value.replace('\'', "'\\''");
+        let escaped = escape_single_quoted(&value);
         let _ = writeln!(env_exports, "export {key}='{escaped}'");
     }
 
-    // 3. Create the sandbox helper script.
+    // 4. Create the sandbox helper script.
     // This script is executed inside the terminal app. It:
-    //   a) Calls sandbox-exec with the profile file to sandbox the shell
-    //   b) Execs the user's command inside the sandbox
-    let script_code = &request.script_code;
-    let helper_content = format!(
-        "#!/bin/sh\n\
-         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
-         {env_exports}\
-         exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
-        profile_path = profile_path,
-        script_escaped = script_code.replace('\'', "'\\''"),
-    );
+    //   a) Enters the resolved working directory and exports `PWD`
+    //   b) Calls sandbox-exec with the profile file to sandbox the shell
+    //   c) Execs the user's command inside the sandbox
+    let helper_content =
+        build_helper_script(&env_exports, &cwd, &profile_path, &request.script_code);
 
     let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
         Ok(p) => p,
@@ -368,7 +381,7 @@ fn spawn_open(
         }
     };
 
-    // 4. Create the .command file that Terminal will execute.
+    // 5. Create the .command file that Terminal will execute.
     let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
     let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
         Ok(p) => {
@@ -393,7 +406,7 @@ fn spawn_open(
 
     let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
 
-    // 5. Launch via `open -n -W`.
+    // 6. Launch via `open -n -W`.
     let child = match Command::new("open")
         .args(["-n", "-W", "-a", "Terminal", &command_path])
         .stdin(Stdio::null())
@@ -717,6 +730,88 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
         Some(resolved) => expand(resolved.path),
         None => "/".to_string(),
     }
+}
+
+/// Anchor a resolved working directory to the launcher's directory when it is
+/// relative — `chdir` gives the exec path that anchor, the helper script (which
+/// runs from Terminal's directory) has none.
+fn absolute_working_directory(path: &str) -> std::io::Result<String> {
+    absolute_working_directory_with(path, std::env::current_dir)
+}
+
+/// [`absolute_working_directory`] with an injectable launch directory. Only
+/// consulted for a relative value: `chdir` accepts an absolute path even when
+/// the launcher's own directory has been removed, so querying it eagerly would
+/// reject a request the exec path launches fine.
+fn absolute_working_directory_with(
+    path: &str,
+    launch_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> std::io::Result<String> {
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Ok(path.to_string());
+    }
+    Ok(launch_dir()?.join(candidate).to_string_lossy().into_owned())
+}
+
+/// Why the helper's `cd` into `path` would fail, or `None` if it will succeed.
+/// `chdir` needs search (`+x`) permission, which a stat check does not test and
+/// a read check over-tests — `access(X_OK)` is the exact bit.
+fn working_directory_error(path: &str) -> Option<String> {
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_dir() => Some(format!(
+            "seatbelt working directory '{path}' is not a directory"
+        )),
+        Ok(_) if !is_searchable(path) => Some(format!(
+            "seatbelt working directory '{path}' cannot be entered: no search (execute) permission"
+        )),
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "seatbelt working directory '{path}' cannot be used: {e}"
+        )),
+    }
+}
+
+/// Does the calling user hold search permission on `path`? Answers for the real
+/// uid — `mxc-exec` is not setuid — and cannot speak for a Terminal running as a
+/// different user, so the helper keeps its own `cd` guard.
+fn is_searchable(path: &str) -> bool {
+    let Ok(c_path) = CString::new(path) else {
+        // An interior NUL would be truncated by any C API it reaches.
+        return false;
+    };
+    // SAFETY: `access` reads the NUL-terminated string it is given and returns
+    // an int; `c_path` owns that buffer and outlives the call.
+    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
+/// close the quoted run, emit a literal `'`, then reopen it. The caller
+/// supplies the surrounding quotes.
+fn escape_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+/// Build the `/bin/sh` helper script Terminal runs for the `open` launch
+/// method.
+fn build_helper_script(
+    env_exports: &str,
+    working_directory: &str,
+    profile_path: &str,
+    script_code: &str,
+) -> String {
+    let cwd = escape_single_quoted(working_directory);
+    format!(
+        "#!/bin/sh\n\
+         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
+         {env_exports}\
+         cd '{cwd}' || {{ echo 'mxc: cannot enter working directory {cwd}' >&2; exit 1; }}\n\
+         PWD='{cwd}'\n\
+         export PWD\n\
+         exec /usr/bin/sandbox-exec -f '{profile}' /bin/sh -c 'clear; {script}'\n",
+        profile = escape_single_quoted(profile_path),
+        script = escape_single_quoted(script_code),
+    )
 }
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
@@ -1098,5 +1193,199 @@ mod tests {
         for p in &paths {
             let _ = fs::remove_file(p);
         }
+    }
+
+    /// The `open` helper must place the child the same way `spawn_exec` does.
+    /// Terminal starts the script in its own directory, so without these two
+    /// lines the request's working directory is silently discarded.
+    #[test]
+    fn open_helper_enters_working_directory_and_exports_pwd() {
+        let script = build_helper_script("", "/tmp/mxc_work", "/tmp/profile.sb", "pwd");
+        assert!(script.contains("cd '/tmp/mxc_work' ||"), "{script}");
+        assert!(
+            script.contains("PWD='/tmp/mxc_work'\nexport PWD\n"),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "exec /usr/bin/sandbox-exec -f '/tmp/profile.sb' /bin/sh -c 'clear; pwd'"
+            ),
+            "{script}"
+        );
+    }
+
+    /// A failed `cd` must abort. A bare `cd` would leave the shell in
+    /// Terminal's directory and run the workload in the wrong place.
+    #[test]
+    fn open_helper_aborts_when_the_working_directory_is_unusable() {
+        let script = build_helper_script("", "/tmp/gone", "/tmp/profile.sb", "pwd");
+        let cd_line = script
+            .lines()
+            .find(|line| line.starts_with("cd "))
+            .expect("cd line");
+        assert!(cd_line.contains("exit 1"), "{cd_line}");
+        assert!(
+            script.find("cd '/tmp/gone'").unwrap()
+                < script.find("exec /usr/bin/sandbox-exec").unwrap(),
+            "{script}"
+        );
+    }
+
+    /// `PWD` is assigned after the caller's exports so a request carrying its
+    /// own `PWD` cannot leave the variable disagreeing with the real directory.
+    #[test]
+    fn open_helper_pwd_export_wins_over_caller_environment() {
+        let script = build_helper_script("export PWD='/elsewhere'\n", "/tmp/real", "/p.sb", "pwd");
+        assert!(
+            script.find("export PWD='/elsewhere'").unwrap()
+                < script.find("PWD='/tmp/real'").unwrap(),
+            "{script}"
+        );
+    }
+
+    /// Every interpolated value lands inside a single-quoted shell word, so a
+    /// quote in any of them must be escaped rather than closing the word.
+    #[test]
+    fn open_helper_escapes_single_quotes() {
+        let script = build_helper_script("", "/tmp/it's", "/tmp/o'brien.sb", "echo 'hi'");
+        assert!(script.contains(r"cd '/tmp/it'\''s'"), "{script}");
+        assert!(script.contains(r"PWD='/tmp/it'\''s'"), "{script}");
+        assert!(script.contains(r"-f '/tmp/o'\''brien.sb'"), "{script}");
+        assert!(script.contains(r"'clear; echo '\''hi'\'''"), "{script}");
+    }
+
+    /// The `open` path resolves the directory through the same
+    /// `resolve_working_directory` the exec path uses, including its
+    /// policy-grant fallback when the request names no explicit directory.
+    #[test]
+    fn open_helper_uses_the_same_resolution_as_exec() {
+        let mut explicit = base_request();
+        explicit.working_directory = "/tmp/explicit".into();
+        assert_eq!(resolve_working_directory(&explicit), "/tmp/explicit");
+
+        let mut policy_fallback = base_request();
+        policy_fallback.policy.readwrite_paths = vec!["/tmp".into()];
+        assert_eq!(resolve_working_directory(&policy_fallback), "/tmp");
+
+        let script = build_helper_script(
+            "",
+            &resolve_working_directory(&policy_fallback),
+            "/p.sb",
+            "pwd",
+        );
+        assert!(script.contains("cd '/tmp' ||"), "{script}");
+    }
+
+    /// A relative `process.cwd` means "relative to the launching process" —
+    /// that is what `chdir` gives the exec path. The helper script runs from
+    /// Terminal's directory instead, so the value must be anchored before it is
+    /// embedded. The two bases here stand in for the launcher and Terminal:
+    /// the same relative request must not be able to name both directories.
+    #[test]
+    fn relative_working_directory_is_anchored_to_the_launching_process() {
+        let launcher = || Ok(PathBuf::from("/tmp/launcher"));
+        let terminal = || Ok(PathBuf::from("/Users/someone"));
+
+        let anchored = absolute_working_directory_with("work", launcher).unwrap();
+        assert_eq!(anchored, "/tmp/launcher/work");
+        assert_ne!(
+            anchored,
+            absolute_working_directory_with("work", terminal).unwrap()
+        );
+
+        // Anchored means absolute, so the directory the helper runs from can no
+        // longer change where it lands.
+        let script = build_helper_script("", &anchored, "/p.sb", "pwd");
+        assert!(script.contains("cd '/tmp/launcher/work' ||"), "{script}");
+        assert!(script.contains("PWD='/tmp/launcher/work'"), "{script}");
+    }
+
+    /// An absolute directory is passed through spelled exactly as written —
+    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports —
+    /// and needs no launch directory. `chdir` accepts it even from a launcher
+    /// whose own directory has been removed, so a failure to read that
+    /// directory must not fail the request: the panicking closure asserts it is
+    /// never consulted.
+    #[test]
+    fn absolute_working_directory_is_left_untouched_without_querying_the_launcher() {
+        let unused = || panic!("the launch directory must not be read for an absolute path");
+        assert_eq!(
+            absolute_working_directory_with("/tmp/mxc_work", unused).unwrap(),
+            "/tmp/mxc_work"
+        );
+    }
+
+    /// A relative value cannot be anchored without the launcher's directory, so
+    /// that failure propagates rather than being silently left relative.
+    #[test]
+    fn relative_working_directory_propagates_a_missing_launch_directory() {
+        let gone = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "launch directory removed",
+            ))
+        };
+        let err = absolute_working_directory_with("work", gone).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A stat check passes a directory `chdir` refuses, so test the search bit.
+    #[test]
+    fn unsearchable_working_directory_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mxc_nox_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let stat_says_directory = Path::new(&path).is_dir();
+        let reason = working_directory_error(&path);
+
+        // Restore before asserting so a failure cannot leave the dir behind.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            stat_says_directory,
+            "precondition: is_dir() sees a directory"
+        );
+        let reason = reason.expect("an unsearchable directory must be rejected");
+        assert!(reason.contains("search"), "{reason}");
+    }
+
+    /// A usable directory is accepted; a file or missing path names its reason.
+    #[test]
+    fn working_directory_error_accepts_usable_and_names_the_failure() {
+        let dir = std::env::temp_dir();
+        assert_eq!(working_directory_error(&dir.to_string_lossy()), None);
+
+        let file = dir.join(format!("mxc_file_{}", std::process::id()));
+        fs::write(&file, "x").unwrap();
+        let reason = working_directory_error(&file.to_string_lossy());
+        fs::remove_file(&file).unwrap();
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a directory"),
+            "{reason:?}"
+        );
+
+        let missing = working_directory_error("/tmp/mxc_definitely_absent_2f9a");
+        assert!(
+            missing
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot be used"),
+            "{missing:?}"
+        );
+    }
+
+    /// An interior NUL can never name a usable directory.
+    #[test]
+    fn working_directory_with_interior_nul_is_not_searchable() {
+        assert!(!is_searchable("/tmp/\0/etc"));
     }
 }
