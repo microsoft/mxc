@@ -1,0 +1,10 @@
+{
+  "version": "0.7.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo unknown field"
+  },
+  "seatbelt": {
+    "unknownField": true
+  }
+}

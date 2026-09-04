@@ -26,6 +26,15 @@ windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
+# Elevated PLM guardian client, used to adapt appcontainer_common's
+# GuardedCaptureFactory/GuardedCaptureSession DI traits (guarded-WPR
+# captureDenials fallback) without appcontainer_common depending on plm
+# directly.
+plm = { workspace = true }
+# ProcessLifetime / AnalysisResult types shared across the guarded-capture DI
+# boundary; appcontainer_common and plm already depend on this crate.
+learning_mode_core = { workspace = true }
+windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bwrap_common = { workspace = true }

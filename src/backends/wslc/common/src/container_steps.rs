@@ -43,6 +43,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{PortMapping, ScriptResponse};
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
 use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
 use crate::wslc_bindings::*;
@@ -52,14 +53,10 @@ use crate::wslc_bindings::*;
 // ---------------------------------------------------------------------------
 
 /// Build a `ScriptResponse` error from an HRESULT failure with an optional
-/// SDK-provided message.
+/// SDK-provided message. Thin wrapper over [`WslcError::Sdk`], which owns the
+/// message formatting and the `LaunchFailed` phase attribution.
 pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
+    WslcError::sdk(context, hr, sdk_msg).into_response()
 }
 
 /// NUL-terminate `value` for a C string the WSLc SDK will read, rejecting an
@@ -73,9 +70,10 @@ fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
     std::ffi::CString::new(value)
         .map(|c| c.into_bytes_with_nul())
         .map_err(|_| {
-            ScriptResponse::error(&format!(
+            WslcError::Rejected(format!(
                 "{field} contains an interior NUL byte, which is not a valid C string"
             ))
+            .into_response()
         })
 }
 
@@ -109,6 +107,35 @@ fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
 // after adoption ownership passes to `exit_callback`; the kill path trades a
 // bounded, one-time leak for memory safety.
 
+/// Which standard stream a live-output chunk came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutStream {
+    Stdout,
+    Stderr,
+}
+
+/// Optional live-output sink invoked from the SDK's stdout/stderr callbacks in
+/// addition to the capped capture buffers. The daemon supplies one to stream a
+/// container's output to the client as bytes arrive; paths that only need the
+/// final captured blob (one-shot, detached init) leave it unset. It receives
+/// the full callback bytes, independent of the capped buffers' truncation.
+///
+/// **Two distinct live-output architectures — why they don't share plumbing.**
+/// The one-shot runner streams via `OutputMode::Stream` (in `wsl_container_runner`)
+/// plus a synchronous in-process `stream_pair`/`StreamReader` (in `stream_buffer`),
+/// drained in the same process (caller pipes, or an `inherit_pump` thread). The
+/// daemon cannot reuse that: it must relay output across a named pipe to a
+/// *separate* client process through an async (tokio) control server, so it
+/// bridges the synchronous SDK callback thread to the async pipe writer with a
+/// bounded mpsc channel (see `session_manager::enqueue_output`). Their
+/// backpressure invariants also differ deliberately: the one-shot `StreamReader`
+/// is drained synchronously in-process, whereas this callback **must never
+/// block** — the same SDK thread also delivers the process-exit callback, so the
+/// daemon path uses a non-blocking `try_send` that drops on overflow rather than
+/// stalling teardown. Keep the two paths separate for those reasons; share only
+/// the leaf primitives ([`OutStream`], the capped capture buffers).
+pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
+
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
 /// captured bytes and exit signal.
@@ -116,6 +143,11 @@ pub struct IoContext {
     pub(crate) stdout: Arc<Mutex<Vec<u8>>>,
     pub(crate) stderr: Arc<Mutex<Vec<u8>>>,
     pub(crate) exited: Arc<(Mutex<bool>, Condvar)>,
+    /// Live sink for streaming output alongside the capped buffers; `None` when
+    /// only the final captured blob is needed. Its owning `Arc<IoContext>` is
+    /// released on the same schedule as the capture buffers, so on the
+    /// deliberate kill-path leak the sink (and its sender) is leaked too.
+    sink: Option<OutputSink>,
 }
 
 /// Per-stream cap on captured stdout/stderr, in bytes. The WSLc SDK streams
@@ -166,12 +198,22 @@ unsafe extern "C" fn io_callback(
     let bytes = std::slice::from_raw_parts(data, data_size as usize);
     match io_handle {
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT => {
-            let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
-            append_capped(&mut buf, bytes);
+            {
+                let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
+                append_capped(&mut buf, bytes);
+            }
+            if let Some(sink) = ctx.sink.as_ref() {
+                sink(OutStream::Stdout, bytes);
+            }
         }
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => {
-            let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
-            append_capped(&mut buf, bytes);
+            {
+                let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
+                append_capped(&mut buf, bytes);
+            }
+            if let Some(sink) = ctx.sink.as_ref() {
+                sink(OutStream::Stderr, bytes);
+            }
         }
         _ => {}
     }
@@ -274,8 +316,9 @@ impl ProcessSettings {
         script_code: &str,
         env: &[String],
         working_directory: &str,
+        sink: Option<OutputSink>,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, true)
+        Self::build_inner(sdk, script_code, env, working_directory, true, sink)
     }
 
     /// Like [`build`](Self::build) but registers no stdio callbacks and shares no
@@ -290,7 +333,7 @@ impl ProcessSettings {
         env: &[String],
         working_directory: &str,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, false)
+        Self::build_inner(sdk, script_code, env, working_directory, false, None)
     }
 
     unsafe fn build_inner(
@@ -299,6 +342,7 @@ impl ProcessSettings {
         env: &[String],
         working_directory: &str,
         register_callbacks: bool,
+        sink: Option<OutputSink>,
     ) -> Result<Self, ScriptResponse> {
         let mut raw = std::mem::zeroed::<WslcProcessSettings>();
         let hr = sdk.WslcInitProcessSettings(&mut raw);
@@ -310,6 +354,7 @@ impl ProcessSettings {
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(false), Condvar::new())),
+            sink,
         });
 
         // Callbacks are registered only for the streamed path; a detached init
@@ -378,9 +423,10 @@ impl ProcessSettings {
         let mut cwd_cstr: Option<Vec<u8>> = None;
         if !working_directory.is_empty() {
             if !working_directory.starts_with('/') {
-                return Err(ScriptResponse::error(&format!(
+                return Err(WslcError::Rejected(format!(
                     "working_directory must be an absolute in-container path (got {working_directory:?})"
-                )));
+                ))
+                .into_response());
             }
             let c = cstr_bytes("working_directory", working_directory)?;
             let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
@@ -619,7 +665,7 @@ pub const KEEPALIVE_SCRIPT: &str = "while true; do sleep 86400; done";
 /// resolvable. The returned [`WslcSdk`] holds raw function pointers; keep it
 /// alive for the duration of all SDK use.
 pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
-    let sdk = WslcSdk::load().map_err(|e| ScriptResponse::error(&e))?;
+    let sdk = WslcSdk::load().map_err(|e| WslcError::Unavailable(e).into_response())?;
 
     let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
     let hr = sdk.WslcGetMissingComponents(&mut missing);
@@ -627,7 +673,7 @@ pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptRes
         return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
     }
     if missing.any_missing() {
-        return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
+        return Err(WslcError::Unavailable(wslc_prerequisite_error(missing)).into_response());
     }
     let _ = writeln!(logger, "[WSLC][daemon] Runtime check passed");
     Ok(sdk)
@@ -742,14 +788,15 @@ pub unsafe fn resolve_image(
         ),
         None => (String::new(), String::new()),
     };
-    Err(ScriptResponse::error(&format!(
+    Err(WslcError::Rejected(format!(
         "WSLC image '{}' not found locally. Pre-pull it with: \
          wxc-exec.exe --setup-wslc --image {}{} \
          (or scripts\\setup-wslc.ps1 -Image {}{}). \
          MXC does not pull images at run time; \
          see docs/wsl/wsl-container-support-plan.md.",
         image, image, storage_arg_wxc, image, storage_arg_ps,
-    )))
+    ))
+    .into_response())
 }
 
 /// Create a daemon-owned container with `keepalive` as its init process, so it
@@ -858,6 +905,10 @@ pub struct ExecOutcome {
 /// # Safety
 /// `sdk` must hold valid function pointers and `container` must be a live,
 /// started handle.
+// A thin FFI primitive whose parameters mirror the SDK's process inputs plus
+// the optional live-output sink; grouping them into a struct would only add an
+// indirection for a single call site.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn exec_in_container(
     sdk: &WslcSdk,
     container: WslcContainer,
@@ -865,12 +916,14 @@ pub unsafe fn exec_in_container(
     env: &[String],
     working_directory: &str,
     timeout_ms: u32,
+    sink: Option<OutputSink>,
     logger: &mut Logger,
 ) -> Result<ExecOutcome, ScriptResponse> {
     // `process_settings` owns every buffer the SDK reads at
     // `WslcCreateContainerProcess` time plus the I/O-capture context; it is held
     // as a stationary local until after the process exits below.
-    let mut process_settings = ProcessSettings::build(sdk, script_code, env, working_directory)?;
+    let mut process_settings =
+        ProcessSettings::build(sdk, script_code, env, working_directory, sink)?;
 
     let mut process: WslcProcess = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();

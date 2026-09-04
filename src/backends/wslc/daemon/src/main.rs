@@ -26,7 +26,7 @@ mod control_server;
 mod session_manager;
 
 #[cfg(windows)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(windows)]
 use std::sync::Arc;
 #[cfg(windows)]
@@ -57,6 +57,35 @@ const IDLE_POLL: Duration = Duration::from_secs(15);
 /// without it, so a phase process holding the lock cannot hang daemon exit.
 #[cfg(windows)]
 const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Env override for [`IDLE_TIMEOUT`] (seconds). Lets E2E tests assert
+/// idle-teardown without waiting the 5-minute production default.
+#[cfg(windows)]
+const IDLE_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS";
+
+/// Env override for [`IDLE_POLL`] (seconds).
+#[cfg(windows)]
+const IDLE_POLL_ENV: &str = "MXC_WSLC_DAEMON_IDLE_POLL_SECS";
+
+/// Resolve a `Duration` from an environment variable holding a positive whole
+/// number of seconds, falling back to `default` when the variable is unset,
+/// empty, non-numeric, or zero.
+#[cfg(windows)]
+fn duration_from_env(var: &str, default: Duration) -> Duration {
+    resolve_duration(std::env::var(var).ok().as_deref(), default)
+}
+
+/// Pure core of [`duration_from_env`]: map an optional raw string to a
+/// `Duration`, using `default` unless the string is a positive integer number
+/// of seconds. Split out so the parsing rules are unit-testable without
+/// mutating process-global environment state.
+#[cfg(windows)]
+fn resolve_duration(raw: Option<&str>, default: Duration) -> Duration {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
 
 // The daemon owns the WSLc SDK's live session/container handles, which only
 // exist on Windows. The Windows-only dependencies are target-gated in
@@ -107,23 +136,27 @@ async fn run() -> Result<()> {
     };
     write_daemon_record(&record).context("publish daemon record")?;
 
-    let shutdown = Arc::new(Notify::new());
-    let active_clients = Arc::new(AtomicUsize::new(0));
+    // Shared control-plane signals: `shutdown` (idle teardown), `active_clients`
+    // (in-flight request count), `activity` (monotonic connection counter the
+    // watchdog compares across polls to catch bursts between samples), and
+    // `draining` (set by the watchdog before it signals shutdown so the accept
+    // loop refuses a client that raced the final idle sample).
+    let signals = DaemonSignals {
+        active_clients: Arc::new(AtomicUsize::new(0)),
+        activity: Arc::new(AtomicU64::new(0)),
+        shutdown: Arc::new(Notify::new()),
+        draining: Arc::new(AtomicBool::new(false)),
+    };
 
     let server = tokio::spawn(control_server::run(
         session.clone(),
         pipe_name.clone(),
         security,
         first_instance,
-        active_clients.clone(),
-        shutdown.clone(),
+        signals.clone(),
     ));
 
-    let watchdog = tokio::spawn(idle_watchdog(
-        session.clone(),
-        active_clients,
-        shutdown.clone(),
-    ));
+    let watchdog = tokio::spawn(idle_watchdog(session.clone(), signals));
 
     // Wait for the control server to finish: it stops accepting when `shutdown`
     // fires and then drains its in-flight handlers, so once this returns no
@@ -153,41 +186,91 @@ async fn run() -> Result<()> {
         .context("control server failed")
 }
 
+/// Shared control-plane signals wired between the accept loop and the idle
+/// watchdog. Bundled so both tasks take one handle instead of a long argument
+/// list; every field is an `Arc`, so `Clone` is cheap.
+#[cfg(windows)]
+#[derive(Clone)]
+struct DaemonSignals {
+    /// Count of client requests currently being serviced.
+    active_clients: Arc<AtomicUsize>,
+    /// Monotonic connection counter the watchdog compares across polls.
+    activity: Arc<AtomicU64>,
+    /// Idle-teardown signal (a retained permit via `notify_one`).
+    shutdown: Arc<Notify>,
+    /// Set by the watchdog before it signals shutdown so the accept loop refuses
+    /// a client that connected after the final idle sample.
+    draining: Arc<AtomicBool>,
+}
+
 /// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT` with
-/// no in-flight requests, notify shutdown.
+/// no in-flight requests and no new connections since the previous poll, notify
+/// shutdown.
+///
+/// Idle is only declared when three signals agree: the container count is zero,
+/// no client request is in flight (`active_clients`), and the monotonic
+/// `activity` counter has not advanced since the last poll. The last guard
+/// closes the window where a client connects and completes entirely between two
+/// polls — the count and `active_clients` would both read zero again, but the
+/// bumped `activity` generation still resets the idle streak.
 ///
 /// The signal is delivered with [`Notify::notify_one`], not `notify_waiters`:
 /// the control server only awaits `shutdown.notified()` inside its `select!`, so
 /// a wakeup raised while it is executing another branch (accepting or spawning a
 /// handler) would be dropped by `notify_waiters` (it retains no permit when no
 /// task is parked). `notify_one` stores a permit, so the server's next
-/// `notified()` completes regardless of when the signal was raised — the
-/// watchdog can then return without leaving the daemon alive forever.
+/// `notified()` completes regardless of when the signal was raised.
 #[cfg(windows)]
-async fn idle_watchdog(
-    session: session_manager::SessionHandle,
-    active_clients: Arc<AtomicUsize>,
-    shutdown: Arc<Notify>,
-) {
+async fn idle_watchdog(session: session_manager::SessionHandle, signals: DaemonSignals) {
+    let DaemonSignals {
+        active_clients,
+        activity,
+        shutdown,
+        draining,
+    } = signals;
     let mut idle_for = Duration::ZERO;
+    let mut last_activity = activity.load(Ordering::SeqCst);
+    // Resolved once at watchdog start so the production defaults hold unless a
+    // test explicitly shortens them via the env overrides.
+    let idle_timeout = duration_from_env(IDLE_TIMEOUT_ENV, IDLE_TIMEOUT);
+    let idle_poll = duration_from_env(IDLE_POLL_ENV, IDLE_POLL);
     loop {
-        tokio::time::sleep(IDLE_POLL).await;
-        match session.container_count().await {
-            // A provision holds the count at zero while it runs, so also require
-            // no in-flight client requests before counting as idle.
-            Ok(0) if active_clients.load(Ordering::SeqCst) == 0 => {
-                idle_for += IDLE_POLL;
-                if idle_for >= IDLE_TIMEOUT {
-                    shutdown.notify_one();
-                    return;
-                }
-            }
-            Ok(_) => idle_for = Duration::ZERO,
+        tokio::time::sleep(idle_poll).await;
+        // Query the count first: it is serialized on the worker, so it cannot
+        // observe zero while a provision that will make it non-zero is in flight.
+        let count = match session.container_count().await {
+            Ok(count) => count,
             Err(_) => {
                 // Worker gone: nothing left to serve.
+                draining.store(true, Ordering::SeqCst);
                 shutdown.notify_one();
                 return;
             }
+        };
+        // Read the monotonic generation last — after count and active_clients —
+        // so a client that connects and completes entirely within this poll
+        // (bumping `activity`, then dropping `active_clients` back to zero) is
+        // still observed here as `generation != last_activity`, instead of
+        // slipping through with both zero-reads while the generation bump goes
+        // unsampled.
+        let active = active_clients.load(Ordering::SeqCst);
+        let generation = activity.load(Ordering::SeqCst);
+        let idle = count == 0 && active == 0 && generation == last_activity;
+        last_activity = generation;
+
+        if idle {
+            idle_for += idle_poll;
+            if idle_for >= idle_timeout {
+                // Enter the draining state *before* signalling shutdown so the
+                // accept loop, once it wakes, refuses any client that connected
+                // after this final sample instead of provisioning it into a
+                // session that is about to be released.
+                draining.store(true, Ordering::SeqCst);
+                shutdown.notify_one();
+                return;
+            }
+        } else {
+            idle_for = Duration::ZERO;
         }
     }
 }
@@ -197,6 +280,8 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::Notify;
+
+    use super::resolve_duration;
 
     /// Regression for the lost idle-shutdown wakeup: the watchdog may fire while
     /// the control server is executing a non-`notified()` `select!` branch. With
@@ -214,5 +299,73 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), shutdown.notified())
             .await
             .expect("a permit raised before the waiter parked must not be lost");
+    }
+
+    /// Regression for the post-sample shutdown race: on an idle session the
+    /// watchdog must enter the draining state *before* it notifies shutdown, so
+    /// the accept loop refuses any client that connects after the final sample
+    /// instead of provisioning it into a session that is about to be released.
+    #[tokio::test(start_paused = true)]
+    async fn idle_shutdown_enters_draining_before_notifying() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let session = crate::session_manager::spawn().unwrap();
+        let signals = super::DaemonSignals {
+            active_clients: Arc::new(AtomicUsize::new(0)),
+            activity: Arc::new(AtomicU64::new(0)),
+            shutdown: Arc::new(Notify::new()),
+            draining: Arc::new(AtomicBool::new(false)),
+        };
+        let shutdown = signals.shutdown.clone();
+        let draining = signals.draining.clone();
+
+        // No containers and no clients: the watchdog runs to the idle timeout,
+        // sets `draining`, then notifies shutdown, and returns.
+        super::idle_watchdog(session.clone(), signals).await;
+
+        assert!(
+            draining.load(Ordering::SeqCst),
+            "watchdog must enter the draining state on idle shutdown"
+        );
+        // The shutdown permit is retained for the accept loop's next `notified()`.
+        tokio::time::timeout(Duration::from_secs(5), shutdown.notified())
+            .await
+            .expect("idle shutdown must leave a retained permit");
+
+        session.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn resolve_duration_falls_back_when_absent() {
+        assert_eq!(
+            resolve_duration(None, Duration::from_secs(300)),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_honours_positive_override() {
+        assert_eq!(
+            resolve_duration(Some("20"), Duration::from_secs(300)),
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_trims_whitespace() {
+        assert_eq!(
+            resolve_duration(Some("  15  "), Duration::from_secs(300)),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_rejects_zero_empty_and_nonnumeric() {
+        let default = Duration::from_secs(300);
+        assert_eq!(resolve_duration(Some("0"), default), default);
+        assert_eq!(resolve_duration(Some(""), default), default);
+        assert_eq!(resolve_duration(Some("abc"), default), default);
+        assert_eq!(resolve_duration(Some("-5"), default), default);
     }
 }

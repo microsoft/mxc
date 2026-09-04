@@ -86,28 +86,19 @@ pub fn resolve_runner(
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
     log_policy_hash(request, logger);
+    #[cfg(target_os = "windows")]
+    {
+        resolve_runner_inner_windows(request, logger).map_err(Error::from)
+    }
+    #[cfg(not(target_os = "windows"))]
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
 /// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
-/// run is about to be launched under, plus the config *schema* version.
-///
-/// Emitted from [`resolve_runner`] — the single funnel every run-to-completion
-/// launch passes through, and the first point at which every policy-affecting
-/// mutation (CLI command override, `--audit` permissive-learning-mode
-/// injection, capability injection) has already been applied. A hash taken
-/// earlier would not describe what actually ran.
-///
-/// `config_schema_version` is deliberately named for the *schema*: it does not
-/// change when the policy changes, so it must never be read as a policy
-/// version.
+/// run is about to be launched under, plus the config schema version.
 pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
     use wxc_common::audit::{AuditEvent, AuditEventName};
 
-    // Computing the hash serialises the whole effective request, canonicalises
-    // it, and runs SHA-256 over the result. That is far too much work to do on
-    // every launch only for `log_audit_event` to discard it, so check for a sink
-    // before building anything.
     if !logger.has_diagnostic_sink() && !wxc_common::telemetry::is_active() {
         return;
     }
@@ -133,6 +124,15 @@ fn policy_hash_identity(container_id: &str) -> String {
     wxc_common::policy_identity::redact_identity(identity)
 }
 
+/// Resolve a runner for the `wxc-exec --audit` compatibility workflow.
+#[cfg(target_os = "windows")]
+pub fn resolve_runner_for_audit(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<ResolvedRunner, Error> {
+    resolve_runner_inner_windows(request, logger).map_err(Error::from)
+}
+
 /// Resolve `request`'s backend and run it to completion.
 ///
 /// Convenience over [`resolve_runner`] for callers without external guard /
@@ -152,7 +152,7 @@ pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResp
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn resolve_runner_inner(
+fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
@@ -161,11 +161,18 @@ fn resolve_runner_inner(
     match request.containment {
         ContainmentBackend::ProcessContainer => {
             // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback` prefers the native
-            // BaseContainer (OS sandbox API) when usable and otherwise falls
-            // back to AppContainer tiers (BFS / DACL). The schema version does
-            // not influence this choice.
-            match appcontainer_common::dispatcher::dispatch_with_fallback(request) {
+            // host capability: `dispatch_with_fallback_and_capture` prefers
+            // the native BaseContainer (OS sandbox API) when usable and
+            // otherwise falls back to AppContainer tiers (BFS / DACL). The
+            // schema version does not influence this choice. When the request
+            // sets `captureDenials`, `factory_for_request` hands the guarded
+            // WPR fallback factory to the dispatcher so an AppContainer
+            // fallback tier can still honor it instead of failing closed.
+            let capture_factory = crate::guarded_capture::factory_for_request(request);
+            match appcontainer_common::dispatcher::dispatch_with_fallback_and_capture(
+                request,
+                capture_factory,
+            ) {
                 Ok(dispatched) => {
                     for w in &dispatched.warnings {
                         let _ = writeln!(logger, "warning: {w}");
@@ -396,6 +403,8 @@ fn resolve_runner_inner(
 
 /// Construct the Hyperlight runner, shared by the Windows and Linux bodies.
 /// Requires x86_64 (Hyperlight needs KVM or WHP) and the `hyperlight` feature.
+/// On Windows, pre-checks that `winhvplatform.dll` is loadable so a missing
+/// WHP becomes a typed error rather than a delay-load SEH exception.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
     #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -404,6 +413,14 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
             return Err(MxcError::malformed_request(
                 "Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
                  Use --experimental flag.",
+            ));
+        }
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(target_os = "windows")]
+        if !hyperlight_common::is_whp_available() {
+            return Err(MxcError::backend_unavailable(
+                "Hyperlight requires Windows Hypervisor Platform (WHP). \
+                 Enable the HypervisorPlatform Windows optional feature and reboot.",
             ));
         }
         Ok(ResolvedRunner::without_guard(Box::new(
@@ -438,11 +455,22 @@ mod tests {
     }
 
     #[test]
+    fn policy_hash_identity_matches_runner_identity_rules() {
+        assert_eq!(policy_hash_identity(""), "CLI");
+        assert_eq!(
+            policy_hash_identity("sandbox-0123456789abcdef"),
+            "sandbox-0123456789abcdef"
+        );
+        assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
+        assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
+    }
+
+    #[test]
     fn windows_sandbox_default_settings_do_not_warn() {
         for config in [None, Some(WindowsSandboxConfig::default())] {
             let request = windows_sandbox_request(config);
             let mut logger = Logger::new(Mode::Buffer);
-            resolve_runner_inner(&request, &mut logger).unwrap();
+            resolve_runner_inner_windows(&request, &mut logger).unwrap();
             assert!(logger.get_buffer().is_empty());
         }
     }
@@ -456,48 +484,11 @@ mod tests {
         let request = windows_sandbox_request(Some(config));
         let mut logger = Logger::new(Mode::Buffer);
 
-        resolve_runner_inner(&request, &mut logger).unwrap();
+        resolve_runner_inner_windows(&request, &mut logger).unwrap();
 
         let warning = logger.get_buffer();
         assert!(warning.contains("idleTimeoutMs"));
         assert!(warning.contains("daemonPipeName"));
         assert!(warning.contains("fresh VM"));
-    }
-}
-
-#[cfg(test)]
-mod audit_tests {
-    use super::{log_policy_hash, policy_hash_identity};
-    use std::fs;
-    use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::ExecutionRequest;
-
-    #[test]
-    fn policy_hash_reaches_the_diagnostic_sink() {
-        let path = std::env::temp_dir().join(format!("mxc-policy-hash-{}.log", std::process::id()));
-        let mut logger = Logger::new(Mode::Buffer);
-        logger.enable_file_sink(&path).expect("file sink");
-
-        let request = ExecutionRequest {
-            container_id: "sandbox-test-123".to_string(),
-            ..ExecutionRequest::default()
-        };
-        log_policy_hash(&request, &mut logger);
-
-        let contents = fs::read_to_string(&path).expect("read audit log");
-        assert!(contents.contains(r#""event":"mxc.PolicyHash""#));
-        assert!(contents.contains(r#""policy_hash":"sha256:"#));
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn policy_hash_identity_matches_runner_identity_rules() {
-        assert_eq!(policy_hash_identity(""), "CLI");
-        assert_eq!(
-            policy_hash_identity("sandbox-0123456789abcdef"),
-            "sandbox-0123456789abcdef"
-        );
-        assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
-        assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
     }
 }

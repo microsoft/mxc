@@ -31,6 +31,7 @@ use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, SandboxBackend,
     SandboxProcess, StdioMode, StreamCloser,
 };
+use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
 
 use crate::stream_buffer::{StreamCanceller, StreamReader};
@@ -38,6 +39,10 @@ use crate::wsl_container_runner::{OutputMode, StartedContainer, WSLContainerRunn
 use crate::wslc_bindings::WslcSignal;
 
 impl SandboxBackend for WSLContainerRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        ScriptRunner::validate_runner(self, request)
+    }
+
     fn spawn(
         &mut self,
         request: &ExecutionRequest,
@@ -388,6 +393,45 @@ impl Drop for WslcSandboxProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wsl_container_runner::START_CONTAINER_BANNER;
+
+    /// The banner is what makes this host-independent: on a host that *has*
+    /// `wslcsdk.dll`, a guard moved after `start_container` would leak a
+    /// container and still return the same message. `start_container` writes the
+    /// banner first, so an untouched buffer proves it was never entered.
+    #[test]
+    fn spawn_rejects_policy_before_touching_the_wslc_sdk() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            policy: wxc_common::models::ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&wxc_common::models::WslcConfig::default());
+
+        let err = runner
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("a rejected policy must not produce a live container");
+        assert!(
+            err.error_message.contains("ui section is not supported"),
+            "the refusal must come from the policy gate, not from bring-up: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "guard must run before `start_container`; logger: {}",
+            logger.get_buffer()
+        );
+    }
 
     /// The exact contradiction the streaming contract forbids: a timed-out run
     /// is killed, so the container *has* an exit code to report — and reporting

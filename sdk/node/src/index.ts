@@ -9,6 +9,13 @@
  * `processContainer.learningMode: true` to enable deny-and-record learning
  * mode. Learning-mode capability names are reserved and must not be supplied
  * directly in `processContainer.capabilities`.
+ * On Linux, `getPlatformSupport()` reports failures for individual backends
+ * through `PlatformSupport.unavailableReasons`, including when none is usable.
+ *
+ * Schema `0.8.0-alpha` policies may use directional
+ * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
+ * `processContainer.network.allowedProxyPeer` through `createConfigFromPolicy`.
+ * These fields cannot be mixed with legacy network fields.
  *
  * @example
  * ```typescript
@@ -39,6 +46,15 @@ export {
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,
+  ProcessContainerConfig,
+  NetworkAction,
+  NetworkProtocol,
+  NetworkPeerConfig,
+  NetworkPortConfig,
+  NetworkRuleConfig,
+  NetworkEgressConfig,
+  NetworkIngressConfig,
+  RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
 } from './types.js';
@@ -98,6 +114,11 @@ export {
   WindowsSandboxExecConfig,
   WindowsSandboxStopConfig,
   WindowsSandboxDeprovisionConfig,
+  WslcProvisionConfig,
+  WslcStartConfig,
+  WslcExecConfig,
+  WslcStopConfig,
+  WslcDeprovisionConfig,
   ConfigsForBackend,
   ProvisionConfigFor,
   StartConfigFor,

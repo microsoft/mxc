@@ -530,19 +530,13 @@ impl Logger {
         })
     }
 
-    /// Emit a security warning through an always-visible channel and retain it
-    /// for in-process callers.
+    /// Retain a warning for in-process callers and configured diagnostic sinks.
     pub fn warning_line(&mut self, msg: &str) {
-        eprintln!("{msg}");
         self.warnings.push(msg.to_string());
-        if let Some(ref mut f) = self.file {
-            Self::write_timestamped_file(f, msg, true);
-        }
-        self.diag_accumulate(msg);
-        self.diag_accumulate("\n");
+        self.log_diagnostic_line(msg);
     }
 
-    /// Security warnings emitted during the run.
+    /// Warnings emitted during the run.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }

@@ -1,0 +1,12 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Legacy",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "set -e; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo SANDBOX_PROXY=$HTTP_PROXY; curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK; echo LEGACY_PROXY_OK"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "builtinTestServer": true }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-V08-Permissive-Ingress",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo this-should-never-run"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  }
+}

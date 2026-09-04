@@ -72,17 +72,132 @@ pub struct DeprovisionResult<M> {
     pub metadata: Option<M>,
 }
 
+/// How an exec's streams are wired.
+///
+/// * [`Relayed`](Self::Relayed) — the calling process relays onto its own
+///   stdio. The backend may allocate a pseudo-console inside the sandbox when
+///   that process is on a TTY; a pseudo-console has a single output stream, so
+///   stderr is then merged into stdout and [`ExecHandle::stderr`] is null, which
+///   is a correct result rather than a failure.
+///
+///   The dispatcher's relay forwards **no** input, so a stdin pipe whose write
+///   end the backend retains would never be written or closed, and a workload
+///   reading stdin would block forever. Return a null [`ExecHandle::stdin`]. A
+///   backend that relays internally, as IsolationSession does through its
+///   pseudo-console, forwards this process's stdin itself.
+/// * [`Piped`](Self::Piped) — the caller drives the streams itself. The
+///   backend must return separate raw stdout and stderr pipes, allocate no
+///   pseudo-console, and leave the host's console untouched.
+///
+/// Topology, not caller identity: a console application hosting an interactive
+/// sandboxed shell is in-process and wants `Relayed`.
+///
+/// The value is **authoritative**. A backend that probes the host to shape stdio
+/// may consult that probe only under `Relayed`, where the probing process is
+/// the relay target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecStdio {
+    /// The calling process relays the streams to its own stdio.
+    Relayed,
+    /// The caller drives the returned streams itself.
+    Piped,
+}
+
+/// The error a backend returns when it is asked to serve
+/// [`ExecStdio::Piped`] and cannot.
+///
+/// Must be raised **before running anything**: the workload is arbitrary and may
+/// not be idempotent, so a later refusal has already caused the side effects the
+/// caller is told did not happen.
+///
+/// Shared so the refusal reads identically whichever backend raises it, and so
+/// the check cannot drift into a per-backend spelling.
+pub fn unsupported_piped_exec(backend: &str) -> MxcError {
+    MxcError::backend_error(format!(
+        "the {backend} backend cannot return exec streams to the caller: it relays the sandbox's \
+         output to this process's own stdout and stderr rather than handing back pipes. Run the \
+         exec attached to this process's stdio instead, which requires this process's stdout and \
+         stdin to be terminals. Nothing has been run."
+    ))
+}
+
+/// How an exec finished — as distinct from *why a wait failed*.
+///
+/// A timeout is an **outcome**, not an error: the backend observed the deadline
+/// and the workload is no longer running. Reserving `Err` for a genuine
+/// inability to determine the exit is what lets a caller tell "it ran too long"
+/// apart from "I could not find out what happened", which are different problems
+/// with different responses.
+///
+/// # Which topologies can observe `TimedOut`
+///
+/// Only [`ExecStdio::Piped`]. A backend serving [`ExecStdio::Relayed`] reports
+/// [`Exited`](Self::Exited); the dispatcher rejects anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// The process exited with this code.
+    Exited(i32),
+    /// The request's timeout elapsed while the process was running, and the
+    /// process is no longer running when this is reported.
+    ///
+    /// **Deadline spent, and the process is gone** — deliberately not "the
+    /// backend killed it". A workload that overruns its deadline and then exits
+    /// on its own a moment later has still missed the deadline, and reporting
+    /// the exit code it happened to produce would hide that from a caller who
+    /// asked for one. What killed it is not the caller's question; whether the
+    /// deadline held is.
+    ///
+    /// The exit code is deliberately absent: on the killed path it would
+    /// describe the kill rather than the workload, and on the late-exit path
+    /// reporting it is exactly the confusion this variant exists to prevent.
+    ///
+    /// **How far "gone" reaches is the backend's to state.** Backends that own
+    /// a process tree or a container kill the whole thing; a backend whose only
+    /// primitive is the foreground process confirms that process and leaves
+    /// descendants to whatever owns the sandbox's lifetime. Neither is implied
+    /// here — see the backend's own documentation.
+    TimedOut,
+}
+
 /// Streaming exec handle. The dispatcher relays `stdout` / `stderr` to the
-/// executor's own streams, forwards executor stdin into `stdin`, awaits exit
-/// via `waiter`, and calls `terminator` on cancellation signals. Pipe-handle
-/// ownership stays with the underlying process object; the relay does not
-/// close them.
+/// calling process's own streams, awaits exit via `waiter`, and calls
+/// `terminator` to tear the exec down.
+///
+/// # Handle ownership
+///
+/// Ownership of `stdout` and `stderr` stays with the underlying process object:
+/// consumers duplicate them and never close the originals.
+///
+/// `stdin` is **not consumed by the relay**, which forwards no input. Under
+/// [`ExecStdio::Piped`] it goes to the caller, which duplicates it
+/// rather than taking it. A pipe reaches EOF only once *every* write handle is
+/// closed, so dropping that duplicate is not enough — `stdin_closer` closes the
+/// backend's own end. A backend that exposes `stdin` must supply one.
+///
+/// # Reporting failure
+///
+/// Both closures are fallible, and for the same reason: the backend is the only
+/// layer that knows, and a consumer that cannot be told has to guess.
+///
+/// - `waiter` returns an [`ExecOutcome`], so a timeout is reported as one rather
+///   than disguised as the exit code of a killed process. `Err` means the exit
+///   could not be determined — **not** that the process is gone.
+/// - `terminator` returns `Result`, so a kill that the platform refused reaches
+///   the caller instead of being swallowed. It reports whether the request was
+///   *accepted*; a backend that can also confirm the process died should say so
+///   in its own documentation, because this type cannot express the difference.
+///
+/// `stdin_closer` is infallible: it runs from `Drop`, where nothing can act on a
+/// failure.
 pub struct ExecHandle {
     pub stdout: PipeHandle,
     pub stderr: PipeHandle,
     pub stdin: PipeHandle,
-    pub waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    pub terminator: Box<dyn FnOnce() + Send>,
+    pub waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+    /// Closes the backend's own stdin write end. `None` when the backend
+    /// exposes no stdin.
+    pub stdin_closer: Option<Box<dyn FnOnce() + Send>>,
 }
 
 // Manual Debug impl: the boxed closures can't derive Debug. Pipe handles are
@@ -149,11 +264,44 @@ pub trait StatefulSandboxBackend {
     }
 
     /// Required. Executes the workload and returns a streaming handle.
+    ///
+    /// `stdio` is authoritative — see [`ExecStdio`] for what each variant
+    /// implies for the topology of the returned streams.
+    ///
+    /// # Honored by one backend so far
+    ///
+    /// The above states what an implementation must satisfy to be driven
+    /// through the streaming entry points. It is not yet a description of every
+    /// backend's behaviour:
+    ///
+    /// - **IsolationSession** honors both variants. Under `Piped` it starts
+    ///   the process without waiting, hands back its real pipe handles, a waiter
+    ///   that blocks on exit and a terminator that kills, and does not touch the
+    ///   host console. Under `Relayed` it relays internally and returns null
+    ///   handles.
+    /// - **Windows Sandbox** and **WSLc** honor `Relayed` only. They relay
+    ///   internally and return null handles; a `Piped` request is refused
+    ///   without running the workload.
+    ///
+    /// Reaching any of this from an in-process caller additionally requires the
+    /// experimental opt-in, which the state-aware entry points expose as an
+    /// `experimental` parameter.
+    ///
+    /// # Backends that cannot serve `Piped`
+    ///
+    /// A backend that relays the workload's output to the *host process's* own
+    /// stdio, rather than returning streams, must refuse [`ExecStdio::Piped`]
+    /// **before running anything** — see [`unsupported_piped_exec`], which is
+    /// the shared refusal. Returning a handle with no streams instead is a
+    /// contract violation: by then the workload has run, so the refusal the
+    /// caller eventually receives describes side effects that have already
+    /// happened and output that has already gone somewhere it never asked for.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -254,6 +402,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
+            _stdio: ExecStdio,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("StubBackend::exec not implemented"))
         }
@@ -335,7 +484,12 @@ mod tests {
         // surface this code rather than aborting the test binary.
         let mut b = StubBackend;
         let err = b
-            .exec("stub:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "stub:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecStdio::Relayed,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
     }

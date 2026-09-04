@@ -252,6 +252,12 @@ pub(crate) fn extract_denials(
     if !is_supported_event {
         return Vec::new();
     }
+    // `is_supported_event` above only matches the two known Learning Mode
+    // providers, so this always resolves.
+    let Some(provider) = crate::extractors::verbose_logging_provider_for_guid(parts.provider)
+    else {
+        return Vec::new();
+    };
 
     let names = extract_names(parts, CAPABILITY_INDEX.get_or_init(build_capability_index));
     names
@@ -263,6 +269,8 @@ pub(crate) fn extract_denials(
             access_type: AccessType::Unknown,
             filetime,
             event_id: parts.event_id,
+            provider,
+            verbose_logging_properties: crate::extractors::sanitize_properties(&parts.props),
         })
         .collect()
 }
@@ -306,8 +314,10 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         let Ok(decoded) = decode_hex(candidate) else {
             continue;
         };
-        let (found, _) = walk_aces(&decoded, index);
-        names.extend(found);
+        let (found, error) = walk_aces(&decoded, index);
+        if error.is_none() {
+            names.extend(found);
+        }
     }
     names
 }
@@ -812,6 +822,15 @@ mod tests {
         let (names, error) = walk_aces(&bytes, &index);
         assert_eq!(names, HashSet::from(["internetClient"]));
         assert!(matches!(error, Some(DaclDecodeError::TruncatedAce(_))));
+    }
+
+    #[test]
+    fn truncated_tail_is_not_promoted_by_extractor() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut bytes = standard_ace(1, &sid);
+        bytes.push(0);
+        assert!(extract_names(&parts("Dacl", hex(&bytes)), &index).is_empty());
     }
 
     #[test]

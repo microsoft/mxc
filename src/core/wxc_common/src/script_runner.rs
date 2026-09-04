@@ -3,7 +3,7 @@
 
 use crate::logger::Logger;
 use crate::models::{ExecutionRequest, ScriptResponse};
-use crate::validator::validate_common;
+use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
 /// Trait for executing scripts within a containment backend.
 ///
@@ -11,13 +11,13 @@ use crate::validator::validate_common;
 /// to provide a uniform interface for `wxc-exec`.
 ///
 /// Implementors provide [`execute`](ScriptRunner::execute) and optionally
-/// [`validate`](ScriptRunner::validate). The provided
+/// [`validate_runner`](ScriptRunner::validate_runner). The provided
 /// [`run`](ScriptRunner::run) method handles validation, dry-run mode,
 /// and delegates to [`execute`](ScriptRunner::execute).
 pub trait ScriptRunner {
-    /// Validate the request before execution. Override to add
-    /// runner-specific checks. Default accepts all requests.
-    fn validate_runner(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    /// Validate shared network support and runner-specific constraints.
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         Ok(())
     }
 

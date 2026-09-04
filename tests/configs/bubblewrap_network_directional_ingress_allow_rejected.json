@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Directional-Ingress-Allow-Rejected",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo DIRECTIONAL_INGRESS_ALLOW_SHOULD_NOT_RUN"
+  },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow" }
+  }
+}

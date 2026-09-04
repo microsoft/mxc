@@ -20,6 +20,41 @@ concurrency story, and error mapping.
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
+### In-process callers reach the same lifecycle
+
+The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
+`isolation_session` feature, take the same phases and the same request JSON as
+`wxc-exec`; only the entry point differs.
+
+| Phase | `wxc-exec` | In-process |
+|---|---|---|
+| provision / start / stop / deprovision | `wxc-exec --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
+| exec, attached to the caller's stdio | `wxc-exec --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
+| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
+
+Requirements on an in-process caller:
+
+- **Both stdout and stdin must be terminals**, or the attached exec path
+  refuses. On a terminal it allocates a pseudo-console inside the sandbox, so an
+  embedding console application gets a working interactive shell. Use the
+  streaming entry point for a workload with no terminal.
+- **Only one attached exec at a time per process.** A second concurrent call is
+  refused.
+- **An attached exec takes over this process's console for its duration**:
+  raw VT, so no echo, no line input, and keystrokes — `Ctrl-C` included — go to
+  the sandboxed workload rather than to this process. Restored on return.
+- **`start` cannot run from Session 0.** `StartSessionAsync` fails with
+  *"requires an interactive session"* (`0x80040233`), so a caller running as a
+  service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
+  `provision` succeeds first and mints an OS account that must be deprovisioned.
+- **A caller in a single-threaded apartment is refused.** Any other caller enters
+  a multi-threaded apartment held for the manager's lifetime and balanced on
+  drop. A UI application must marshal onto a background thread.
+  `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
+
+The **one-shot** surface is not reachable in-process: `mxc_sdk::run` and
+`spawn_sandbox` return `unsupported_containment`.
+
 ### Out of scope (for v1)
 
 - **Explicit `AbortSignal` plumbing.** v1 cancellation is OS-level: the
@@ -50,14 +85,14 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string \| absent | absent | Optional identifier for the calling application. For a **packaged** application this is the Package Family Name; for an unpackaged one it may be any string. Carried verbatim inside the `sandboxId` (see below) so later phases recover it without the caller re-supplying it. **Nothing consumes it today** — it is accepted now so a future OS contract that acts on the calling application's identity does not require a breaking change. Validated **structurally only** (no control characters; at most 256 characters) — MXC is a pass-through carrier here and does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. Preserved verbatim: no trimming, no case folding, no normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such (a future OS API may assign it meaning, and MXC never synthesizes an empty string the caller did not send); JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. There is no trimming, case folding, or normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such; JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync`, also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
-| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by `AddUserAsync`. Diagnostic only. |
+| `agentUserName` | string | The OS-assigned agent account name returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support), also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
+| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support). Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied
@@ -353,18 +388,20 @@ whole section for every backend. See the matrix notes above.
 
 ### Multiple sandboxes
 
-Distinct `sandboxId`s map to distinct OS agent users (each `AddUserAsync`
-mints a fresh account). There is no shared registration between them, so
+Distinct `sandboxId`s map to distinct OS agent users (each provisioning call —
+`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support — mints a
+fresh account). There is no shared registration between them, so
 concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl reuses the existing one-shot `create_process` path
-synchronously: `manager.create_process(&options)` blocks until the agent
-process exits and the relay drains. Two concurrent exec calls against the
-same `sandboxId` from two `wxc-exec` processes are not coordinated by MXC;
-the OS-side service serialises (or rejects, depending on session state) at
-its own layer.
+The runner's `exec` impl blocks under **`Relayed`**: it reuses the
+one-shot `create_process` path, and that call runs until the agent process
+exits and the relay drains. Under **`Piped`** it starts the
+process and returns without waiting, handing back the live pipe handles and a
+waiter, so the caller decides when to block. Either way, two concurrent exec
+calls against the same `sandboxId` are not coordinated by MXC; the OS-side
+service serialises (or rejects, depending on session state) at its own layer.
 
 ### Deprovision and concurrent sandboxes
 
@@ -387,10 +424,10 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 ### Structured failure fields
 
-The components of an API failure travel as **discrete fields** on the wire error
-envelope — `operation`, `nativeCode` and `remediation` — rather than being concatenated
-into `message`. `message` holds the bare human-readable text; for a semantic API failure
-that is the API's own message, passed through verbatim.
+The components of a failure travel as **discrete fields** on the wire error envelope —
+`operation`, `nativeCode` and `remediation` — rather than being concatenated into
+`message`. `message` holds the bare human-readable text; for a semantic API failure that
+is the API's own message, passed through verbatim.
 
 | Failure | `operation` | `nativeCode` | `remediation` |
 |---|---|---|---|
@@ -398,11 +435,11 @@ that is the API's own message, passed through verbatim.
 | Transport failure (the call could not be completed, or a result property could not be read) | ✅ | ✅ | — |
 | Activation failure (`backend_unavailable`) | ✅ | ✅ | — |
 | The API's status code itself could not be read | ✅ | — | best-effort |
+| Single-threaded-apartment refusal | — | — | ✅ |
 | MXC-internal failure (relay threads, console handles) | — | — | — |
 | `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
 
-**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
-`operation` marks that an API operation was in flight; neither refinement appears alone.
+**Invariant:** `operation` marks that an API operation was in flight.
 
 `operation` is the interface-qualified member name — for example
 `IsoSessionOps.StopSessionAsync`. It is deliberately low-cardinality and free of call
@@ -444,20 +481,83 @@ semantic error channel, and **only** for non-provision operations.
 
 State-aware exec (and other phases) use OS-level cancellation in v1:
 
-- The SDK kills the `wxc-exec` process via process termination.
+- On the `wxc-exec` route, cancellation is process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
-  `process.timeout`) reaps the agent if the runner does not.
+  `process.timeout`) reaps the agent if the runner does not. On the
+  streaming path that timer is armed with a **margin** past the caller's
+  deadline, so it acts purely as a watchdog: the service kills with an
+  ordinary exit code (the host suite pins it as exit code 1), so if it
+  fired first a genuine timeout would be indistinguishable from a normal
+  exit and could not be reported as one. The run-to-completion path arms
+  it unchanged — it has no timeout channel to report through.
 - The runner's existing 3-tier shutdown (`CloseStandardInput` →
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.
 
-`ExecHandle.terminator` is currently a no-op closure on the
-IsolationSession path because the backend reuses the one-shot
-`create_process` synchronously and there is no mid-flight cancellation
-seam. Future work — explicit Rust-layer `AbortSignal` plumbing — would
-require splitting `create_process` into a non-blocking start + a separate
-waiter, with `terminator` invoking `IsoSessionProcess::Terminate()`.
+`ExecHandle.terminator` is a no-op closure on the IsolationSession path
+under `Relayed`, which reuses the one-shot
+`create_process` synchronously and so has no mid-flight cancellation
+seam. Under `Piped` the backend instead starts the process
+without waiting and returns a terminator that calls
+`IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
+waiter that blocks on exit.
+
+That terminator now reports whether the platform **accepted** the kill:
+`ExecHandle.terminator` returns a `Result`, and the answer
+`StartedProcess::terminate` already computed reaches the caller through
+`SandboxProcess::kill`. What it still cannot say is whether the process
+actually died — that would need the bounded post-kill wait's result,
+which the handle type does not carry.
+
+The waiter likewise distinguishes a timeout from an exit, returning
+`ExecOutcome::TimedOut` when the deadline elapsed while the process was
+running. Neither available signal proves that on its own: `WaitForExit`
+answers `-1` on timeout and `ExitCode()` reads `STILL_ACTIVE` (259), and
+both are legal exit codes for untrusted code. Their conjunction
+establishes whether the process was still running when it was sampled,
+which is what the ladder decision needs.
+
+A spent deadline is **sticky**. The two reads are not atomic, so a
+process can exit in the window between them; that still reports
+`TimedOut`, because the sentinel proves the deadline elapsed while the
+process ran and a later-observed exit code does not un-spend it.
+Reporting that code would hide a missed deadline from a caller who asked
+for one. The sibling WSLc backend draws the same line, tracking
+`deadline_elapsed` separately from `timed_out`. The one irreducible case
+is `-1`/`-1`, where the sentinel and the exit code collide and nothing
+distinguishes them, so it is read as the exit.
+
+`TimedOut` promises the process is **gone**, not that MXC killed it, and
+it reaches only the foreground process: `IsoSessionProcess` exposes
+`Terminate` and `ExitCode` and no tree primitive, so a descendant the
+workload backgrounded outlives a reported timeout on either path and is
+reclaimed when the session is stopped and deprovisioned.
+
+An exited process is never routed through the shutdown ladder, which reads only `ExitCode()`
+and so cannot tell a `259` exit from a live process. The adapter maps
+`TimedOut` onto `ErrorKind::TimedOut`, which is what
+`mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
+is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
+
+Teardown is bounded only insofar as the kill is: the streaming adapter's
+`Drop` joins the waiter when the kill was accepted, and abandons the
+thread when it was refused rather than blocking forever in a `Drop` the
+caller cannot opt out of. A process that survives an *accepted* kill can
+still park that waiter by either of
+two routes — in its leading `WaitForExit` (INFINITE when the caller
+supplied no timeout), or, when a timeout was supplied, in the graceful
+ladder's tier 3, which is `Terminate` followed by an INFINITE
+`WaitForExit(0)`. Neither is certain to stall: tier 3's `Terminate` is a
+fresh attempt that may land where the first did not. The narrow claim is
+that nothing bounds the
+join if the process does survive. The terminator is now fallible end to
+end, so a *refused* kill is reported and the join is skipped; bounding
+the join after an *accepted* kill that never took effect is future work,
+and needs the backend to confirm the process actually died. A **confirmed
+exit** retires the terminator entirely: once the waiter has reported an
+outcome there is nothing to kill, so `kill` succeeds without running the
+terminator and an earlier refusal no longer applies.
 
 ## Known issues
 

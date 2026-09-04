@@ -80,6 +80,30 @@ describe('macOS Seatbelt Container', {
     assert.strictEqual(result.exitCode, 42);
   });
 
+  it('should allow a process to signal its child', async () => {
+    // The EXIT trap matters on the failing path this test exists to catch: if
+    // `kill -TERM` is denied, `exit 1` would otherwise skip `wait` and orphan
+    // the child. The runner deliberately won't group-kill it afterwards (a
+    // reaped pid/pgid can be recycled), so it would outlive the test.
+    const script = [
+      'sleep 5 </dev/null >/dev/null 2>&1 & child=$!',
+      `trap 'kill -KILL "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' 0`,
+      'kill -TERM "$child" || exit 1',
+      'wait "$child"; status=$?',
+      'trap - 0',
+      'test "$status" -eq 143',
+    ].join('\n');
+    const result = await sdk.spawnSandboxAsync(
+      script,
+      { version: schemaVersion },
+      seatbeltSpawnOptions,
+      undefined,
+      'seatbelt-child-signal',
+    );
+    // `spawnSandboxAsync` merges PTY output into `stdout`; `stderr` is always ''.
+    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
+  });
+
   it('should deny filesystem access by default', async () => {
     // The default seatbelt profile denies access to /Users.
     const result = await sdk.spawnSandboxAsync(

@@ -2,17 +2,20 @@
 // Licensed under the MIT License.
 
 //! Generates the C# P/Invoke layer for the C# SDK from this crate's `extern
-//! "C"` surface, using csbindgen. The generated file is checked in (a CI drift
-//! gate regenerates and diffs it).
+//! "C"` surface, using csbindgen. The generated file is gitignored rather than
+//! committed, so it is regenerated rather than diffed.
 //!
 //! Code generation is gated behind the **`dotnetsdk`** cargo feature so that
 //! normal builds — including the whole-workspace backend build matrix — do
-//! **not** compile csbindgen or write into the source tree. Only the drift gate
-//! (`scripts/check-dotnet-bindings-codegen.js`, which builds with
-//! `--features dotnetsdk`) regenerates the committed file.
+//! **not** compile csbindgen or write into the source tree. Two callers pass
+//! that feature: the C# csproj's `GenerateNativeBindings` target, which keeps
+//! the bindings current for each C# compile, and
+//! `scripts/check-dotnet-bindings-codegen.js`, which regenerates and asserts
+//! the expected entry points are produced.
 
 fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src/error_detail.rs");
     println!("cargo:rerun-if-changed=src/streaming.rs");
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");
@@ -43,6 +46,7 @@ fn generate_csharp_bindings() {
 
     if let Err(e) = csbindgen::Builder::default()
         .input_extern_file("src/lib.rs")
+        .input_extern_file("src/error_detail.rs")
         .input_extern_file("src/streaming.rs")
         .input_extern_file("src/state_aware.rs")
         .csharp_dll_name("mxc_ffi")

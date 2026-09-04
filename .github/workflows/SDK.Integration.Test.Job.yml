@@ -15,7 +15,7 @@ jobs:
           - os_label: linux
             runner: ubuntu-latest
           - os_label: macos
-            runner: macos-14
+            runner: macos-26
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -33,16 +33,16 @@ jobs:
       # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: sdk/node/tests/integration/package-lock.json
 
       - name: Download SDK package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-packages
           path: sdk-pkg
@@ -81,7 +81,7 @@ jobs:
       - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
         continue-on-error: true
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           # Installs the LXC + Bubblewrap substrate the SDK integration
           # tests need. Capability probe 27576588204 confirmed these
@@ -179,6 +179,18 @@ jobs:
           sudo systemctl daemon-reload
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
+
+      # A bridged veth reaches the LXC firewall chain only while br_netfilter
+      # delivers bridged packets to iptables, and the backend refuses to
+      # report success for a policy it cannot enforce.
+      - name: Enable bridge netfilter
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'

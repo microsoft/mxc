@@ -3,10 +3,11 @@
 
 use std::io::IsTerminal;
 use std::ptr;
+use std::sync::Arc;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
-    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ACCESS_DISABLED_BY_POLICY,
+    ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -30,7 +31,14 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::capture_output;
+use crate::guarded_capture::{
+    finalize_guarded_capture, validate_retain_etl_supported, GuardedCaptureFactory,
+    GuardedCaptureSession, GuardedStop,
+};
 use crate::job_object::UiJobObject;
+use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
 use wxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
@@ -39,8 +47,7 @@ use wxc_common::audit::{
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainmentBackend, ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy,
-    ScriptResponse,
+    ContainmentBackend, ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -51,10 +58,13 @@ use wxc_common::sandbox_process::{
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
-    "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
+    "captureDenials requires either the native BaseContainer learning-mode APIs or an \
+     AppContainer runner explicitly configured with the guarded-WPR capture fallback \
+     (see AppContainerScriptRunner::with_guarded_capture_factory)";
 
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
@@ -65,6 +75,28 @@ const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
+
+fn create_process_failure(
+    err: &windows_core::Error,
+    command_line: &str,
+    readonly_paths: &[String],
+    working_directory: &str,
+) -> WxcError {
+    let message = if err.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
+        diagnose_create_process_failure(
+            ERROR_ACCESS_DISABLED_BY_POLICY.0,
+            command_line,
+            readonly_paths,
+        )
+        .message
+    } else {
+        format!("CreateProcessW failed: {err}")
+    };
+
+    WxcError::Process(format!(
+        "{message} (working directory: {working_directory})"
+    ))
+}
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -150,7 +182,7 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
 /// proxy env vars (stripping any pre-existing proxy vars first).
-fn build_explicit_entries(
+pub(crate) fn build_explicit_entries(
     env_vars: &[String],
     proxy_address: Option<&wxc_common::models::ProxyAddress>,
 ) -> Vec<(String, String)> {
@@ -172,7 +204,10 @@ fn build_explicit_entries(
 
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
-fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+pub(crate) fn inject_proxy_vars(
+    entries: &mut Vec<(String, String)>,
+    addr: &wxc_common::models::ProxyAddress,
+) {
     entries.retain(|(key, _)| {
         !PROXY_VAR_NAMES
             .iter()
@@ -401,15 +436,10 @@ pub enum FilesystemMode {
 }
 
 impl FilesystemMode {
-    /// The isolation tier this filesystem mode corresponds to.
-    ///
-    /// The dispatcher picks the mode *from* a tier and the audit records need
-    /// the tier back; keeping the mapping in one place stops the two directions
-    /// from drifting.
     pub fn isolation_tier(self) -> crate::fallback_detector::IsolationTier {
         match self {
-            FilesystemMode::Bfs => crate::fallback_detector::IsolationTier::AppContainerBfs,
-            FilesystemMode::Dacl => crate::fallback_detector::IsolationTier::AppContainerDacl,
+            Self::Bfs => crate::fallback_detector::IsolationTier::AppContainerBfs,
+            Self::Dacl => crate::fallback_detector::IsolationTier::AppContainerDacl,
         }
     }
 }
@@ -537,6 +567,7 @@ pub struct AppContainerScriptRunner {
     app_container_sid: PSID,
     proxy_address: Option<wxc_common::models::ProxyAddress>,
     filesystem_mode: FilesystemMode,
+    denied_paths_enforced_externally: bool,
     /// Optional pre-derived SID string supplied by the dispatcher.
     ///
     /// When `Some`, the runner uses this value for the firewall
@@ -548,6 +579,16 @@ pub struct AppContainerScriptRunner {
     /// [`DeriveAppContainerSidFromAppContainerName`] / `FreeSid`; that
     /// duplicate Win32 call is documented and left as a follow-up.
     preset_sid_string: Option<String>,
+    /// Opts this runner into the guarded-WPR `captureDenials` fallback.
+    ///
+    /// `None` (the default for every plain constructor) means the
+    /// runner behaves exactly as it always has: `captureDenials` is
+    /// rejected in [`SandboxBackend::validate`]. Only a caller that
+    /// explicitly chains [`Self::with_guarded_capture_factory`] (the
+    /// dispatcher, when it selects a legacy tier for a request that
+    /// asked for `captureDenials`) opts a runner into accepting it — see
+    /// the module-level fallback docs on [`crate::guarded_capture`].
+    guarded_capture_factory: Option<Arc<dyn GuardedCaptureFactory>>,
 }
 
 impl AppContainerScriptRunner {
@@ -557,7 +598,9 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: FilesystemMode::Bfs,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
+            guarded_capture_factory: None,
         }
     }
 
@@ -571,7 +614,9 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
+            guarded_capture_factory: None,
         }
     }
 
@@ -589,8 +634,33 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: Some(sid_string),
+            guarded_capture_factory: None,
         }
+    }
+
+    /// Opts this runner into the guarded-WPR `captureDenials` legacy-tier
+    /// fallback, using `factory` to start an elevated, process-scoped WPR
+    /// capture for each run.
+    ///
+    /// Must be called explicitly by the caller that selects this runner for
+    /// a `captureDenials` request (the dispatcher, when the native
+    /// BaseContainer tier is unavailable) — an `AppContainerScriptRunner`
+    /// constructed any other way keeps rejecting `captureDenials` in
+    /// [`SandboxBackend::validate`]. See [`crate::guarded_capture`] for the
+    /// full rationale: `appcontainer_common` never depends on `plm`
+    /// directly, so `factory` is a trait object implemented by a higher
+    /// layer (`mxc_engine`) that does.
+    pub fn with_guarded_capture_factory(mut self, factory: Arc<dyn GuardedCaptureFactory>) -> Self {
+        self.guarded_capture_factory = Some(factory);
+        self
+    }
+
+    /// Marks `deniedPaths` as enforced by the dispatcher's per-run DACL guard.
+    pub(crate) fn with_external_denied_paths(mut self) -> Self {
+        self.denied_paths_enforced_externally = true;
+        self
     }
 
     /// Create or derive an AppContainer SID for the given container name.
@@ -658,16 +728,7 @@ impl AppContainerScriptRunner {
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
         capabilities_to_add.push("AgenticAppContainer".to_string());
 
-        let use_capabilities_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_capabilities_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !capabilities_to_add.iter().any(|c| c == "internetClient")
-        {
-            capabilities_to_add.push("internetClient".to_string());
-        }
+        add_default_network_capabilities(&request.policy, &mut capabilities_to_add);
 
         // --- Derive SIDs for each capability ---
         // `owned_capability_sids` owns the derived SIDs (freed on drop); it
@@ -1036,11 +1097,12 @@ impl AppContainerScriptRunner {
             )
         }
         .map_err(|err| {
-            WxcError::Process(format!(
-                "CreateProcessW failed: {} (working directory: {})",
-                err,
-                working_directory.describe()
-            ))
+            create_process_failure(
+                &err,
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &working_directory.describe(),
+            )
         })?;
 
         logger.log_line(&format!(
@@ -1080,6 +1142,85 @@ impl AppContainerScriptRunner {
             }
         };
 
+        // --- Guarded WPR captureDenials session (legacy-tier fallback) ---
+        //
+        // Started only now — after the job has been created, UI-limited,
+        // and the still-suspended child assigned to it — but before the
+        // caller resumes the child (`SpawnedChild::resume`, called by
+        // `SandboxBackend::spawn` right after this function returns). That
+        // ordering means a guardian-start failure can terminate the
+        // still-suspended child without ever leaving an active host-wide
+        // WPR trace running.
+        let (capture_session, capture_output_path, capture_etl_path): (
+            Option<Box<dyn GuardedCaptureSession>>,
+            Option<std::path::PathBuf>,
+            Option<std::path::PathBuf>,
+        ) = match (
+            self.guarded_capture_factory.as_ref(),
+            request.policy.capture_denials.as_ref(),
+        ) {
+            (Some(factory), Some(capture_config)) => {
+                let retain_etl = capture_config.retain_etl && factory.allows_trace_transfer();
+                let output_paths = match capture_output::unique_denials_output_paths(
+                    capture_config.output_path.as_deref(),
+                    retain_etl,
+                ) {
+                    Ok(paths) => paths,
+                    Err(e) => {
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                "captureDenials failed to resolve the denials output path: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                            ))
+                            })?;
+                        return Err(WxcError::Process(format!(
+                            "captureDenials failed to resolve the denials output path: {e}"
+                        )));
+                    }
+                };
+                let output_path = output_paths.denials;
+                match factory.start(std::process::id()) {
+                    Ok(session) => {
+                        let session = attach_guarded_capture_or_cleanup(
+                            session,
+                            job.handle_value(),
+                            process_handle.get().0 as usize,
+                            || {
+                                job.terminate_and_wait(u32::MAX)
+                                    .err()
+                                    .map(|error| error.to_string())
+                            },
+                        )
+                        .map_err(WxcError::Process)?;
+                        logger.log_line(&format!(
+                            "guarded WPR captureDenials session started (output: {})",
+                            output_path.display()
+                        ));
+                        (Some(session), Some(output_path), output_paths.etl)
+                    }
+                    Err(e) => {
+                        // No active trace exists yet -- terminate the
+                        // still-suspended child now, before it is ever
+                        // resumed, so nothing runs unobserved.
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                    "captureDenials guarded WPR session failed to start: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                                ))
+                            })?;
+                        return Err(WxcError::Process(format!(
+                            "captureDenials guarded WPR session failed to start: {e}"
+                        )));
+                    }
+                }
+            }
+            _ => (None, None, None),
+        };
+
         let (stdout_read, stderr_read) = match capture_reads {
             Some((out, err)) => (Some(out), Some(err)),
             None => (None, None),
@@ -1092,6 +1233,9 @@ impl AppContainerScriptRunner {
             thread: thread_handle,
             job,
             pid: pi.dwProcessId,
+            capture_session,
+            capture_output_path,
+            capture_etl_path,
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -1137,6 +1281,17 @@ struct SpawnedChild {
     job: UiJobObject,
     /// OS process id of the child.
     pid: u32,
+    /// Live guarded WPR capture session for `captureDenials`, started
+    /// (while still suspended) by [`AppContainerScriptRunner::spawn_suspended`].
+    /// `Some` only when the runner was configured via
+    /// [`AppContainerScriptRunner::with_guarded_capture_factory`] and the
+    /// request asked for `captureDenials`.
+    capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
+    /// is `Some`.
+    capture_output_path: Option<std::path::PathBuf>,
+    /// Caller-visible ETL destination when retention is requested.
+    capture_etl_path: Option<std::path::PathBuf>,
     /// Parent's stdin write-end (Some only when spawned for streaming).
     stdin_write: Option<OwnedHandle>,
     /// Parent's stdout/stderr read-ends (Some only in streaming mode).
@@ -1147,17 +1302,76 @@ struct SpawnedChild {
 
 impl SpawnedChild {
     /// Resume the suspended child, terminating it on failure.
-    fn resume(&self) -> Result<(), WxcError> {
+    ///
+    /// If a guarded WPR capture was started for this child, a resume
+    /// failure also discards it (see
+    /// [`Self::discard_capture_session_after_launch_failure`]) before
+    /// returning the resume error, so the elevated guardian is never left
+    /// tracing a child that never ran.
+    fn resume(&mut self) -> Result<(), WxcError> {
         let r = unsafe { ResumeThread(self.thread.get()) };
         if r == u32::MAX {
             let err = unsafe { GetLastError() };
             unsafe {
                 let _ = TerminateProcess(self.process.get(), u32::MAX);
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
             }
+            self.discard_capture_session_after_launch_failure();
             return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
         }
         Ok(())
     }
+
+    /// Best-effort teardown of an armed-but-abandoned guarded WPR capture
+    /// session, used when the sandboxed child failed to launch after the
+    /// session was already started.
+    ///
+    /// The child never ran successfully, so there is no analysis result to
+    /// preserve. Stop the trace through the authenticated discard protocol.
+    fn discard_capture_session_after_launch_failure(&mut self) {
+        let Some(mut session) = self.capture_session.take() else {
+            return;
+        };
+        let _ = session.discard();
+    }
+}
+
+/// Attach `session` to the sandbox job / root process, or perform the
+/// security-sensitive abandonment cleanup on failure.
+///
+/// On attach failure the job is terminated (via `terminate_job`, which returns
+/// `Some(message)` if termination failed) **before** the guarded session is
+/// discarded — nothing may keep running once the trace is about to be torn
+/// down — and the returned error reports the attach failure plus any
+/// termination/discard failures, in that order. Returns the live session on
+/// success. Extracted so the orchestration ordering can be unit-tested with a
+/// fake session and a fake job terminator, without a real suspended process.
+fn attach_guarded_capture_or_cleanup(
+    mut session: Box<dyn GuardedCaptureSession>,
+    job_handle: usize,
+    root_process_handle: usize,
+    terminate_job: impl FnOnce() -> Option<String>,
+) -> Result<Box<dyn GuardedCaptureSession>, String> {
+    let Err(attach_error) = session.attach_process_tree(job_handle, root_process_handle) else {
+        return Ok(session);
+    };
+    let termination_error = terminate_job();
+    let discard_error = session.discard().err();
+    let mut message = format!(
+        "captureDenials guarded WPR session failed to attach the sandbox process tree: \
+         {attach_error}"
+    );
+    if let Some(terminate_error) = termination_error {
+        message.push_str(&format!(
+            "; additionally failed to terminate the suspended sandbox: {terminate_error}"
+        ));
+    }
+    if let Some(discard_error) = discard_error {
+        message.push_str(&format!(
+            "; additionally failed to stop and discard guarded WPR: {discard_error}"
+        ));
+    }
+    Err(message)
 }
 
 impl Default for AppContainerScriptRunner {
@@ -1294,30 +1508,15 @@ impl AppContainerScriptRunner {
             self.app_container_sid,
             logger,
         );
-
-        // Record what network policy was actually installed, on both the
-        // success and failure arms — "the policy I tried to install and failed"
-        // is as auditable a fact as a successful one.
         if logger.has_diagnostic_sink() {
-            // `firewall_applied` reflects the actual apply outcome (rules
-            // installed), NOT the policy plan. Deriving the audit field from
-            // the plan would report `firewall_applied=true` on a
-            // partially-failed install with zero rules on-device — an operator
-            // reading the record would see a green enforcement claim on a run
-            // whose enforcement never landed.
             let firewall_applied = network_manager.firewall_applied();
-            // Aggregate status: a proxy-only success with no firewall step
-            // remains a success; a firewall-plan run whose install failed is a
-            // failure regardless of `network_result` (the caller may have kept
-            // the run going after a proxy-only failure). Both terms must be
-            // green for the record to be green.
             let plan = NetworkManager::describe_policy(&request.policy);
             let firewall_ok = !plan.rules_will_be_installed
                 || matches!(network_manager.firewall_apply_ok(), Some(true));
-            let network_status = if network_result.is_ok() && firewall_ok {
-                OperationStatus::Success.as_str()
+            let status = if network_result.is_ok() && firewall_ok {
+                OperationStatus::Success
             } else {
-                OperationStatus::Failure.as_str()
+                OperationStatus::Failure
             };
             let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
                 .str("backend", ContainmentBackend::ProcessContainer.wire_name())
@@ -1335,7 +1534,7 @@ impl AppContainerScriptRunner {
                     "proxy_port",
                     network_manager
                         .proxy_address()
-                        .map(|a| a.port as u64)
+                        .map(|address| address.port as u64)
                         .unwrap_or(0),
                 )
                 .u64(
@@ -1343,7 +1542,7 @@ impl AppContainerScriptRunner {
                     network_manager.rule_count() as u64,
                 )
                 .bool("firewall_applied", firewall_applied)
-                .str("status", network_status);
+                .str("status", status.as_str());
             logger.log_audit_event(&record);
         }
         if wxc_common::telemetry::is_active() {
@@ -1353,7 +1552,7 @@ impl AppContainerScriptRunner {
                 request.policy.default_network_policy.as_str(),
                 network_manager
                     .proxy_address()
-                    .map(|a| a.port as u64)
+                    .map(|address| address.port as u64)
                     .unwrap_or(0),
             );
         }
@@ -1375,16 +1574,8 @@ impl AppContainerScriptRunner {
 
     /// Tear down the per-run firewall and filesystem policy. Idempotent at the
     /// manager level; called once after the child exits.
-    ///
-    /// This path can run after network policy was installed but before the
-    /// child process was created, so cleanup failures must remain observable.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
         let network = prepared.network_manager.stop_all(!preserve_policy, logger);
-        // BFS removal is only attempted when we asked for it; the manager
-        // reports back whether the removal actually landed. Capture the
-        // per-call result so a requested-but-failed removal can downgrade the
-        // aggregate status to `failure`, instead of being silently discarded
-        // and reported as a clean teardown.
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
             && !preserve_policy;
@@ -1402,10 +1593,6 @@ impl AppContainerScriptRunner {
         if logger.has_diagnostic_sink() {
             let mut record = AuditEvent::new(AuditEventName::SandboxTornDown)
                 .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-                // The AppContainer profile name is the caller's `containerId`,
-                // i.e. a config value — sanitize identically to the successful
-                // teardown path so caller-supplied non-opaque ids can't reach a
-                // record from the early-failure teardown either.
                 .str("identity", sanitize_identity(&self.app_container_name))
                 .str("tier", self.tier_str())
                 .str("status", status.as_str())
@@ -1421,35 +1608,114 @@ impl AppContainerScriptRunner {
             logger.log_audit_event(&record);
         }
         if wxc_common::telemetry::is_active() {
-            let released_resources = format_released_resources(
-                network.rules_removed,
-                bfs_removed,
-                network.proxy_stopped,
-            );
             wxc_common::telemetry::log_sandbox_torn_down(
                 sanitize_identity(&self.app_container_name),
                 status.as_str(),
-                &released_resources,
+                &format_released_resources(
+                    network.rules_removed,
+                    bfs_removed,
+                    network.proxy_stopped,
+                ),
             );
         }
     }
 
-    /// The isolation tier this runner implements, as
-    /// [`crate::fallback_detector::IsolationTier::as_str`].
     fn tier_str(&self) -> &'static str {
         self.filesystem_mode.isolation_tier().as_str()
     }
 }
 
+fn format_released_resources(
+    firewall_rules_removed: usize,
+    bfs_removed: bool,
+    proxy_stopped: bool,
+) -> String {
+    format!(
+        "firewall_rules_removed={firewall_rules_removed},bfs_removed={bfs_removed},\
+         proxy_stopped={proxy_stopped},container_released=false"
+    )
+}
+
+fn appcontainer_teardown_status_with_bfs(
+    preserve_policy: bool,
+    firewall_removal_ok: bool,
+    bfs_requested: bool,
+    bfs_removed: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if preserve_policy {
+        return (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        );
+    }
+    if firewall_removal_ok && (!bfs_requested || bfs_removed) {
+        (TeardownStatus::Success, None)
+    } else {
+        (TeardownStatus::Failure, None)
+    }
+}
+
 impl SandboxBackend for AppContainerScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        // AppContainer naturally enforces host-loopback deny. Advertise the
+        // field so shared validation accepts that default posture; `validate`
+        // below rejects the unsupported allow value.
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request.policy.capture_denials.is_some() {
+        validate_network_policy_support(request, self.network_policy_support())?;
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
+            && !allows_network_egress(&request.policy)
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.default='allow' cannot be combined with denied network egress \
+                 on the AppContainer fallback because privateNetworkClientServer grants \
+                 bidirectional private-network access",
+            ));
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| {
+                ingress.host_loopback == wxc_common::models::NetworkAction::Allow
+            })
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.hostLoopback='allow' is not supported by the AppContainer fallback",
+            ));
+        }
+        // AppContainer fallback tiers have no native capture path, so retainEtl
+        // is honored only by a guarded-WPR provider that can transfer the ETL.
+        validate_retain_etl_supported(
+            request
+                .policy
+                .capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl),
+            self.guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer()),
+            false,
+        )?;
+        if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
                 ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
             });
         }
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+        if !request.policy.denied_paths.is_empty()
+            && self.filesystem_mode != FilesystemMode::Dacl
+            && !self.denied_paths_enforced_externally
+        {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
@@ -1478,7 +1744,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         // Pipes → capture pipes the caller drives; Inherit → the child inherits
         // the binary's own std handles / console (a TTY when the binary has one).
         let capture = stdio == StdioMode::Pipes;
-        let child = match self.spawn_suspended(request, logger, capture) {
+        let mut child = match self.spawn_suspended(request, logger, capture) {
             Ok(c) => c,
             Err(e) => {
                 self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
@@ -1530,18 +1796,23 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
-    teardown_done: bool,
-    /// Sandbox identity join key — the AppContainer profile name MXC created
-    /// this sandbox under. Carried so the audit records emitted from `wait()`,
-    /// `kill()`, and `run_teardown()` can be joined to the OS-side records
-    /// without recomputing it.
+    teardown_result: Option<Result<(), String>>,
+    /// Live guarded WPR capture session, moved from the `SpawnedChild`.
+    /// Stopped and analyzed in `run_teardown` once the child has exited and
+    /// been reaped.
+    capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
+    /// is `Some`.
+    capture_output_path: Option<std::path::PathBuf>,
+    /// Caller-visible ETL destination when retention is requested.
+    capture_etl_path: Option<std::path::PathBuf>,
+    /// Exit code of the child, recorded by `wait` before teardown so the
+    /// denials summary can carry it. `None` on the `Drop`/early-exit path.
+    last_exit_code: Option<i32>,
+    /// Structured output published after capture teardown succeeds.
+    output_metadata: Option<SandboxOutputMetadata>,
     identity: String,
-    /// The isolation tier this handle is running under, as
-    /// [`crate::fallback_detector::IsolationTier::as_str`].
     tier: &'static str,
-    /// Detached clone of the caller's diagnostic sinks, so audit records emitted
-    /// from `wait()` / `Drop` (neither of which receives a `Logger`) are
-    /// actually observable. See [`Logger::clone_diagnostic_sink`].
     audit_logger: Logger,
 }
 
@@ -1579,7 +1850,6 @@ impl AppContainerSandboxProcess {
         let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
         let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
         let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
-        let tier = filesystem_mode.isolation_tier().as_str();
         Self {
             process,
             _thread: thread,
@@ -1594,17 +1864,18 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
-            teardown_done: false,
-            // The AppContainer profile name is the caller's `containerId`, i.e.
-            // a config value — sanitize before it can reach a record.
+            teardown_result: None,
+            capture_session: child.capture_session.take(),
+            capture_output_path: child.capture_output_path.take(),
+            capture_etl_path: child.capture_etl_path.take(),
+            last_exit_code: None,
+            output_metadata: None,
             identity: sanitize_identity(&identity).to_string(),
-            tier,
+            tier: filesystem_mode.isolation_tier().as_str(),
             audit_logger: logger.clone_diagnostic_sink(),
         }
     }
 
-    /// Start an audit record pre-populated with this handle's attribution
-    /// (backend, identity, tier, pid) so no call site can forget one of them.
     fn audit(&self, name: AuditEventName) -> AuditEvent {
         AuditEvent::new(name)
             .str("backend", ContainmentBackend::ProcessContainer.wire_name())
@@ -1613,31 +1884,36 @@ impl AppContainerSandboxProcess {
             .u64("pid", self.pid as u64)
     }
 
-    /// Whether an audit record built here would reach a sink. Checked before
-    /// building one so a run with no diagnostic sink pays nothing.
     fn audit_enabled(&self) -> bool {
         self.audit_logger.has_diagnostic_sink()
     }
 
-    fn run_teardown(&mut self) {
-        if self.teardown_done {
-            return;
+    fn record_kill_failure(&mut self, error: &windows::core::Error) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::KillFailed(
+                KillMethod::TerminateJobObject.as_str(),
+                error.code().0,
+            ),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessKillFailed)
+                .str("kill_method", KillMethod::TerminateJobObject.as_str())
+                .i64("error_code", error.code().0 as i64);
+            self.audit_logger.log_audit_event(&record);
         }
-        self.teardown_done = true;
-        // Reuse the sink-preserving audit logger for the firewall/BFS
-        // cleanup calls below, not a throwaway buffer-only logger: partial
-        // cleanup warnings from `stop_all`/`remove_configuration` are
-        // real diagnostics and must reach the same file/pipe sinks as the
-        // structured `SandboxTornDown` record emitted at the end of this
-        // function, not be silently dropped with the buffer.
+    }
+
+    fn run_teardown(&mut self, allow_trace_transfer: bool) -> std::io::Result<()> {
+        if let Some(result) = &self.teardown_result {
+            return result.clone().map_err(std::io::Error::other);
+        }
         let network = self
             .prepared
             .network_manager
             .stop_all(!self.preserve_policy, &mut self.audit_logger);
-        // Whether BFS removal was actually requested this teardown, vs whether
-        // it landed. The two used to be conflated: `bfs_removed` was inferred
-        // from `filesystem_mode` alone, so a failed `remove_configuration`
-        // still recorded `bfs_removed=true` and did not affect `status`.
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
             && !self.preserve_policy;
@@ -1649,12 +1925,40 @@ impl AppContainerSandboxProcess {
             false
         };
 
-        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+        // Stop and analyze the guarded WPR capture now that the child has
+        // exited and been reaped (both `wait` and `Drop` kill + reap before
+        // calling this). The shared finalizer owns every analysis-vs-retention
+        // state transition (JSON write, metadata success/error, retention
+        // failure surfacing) so this legacy tier and the BaseContainer guarded
+        // tier cannot drift.
+        let result: std::io::Result<()> = if let Some(mut session) = self.capture_session.take() {
+            let output_path = self.capture_output_path.take();
+            let etl_path = self
+                .capture_etl_path
+                .take()
+                .filter(|_| allow_trace_transfer);
+            let exit_code = self.last_exit_code.unwrap_or(-1);
+            let stop = match etl_path.as_deref() {
+                Some(destination) => GuardedStop::AnalyzeAndRetain { destination },
+                None => GuardedStop::AnalyzeOnly,
+            };
+            let finalization =
+                finalize_guarded_capture(session.as_mut(), output_path.as_deref(), stop, exit_code);
+            self.output_metadata = finalization.metadata;
+            finalization.result.map_err(std::io::Error::other)
+        } else {
+            Ok(())
+        };
+        let result = result.map_err(|error| error.to_string());
+        let (mut status, skip_reason) = appcontainer_teardown_status_with_bfs(
             self.preserve_policy,
             network.firewall_removal_ok,
             bfs_requested,
             bfs_removed,
         );
+        if result.is_err() {
+            status = TeardownStatus::Failure;
+        }
         if self.audit_enabled() {
             let mut record = self
                 .audit(AuditEventName::SandboxTornDown)
@@ -1664,80 +1968,47 @@ impl AppContainerSandboxProcess {
                 .bool("bfs_removed", bfs_removed)
                 .bool("proxy_stopped", network.proxy_stopped)
                 .bool("preserve_policy", self.preserve_policy)
-                // The AppContainer tiers delete no profile here (the runner's own
-                // `Drop` owns profile deletion), so this handle releases no
-                // container.
                 .bool("container_released", false);
             if let Some(reason) = skip_reason {
                 record = record.str("skip_reason", reason.as_str());
             }
             self.audit_logger.log_audit_event(&record);
         }
-        let released_resources = if wxc_common::telemetry::is_active() {
-            format_released_resources(network.rules_removed, bfs_removed, network.proxy_stopped)
-        } else {
-            String::new()
+        if wxc_common::telemetry::is_active() {
+            wxc_common::telemetry::log_sandbox_torn_down(
+                &self.identity,
+                status.as_str(),
+                &format_released_resources(
+                    network.rules_removed,
+                    bfs_removed,
+                    network.proxy_stopped,
+                ),
+            );
+        }
+        self.teardown_result = Some(result.clone());
+        result.map_err(std::io::Error::other)
+    }
+
+    fn release_guarded_capture_after_termination_failure(&mut self) {
+        let Some(session) = self.capture_session.take() else {
+            return;
         };
-        wxc_common::telemetry::log_sandbox_torn_down(
-            &self.identity,
-            status.as_str(),
-            &released_resources,
-        );
-    }
-}
-
-fn format_released_resources(
-    firewall_rules_removed: usize,
-    bfs_removed: bool,
-    proxy_stopped: bool,
-) -> String {
-    format!(
-        "firewall_rules_removed={firewall_rules_removed},bfs_removed={bfs_removed},proxy_stopped={proxy_stopped},container_released=false"
-    )
-}
-
-/// Decide the audit `status` / `skip_reason` for an AppContainer teardown.
-///
-/// Pure so the mapping is unit-testable without launching a sandbox: the
-/// emission site in `run_teardown` only supplies the two facts it already has.
-///
-/// `preserve_policy` is a deliberate request to leave enforcement in place, so
-/// it is `skipped` rather than a success or a failure — the record must not
-/// claim a release that was never attempted.
-/// Extended teardown-status mapping that additionally accounts for the BFS
-/// removal outcome. A requested-but-failed BFS removal downgrades the aggregate
-/// status to `failure`, so the audit stream cannot show a green
-/// `SandboxTornDown` on a run that left the BFS configuration behind.
-///
-/// `bfs_requested` and `bfs_removed` are independent facts: `bfs_removed` is
-/// meaningful only when `bfs_requested` is true. A caller that did not request
-/// BFS removal (either not the BFS tier, or `preserve_policy`) passes
-/// `bfs_requested = false` and the BFS outcome does not affect the status.
-///
-/// `preserve_policy` is a deliberate request to leave enforcement in place, so
-/// it is `skipped` rather than a success or a failure — the record must not
-/// claim a release that was never attempted.
-fn appcontainer_teardown_status_with_bfs(
-    preserve_policy: bool,
-    firewall_removal_ok: bool,
-    bfs_requested: bool,
-    bfs_removed: bool,
-) -> (TeardownStatus, Option<TeardownSkipReason>) {
-    if preserve_policy {
-        return (
-            TeardownStatus::Skipped,
-            Some(TeardownSkipReason::PreservePolicy),
-        );
-    }
-    let bfs_ok = !bfs_requested || bfs_removed;
-    if firewall_removal_ok && bfs_ok {
-        (TeardownStatus::Success, None)
-    } else {
-        (TeardownStatus::Failure, None)
+        // The trait contract keeps this call blocked until the elevated
+        // guardian has released its duplicate job handle, even when discard
+        // itself fails. Only then may Drop return and release enforcement.
+        if let Err(error) = crate::guarded_capture::release_after_termination_failure(session) {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to discard guarded WPR capture after sandbox termination failure: {error}"
+            ));
+        }
     }
 }
 
 impl SandboxProcess for AppContainerSandboxProcess {
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_ref()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.stdin)
     }
@@ -1779,25 +2050,32 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        //
-        if let Err(error) = self.job.terminate(u32::MAX) {
-            wxc_common::telemetry::log_process_event(
-                sanitize_identity(&self.identity),
-                self.pid,
-                wxc_common::telemetry::ProcessEvent::KillFailed(
-                    KillMethod::TerminateJobObject.as_str(),
-                    error.code().0,
-                ),
-            );
-            if self.audit_enabled() {
-                let record = self
-                    .audit(AuditEventName::ProcessKillFailed)
-                    .str("kill_method", KillMethod::TerminateJobObject.as_str())
-                    .i64("error_code", error.code().0 as i64);
-                self.audit_logger.log_audit_event(&record);
-            }
+        if let Err(error) = self.job.terminate_raw(u32::MAX) {
+            self.record_kill_failure(&error);
+            return Err(std::io::Error::other(format!(
+                "TerminateJobObject: {error}"
+            )));
         }
-        Ok(())
+        if self.capture_session.is_some() {
+            // Guarded-WPR capture needs strict drain certainty before the trace
+            // is stopped/discarded; a failure to drain is a hard error here.
+            return self
+                .job
+                .wait_for_empty()
+                .map_err(|error| std::io::Error::other(error.to_string()));
+        }
+        // Ordinary run: terminate the tree, but downgrade a slow drain to a
+        // warning so it does not fail an otherwise valid result.
+        match self.job.wait_for_empty() {
+            Err(drain_warning) => {
+                capture_output::write_stderr_line_best_effort(format_args!(
+                    "sandbox job did not fully drain within the teardown window (continuing): \
+                     {drain_warning}"
+                ));
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1818,16 +2096,8 @@ impl SandboxProcess for AppContainerSandboxProcess {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
                     let exit_code = code as i32;
-                    // Always emit exactly one terminal outcome record here,
-                    // even when an external caller cancelled via `kill()`
-                    // before this natural exit was observed: a prior design
-                    // suppressed `ProcessExited` whenever a kill had been
-                    // requested, which left a successful proactive
-                    // cancellation (and a failed kill followed by a natural
-                    // exit) with no process outcome record at all, violating
-                    // the process-outcome contract (M-ETW-1).
                     wxc_common::telemetry::log_process_event(
-                        sanitize_identity(&self.identity),
+                        &self.identity,
                         self.pid,
                         wxc_common::telemetry::ProcessEvent::Exited(exit_code),
                     );
@@ -1842,7 +2112,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
             }
             WAIT_TIMEOUT => {
                 wxc_common::telemetry::log_process_event(
-                    sanitize_identity(&self.identity),
+                    &self.identity,
                     self.pid,
                     wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
                 );
@@ -1868,14 +2138,20 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // (immediate once it has exited) before releasing the pipe drains — and
         // killing the tree closes the descendant's pipe write-ends, so the drains
         // can finish.
-        let _ = self.kill();
-        unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        let termination_result = self.kill();
+        if termination_result.is_ok() {
+            unsafe {
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            }
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
-        self.run_teardown();
-        result
+        termination_result?;
+        // Record the child's exit code so `run_teardown` can stamp it into the
+        // denials summary. On a timeout / wait failure there is no exit code.
+        self.last_exit_code = result.as_ref().ok().copied();
+        let teardown_result = self.run_teardown(true);
+        capture_output::combine_process_and_teardown_results(result, teardown_result)
     }
 }
 
@@ -1884,16 +2160,28 @@ impl Drop for AppContainerSandboxProcess {
         // Kill the tree and reap before tearing down firewall/filesystem
         // policy, so an abandoned-but-running sandbox cannot outlive its
         // enforcement (or leak as an orphan). `kill()` terminates the job.
-        let _ = self.kill();
+        if let Err(error) = self.kill() {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to terminate sandbox job during drop: {error}"
+            ));
+            self.release_guarded_capture_after_termination_failure();
+            return;
+        }
         unsafe {
             let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
-        self.run_teardown();
+        if let Err(error) = self.run_teardown(false) {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "captureDenials teardown failed during drop: {error}"
+            ));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use wxc_common::audit::{TeardownSkipReason, TeardownStatus};
+
     #[test]
     fn released_resources_format_is_stable() {
         assert_eq!(
@@ -1902,84 +2190,39 @@ mod tests {
         );
     }
 
-    /// `preserve_policy` is an explicit request to leave enforcement in place,
-    /// so it must be reported as `skipped` — never as a green `success` that
-    /// implies a release the code never attempted, and never as a `failure`.
     #[test]
     fn teardown_status_reports_preserve_policy_as_skipped() {
-        use super::appcontainer_teardown_status_with_bfs;
-        use wxc_common::audit::{TeardownSkipReason, TeardownStatus};
-
         for firewall_ok in [true, false] {
-            for (bfs_req, bfs_ok) in [(false, false), (true, true), (true, false)] {
-                let (status, reason) =
-                    appcontainer_teardown_status_with_bfs(true, firewall_ok, bfs_req, bfs_ok);
-                assert_eq!(status, TeardownStatus::Skipped);
-                assert_eq!(reason, Some(TeardownSkipReason::PreservePolicy));
+            for (bfs_requested, bfs_ok) in [(false, false), (true, true), (true, false)] {
+                assert_eq!(
+                    super::appcontainer_teardown_status_with_bfs(
+                        true,
+                        firewall_ok,
+                        bfs_requested,
+                        bfs_ok,
+                    ),
+                    (
+                        TeardownStatus::Skipped,
+                        Some(TeardownSkipReason::PreservePolicy)
+                    )
+                );
             }
         }
     }
 
-    /// A partially-failed firewall removal must be distinguishable from a clean
-    /// one — that distinction is the whole reason `stop_all` stopped discarding
-    /// its `Result`.
     #[test]
-    fn teardown_status_distinguishes_failed_firewall_removal() {
-        use super::appcontainer_teardown_status_with_bfs;
-        use wxc_common::audit::TeardownStatus;
-
+    fn teardown_status_distinguishes_cleanup_failures() {
         assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, true, false, false),
+            super::appcontainer_teardown_status_with_bfs(false, true, false, false),
             (TeardownStatus::Success, None)
         );
         assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, false, false, false),
-            (TeardownStatus::Failure, None)
-        );
-    }
-
-    /// A failed BFS removal must downgrade the aggregate status to `failure`,
-    /// so a reader cannot look at a green `SandboxTornDown` on a run whose BFS
-    /// configuration was still installed at teardown. Firewall-clean case:
-    /// only the BFS outcome makes the difference.
-    #[test]
-    fn teardown_status_reports_failed_bfs_removal_as_failure() {
-        use super::appcontainer_teardown_status_with_bfs;
-        use wxc_common::audit::TeardownStatus;
-
-        // Requested + landed → success.
-        assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, true, true, true),
-            (TeardownStatus::Success, None)
-        );
-        // Requested + failed → failure, regardless of the firewall outcome.
-        assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, true, true, false),
+            super::appcontainer_teardown_status_with_bfs(false, false, false, false),
             (TeardownStatus::Failure, None)
         );
         assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, false, true, false),
+            super::appcontainer_teardown_status_with_bfs(false, true, true, false),
             (TeardownStatus::Failure, None)
-        );
-        // Not requested → does not affect status.
-        assert_eq!(
-            appcontainer_teardown_status_with_bfs(false, true, false, false),
-            (TeardownStatus::Success, None)
-        );
-    }
-
-    #[test]
-    fn filesystem_mode_maps_to_exactly_one_tier() {
-        use super::FilesystemMode;
-        use crate::fallback_detector::IsolationTier;
-
-        assert_eq!(
-            FilesystemMode::Bfs.isolation_tier(),
-            IsolationTier::AppContainerBfs
-        );
-        assert_eq!(
-            FilesystemMode::Dacl.isolation_tier(),
-            IsolationTier::AppContainerDacl
         );
     }
 
@@ -2247,10 +2490,85 @@ mod tests {
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use super::{
-        AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+        create_process_failure, AppContainerScriptRunner, FilesystemMode,
+        CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
     };
+    use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
+    use learning_mode_core::AnalysisResult;
+    use std::sync::Arc;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED};
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
+
+    /// A fake [`GuardedCaptureFactory`] used only to exercise `validate()`'s
+    /// factory-presence gate — its `start` is never called by these tests.
+    struct FakeGuardedCaptureFactory;
+
+    impl GuardedCaptureFactory for FakeGuardedCaptureFactory {
+        fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
+            struct FakeSession;
+            impl GuardedCaptureSession for FakeSession {
+                fn attach_process_tree(
+                    &mut self,
+                    _job_handle: usize,
+                    _root_process_handle: usize,
+                ) -> Result<(), String> {
+                    Ok(())
+                }
+
+                fn discard(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+
+                fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+                    Ok(AnalysisResult::complete(Vec::new()))
+                }
+
+                fn stop_analyzed_with_trace(
+                    &mut self,
+                    trace_destination: &std::path::Path,
+                ) -> Result<crate::guarded_capture::AnalyzedTrace, String> {
+                    std::fs::write(trace_destination, b"fake etl")
+                        .map_err(|error| error.to_string())?;
+                    Ok(crate::guarded_capture::AnalyzedTrace {
+                        analysis: AnalysisResult::complete(Vec::new()),
+                        trace_retention: Ok(()),
+                    })
+                }
+            }
+            Ok(Box::new(FakeSession))
+        }
+    }
+
+    #[test]
+    fn appcontainer_policy_block_uses_launch_diagnostic() {
+        let err = windows_core::Error::from_hresult(ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult());
+        let mapped = create_process_failure(
+            &err,
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
+            &[],
+            r"C:\work",
+        );
+        let message = mapped.to_string();
+
+        assert!(message.contains("IT-managed policy rule"));
+        assert!(message.contains("1260"));
+        assert!(message.contains("system administrator"));
+        assert!(message.contains(r"working directory: C:\work"));
+        assert!(!message.contains("readonlyPaths"));
+    }
+
+    #[test]
+    fn appcontainer_other_win32_error_preserves_create_process_message() {
+        let err = windows_core::Error::from_hresult(ERROR_CALL_NOT_IMPLEMENTED.to_hresult());
+        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work");
+        let message = mapped.to_string();
+
+        assert!(message.contains("CreateProcessW failed"));
+        assert!(message.contains(r"working directory: C:\work"));
+        assert!(!message.contains("BaseContainer"));
+        assert!(!message.contains("Experimental_CreateProcessInSandbox"));
+    }
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
@@ -2278,6 +2596,157 @@ mod tests {
             runner.validate(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
         );
+    }
+
+    #[test]
+    fn validate_runner_accepts_dispatcher_enforced_denied_paths_in_bfs_mode() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs)
+            .with_external_denied_paths();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        assert!(runner.validate(&request).is_ok());
+    }
+
+    /// Records the order of guarded-capture callbacks so orchestration tests can
+    /// assert the security-sensitive teardown ordering explicitly.
+    struct RecordingSession {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        attach_result: Result<(), String>,
+        discard_result: Result<(), String>,
+    }
+
+    impl GuardedCaptureSession for RecordingSession {
+        fn attach_process_tree(
+            &mut self,
+            _job_handle: usize,
+            _root_process_handle: usize,
+        ) -> Result<(), String> {
+            self.events.lock().unwrap().push("attach".to_string());
+            self.attach_result.clone()
+        }
+
+        fn discard(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("discard".to_string());
+            self.discard_result.clone()
+        }
+
+        fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push("stop_analyzed".to_string());
+            Ok(AnalysisResult::complete(Vec::new()))
+        }
+
+        fn stop_analyzed_with_trace(
+            &mut self,
+            _trace_destination: &std::path::Path,
+        ) -> Result<crate::guarded_capture::AnalyzedTrace, String> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn attach_failure_terminates_job_before_discarding_and_composes_message() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Err("discard boom".to_string()),
+        });
+        let events_for_kill = Arc::clone(&events);
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            events_for_kill
+                .lock()
+                .unwrap()
+                .push("terminate".to_string());
+            Some("terminate boom".to_string())
+        }) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        // Ordering is load-bearing: attach is attempted, then the job is
+        // terminated, and only then is the session discarded — nothing may keep
+        // running once the trace is about to be torn down.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "attach".to_string(),
+                "terminate".to_string(),
+                "discard".to_string()
+            ]
+        );
+        // The composed message reports all three failures, terminate before
+        // discard.
+        assert!(error.contains("attach boom"), "got: {error}");
+        let terminate_at = error.find("terminate boom").expect("terminate reported");
+        let discard_at = error.find("discard boom").expect("discard reported");
+        assert!(
+            terminate_at < discard_at,
+            "terminate must be reported before discard: {error}"
+        );
+    }
+
+    #[test]
+    fn attach_failure_reports_only_attach_when_cleanup_succeeds() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Ok(()),
+        });
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || None) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("attach boom"), "got: {error}");
+        assert!(
+            !error.contains("additionally"),
+            "clean cleanup must not append failure suffixes: {error}"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["attach".to_string(), "discard".to_string()]
+        );
+    }
+
+    #[test]
+    fn attach_success_returns_the_live_session_without_cleanup() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+
+        let session = super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            panic!("the job must not be terminated when attach succeeds")
+        })
+        .expect("attach success returns the live session");
+
+        // The live session is returned undisturbed (no discard on success).
+        assert_eq!(*events.lock().unwrap(), vec!["attach".to_string()]);
+        drop(session);
+    }
+
+    #[test]
+    fn discard_after_launch_failure_stops_the_trace_once() {
+        // The resume-failure path abandons an already-started capture via
+        // `discard`. Model that discard contract directly: it must be invoked
+        // exactly once to stop the trace, with no analysis attempted.
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut session: Box<dyn GuardedCaptureSession> = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+        let _ = session.discard();
+        assert_eq!(*events.lock().unwrap(), vec!["discard".to_string()]);
     }
 
     #[test]
@@ -2312,6 +2781,122 @@ mod tests {
     }
 
     #[test]
+    fn validate_runner_rejects_proxy_peer_identity() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not drop the BaseContainer-only proxy identity");
+        assert!(error.error_message.contains("not supported"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_host_loopback() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept host-loopback access");
+        assert!(error.error_message.contains("network.ingress.hostLoopback"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_directional_default_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy::default());
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "AppContainer naturally enforces the schema 0.8 default-deny posture"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_ingress_allow_with_egress_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not weaken denied private-network egress");
+        assert!(error
+            .error_message
+            .contains("privateNetworkClientServer grants bidirectional"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_ingress_and_egress_allow() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "bidirectional private-network access is compatible with allow defaults"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_egress_allow_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            allow: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress allow rules");
+        assert!(error.error_message.contains("allow/deny rules"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_egress_deny_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            deny: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress deny rules");
+        assert!(error.error_message.contains("allow/deny rules"));
+    }
+
+    #[test]
     fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();
@@ -2327,190 +2912,64 @@ mod tests {
         );
     }
 
-    /// Runner-level end-to-end tests: a real Win32 process, a real job
-    /// object, and a real file-backed `Logger`, driven through
-    /// `AppContainerSandboxProcess::wait`/`kill`/`Drop` exactly as
-    /// `wxc-exec` does. These exercise the actual runner-to-audit-log wiring
-    /// (unit tests elsewhere only exercise the pure status-computation
-    /// helpers in isolation), so a real regression in that wiring — e.g. the
-    /// `ProcessExited` suppression bug fixed alongside these tests — shows up
-    /// as a missing line in a real log file, not just a wrong argument to a
-    /// mocked call.
-    mod runner_e2e {
-        use super::super::*;
-        use std::io::Read as _;
-        use std::os::windows::io::IntoRawHandle;
-        use std::process::Command;
-        use windows::Win32::Foundation::HANDLE;
-        use wxc_common::process_util::{OwnedHandle, SendOwnedHandle};
-        use wxc_common::sandbox_process::SandboxProcess;
+    #[test]
+    fn validate_runner_accepts_capture_denials_with_guarded_factory() {
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
 
-        /// Spawn a real, ordinary (non-AppContainer) child process for the
-        /// test to drive through the runner's real `wait`/`kill`/
-        /// `run_teardown` logic. Returns the process's raw handle — now
-        /// owned by the caller, since `Command`'s `Child` is consumed via
-        /// `IntoRawHandle` so nothing double-closes it — and its OS pid.
-        fn spawn_test_child(args: &[&str]) -> (SendOwnedHandle, u32) {
-            let child = Command::new("cmd.exe")
-                .args(args)
-                .spawn()
-                .expect("spawn cmd.exe for runner e2e test");
-            let pid = child.id();
-            let raw = child.into_raw_handle();
-            let mut owned = OwnedHandle::new(HANDLE(raw));
-            (SendOwnedHandle::take(&mut owned), pid)
-        }
+        assert!(
+            runner.validate(&request).is_ok(),
+            "a runner explicitly configured with a guarded capture factory must accept \
+             captureDenials"
+        );
+    }
 
-        /// Build a minimal, real `AppContainerSandboxProcess` around
-        /// `process`/`pid`: a real `UiJobObject` assigned to the process, an
-        /// unconfigured (no-op) `NetworkManager`/`FileSystemBfsManager` pair
-        /// (`FilesystemMode::Dacl` skips the BFS path entirely, and the
-        /// default `NetworkManager` has no firewall rules to remove), and
-        /// `logger`'s diagnostic sinks — so audit records land wherever the
-        /// caller attached a file sink on `logger`.
-        fn make_test_process(
-            process: SendOwnedHandle,
-            pid: u32,
-            timeout_ms: u32,
-            logger: &Logger,
-        ) -> AppContainerSandboxProcess {
-            let job = UiJobObject::new().expect("create job object");
-            job.assign_process(process.get())
-                .expect("assign process to job");
-            AppContainerSandboxProcess {
-                process,
-                _thread: SendOwnedHandle::take(&mut OwnedHandle::new(HANDLE::default())),
-                job,
-                pid,
-                stdin: None,
-                stdout: None,
-                stderr: None,
-                stdout_canceller: None,
-                stderr_canceller: None,
-                prepared: Prepared {
-                    network_manager: crate::network_manager::NetworkManager::new(),
-                    bfs_manager: crate::filesystem_bfs::FileSystemBfsManager::new(
-                        "wxc-e2e-test".to_string(),
-                        None,
-                    ),
-                },
-                filesystem_mode: FilesystemMode::Dacl,
-                preserve_policy: false,
-                timeout_ms,
-                teardown_done: false,
-                identity: "wxc-e2e-test".to_string(),
-                tier: "app_container_dacl",
-                audit_logger: logger.clone_diagnostic_sink(),
+    #[test]
+    fn validate_runner_rejects_etl_retention_with_guarded_capture() {
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("the configured guarded provider cannot transfer ETL");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
+        );
+    }
+
+    #[test]
+    fn validate_runner_allows_guarded_etl_when_provider_supports_transfer() {
+        struct RetainingGuardedCaptureFactory;
+        impl GuardedCaptureFactory for RetainingGuardedCaptureFactory {
+            fn allows_trace_transfer(&self) -> bool {
+                true
+            }
+
+            fn start(&self, owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
+                FakeGuardedCaptureFactory.start(owner_pid)
             }
         }
 
-        fn read_audit_file(path: &std::path::Path) -> String {
-            let mut contents = String::new();
-            std::fs::File::open(path)
-                .expect("open audit log file")
-                .read_to_string(&mut contents)
-                .expect("read audit log file");
-            contents
-        }
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(RetainingGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
 
-        /// Unique-per-test log path so parallel test threads never share a
-        /// file sink.
-        fn test_log_path(name: &str) -> std::path::PathBuf {
-            std::env::temp_dir().join(format!(
-                "wxc-e2e-{name}-{}-{:?}.log",
-                std::process::id(),
-                std::thread::current().id()
-            ))
-        }
-
-        #[test]
-        fn natural_exit_emits_process_exited_and_torn_down_records() {
-            let log_path = test_log_path("natural-exit");
-            let _ = std::fs::remove_file(&log_path);
-            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-            logger
-                .enable_file_sink(&log_path)
-                .expect("enable file sink");
-
-            let (process, pid) = spawn_test_child(&["/C", "exit 7"]);
-            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
-
-            let exit_code = sandbox.wait().expect("natural exit should succeed");
-            assert_eq!(exit_code, 7);
-            drop(sandbox);
-
-            let audit = read_audit_file(&log_path);
-            assert!(
-                audit.contains(r#""event":"mxc.ProcessExited""#),
-                "expected a ProcessExited audit record; got: {audit}"
-            );
-            assert!(
-                audit.contains(r#""exit_code":7"#),
-                "ProcessExited record must carry the real exit code; got: {audit}"
-            );
-            assert!(
-                audit.contains(r#""event":"mxc.SandboxTornDown""#),
-                "expected a SandboxTornDown audit record; got: {audit}"
-            );
-            let _ = std::fs::remove_file(&log_path);
-        }
-
-        #[test]
-        fn proactive_kill_before_natural_exit_still_emits_process_exited() {
-            let log_path = test_log_path("proactive-kill");
-            let _ = std::fs::remove_file(&log_path);
-            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-            logger
-                .enable_file_sink(&log_path)
-                .expect("enable file sink");
-
-            // A process that would otherwise run far longer than this test.
-            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
-            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
-
-            // Simulate an external caller (e.g. an FFI/SDK cancellation)
-            // cancelling before the process would otherwise exit on its own.
-            sandbox.kill().expect("kill should succeed");
-            let exit_code = sandbox
-                .wait()
-                .expect("wait after a successful kill should still resolve");
-            let _ = exit_code;
-            drop(sandbox);
-
-            let audit = read_audit_file(&log_path);
-            assert!(
-                audit.contains(r#""event":"mxc.ProcessExited""#),
-                "a successful proactive cancellation must still leave exactly \
-                 one terminal process-outcome record instead of none; got: {audit}"
-            );
-            let _ = std::fs::remove_file(&log_path);
-        }
-
-        #[test]
-        fn timeout_emits_process_timed_out_record() {
-            let log_path = test_log_path("timeout");
-            let _ = std::fs::remove_file(&log_path);
-            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-            logger
-                .enable_file_sink(&log_path)
-                .expect("enable file sink");
-
-            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
-            // A timeout far shorter than the child's runtime.
-            let mut sandbox = make_test_process(process, pid, 200, &logger);
-
-            let err = sandbox
-                .wait()
-                .expect_err("the child must still be running past the timeout");
-            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-            drop(sandbox);
-
-            let audit = read_audit_file(&log_path);
-            assert!(
-                audit.contains(r#""event":"mxc.ProcessTimedOut""#),
-                "expected a ProcessTimedOut audit record; got: {audit}"
-            );
-            let _ = std::fs::remove_file(&log_path);
-        }
+        runner
+            .validate(&request)
+            .expect("a transfer-capable guarded provider should permit ETL retention");
     }
 }

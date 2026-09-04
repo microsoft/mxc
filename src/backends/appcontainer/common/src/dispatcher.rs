@@ -66,10 +66,12 @@
 //! `#[cfg(target_os = "windows")]`; no inner attribute is needed.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, FilesystemMode};
 use crate::base_container_runner::BaseContainerRunner;
 use crate::fallback_detector::{self, DegradationReason, FallbackError, IsolationTier};
+use crate::guarded_capture::GuardedCaptureFactory;
 use wxc_common::audit::{sanitize_identity, AuditEvent, AuditEventName, EffectiveEnforcementLevel};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
@@ -77,23 +79,11 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::NetworkPolicySupport;
 
-/// Bounded, machine-readable summary of how far the selected tier fell short of
-/// the preferred one. Carried alongside the free-form `warnings` so audit
-/// records never have to parse prose.
-///
-/// This exists because the dispatcher outlives the [`TierDecision`] that
-/// produced it (the decision's `bfscfg_path` is moved into the runner). The
-/// *semantics* — what counts as degraded, and how the reason codes render — live
-/// exactly once, in [`fallback_detector::is_degraded`] and
-/// [`fallback_detector::reason_codes`], which this type delegates to.
 #[derive(Debug, Clone, Default)]
 pub struct Degradation {
-    /// Whether the chosen tier needs host-DACL augmentation to enforce the
-    /// policy. Previously computed by the detector and then dropped on the
-    /// floor by the dispatcher.
     pub needs_dacl_augmentation: bool,
-    /// Bounded reason codes, produced at the detector branches themselves.
     pub reasons: Vec<DegradationReason>,
 }
 
@@ -114,16 +104,6 @@ fn effective_enforcement_level(
     }
 }
 
-fn logging_sinks_active(telemetry_active: bool, diagnostic_active: bool) -> bool {
-    telemetry_active || diagnostic_active
-}
-
-/// Emit `mxc.EnforcementDegraded` when the preferred tier was not selected.
-///
-/// A clean Tier 1 run produces no record, so the stream stays signal-bearing.
-/// Called from both dispatch surfaces (run-to-completion and streaming),
-/// including the streaming spawn-failure arm — a tier was already chosen there,
-/// so the degradation is real even though the spawn did not succeed.
 pub(crate) fn log_enforcement_degraded(
     logger: &mut Logger,
     identity: &str,
@@ -139,11 +119,9 @@ pub(crate) fn log_enforcement_degraded(
     }
     let telemetry_active = wxc_common::telemetry::is_active();
     let diagnostic_active = logger.has_diagnostic_sink();
-    if !logging_sinks_active(telemetry_active, diagnostic_active) {
+    if !telemetry_active && !diagnostic_active {
         return;
     }
-    // Lazy-compute shared fields only when needed. Both telemetry and diagnostic
-    // sinks require these fields, but we skip computation when both sinks are inactive.
     let effective_level = effective_enforcement_level(tier, degradation.needs_dacl_augmentation);
     let reason_codes = fallback_detector::reason_codes(&degradation.reasons);
     if telemetry_active {
@@ -156,24 +134,20 @@ pub(crate) fn log_enforcement_degraded(
             effective_level.as_str(),
         );
     }
-    if !diagnostic_active {
-        return;
+    if diagnostic_active {
+        let record = AuditEvent::new(AuditEventName::EnforcementDegraded)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", sanitize_identity(identity))
+            .str("tier", tier.as_str())
+            .str("effective_enforcement_level", effective_level.as_str())
+            .bool(
+                "needs_dacl_augmentation",
+                degradation.needs_dacl_augmentation,
+            )
+            .str("degradation_reasons", &reason_codes)
+            .u64("degradation_reason_count", degradation.reasons.len() as u64);
+        logger.log_audit_event(&record);
     }
-    let record = AuditEvent::new(AuditEventName::EnforcementDegraded)
-        .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-        // The AppContainer profile name derives from the caller's
-        // `containerId`, i.e. a config value, so it is sanitized on the way in
-        // exactly as the runner-side records do.
-        .str("identity", sanitize_identity(identity))
-        .str("tier", tier.as_str())
-        .str("effective_enforcement_level", effective_level.as_str())
-        .bool(
-            "needs_dacl_augmentation",
-            degradation.needs_dacl_augmentation,
-        )
-        .str("degradation_reasons", &reason_codes)
-        .u64("degradation_reason_count", degradation.reasons.len() as u64);
-    logger.log_audit_event(&record);
 }
 
 /// Result of a successful dispatch decision: a phased handle holding a
@@ -199,15 +173,9 @@ pub struct Dispatched {
     dacl_manager: Option<DaclManager>,
     /// The selected tier, for telemetry.
     pub tier: IsolationTier,
-    /// The sandbox identity (AppContainer profile name) the selected tier will
-    /// run under. Captured at dispatch so the degradation record can name the
-    /// sandbox it describes without reaching back into the request.
     identity: String,
     /// Operator-visible warnings collected during tier selection.
     pub warnings: Vec<String>,
-    /// Bounded, machine-readable degradation facts for the
-    /// `mxc.EnforcementDegraded` audit record. Distinct from `warnings`, which
-    /// is free-form prose that can embed filesystem paths.
     pub degradation: Degradation,
 }
 
@@ -234,13 +202,6 @@ impl Dispatched {
         self.dacl_manager.is_some()
     }
 
-    /// Record `mxc.EnforcementDegraded` when the preferred tier was not
-    /// selected. A no-op for a clean Tier 1 dispatch.
-    ///
-    /// This lives on `Dispatched` rather than inside
-    /// [`dispatch_with_fallback`] because that function takes no `Logger`; the
-    /// caller (which has one) invokes it right where it already logs the
-    /// selected tier and the tier-selection warnings.
     pub fn log_enforcement_degraded(&self, logger: &mut Logger) {
         log_enforcement_degraded(logger, &self.identity, self.tier, &self.degradation);
     }
@@ -409,6 +370,13 @@ enum SelectedBackend {
 }
 
 impl SandboxBackend for SelectedBackend {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        match self {
+            SelectedBackend::BaseContainer(b) => b.network_policy_support(),
+            SelectedBackend::AppContainer(a) => a.network_policy_support(),
+        }
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         match self {
             SelectedBackend::BaseContainer(b) => b.validate(request),
@@ -436,17 +404,8 @@ impl SandboxBackend for SelectedBackend {
     }
 }
 
-/// Everything [`select_backend_with_fallback`] resolves for a request: the
-/// concrete backend, the (already-applied) DACL guard, the selected tier, the
-/// operator-visible warnings, and the bounded degradation facts.
-///
-/// A struct rather than a tuple so the two dispatch surfaces cannot bind the
-/// fields in the wrong order, and so adding a field later is not a
-/// call-site-wide edit.
 struct BackendPlan {
     backend: SelectedBackend,
-    /// When present, this manager has **already applied its ACEs** and MUST
-    /// outlive the run — its `Drop` restores the host ACEs.
     dacl_manager: Option<DaclManager>,
     tier: IsolationTier,
     warnings: Vec<String>,
@@ -456,18 +415,36 @@ struct BackendPlan {
 /// Run tier selection and construct the backend + (optional) DACL guard for
 /// `request`. This is the single source of truth for the tier → (backend, DACL)
 /// mapping, shared by the run-to-completion ([`dispatch_with_fallback`]) and
-/// streaming ([`spawn_with_fallback`]) surfaces.
+/// streaming ([`spawn_with_fallback`]) surfaces (and their capture-aware
+/// counterparts, [`dispatch_with_fallback_and_capture`] /
+/// [`spawn_with_fallback_and_capture`]).
+///
+/// `capture_factory` is the optional guarded-WPR-capture DI boundary (see
+/// [`crate::guarded_capture`]). When `request.policy.capture_denials` is set
+/// and the selected tier is not the native BaseContainer backend:
+/// - `capture_factory` present → the factory is threaded onto the chosen
+///   AppContainer runner via `with_guarded_capture_factory`, so the runner
+///   itself performs the guarded WPR fallback capture (see
+///   `appcontainer_runner`'s `validate`/`spawn`).
+/// - `capture_factory` absent → dispatch fails closed with
+///   [`DispatchError::CaptureDenialsUnsupported`], preserving the legacy
+///   behavior for callers that haven't opted into the fallback (e.g. callers
+///   without a Windows-only `plm` dependency available).
 ///
 /// On success the returned [`DaclManager`], when present, has **already applied
 /// its ACEs** and MUST outlive the run (its `Drop` restores the host ACEs). The
 /// selected [`IsolationTier`] and any tier-selection warnings are returned for
 /// telemetry.
-fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPlan, DispatchError> {
+fn select_backend_with_fallback(
+    request: &ExecutionRequest,
+    capture_factory: Option<&Arc<dyn GuardedCaptureFactory>>,
+) -> Result<BackendPlan, DispatchError> {
     // Keep the established tier fallback behavior for every schema version.
-    // For schema 0.8+, BaseContainerRunner prefers PSEC when available and
+    // BaseContainerRunner prefers PSEC whenever it is available and compatible,
     // otherwise uses the transitional SBOX contract. If neither BaseContainer
     // contract is usable, detection continues to the AppContainer tiers.
     let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
+    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let decision = fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
@@ -475,11 +452,26 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
         prefer_base_container,
         supports_deny_paths,
     )?;
-    if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
+    let guarded_capture_required = request.policy.capture_denials.is_some()
+        && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);
+    if guarded_capture_required && capture_factory.is_none() {
         return Err(DispatchError::CaptureDenialsUnsupported {
             tier: decision.tier,
         });
     }
+    // Only thread the factory into the runner when it will actually be used —
+    // an AppContainer tier honoring `captureDenials`. Reuse the already-derived
+    // `guarded_capture_required` rather than re-deriving the condition from
+    // `capture_denials`: for every AppContainer tier the two are equivalent
+    // (those arms only run when `tier != BaseContainer`), and in the
+    // BaseContainer arm this value is unused. This keeps
+    // T1/T2-without-capture/T3-without-capture identical to their pre-fallback
+    // construction.
+    let capture_factory_for_appcontainer = if guarded_capture_required {
+        capture_factory
+    } else {
+        None
+    };
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
@@ -487,10 +479,14 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
             // here: the detector only routes a denied-paths policy to T1
             // when the OS enforces `fs_deny` natively, so there is nothing
             // for a host DACL to add.
-            (
-                SelectedBackend::BaseContainer(BaseContainerRunner::new()),
-                None,
-            )
+            let runner = if guarded_capture_required {
+                BaseContainerRunner::new().with_guarded_capture_factory(Arc::clone(
+                    capture_factory.expect("guarded capture factory checked above"),
+                ))
+            } else {
+                BaseContainerRunner::new()
+            };
+            (SelectedBackend::BaseContainer(runner), None)
         }
         IsolationTier::AppContainerBfs => {
             // T2 only needs deny ACEs (BFS handles the rest in-runner)
@@ -499,12 +495,11 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
             // common no-deny case skips both costs.
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             if denied.is_empty() {
-                (
-                    SelectedBackend::AppContainer(AppContainerScriptRunner::with_filesystem_mode(
-                        FilesystemMode::Bfs,
-                    )),
-                    None,
-                )
+                let runner = with_capture_factory(
+                    AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs),
+                    capture_factory_for_appcontainer,
+                );
+                (SelectedBackend::AppContainer(runner), None)
             } else {
                 let sid =
                     derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
@@ -512,15 +507,27 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
                 // principal-id lookup.
-                (
-                    SelectedBackend::AppContainer(
-                        AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                            FilesystemMode::Bfs,
-                            sid,
-                        ),
-                    ),
-                    mgr,
-                )
+                //
+                // BFS cannot enforce `deniedPaths` itself. Marking them
+                // "externally enforced" — so the runner's `validate` accepts
+                // them and relies on the host deny-only DACL built above — is a
+                // capture-fallback affordance, gated to `captureDenials`
+                // requests. For non-capture requests we leave the runner
+                // unmarked, so `deniedPaths` on the BFS tier stay unsupported
+                // exactly as before this fallback existed (the runner's
+                // `validate` rejects them) rather than silently broadening BFS
+                // to honor `deniedPaths` via host DACLs.
+                let base_runner = AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
+                    FilesystemMode::Bfs,
+                    sid,
+                );
+                let base_runner = if guarded_capture_required {
+                    base_runner.with_external_denied_paths()
+                } else {
+                    base_runner
+                };
+                let runner = with_capture_factory(base_runner, capture_factory_for_appcontainer);
+                (SelectedBackend::AppContainer(runner), mgr)
             }
         }
         IsolationTier::AppContainerDacl => {
@@ -548,15 +555,14 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
             let mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
-            (
-                SelectedBackend::AppContainer(
-                    AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                        FilesystemMode::Dacl,
-                        sid,
-                    ),
+            let runner = with_capture_factory(
+                AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
+                    FilesystemMode::Dacl,
+                    sid,
                 ),
-                Some(mgr),
-            )
+                capture_factory_for_appcontainer,
+            );
+            (SelectedBackend::AppContainer(runner), Some(mgr))
         }
     };
 
@@ -572,6 +578,20 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
     })
 }
 
+/// Chain [`AppContainerScriptRunner::with_guarded_capture_factory`] onto
+/// `runner` when `capture_factory` is present, otherwise return `runner`
+/// unchanged. Small helper to keep the three tier-selection arms above
+/// symmetric regardless of whether `captureDenials` is in play.
+fn with_capture_factory(
+    runner: AppContainerScriptRunner,
+    capture_factory: Option<&Arc<dyn GuardedCaptureFactory>>,
+) -> AppContainerScriptRunner {
+    match capture_factory {
+        Some(factory) => runner.with_guarded_capture_factory(Arc::clone(factory)),
+        None => runner,
+    }
+}
+
 /// Build a runner with appropriate DACL augmentation for the
 /// BaseContainer-preferred path. The caller is responsible for the explicit
 /// (no-fallback) AppContainer path.
@@ -580,8 +600,28 @@ fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPla
 /// execute and (when applicable) a [`DaclManager`] that has already
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
+///
+/// This is the legacy, capture-unaware entrypoint: `captureDenials` on a
+/// non-BaseContainer tier always fails closed. Use
+/// [`dispatch_with_fallback_and_capture`] to additionally opt into the
+/// guarded-WPR fallback.
 pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
-    let plan = select_backend_with_fallback(request)?;
+    dispatch_with_fallback_and_capture(request, None)
+}
+
+/// Capture-aware counterpart of [`dispatch_with_fallback`]: identical tier
+/// selection, but when `request.policy.capture_denials` is set and the
+/// selected tier is an AppContainer fallback (not the native BaseContainer
+/// backend), `capture_factory` — when present — is threaded onto the chosen
+/// runner via `with_guarded_capture_factory` so the runner performs a guarded
+/// WPR fallback capture instead of failing closed.
+///
+/// Passing `None` is equivalent to [`dispatch_with_fallback`].
+pub fn dispatch_with_fallback_and_capture(
+    request: &ExecutionRequest,
+    capture_factory: Option<Arc<dyn GuardedCaptureFactory>>,
+) -> Result<Dispatched, DispatchError> {
+    let plan = select_backend_with_fallback(request, capture_factory.as_ref())?;
     let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(plan.backend));
     Ok(Dispatched {
         runner,
@@ -605,6 +645,7 @@ pub struct DispatchedProcess {
     /// Operator-visible warnings collected during tier selection.
     pub warnings: Vec<String>,
 }
+
 /// Error from the streaming [`spawn_with_fallback`] path. Kept distinct from a
 /// flat error so the caller can preserve fallback semantics: tier-selection /
 /// DACL failures map to `backend_unavailable` (as the run-to-completion path
@@ -648,10 +689,30 @@ pub enum SpawnDispatchError {
 /// tearing down firewall / BFS enforcement) **before** the [`DaclManager`]
 /// (restoring host ACEs) — the same order the run-to-completion path enforces
 /// via [`Dispatched::into_runner_and_guard`].
+///
+/// This is the legacy, capture-unaware entrypoint: `captureDenials` on a
+/// non-BaseContainer tier always fails closed. Use
+/// [`spawn_with_fallback_and_capture`] to additionally opt into the
+/// guarded-WPR fallback.
 pub fn spawn_with_fallback(
     request: &ExecutionRequest,
     logger: &mut Logger,
     stdio: StdioMode,
+) -> Result<DispatchedProcess, SpawnDispatchError> {
+    spawn_with_fallback_and_capture(request, logger, stdio, None)
+}
+
+/// Capture-aware counterpart of [`spawn_with_fallback`]: identical tier
+/// selection and spawn behavior, but threads `capture_factory` through to
+/// [`select_backend_with_fallback`] so an AppContainer fallback tier can
+/// perform a guarded WPR capture instead of failing closed when
+/// `request.policy.capture_denials` is set. Passing `None` is equivalent to
+/// [`spawn_with_fallback`].
+pub fn spawn_with_fallback_and_capture(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+    capture_factory: Option<Arc<dyn GuardedCaptureFactory>>,
 ) -> Result<DispatchedProcess, SpawnDispatchError> {
     let BackendPlan {
         mut backend,
@@ -659,10 +720,8 @@ pub fn spawn_with_fallback(
         tier,
         warnings,
         degradation,
-    } = select_backend_with_fallback(request).map_err(SpawnDispatchError::Dispatch)?;
-
-    // A tier has been chosen: record any degradation now, so the record exists
-    // whether or not the spawn below succeeds.
+    } = select_backend_with_fallback(request, capture_factory.as_ref())
+        .map_err(SpawnDispatchError::Dispatch)?;
     log_enforcement_degraded(logger, &container_name(request), tier, &degradation);
 
     // Spawn with the DACL ACEs (if any) already applied. On a spawn failure the
@@ -748,6 +807,10 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.wait()
     }
 
+    fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+        self.inner.output_metadata()
+    }
+
     fn stdout_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
         self.inner.stdout_closer()
     }
@@ -766,20 +829,13 @@ mod tests {
     // a dispatcher test and a fallback-detector test running on
     // different threads could each mutate `MXC_FORCE_TIER` under
     // independent locks and race.
-    use crate::test_env::{BcUsableGuard, ForceTierGuard, ENV_LOCK};
+    use crate::test_env::{BcUsableGuard, CaptureCapabilityGuard, ForceTierGuard, ENV_LOCK};
 
     fn test_request(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {
             container_id: "MxcDispatcherTest".to_string(),
             policy,
             ..ExecutionRequest::default()
-        }
-    }
-
-    fn schema_0_8_request(policy: ContainerPolicy) -> ExecutionRequest {
-        ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..test_request(policy)
         }
     }
 
@@ -830,14 +886,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn telemetry_remains_eligible_without_a_diagnostic_sink() {
-        assert!(logging_sinks_active(true, false));
-        assert!(logging_sinks_active(false, true));
-        assert!(logging_sinks_active(true, true));
-        assert!(!logging_sinks_active(false, false));
-    }
-
     fn policy_with_denied_temp() -> (ContainerPolicy, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut p = ContainerPolicy::default();
@@ -852,6 +900,21 @@ mod tests {
             .push(dir.path().to_string_lossy().into_owned());
         (p, dir)
     }
+
+    /// A fake [`GuardedCaptureFactory`] used only to exercise dispatcher
+    /// tier-selection gating — its `start` is never invoked by these tests
+    /// (dispatch stops at backend construction, before `spawn`).
+    struct FakeGuardedCaptureFactory;
+
+    impl GuardedCaptureFactory for FakeGuardedCaptureFactory {
+        fn start(
+            &self,
+            _owner_pid: u32,
+        ) -> Result<Box<dyn crate::guarded_capture::GuardedCaptureSession>, String> {
+            Err("not used in dispatcher selection tests".to_string())
+        }
+    }
+
     #[test]
     fn dispatch_t1_no_denied_paths_no_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
@@ -906,7 +969,7 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
-        let req = schema_0_8_request(policy);
+        let req = test_request(policy);
 
         let result = dispatch_with_fallback(&req);
         assert!(matches!(
@@ -918,49 +981,154 @@ mod tests {
     }
 
     #[test]
-    fn schema_0_8_without_capture_keeps_legacy_fallback() {
+    fn capture_denials_rejects_appcontainer_fallback_via_capture_entrypoint_without_factory() {
+        // The capture-aware entrypoint with `None` must behave identically to
+        // the legacy `dispatch_with_fallback` fail-closed path.
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _tmp) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+
+        let result = dispatch_with_fallback_and_capture(&req, None);
+        assert!(matches!(
+            result,
+            Err(DispatchError::CaptureDenialsUnsupported {
+                tier: IsolationTier::AppContainerDacl
+            })
+        ));
+    }
+
+    #[test]
+    fn capture_denials_selects_appcontainer_fallback_with_guarded_factory() {
+        // With a guarded capture factory supplied, an AppContainer fallback
+        // tier must be selected (not rejected) when `captureDenials` is set.
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _tmp) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(FakeGuardedCaptureFactory);
+        let dispatched = dispatch_with_fallback_and_capture(&req, Some(factory))
+            .expect("a guarded capture factory should let AppContainer+DACL honor captureDenials");
+        assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
+        assert!(
+            dispatched.has_dacl_guard(),
+            "T3 still stamps its grant ACEs when captureDenials is honored via guarded WPR"
+        );
+    }
+
+    #[test]
+    fn capture_denials_prefers_native_psec_v2_when_complete() {
+        let _guard = CaptureCapabilityGuard::set(true, true);
+        let mut policy = empty_policy();
+        policy.capture_denials = Some(Default::default());
+        let request = test_request(policy);
+
+        let dispatched = dispatch_with_fallback(&request)
+            .expect("complete native capture should not require guarded WPR");
+
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+    }
+
+    #[test]
+    fn capture_denials_selects_legacy_sbox_with_guarded_factory() {
+        let _guard = CaptureCapabilityGuard::set(true, false);
+        let mut policy = empty_policy();
+        policy.capture_denials = Some(Default::default());
+        let request = test_request(policy);
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(FakeGuardedCaptureFactory);
+
+        let dispatched = dispatch_with_fallback_and_capture(&request, Some(factory))
+            .expect("legacy SBOX should pair with guarded WPR");
+
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+        assert!(!dispatched.has_dacl_guard());
+    }
+
+    #[test]
+    fn capture_denials_rejects_legacy_sbox_without_guarded_factory() {
+        let _guard = CaptureCapabilityGuard::set(true, false);
+        let mut policy = empty_policy();
+        policy.capture_denials = Some(Default::default());
+        let request = test_request(policy);
+
+        let result = dispatch_with_fallback(&request);
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::CaptureDenialsUnsupported {
+                tier: IsolationTier::BaseContainer
+            })
+        ));
+    }
+
+    #[test]
+    fn spawn_with_fallback_and_capture_none_matches_legacy_rejection() {
+        // `spawn_with_fallback_and_capture(..., None)` must fail closed the
+        // same way the run-to-completion entrypoint does.
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _tmp) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let result = spawn_with_fallback_and_capture(&req, &mut logger, StdioMode::Inherit, None);
+        assert!(matches!(
+            result,
+            Err(SpawnDispatchError::Dispatch(
+                DispatchError::CaptureDenialsUnsupported {
+                    tier: IsolationTier::AppContainerDacl
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn ordinary_request_keeps_appcontainer_fallback() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (policy, _tmp) = policy_with_rw_temp();
-        let req = schema_0_8_request(policy);
+        let req = test_request(policy);
 
         let dispatched = dispatch_with_fallback(&req).expect("fallback should be selected");
         assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
         assert!(
             dispatched.has_dacl_guard(),
-            "schema 0.8 ordinary requests retain AppContainer + DACL fallback"
+            "ordinary requests retain AppContainer + DACL fallback"
         );
     }
 
     #[test]
-    fn schema_0_8_proxy_keeps_base_container_on_legacy_sbox_hosts() {
+    fn proxy_keeps_base_container_on_legacy_sbox_hosts() {
         let _g = BcUsableGuard::set(true);
         let mut policy = empty_policy();
         policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        let req = schema_0_8_request(policy);
+        let req = test_request(policy);
 
-        let plan = select_backend_with_fallback(&req).expect("SBOX should remain eligible");
-        assert!(matches!(plan.tier, IsolationTier::BaseContainer));
-        assert!(matches!(plan.backend, SelectedBackend::BaseContainer(_)));
-        assert!(plan.dacl_manager.is_none());
+        let plan = select_backend_with_fallback(&req, None).expect("SBOX should remain eligible");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
+        assert!(matches!(tier, IsolationTier::BaseContainer));
+        assert!(matches!(backend, SelectedBackend::BaseContainer(_)));
+        assert!(dacl.is_none());
     }
 
     #[test]
-    fn schema_0_8_proxy_uses_appcontainer_when_base_container_is_incompatible() {
+    fn proxy_uses_appcontainer_when_base_container_is_incompatible() {
         let _g = BcUsableGuard::set(false);
         let mut policy = empty_policy();
         policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        let req = schema_0_8_request(policy);
+        let req = test_request(policy);
 
-        let plan =
-            select_backend_with_fallback(&req).expect("AppContainer fallback should be selected");
-        assert_ne!(plan.tier, IsolationTier::BaseContainer);
-        assert!(matches!(plan.backend, SelectedBackend::AppContainer(_)));
+        let plan = select_backend_with_fallback(&req, None)
+            .expect("AppContainer fallback should be selected");
+        let (backend, tier) = (plan.backend, plan.tier);
+        assert_ne!(tier, IsolationTier::BaseContainer);
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
     }
 
     #[test]
@@ -1136,7 +1304,7 @@ mod tests {
     fn select_backend_t1_builds_base_container_no_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let req = test_request(empty_policy());
-        let plan = select_backend_with_fallback(&req).expect("T1 selection should succeed");
+        let plan = select_backend_with_fallback(&req, None).expect("T1 selection should succeed");
         let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::BaseContainer));
         assert!(
@@ -1153,7 +1321,7 @@ mod tests {
     fn select_backend_t2_no_deny_builds_appcontainer_no_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let req = test_request(empty_policy());
-        let plan = select_backend_with_fallback(&req).expect("T2 selection should succeed");
+        let plan = select_backend_with_fallback(&req, None).expect("T2 selection should succeed");
         let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerBfs));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
@@ -1168,7 +1336,8 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let plan = select_backend_with_fallback(&req).expect("T2+deny selection should succeed");
+        let plan =
+            select_backend_with_fallback(&req, None).expect("T2+deny selection should succeed");
         let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerBfs));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
@@ -1179,11 +1348,38 @@ mod tests {
     }
 
     #[test]
+    fn select_backend_t2_non_capture_deny_still_rejects_denied_paths() {
+        // Item 15 regression: on the BFS tier a *non-capture* deniedPaths
+        // request must NOT be broadened to honor deniedPaths via a host DACL.
+        // The selected runner is left un-marked (no `with_external_denied_paths`),
+        // so its `validate` still rejects deniedPaths exactly as before the
+        // guarded-capture fallback existed. (The deny DACL is still built,
+        // preserving the has-DACL selection asserted above; only the runner's
+        // acceptance is gated.)
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
+        let (policy, _tmp) = policy_with_denied_temp();
+        let req = test_request(policy);
+        let plan =
+            select_backend_with_fallback(&req, None).expect("T2+deny selection should succeed");
+        let (backend, tier) = (plan.backend, plan.tier);
+        assert!(matches!(tier, IsolationTier::AppContainerBfs));
+
+        let error = backend
+            .validate(&req)
+            .expect_err("non-capture deniedPaths on the BFS tier must be rejected");
+        assert!(
+            error.error_message.contains("deniedPaths"),
+            "expected a deniedPaths rejection, got: {}",
+            error.error_message
+        );
+    }
+
+    #[test]
     fn select_backend_t3_builds_appcontainer_with_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let (policy, _tmp) = policy_with_rw_temp();
         let req = test_request(policy);
-        let plan = select_backend_with_fallback(&req).expect("T3 selection should succeed");
+        let plan = select_backend_with_fallback(&req, None).expect("T3 selection should succeed");
         let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerDacl));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
@@ -1203,7 +1399,7 @@ mod tests {
         // with the "bfscfg.exe is not available" error.
         let _g = BcUsableGuard::set(false);
         let req = test_request(empty_policy());
-        let plan = select_backend_with_fallback(&req).expect("selection should succeed");
+        let plan = select_backend_with_fallback(&req, None).expect("selection should succeed");
         let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerDacl));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
@@ -1226,6 +1422,7 @@ mod tests {
         struct FakeProcess {
             stdin_taken: bool,
             killed: bool,
+            output_metadata: wxc_common::models::SandboxOutputMetadata,
         }
         impl SandboxProcess for FakeProcess {
             fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -1251,6 +1448,9 @@ mod tests {
             fn wait(&mut self) -> std::io::Result<i32> {
                 Ok(7)
             }
+            fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+                Some(&self.output_metadata)
+            }
         }
 
         let _scope = ScopedStateDir::new();
@@ -1270,5 +1470,9 @@ mod tests {
         assert!(matches!(guarded.wait(), Ok(7)), "wait() must delegate");
         assert!(guarded.take_stdin().is_none(), "take_stdin() must delegate");
         assert!(guarded.kill().is_ok(), "kill() must delegate");
+        assert!(
+            guarded.output_metadata().is_some(),
+            "output_metadata() must delegate"
+        );
     }
 }

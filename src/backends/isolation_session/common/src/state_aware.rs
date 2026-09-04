@@ -7,6 +7,7 @@
 //! between caller invocations.
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -14,15 +15,19 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
+use super::manager::{
+    log_sandbox_torn_down, ClosingProcess, IsolationSessionManager, MtaReference, TeardownOutcome,
+};
 use super::policy::{validate_post_provision_policy, validate_provision_policy};
-use super::process_options::build_process_options;
+use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
 
@@ -53,6 +58,27 @@ fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
     Ok(sandbox_id::decode(sandbox_id)?.agent_user_name)
 }
 
+/// Whether this exec should ask the OS API to set up a ConPTY.
+///
+/// `host_is_terminal` is a **closure**, not a value, and that is load-bearing:
+/// Rust evaluates arguments eagerly, so passing the probe's result would run the
+/// probe on the `Piped` path too — contradicting the contract this function
+/// exists to enforce. Taking a closure makes "never probes under `Piped`" a
+/// property of the code rather than a claim in a comment, and one a test can
+/// actually observe.
+///
+/// The rule itself: only [`ExecStdio::Relayed`] may consult the host. Under
+/// `Piped` an embedded host's stdout says nothing about the sandbox, and
+/// allocating a pseudo-console would both merge stderr into stdout — destroying
+/// the separate streams the caller asked for — and touch console state the
+/// caller owns.
+fn wants_interactive_console(stdio: ExecStdio, host_is_terminal: impl FnOnce() -> bool) -> bool {
+    match stdio {
+        ExecStdio::Relayed => host_is_terminal(),
+        ExecStdio::Piped => false,
+    }
+}
+
 impl StatefulSandboxBackend for IsolationSessionRunner {
     const ID_PREFIX: &'static str = sandbox_id::ID_PREFIX;
     const BACKEND_KEY: &'static str = "isolation_session";
@@ -73,21 +99,24 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         config: Option<IsolationSessionProvisionConfig>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let config = config.unwrap_or_default();
-        let app_id = config.app_id;
         // The manager is discarded here — each post-provision phase builds its
         // own from the `sandboxId`. Taking it anyway keeps a single provisioning
         // path with `one_shot`, and proves the service instance that minted the
         // user is live rather than re-activating to find out.
-        let (provisioned, _manager) =
-            IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
+        //
+        // The caller-supplied `appId` is passed through verbatim. The in-proc
+        // isolation-session client resolves the default (an empty or absent id)
+        // to the calling process's PFN itself, so MXC does no PFN detection of
+        // its own; a non-empty id is used as-is.
+        let (provisioned, _manager) = IsolationSessionManager::add_user(config.app_id.as_deref())
+            .map_err(map_lifecycle_error)?;
 
-        // `appId` rides inside the id so later phases recover it without the
-        // caller re-supplying it. Nothing consumes it yet; it is carried for a
-        // future OS contract. Metadata deliberately does not echo it — the
-        // caller already has the value it supplied.
+        // `appId` rides inside the id so later phases can recover exactly what
+        // the caller supplied at provision. Metadata deliberately does not echo
+        // it; the id is the single carrier.
         let sandbox_id = sandbox_id::encode(&SandboxIdPayload::new(
             provisioned.agent_user_name.clone(),
-            app_id,
+            config.app_id,
         ))?;
 
         Ok(ProvisionResult {
@@ -123,8 +152,6 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
         let stopped = manager.stop_session();
-        // Report the release before propagating a failure, so a stop that did
-        // not land is auditable rather than only surfacing as an error envelope.
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
             &agent_user_name,
@@ -176,8 +203,9 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
-        // Structural only — MXC carries `appId` for a future OS consumer and
-        // does not judge what a valid application identity looks like.
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        // Structural only — MXC does not judge what a valid application
+        // identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
             sandbox_id::validate_app_id(app_id)?;
         }
@@ -231,57 +259,142 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
-    /// Reuses `IsolationSessionManager::create_process` — the same path the
-    /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
-    /// internal relay threads while the call is in flight; the call returns
-    /// once the process has exited and the relays have drained. The
-    /// resulting `ExecHandle` carries sentinel pipe handles plus a waiter
-    /// closure that yields the already-captured exit code, so the
-    /// dispatcher's `relay_exec_to_stdio` is a thin call-through.
+    /// Executes the workload inside the running isolation session.
+    ///
+    /// **The two topologies get different shapes, deliberately** — see
+    /// [`ExecStdio`]. Under `Relayed` this keeps the backend's own relay:
+    /// `create_process` blocks, bridging the guest's pipes to the calling
+    /// process's stdio
+    /// through internal threads that also manage the ConPTY, the raw-VT console
+    /// mode, the viewport size and stdin. None of that exists in the
+    /// dispatcher's generic relay — which since the relay landed does not
+    /// forward stdin at all — so handing it real handles here would regress the
+    /// interactive shell. The returned `ExecHandle` therefore carries sentinel
+    /// handles plus a waiter yielding the already-captured exit code, and the
+    /// dispatcher's relay stays a call-through.
+    ///
+    /// Under `Piped` the caller drives the streams, so this starts the process
+    /// without waiting and hands back its real pipe handles, a waiter that
+    /// blocks on exit, and a terminator that actually kills. It performs **no**
+    /// console probe: an embedded host's stdout says nothing about the sandbox,
+    /// and touching console state would mutate something the caller owns.
+    ///
+    /// # Coverage
+    ///
+    /// The `Piped` branch is exercised end-to-end by `mxc-sdk`'s
+    /// `tests/isolation_session.rs` — streaming, exit-code propagation and
+    /// termination — on a host running the OS-side service, which CI and most
+    /// dev machines do not have, so those tests skip elsewhere.
+    ///
+    /// Pinned host-independently: the topology split itself
+    /// (`wants_interactive_console`), and — in `wxc_common` — that
+    /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
+    /// is the deadlock this branch would otherwise arm.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
 
-        let interactive = std::io::stdout().is_terminal();
-        let options = build_process_options(request, interactive);
-        // Inherit any diagnostic sinks (--log-file, diagnostic console pipe)
-        // the driver installed on this thread. When the driver has not
-        // installed anything this behaves identically to `Logger::new(Buffer)`,
-        // so the environment-driven pipe fallback below is still exercised.
-        let mut logger = Logger::inherit_thread_diagnostic_sink();
-        let diagnostic_config = wxc_common::diagnostic::DiagnosticConfig::from_environment();
-        if diagnostic_config.console_enabled {
-            logger.enable_diagnostics(&diagnostic_config);
+        match stdio {
+            ExecStdio::Relayed => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
+                );
+
+                let mut logger = Logger::inherit_thread_diagnostic_sink();
+                let exit_code = manager
+                    .create_process(&options, Some(&mut logger))
+                    .map_err(map_lifecycle_error)?;
+
+                // The output relay completed inside `create_process`. The
+                // dispatcher sees zero pipe handles, skips its own relay setup,
+                // and gets the exit code from the waiter closure.
+                let null = HANDLE(std::ptr::null_mut());
+                Ok(ExecHandle {
+                    stdout: null,
+                    stderr: null,
+                    stdin: null,
+                    stdin_closer: None,
+                    // `Exited`, never `TimedOut`: a backend serving
+                    // `ExecStdio::Relayed` reports an exit code, and the
+                    // relay rejects anything else.
+                    waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+                    // Nothing to terminate: `create_process` returned only once
+                    // the process was gone.
+                    terminator: Box::new(|| Ok(())),
+                })
+            }
+            ExecStdio::Piped => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
+                );
+                // The caller's deadline, enforced by our own wait below. The
+                // service timer is armed with a margin so it cannot fire first
+                // and turn a timeout into an ordinary exit we could not report.
+                let timeout_ms = options.timeout_ms;
+                let options = with_service_timeout_grace(options);
+
+                // Acquired before the workload starts, so a failure here cannot
+                // leave one running with no handle to reach it.
+                let mta = MtaReference::acquire().map_err(map_lifecycle_error)?;
+                let started = Arc::new(ClosingProcess::new(
+                    manager
+                        .start_process(&options, None)
+                        .map_err(map_lifecycle_error)?,
+                    mta,
+                ));
+
+                // Read the handles before the closures take ownership. A zero
+                // means the stream is genuinely absent, which is exactly the
+                // sentinel the consumer already treats as "no stream".
+                let stdout = HANDLE(started.stdout as *mut std::ffi::c_void);
+                let stderr = HANDLE(started.stderr as *mut std::ffi::c_void);
+                let stdin = HANDLE(started.stdin as *mut std::ffi::c_void);
+
+                // `IsoSessionProcess` is an agile WinRT object (the bindings
+                // declare it `Send + Sync`), so both closures can hold it
+                // without the apartment-affine worker thread the WSLC backend
+                // needs.
+                let waiter_process = Arc::clone(&started);
+                let stdin_process = Arc::clone(&started);
+                Ok(ExecHandle {
+                    stdout,
+                    stderr,
+                    stdin,
+                    stdin_closer: Some(Box::new(move || {
+                        let _ = stdin_process.process.CloseStandardInput();
+                    })),
+                    // Reports `TimedOut` when the deadline elapsed with the
+                    // process still running — see `StartedProcess::wait`, which
+                    // samples that before the shutdown ladder destroys the
+                    // evidence by killing the survivor.
+                    waiter: Box::new(move || {
+                        waiter_process.wait(timeout_ms).map_err(map_lifecycle_error)
+                    }),
+                    // The result now reaches the caller instead of being
+                    // discarded here. It reports whether the platform *accepted*
+                    // the kill: `terminate`'s bounded post-kill wait is not
+                    // consulted, so a `Terminate` that was accepted and then did
+                    // not take effect still reports success.
+                    terminator: Box::new(move || started.terminate().map_err(map_lifecycle_error)),
+                })
+            }
         }
-
-        let exit_code = manager
-            .create_process(&options, Some(&mut logger))
-            .map_err(map_lifecycle_error)?;
-
-        // The output relay completed inside `create_process`. The dispatcher
-        // sees zero pipe handles, skips its own relay setup, and gets the
-        // exit code from the waiter closure.
-        let null = HANDLE(std::ptr::null_mut());
-        Ok(ExecHandle {
-            stdout: null,
-            stderr: null,
-            stdin: null,
-            waiter: Box::new(move || Ok(exit_code)),
-            terminator: Box::new(|| {}),
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
     use wxc_common::mxc_error::MxcErrorCode;
 
     // ====== Wire-format constants ======
@@ -291,6 +404,49 @@ mod tests {
     // silently swallow every per-phase config (the field would still
     // deserialize from the containment slot via models.rs's serde
     // rename — only the experimental block would go missing).
+    // ====== Stdio topology ======
+
+    /// A piped exec must never get a ConPTY — **including on a host whose
+    /// stdout is a terminal**, which is the only case that can distinguish a
+    /// correct implementation from one that always follows the host.
+    ///
+    /// Allocating one here would be doubly wrong: a pseudo-console merges
+    /// stderr into stdout, so the caller would silently lose the separate
+    /// stream it asked for, and setting it up touches console state the caller
+    /// owns.
+    #[test]
+    fn a_piped_exec_never_gets_an_interactive_console() {
+        let mut probed = false;
+        assert!(
+            !wants_interactive_console(ExecStdio::Piped, || {
+                probed = true;
+                true
+            }),
+            "a terminal host must not leak a console into the piped path"
+        );
+        assert!(
+            !probed,
+            "the piped path must not even evaluate the host probe -- passing the \
+             probe's value rather than a closure would run it eagerly"
+        );
+    }
+
+    /// The relayed path is the only one allowed to act on the probe, and it
+    /// must actually follow it rather than hardcoding either answer.
+    ///
+    /// Both host answers are asserted, so hardcoding `true` *or* `false` fails.
+    #[test]
+    fn a_relayed_exec_follows_the_host() {
+        assert!(
+            wants_interactive_console(ExecStdio::Relayed, || true),
+            "a terminal host must still get an interactive console"
+        );
+        assert!(
+            !wants_interactive_console(ExecStdio::Relayed, || false),
+            "a piped host must not get one"
+        );
+    }
+
     #[test]
     fn backend_key_matches_wire_format() {
         assert_eq!(
@@ -406,13 +562,13 @@ mod tests {
         // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
         // does not error — it silently drops the value.
         let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
-            app_id: Some("Contoso.App_8wekyb3d8bbwe".to_string()),
+            app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
         };
         let provision: ProvisionConfig =
             serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
         assert_eq!(
             provision.app_id.as_deref(),
-            Some("Contoso.App_8wekyb3d8bbwe"),
+            Some("PFN:Contoso.App_8wekyb3d8bbwe"),
             "provision dropped the wire appId (serde rename drift?)"
         );
     }
@@ -623,6 +779,44 @@ mod tests {
         assert_eq!(d.code, MxcErrorCode::PolicyValidation);
     }
 
+    #[test]
+    fn validate_post_provision_hooks_reject_runtime_proxy() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        for (label, result) in [
+            (
+                "start",
+                runner.validate_start(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "exec",
+                runner.validate_exec(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "stop",
+                runner.validate_stop(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "deprovision",
+                runner.validate_deprovision(&valid_sandbox_id(), &req, None),
+            ),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation, "phase {label}");
+            assert!(error.message.contains("proxy"), "phase {label}: {error:?}");
+        }
+    }
+
     // ====== UI policy is refused on every phase ======
 
     #[test]
@@ -712,7 +906,7 @@ mod tests {
     #[test]
     fn validate_provision_accepts_a_well_formed_app_id() {
         let runner = IsolationSessionRunner::new();
-        let cfg = provision_config_with_app_id("Contoso.App_8wekyb3d8bbwe");
+        let cfg = provision_config_with_app_id("PFN:Contoso.App_8wekyb3d8bbwe");
         runner
             .validate_provision(&request_with_canonical_network(), Some(&cfg))
             .unwrap();

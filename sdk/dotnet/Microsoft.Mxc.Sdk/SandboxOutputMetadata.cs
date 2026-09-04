@@ -11,6 +11,25 @@ public sealed class SandboxOutputMetadata
     /// <summary>Location and summary of a captureDenials output document.</summary>
     [JsonPropertyName("captureDenials")]
     public CaptureDenialsOutput? CaptureDenials { get; init; }
+
+    /// <summary>Failure details and the retained ETL path, when finalization fails.</summary>
+    [JsonPropertyName("captureDenialsError")]
+    public CaptureDenialsErrorOutput? CaptureDenialsError { get; init; }
+}
+
+/// <summary>Structured diagnostics for a failed captureDenials finalization.</summary>
+public sealed class CaptureDenialsErrorOutput
+{
+    /// <summary>Human-readable finalization failure.</summary>
+    [JsonPropertyName("message")]
+    public string Message { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Absolute path to the retained ETL trace. Delete this file after use; do not delete its
+    /// parent directory unless the caller independently owns or positively recognizes it.
+    /// </summary>
+    [JsonPropertyName("etlPath")]
+    public string EtlPath { get; init; } = string.Empty;
 }
 
 /// <summary>Location and summary of a captureDenials output document.</summary>
@@ -35,4 +54,12 @@ public sealed class CaptureDenialsOutput
     /// <summary>Whether the emitted denial set was truncated.</summary>
     [JsonPropertyName("deniedResourcesTruncated")]
     public bool DeniedResourcesTruncated { get; init; }
+
+    /// <summary>
+    /// Absolute path to the retained ETL trace, when requested. Delete this file after use; do
+    /// not delete its parent directory unless the caller independently owns or positively
+    /// recognizes it.
+    /// </summary>
+    [JsonPropertyName("etlPath")]
+    public string? EtlPath { get; init; }
 }

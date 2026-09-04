@@ -515,6 +515,7 @@ mod tests {
         baseline.policy.capture_denials = Some(CaptureDenialsConfig {
             mode: CaptureDenialsMode::Block,
             output_path: None,
+            ..Default::default()
         });
         let base = policy_hash(&baseline);
 
@@ -546,6 +547,7 @@ mod tests {
         baseline.policy.capture_denials = Some(CaptureDenialsConfig {
             mode: CaptureDenialsMode::Block,
             output_path: Some("C:\\logs\\denials.json".to_string()),
+            ..Default::default()
         });
         let block_hash = policy_hash(&baseline);
 

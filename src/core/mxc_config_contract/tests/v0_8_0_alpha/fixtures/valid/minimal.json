@@ -1,0 +1,6 @@
+{
+  "version": "0.8.0-alpha",
+  "process": {
+    "commandLine": "echo hello"
+  }
+}

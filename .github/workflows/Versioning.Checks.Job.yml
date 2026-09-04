@@ -10,14 +10,14 @@ jobs:
     env:
       MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'HEAD^' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so a pull-request base ref can be resolved. For a
           # pull_request event the checkout action fetches the base branch too,
           # so the gates can read files at the base commit directly.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
 
@@ -41,6 +41,12 @@ jobs:
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
 
+      - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
+        run: node scripts/check-dotnet-errorcode-parity.js
+
+      - name: Check C# API parity with Rust SDK surfaces
+        run: node scripts/check-dotnet-api-parity.js
+
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 
@@ -49,6 +55,12 @@ jobs:
 
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
+
+      - name: Check exact contract generated artifacts and fixtures
+        run: node scripts/versioning/check-contract-codegen.js
+
+      - name: Check C# bindings codegen (regenerates and asserts entry points)
+        run: node scripts/check-dotnet-bindings-codegen.js
 
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js

@@ -8,7 +8,7 @@
     that at least one event was captured.
 
     This test uses the PUBLIC provider GUID (already in the open-source
-    code) — it does NOT depend on or reveal the private telemetry group GUID.
+    code) - it does NOT depend on or reveal the private telemetry group GUID.
 
     Requires: Administrator privileges (for ETW session creation),
               wxc-exec.exe built, logman.exe (ships with Windows).
@@ -137,13 +137,19 @@ try {
     # events are emitted on completion, after the runner returns. The sandbox
     # itself may fail (e.g. AppContainer prerequisites), but completion
     # telemetry still fires for the failure, so events should be captured.
+    $executionTimeoutSeconds = 60
     $proc = Start-Process -FilePath $wxcExe `
         -ArgumentList "--debug", "--experimental", $configFile `
-        -PassThru -NoNewWindow -Wait
+        -PassThru -NoNewWindow
+    if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
+        Stop-Process -Id $proc.Id -Force
+        $proc.WaitForExit()
+        throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+    }
     Write-Host "wxc-exec exited with code $($proc.ExitCode)"
 } catch {
     Write-Host "wxc-exec failed to run: $_" -ForegroundColor Yellow
-    # Continue — even a crash after init may have emitted events.
+    # Continue - even a crash after init may have emitted events.
 }
 
 # Brief pause for ETW buffers to flush.
@@ -168,8 +174,8 @@ $etlSize = (Get-Item $etlFile).Length
 Write-Host "ETL file size: $etlSize bytes"
 
 if ($etlSize -eq 0) {
-    Write-Host "FAILED: ETL file is empty — no events captured." -ForegroundColor Red
-    Write-Host "All prerequisites were met (admin, wxc-exec present, ETW session created)," -ForegroundColor Red
+    Write-Host "FAILED: ETL file is empty - no events captured." -ForegroundColor Red
+    Write-Host 'All prerequisites were met (admin, wxc-exec present, ETW session created),' -ForegroundColor Red
     Write-Host "so the provider should have emitted at least one completion event." -ForegroundColor Red
     exit 1
 }
@@ -186,42 +192,56 @@ $xmlContent = Get-Content -Path $xmlFile -Raw
 $eventCount = ([regex]::Matches($xmlContent, '<Event ')).Count
 Write-Host "Events captured: $eventCount"
 
-$providerCaptured = $xmlContent -match [regex]::Escape($providerGuid)
-if ($eventCount -gt 0 -and $providerCaptured) {
-    Write-Host "`n=== ETW CAPTURE SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "$eventCount event(s) captured from the MXC provider."
-
-    $specializedEvents = @(
-        'MXC.ProcessExited',
-        'MXC.ProcessTimedOut',
-        'MXC.ProcessKillFailed',
-        'MXC.PolicyHash',
-        'MXC.SandboxNetworkPolicyApplied',
-        'MXC.SandboxTornDown',
-        'MXC.ConfigRejected'
+if ($eventCount -gt 0 -and $xmlContent -match [regex]::Escape($providerGuid)) {
+    $expectedFields = @(
+        'PartA_PrivacyProduct',
+        'PartA_PrivacyDataCategory',
+        'PartA_PrivTags',
+        'mxc.sandbox_kind',
+        'mxc.backend',
+        'mxc.exit_code',
+        'mxc.outcome',
+        'mxc.duration_ms'
     )
-    $specializedMatches = @($specializedEvents | Where-Object { $xmlContent -match [regex]::Escape($_) })
-    if ($specializedMatches.Count -gt 0) {
-        Write-Host "Specialized MXC events: $($specializedMatches -join ', ')"
-    } else {
-        Write-Host "Specialized event names were not rendered by tracerpt for this TraceLogging ETL." -ForegroundColor Yellow
-    }
+    $eventBlocks = [regex]::Matches($xmlContent, '(?s)<Event\b.*?</Event>')
+    $matchingEvent = $null
 
-    # Check for expected field names (public, not private).
-    $expectedFields = @('mxc.backend', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
-    foreach ($field in $expectedFields) {
-        if ($xmlContent -match $field) {
-            Write-Host "  [OK] Found field: $field" -ForegroundColor Green
-        } else {
-            Write-Host "  [--] Field not found: $field (may not be in this event type)" -ForegroundColor Yellow
+    foreach ($eventBlock in $eventBlocks) {
+        $eventXml = $eventBlock.Value
+        $eventMissingFields = @(
+            $expectedFields | Where-Object {
+                $eventXml -notmatch ([regex]::Escape($_))
+            }
+        )
+        if ($eventMissingFields.Count -eq 0) {
+            $matchingEvent = $eventXml
+            break
         }
     }
+
+    if (-not $matchingEvent) {
+        $missingFieldsMessage = 'No single captured event contained all required public fields: ' + ($expectedFields -join ', ') + '.'
+        Write-Host ''
+        Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
+        Write-Host $missingFieldsMessage -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST PASSED ===' -ForegroundColor Green
+    Write-Host ($eventCount.ToString() + ' event(s) captured from the MXC provider.')
+    foreach ($field in $expectedFields) {
+        Write-Host ('  [OK] Found field in one event: ' + $field) -ForegroundColor Green
+    }
 } elseif ($eventCount -eq 0) {
-    Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
-    Write-Host "ETL file had content ($etlSize bytes) but no parseable events were found." -ForegroundColor Red
+    $noEventsMessage = 'ETL file had content (' + $etlSize + ' bytes) but no parseable events were found.'
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
+    Write-Host $noEventsMessage -ForegroundColor Red
     exit 1
 } else {
-    Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
     Write-Host "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)." -ForegroundColor Red
     exit 1
 }

@@ -48,6 +48,8 @@ Rust constants and `write_event!` struct fields.
 | **Sampling keywords** | `MICROSOFT_KEYWORD_MEASURES` named constant | Raw `u64` in `keyword(...)` | Generated `MXC_EVENT_KEYWORD` constant — `0x1` (provider-local, no UTC meaning) by default; `MICROSOFT_KEYWORD_MEASURES` only when the build opts into telemetry via the group GUID |
 | **Common event fields** | `_GENERIC_PARTB_FIELDS_ENABLED` pattern | `struct("Name", { ... })` in `write_event!` | `struct("COMMON_MXC_PARAMS", { Version, Channel, IsDebugging, UTCReplace_AppSessionGuid })` |
 | **Provider lifecycle** | `IMPLEMENT_TRACELOGGING_CLASS` singleton | `define_provider!` static + `register()`/`unregister()` | `OnceLock<ProviderState>` for version/channel, manual lifecycle |
+| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct = 11` (`MXC (Microsoft Execution Containers)`) on all events |
+| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory = 1` (`Client Diagnostic Data`) on all events |
 | **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Generated `MXC_PRIVACY_TAG` constant — `0` (not telemetry-classified) by default; `PDT_PRODUCT_AND_SERVICE_USAGE` only when the build opts into telemetry via the group GUID. The field is always present so the event schema is stable across both modes |
 | **Activity tracking** | `DEFINE_TELEMETRY_ACTIVITY` | Manual `Opcode` | Not needed for current events |
 
@@ -55,6 +57,16 @@ The remaining gap (activity tracking) is not needed for current events.
 If needed later, it can be added incrementally.
 
 
+
+## Common Event Fields (Part A)
+
+Every MXC telemetry event carries the WinExt-required Common Schema fields
+`PartA_PrivacyProduct = 11` and `PartA_PrivacyDataCategory = 1`. The
+`PartA_PrivTags` field is also always present, but its value is build-scoped:
+public and local builds use `0`; official grouped builds use Product and
+Service Usage Data. Product `11` is privacy-approved and registered in the
+WinExt product list. The provider-group identifier remains a secure build
+input and must not be copied into source, tests, documentation, or commits.
 
 ## Common Event Fields (Part C)
 
@@ -148,6 +160,7 @@ the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
 | `mxc.backend` | string | Containment backend name |
 | `mxc.exit_code` | int32 | Process exit code |
 | `mxc.outcome` | string | `"success"` or `"failure"` |
@@ -156,10 +169,13 @@ the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 | `mxc.phase` | string | State-aware lifecycle phase (`provision`\|`start`\|`exec`\|`stop`\|`deprovision`); empty for one-shot executions |
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
+### MXC.Error
+
 Emitted on execution errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
 | `mxc.backend` | string | Containment backend name |
 | `mxc.error_type` | string | Error category (`config_error`, `policy_error`, `process_error`, `timeout`, `init_error`, `internal_error`, `cancelled`, `unknown`) |
 | `mxc.exit_code` | int32 | Process exit code |
@@ -293,6 +309,19 @@ code, 128 + SIGINT) — a bounded attribution sentinel, since the OS ultimately
 terminates the process with its own status. The handler runs on a short,
 OS-imposed budget and does not shut the provider down; the events carry no
 free-form text.
+
+## Consent
+
+Telemetry emission is gated by the per-run request, MXC-owned consent,
+administrative policy, and provider availability. See
+[`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
+audit records are a separate operator-selected sink and are not uploaded.
+
+The optional ETW events contain MXC version/channel, debug-build state,
+caller-requested sandbox kind, selected backend, bounded outcomes and failure
+categories, numeric status values, lifecycle phase, policy fingerprints, and
+opaque/redacted identities. They do not contain commands, file paths,
+credentials, customer content, or free-form error text.
 
 ## Cross-Platform Behaviour
 

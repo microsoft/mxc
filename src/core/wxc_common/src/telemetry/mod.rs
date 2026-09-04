@@ -11,12 +11,15 @@
 //!
 //! On non-Windows platforms, all telemetry functions are no-ops.
 
+pub mod consent;
+pub mod consent_prompt;
 pub mod correlation_vector;
 pub mod events;
+pub mod policy;
 
 use std::time::Duration;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use crate::logger::Logger;
@@ -24,11 +27,60 @@ use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryC
 use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
+pub use consent::ConsentState;
 pub use events::{
     log_config_rejected, log_enforcement_degraded, log_error, log_execution,
     log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
     ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext,
 };
+pub use policy::PolicyState;
+
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct FailureReporter {
+    reported: Mutex<std::collections::HashSet<String>>,
+}
+
+#[cfg(target_os = "windows")]
+impl FailureReporter {
+    fn report(&self, signature: String, emit: impl FnOnce(&str)) {
+        let is_new = self
+            .reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(signature.clone());
+        if is_new {
+            emit(&signature);
+        }
+    }
+}
+
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// Lock-order-safe redirect guard for tests that need both the consent
+    /// store and the policy key redirected away from real user/machine state.
+    pub struct TelemetryTestEnv {
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirect both telemetry globals for the lifetime of the guard.
+        pub fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
+}
 
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
@@ -80,7 +132,7 @@ static PROCESS_CORRELATION_VECTOR: Mutex<Option<String>> = Mutex::new(None);
 /// handler) can race the main thread's normal completion emit; this guard makes
 /// emission exactly-once so a single dispatch never yields duplicate
 /// `MXC.Execution` records.
-static HAS_EMITTED: AtomicBool = AtomicBool::new(false);
+static HAS_EMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 thread_local! {
@@ -92,6 +144,10 @@ thread_local! {
     /// telemetry test's forced-active state and trip the global panic hook into
     /// the sink. Never set outside tests.
     static TEST_FORCE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only authorization override for emit-path tests that run on
+    /// non-Windows hosts or intentionally isolate event mapping from the
+    /// persisted consent and policy stores.
+    static TEST_FORCE_AUTHORIZED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether the emit glue should proceed. In production this is exactly
@@ -103,6 +159,19 @@ fn emit_active() -> bool {
         return true;
     }
     mxc_telemetry::is_active()
+}
+
+/// Re-check live authorization immediately before one logical emission.
+///
+/// Provider registration records only that telemetry was authorized at
+/// initialization. Consent withdrawal or a newly blocking administrative
+/// policy must suppress the next emission from an already-running process.
+fn emission_is_authorized() -> bool {
+    #[cfg(test)]
+    if let Some(authorized) = TEST_FORCE_AUTHORIZED.with(|value| value.get()) {
+        return authorized;
+    }
+    consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
 }
 
 /// Claim the single terminal-emit slot for this process. Returns `true` if a
@@ -125,6 +194,7 @@ fn reset_for_test() {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
     TEST_FORCE_ACTIVE.with(|f| f.set(false));
+    TEST_FORCE_AUTHORIZED.with(|value| value.set(None));
     events::test_sink::clear();
 }
 
@@ -142,16 +212,24 @@ pub fn version() -> &'static str {
     MXC_VERSION
 }
 
+/// Returns whether the process-local ETW provider is currently registered.
+pub fn is_active() -> bool {
+    mxc_telemetry::is_active()
+}
+
 /// Resolve whether telemetry is enabled for this invocation.
 ///
 /// Resolution:
-/// - `experimental.telemetry.enabled` in JSON config — explicit override.
-/// - Default: off (telemetry requires explicit opt-in).
+/// - `telemetry.enabled` in JSON config — explicit kill-switch/opt-in.
+/// - Persisted user consent state — must be `Granted`.
+/// - Administrative policy ceiling — must allow collection.
 ///
-/// Note: Consent is the SDK consumer's responsibility. MXC does not implement
-/// consent prompts or persistent consent storage.
+/// All three terms must hold. The function fails closed if either consent or
+/// policy cannot be read: those helpers resolve to non-collecting states.
 pub fn is_enabled(config: &TelemetryConfig) -> bool {
     config.enabled.unwrap_or(false)
+        && consent::get_consent().allows_collection()
+        && policy::get_policy().allows_collection()
 }
 
 /// Initialize the TraceLogging ETW provider.
@@ -188,11 +266,6 @@ pub fn shutdown() {
     mxc_telemetry::shutdown();
 }
 
-/// Returns whether the process-scoped Windows ETW provider is registered.
-pub fn is_active() -> bool {
-    mxc_telemetry::is_active()
-}
-
 /// Classify a failed execution into a bounded [`FailureReason`].
 fn classify_failure(phase: &FailurePhase) -> FailureReason {
     match phase {
@@ -221,6 +294,10 @@ pub fn emit_completion(
     if !active {
         return;
     }
+    if !emission_is_authorized() {
+        shutdown();
+        return;
+    }
     if already_emitted() {
         return;
     }
@@ -232,6 +309,7 @@ pub fn emit_completion(
 
     log_execution(&ExecutionEvent {
         backend,
+        sandbox_kind: backend,
         exit_code: response.exit_code,
         outcome,
         duration_ms: elapsed.as_millis() as u64,
@@ -250,6 +328,7 @@ pub fn emit_completion(
         log_error(
             TelemetryContext {
                 backend,
+                sandbox_kind: backend,
                 phase: "",
                 correlation_vector: "",
             },
@@ -275,6 +354,10 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
     if !active {
         return;
     }
+    if !emission_is_authorized() {
+        shutdown();
+        return;
+    }
     if already_emitted() {
         return;
     }
@@ -283,6 +366,7 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
 
     log_execution(&ExecutionEvent {
         backend,
+        sandbox_kind: backend,
         exit_code: 1,
         outcome: "failure",
         duration_ms: 0,
@@ -296,6 +380,7 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
     log_error(
         TelemetryContext {
             backend,
+            sandbox_kind: backend,
             phase: "",
             correlation_vector: "",
         },
@@ -429,6 +514,7 @@ fn crash_event<'a>(
 ) -> ExecutionEvent<'a> {
     ExecutionEvent {
         backend: ctx.backend,
+        sandbox_kind: ctx.sandbox_kind,
         exit_code,
         outcome: "failure",
         duration_ms: 0,
@@ -486,13 +572,14 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 /// where the OS reclaims the ETW registration at process exit. It also carries
 /// **no** panic message text, which can contain paths or other PII.
 pub fn emit_panic() {
-    if !emit_active() || already_emitted() {
+    if !emit_active() || !emission_is_authorized() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
     emit_crash(
         TelemetryContext {
             backend: process_backend(),
+            sandbox_kind: process_backend(),
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
@@ -515,13 +602,14 @@ pub fn emit_panic() {
 /// tears the process down via `ExitProcess`, and the main thread may still be
 /// live. It is allocation-light and emits no free-form text.
 pub fn emit_cancellation() {
-    if !emit_active() || already_emitted() {
+    if !emit_active() || !emission_is_authorized() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
     emit_crash(
         TelemetryContext {
             backend: process_backend(),
+            sandbox_kind: process_backend(),
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
@@ -569,6 +657,7 @@ fn plan_state_aware<'a>(
         Ok(DispatchOutcome::Envelope(_)) => StateAwareEvents {
             execution: ExecutionEvent {
                 backend: ctx.backend,
+                sandbox_kind: ctx.sandbox_kind,
                 exit_code: 0,
                 outcome: "success",
                 duration_ms,
@@ -583,6 +672,7 @@ fn plan_state_aware<'a>(
             StateAwareEvents {
                 execution: ExecutionEvent {
                     backend: ctx.backend,
+                    sandbox_kind: ctx.sandbox_kind,
                     exit_code: *exit_code,
                     outcome: if failed { "failure" } else { "success" },
                     duration_ms,
@@ -602,6 +692,7 @@ fn plan_state_aware<'a>(
             StateAwareEvents {
                 execution: ExecutionEvent {
                     backend: ctx.backend,
+                    sandbox_kind: ctx.sandbox_kind,
                     exit_code: 1,
                     outcome: "failure",
                     duration_ms,
@@ -644,6 +735,10 @@ pub fn emit_state_aware(
     if !active {
         return;
     }
+    if !emission_is_authorized() {
+        shutdown();
+        return;
+    }
     if already_emitted() {
         return;
     }
@@ -666,20 +761,8 @@ mod tests {
     /// Serializes tests that touch the process-global emit slot / context
     /// (`HAS_EMITTED`, `PROCESS_BACKEND`, `PROCESS_PHASE`, `PROCESS_CORRELATION_VECTOR`)
     /// or drive the emit paths, so their global state can't leak across tests.
-    /// Shared with `events::test_sink`, since both this module's tests and
-    /// the requirement-payload test in `events.rs` touch the same
-    /// process-global capture state; a lock private to this module alone
-    /// would not serialize against that test. Mirrors the `TEST_LOCK`
-    /// pattern in `mxc_telemetry`.
-    use super::events::test_sink::TEST_LOCK;
-
-    #[test]
-    fn is_enabled_explicit_true() {
-        let config = TelemetryConfig {
-            enabled: Some(true),
-        };
-        assert!(is_enabled(&config));
-    }
+    /// Mirrors the `TEST_LOCK` pattern in `mxc_telemetry`.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn is_enabled_explicit_false() {
@@ -692,6 +775,42 @@ mod tests {
     #[test]
     fn is_enabled_default_off() {
         let config = TelemetryConfig::default();
+        assert!(!is_enabled(&config));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_explicit_true_requires_granted_consent_and_permitting_policy() {
+        let store = tempfile::tempdir().expect("temp dir");
+        let env = test_support::TelemetryTestEnv::new(store.path());
+        let config = TelemetryConfig {
+            enabled: Some(true),
+        };
+
+        assert!(
+            !is_enabled(&config),
+            "undetermined consent must fail closed"
+        );
+
+        consent::set_consent(true, "test").expect("set consent");
+        assert!(
+            is_enabled(&config),
+            "granted + allowed policy should enable"
+        );
+
+        env.set_policy_value(0);
+        assert!(
+            !is_enabled(&config),
+            "blocked policy must suppress telemetry even with granted consent"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn is_enabled_explicit_true_is_false_off_windows() {
+        let config = TelemetryConfig {
+            enabled: Some(true),
+        };
         assert!(!is_enabled(&config));
     }
 
@@ -736,6 +855,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
         set_process_correlation_vector("iso:wxc-abcd");
@@ -750,12 +870,14 @@ mod tests {
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::InternalError));
         assert_eq!(exec.phase, "exec");
+        assert_eq!(exec.sandbox_kind, "isolation_session");
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1, "panic emits exactly one MXC.Error");
         let error = &errors[0];
         assert_eq!(error.backend, "isolation_session");
+        assert_eq!(error.sandbox_kind, "isolation_session");
         assert_eq!(error.error_type, FailureReason::InternalError);
         assert_eq!(error.exit_code, PANIC_EXIT_CODE);
         assert_eq!(error.phase, "exec");
@@ -772,6 +894,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("start");
         set_process_correlation_vector("iso:wxc-abcd");
@@ -785,10 +908,12 @@ mod tests {
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::Cancelled));
         assert_eq!(exec.phase, "start");
+        assert_eq!(exec.sandbox_kind, "isolation_session");
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].sandbox_kind, "isolation_session");
         assert_eq!(errors[0].error_type, FailureReason::Cancelled);
         assert_eq!(errors[0].exit_code, CANCELLED_EXIT_CODE);
 
@@ -804,6 +929,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
 
@@ -881,6 +1007,7 @@ mod tests {
             false,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -947,6 +1074,7 @@ mod tests {
         let event = crash_event(
             TelemetryContext {
                 backend: "lxc",
+                sandbox_kind: "lxc",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -963,6 +1091,7 @@ mod tests {
         let cancel = crash_event(
             TelemetryContext {
                 backend: "appcontainer",
+                sandbox_kind: "appcontainer",
                 phase: "",
                 correlation_vector: "",
             },
@@ -983,6 +1112,7 @@ mod tests {
         let panic = plan_crash(
             TelemetryContext {
                 backend: "lxc",
+                sandbox_kind: "lxc",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -1005,6 +1135,7 @@ mod tests {
         let cancel = plan_crash(
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "",
                 correlation_vector: "",
             },
@@ -1041,6 +1172,7 @@ mod tests {
         for phase in PHASES {
             let ctx = TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase,
                 correlation_vector: correlation,
             };
@@ -1145,6 +1277,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
 
         // Provision-style success envelope → one MXC.Execution, no MXC.Error.
         let envelope = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
@@ -1152,6 +1285,7 @@ mod tests {
             true,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "provision",
                 correlation_vector: "corr-provision",
             },
@@ -1161,6 +1295,7 @@ mod tests {
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1);
         assert_eq!(execs[0].phase, "provision");
+        assert_eq!(execs[0].sandbox_kind, "isolation_session");
         assert_eq!(execs[0].correlation_vector, "corr-provision");
         assert_eq!(execs[0].outcome, "success");
         assert!(events::test_sink::take_errors().is_empty());
@@ -1168,11 +1303,13 @@ mod tests {
         // Fresh slot for the error case (the emit above claimed it once).
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         let err = Err(MxcError::policy_validation("bad policy"));
         emit_state_aware(
             true,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "start",
                 correlation_vector: "corr-start",
             },
@@ -1182,12 +1319,14 @@ mod tests {
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1);
         assert_eq!(execs[0].phase, "start");
+        assert_eq!(execs[0].sandbox_kind, "isolation_session");
         assert_eq!(execs[0].correlation_vector, "corr-start");
         assert_eq!(execs[0].outcome, "failure");
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].error_type, FailureReason::PolicyError);
         assert_eq!(errors[0].phase, "start");
+        assert_eq!(errors[0].sandbox_kind, "isolation_session");
         assert_eq!(errors[0].correlation_vector, "corr-start");
 
         reset_for_test();
@@ -1203,6 +1342,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
 
         // Register the real ETW provider; on Windows this makes is_active() true.
         assert!(
@@ -1224,6 +1364,42 @@ mod tests {
         );
 
         mxc_telemetry::shutdown();
+        reset_for_test();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_withdrawal_and_policy_block_suppress_the_next_emission() {
+        let store = tempfile::tempdir().expect("temp dir");
+        let env = test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        consent::set_consent(true, "test").expect("set consent");
+
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        set_process_context(&ContainmentBackend::IsolationSession);
+
+        consent::withdraw_consent().expect("withdraw consent");
+        emit_panic();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "withdrawal must suppress the next logical emission"
+        );
+
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        consent::set_consent(true, "test").expect("restore consent");
+        env.set_policy_value(0);
+
+        emit_cancellation();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "a newly blocking policy must suppress the next logical emission"
+        );
+
         reset_for_test();
     }
 }

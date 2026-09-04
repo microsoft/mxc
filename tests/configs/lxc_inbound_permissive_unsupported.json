@@ -1,0 +1,20 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Inbound-Permissive",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo this-should-never-run"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "enforcementMode": "firewall",
+    "allowLocalNetwork": true
+  }
+}

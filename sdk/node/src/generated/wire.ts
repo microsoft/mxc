@@ -6,14 +6,15 @@
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
+ * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
+ * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
+ * API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
  */
 /**
  * BaseProcessContainer UI isolation settings.
@@ -38,7 +39,7 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Native capture requires the complete compatible PSEC plus V2 Learning Mode API set. Requests that native capture cannot represent use guarded WPR with a compatible legacy SBOX or AppContainer containment tier.
  */
 export interface CaptureDenials {
   /**
@@ -46,9 +47,13 @@ export interface CaptureDenials {
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed file in a protected per-run directory. Retained traces use `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\retained`; non-retained traces use the system temporary directory.)
    */
   outputPath?: string | null;
+  /**
+   * Keep the sealed ETL trace after analysis and report its path in output metadata. Defaults to `false`, which deletes the trace after analysis. Retention requires a terminal wait; abandoning the process handle deletes the internal trace. If post-seal analysis fails, the failure and retained path are exposed through `captureDenialsError` output metadata. Retained traces can contain sensitive resource paths and identifiers; callers are responsible for deleting them.
+   */
+  retainEtl?: boolean | null;
 }
 
 /**
@@ -143,7 +148,9 @@ export interface IsolationSession {
  */
 export interface IsolationSessionProvisionPhase {
   /**
-   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   * Optional identifier for the calling application.
+   * 
+   * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
   appId?: string | null;
   [k: string]: unknown;
@@ -203,13 +210,44 @@ export interface Network {
    */
   defaultPolicy?: NetworkPolicy | null;
   /**
+   * Outbound network policy.
+   */
+  egress?: NetworkEgress | null;
+  /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
+   * Inbound and host-loopback network policy.
+   */
+  ingress?: NetworkIngress | null;
+  /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * Allow or deny network action.
+ */
+export type NetworkAction = "allow" | "deny";
+
+/**
+ * Outbound network policy.
+ */
+export interface NetworkEgress {
+  /**
+   * Explicit allow rules.
+   */
+  allow?: NetworkRule[] | null;
+  /**
+   * Action used when no explicit rule matches. Defaults to `deny`.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Explicit deny rules. Deny rules take precedence over allow rules.
+   */
+  deny?: NetworkRule[] | null;
 }
 
 /**
@@ -218,9 +256,74 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * Inbound and host-loopback network policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Default action for LAN/private-network inbound traffic.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Bidirectional host-loopback connectivity action.
+   */
+  hostLoopback?: NetworkAction | null;
+}
+
+/**
+ * CIDR network peer.
+ */
+export interface NetworkPeer {
+  /**
+   * IPv4 or IPv6 CIDR.
+   */
+  cidr: string;
+  /**
+   * CIDRs excluded from this peer.
+   */
+  except?: string[] | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * Protocol and destination-port selector.
+ */
+export interface NetworkPort {
+  /**
+   * Inclusive end of a destination-port range. Requires `port`.
+   */
+  endPort?: number | null;
+  /**
+   * Destination port. Omission matches every port.
+   */
+  port?: number | null;
+  /**
+   * Transport protocol. Defaults to `any`.
+   */
+  protocol?: NetworkProtocol | null;
+}
+
+/**
+ * Transport protocol selector.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
+
+/**
+ * Outbound network rule.
+ */
+export interface NetworkRule {
+  /**
+   * Destination protocols and ports. Omission matches all.
+   */
+  ports?: NetworkPort[] | null;
+  /**
+   * Destination CIDRs. Omission matches both IP families.
+   */
+  to?: NetworkPeer[] | null;
+}
 
 /**
  * State-aware lifecycle phase.
@@ -277,7 +380,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. MXC prefers native PSEC plus V2 Learning Mode when that API set can fully honor the request. Otherwise it retains the highest compatible legacy containment tier and uses guarded WPR capture, so `leastPrivilege`, `network.proxy`, and deny-path policies can remain enforced without weakening the request.
    */
   captureDenials?: CaptureDenials | null;
   /**
@@ -289,9 +392,23 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
+   * ProcessContainer-specific network configuration.
+   */
+  network?: ProcessContainerNetwork | null;
+  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
+}
+
+/**
+ * ProcessContainer-specific network configuration.
+ */
+export interface ProcessContainerNetwork {
+  /**
+   * Installed package family name or AppContainer profile allowed to host the configured loopback proxy.
+   */
+  allowedProxyPeer?: string | null;
 }
 
 /**
@@ -310,6 +427,16 @@ export interface Proxy {
    * Proxy URL (parsed into host:port).
    */
   url?: string | null;
+}
+
+/**
+ * Runtime values supplied alongside, but separate from, sandbox policy.
+ */
+export interface RuntimeConfig {
+  /**
+   * HTTP/S loopback proxy URL.
+   */
+  networkProxy?: string | null;
 }
 
 /**
@@ -440,6 +567,10 @@ export interface Wslc {
    */
   portMappings?: PortMapping[] | null;
   /**
+   * State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
+   */
+  provision?: WslcProvisionPhase | null;
+  /**
    * Storage path override.
    */
   storagePath?: string | null;
@@ -447,6 +578,23 @@ export interface Wslc {
    * OS inside the WSL container.
    */
   targetOs?: string | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
+ * 
+ * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
+ */
+export interface WslcProvisionPhase {
+  /**
+   * Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.
+   */
+  image?: string | null;
+  /**
+   * Path to a local image tarball to import instead of pulling.
+   */
+  imageTarPath?: string | null;
   [k: string]: unknown;
 }
 
@@ -511,6 +659,10 @@ export interface MXCConfiguration {
    */
   processContainer?: ProcessContainer | null;
   /**
+   * Runtime values supplied alongside, but separate from, sandbox policy.
+   */
+  runtimeConfig?: RuntimeConfig | null;
+  /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */
   sandboxId?: string | null;
@@ -523,7 +675,7 @@ export interface MXCConfiguration {
    */
   ui?: Ui | null;
   /**
-   * MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+   * MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
    */
   version?: string | null;
 }

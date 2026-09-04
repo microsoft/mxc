@@ -1,253 +1,701 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Graceful-exit PLM audit-trace lifecycle for `wxc-exec --audit`.
-//!
-//! **Invariant: `wxc-exec.exe` runs unelevated.** Starting a WPR
-//! kernel ETW session requires administrator, so `--audit` does NOT
-//! self-elevate `wxc-exec`; instead it delegates the privileged work
-//! to `plm.exe`, which carries a `requireAdministrator` manifest and
-//! is spawned via `ShellExecuteExW` + `runas` (UAC). See
-//! [`crate::plm_launch::run_plm_elevated`] for the spawn wrapper.
-//! Every `run_plm_command(...)` call in this module therefore
-//! triggers a UAC prompt when invoked from a medium-IL shell — one
-//! prompt per `plm start`, one per `plm stop`.
-//!
-//! `--audit` runs `plm.exe start`, which leaves a live WPR ETW session
-//! in the kernel for the duration of the workload. The matching
-//! `plm.exe stop` tears it down. If anything between those two calls
-//! aborts wxc-exec — Ctrl-C, panic, `process::exit`, container-runner
-//! kill — the kernel session stays allocated until reboot or manual
-//! `wpr -cancel`, blocking all other WPR consumers on the host (only
-//! one NT Kernel Logger session can exist at a time).
-//!
-//! We bracket the live-trace window with `AUDIT_ACTIVE` plus a stack-
-//! owned `AuditTraceGuard`. Cleanup paths:
-//!  * Normal exit and panic unwind — `AuditTraceGuard::drop` invokes
-//!    `cancel_active_audit_trace()`.
-//!  * Ctrl-C / Ctrl-Break / console close — the `dacl_ctrl_handler`
-//!    (in `main.rs`) also calls `cancel_active_audit_trace()` after
-//!    handling DACLs.
-//!
-//! `cancel_active_audit_trace()` is idempotent via the AtomicBool, so
-//! it is safe for both paths to call it.
-//!
-//! The host-wide named-mutex singleton (`Global\Mxc_Plm_Audit`) is
-//! shared with `plm.exe`; both binaries acquire and release it via
-//! `plm::coordination::singleton` so their retry-on-conflict paths can
-//! never silently `wpr -cancel` a peer trace.
+//! `wxc-exec --audit` compatibility artifacts built on `captureDenials`.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::path::{Path, PathBuf};
 
-use wxc_common::logger::Logger;
+use wxc_common::models::{
+    CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest, ScriptResponse,
+};
 
-/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
-/// same install directory. Returns `None` when the current exe path
-/// can't be resolved.
-pub fn plm_exe_path() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
+#[derive(Debug)]
+pub struct AuditContext {
+    pub log_dir: PathBuf,
+    pub config_path: Option<PathBuf>,
 }
 
-/// Run `plm.exe <subcommand> <args...>` synchronously via
-/// `run_plm_elevated`, which captures the child's stdout/stderr into
-/// temp files (the UAC broker can't inherit our stdio) and replays
-/// them only on non-zero exit or when `verbose` is set — the happy
-/// path is deliberately silent. Audit tracing is a best-effort
-/// diagnostic: missing-binary / spawn / non-zero-exit conditions are
-/// logged and returned as `false` — this function never calls
-/// `process::exit` on its own. The caller (currently the `--audit`
-/// entry point) is responsible for deciding whether a `false` return
-/// should abort the workload; today the `plm start` caller does abort
-/// rather than run --audit without an active trace, while `plm stop`
-/// merely falls through to the `wpr -cancel` cleanup path.
-///
-/// Returns `true` iff the spawn succeeded **and** plm.exe exited with
-/// a zero status. The caller needs this signal to decide whether to
-/// clear `AUDIT_ACTIVE` (only after a successful `plm stop`); without
-/// it, `AUDIT_ACTIVE.store(false)` would run unconditionally and
-/// silently leak the kernel ETW session on every failure path.
-pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: bool) -> bool {
-    use std::fmt::Write as _;
+pub fn prepare_request(
+    request: &mut ExecutionRequest,
+    config_path: Option<PathBuf>,
+) -> Result<AuditContext, String> {
+    prepare_request_in(request, config_path, plm::stop::default_log_dir())
+}
 
-    let Some(plm) = plm_exe_path() else {
-        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
-        return false;
-    };
-    if !plm.exists() {
-        let _ = writeln!(
-            logger,
-            "[audit] plm.exe not found at {} - skipping",
-            plm.display()
+fn prepare_request_in(
+    request: &mut ExecutionRequest,
+    config_path: Option<PathBuf>,
+    log_dir: PathBuf,
+) -> Result<AuditContext, String> {
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("failed to create audit log directory: {error}"))?;
+    request.policy.capture_denials = Some(CaptureDenialsConfig {
+        mode: CaptureDenialsMode::Allow,
+        output_path: Some(log_dir.join("denials.json").to_string_lossy().into_owned()),
+        retain_etl: true,
+    });
+    Ok(AuditContext {
+        log_dir,
+        config_path,
+    })
+}
+
+pub fn finalize(
+    response: &mut ScriptResponse,
+    context: &AuditContext,
+    exe_dir: &Path,
+    verbose: bool,
+) -> Result<Vec<String>, String> {
+    let metadata = response
+        .output_metadata
+        .as_mut()
+        .ok_or_else(|| "captureDenials returned no output metadata".to_string())?;
+    if let Some(error) = metadata.capture_denials_error.as_ref() {
+        return Err(format!(
+            "captureDenials finalization failed: {}; retained ETL: {}",
+            error.message, error.etl_path
+        ));
+    }
+    let capture = metadata
+        .capture_denials
+        .as_mut()
+        .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
+    let source_denials = PathBuf::from(&capture.output_path);
+    let source_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&source_denials)
+        .map_err(|error| {
+            format!(
+                "failed to derive verbose logging path from {}: {error}",
+                source_denials.display()
+            )
+        })?;
+    let source_etl = capture
+        .etl_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "captureDenials did not return the retained ETL path".to_string())?;
+    if !source_denials.is_file() {
+        return Err(format!(
+            "captureDenials output file is missing: {}",
+            source_denials.display()
+        ));
+    }
+    if !source_etl.is_file() {
+        return Err(format!(
+            "captureDenials retained ETL is missing: {}",
+            source_etl.display()
+        ));
+    }
+    if !source_verbose_logging.is_file() {
+        return Err(format!(
+            "captureDenials verbose logging output file is missing: {}",
+            source_verbose_logging.display()
+        ));
+    }
+
+    let document: learning_mode_core::DenialsDocument =
+        serde_json::from_slice(&std::fs::read(&source_denials).map_err(|error| {
+            format!(
+                "failed to read captureDenials output {}: {error}",
+                source_denials.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "captureDenials output {} is not valid actionable denials JSON: {error}",
+                source_denials.display()
+            )
+        })?;
+    validate_metadata(capture, &document)?;
+    let _: learning_mode_core::VerboseLoggingDocument =
+        serde_json::from_slice(&std::fs::read(&source_verbose_logging).map_err(|error| {
+            format!(
+                "failed to read captureDenials verbose logging output {}: {error}",
+                source_verbose_logging.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "captureDenials verbose logging output {} is not valid JSON: {error}",
+                source_verbose_logging.display()
+            )
+        })?;
+
+    let final_denials = context.log_dir.join("denials.json");
+    let final_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&final_denials)
+        .map_err(|error| format!("failed to derive audit verbose logging output path: {error}"))?;
+    let final_etl = context.log_dir.join("trace.etl");
+    let cleanup_warnings = relocate_artifacts(
+        capture,
+        &ArtifactRelocation {
+            source_denials: &source_denials,
+            final_denials: &final_denials,
+            source_verbose_logging: &source_verbose_logging,
+            final_verbose_logging: &final_verbose_logging,
+            source_etl: &source_etl,
+            final_etl: &final_etl,
+        },
+        learning_mode_core::relocate_paired_output_files,
+        move_new_file,
+    )?;
+    remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
+
+    plm::stop::postprocess_denials(
+        &document,
+        &plm::stop::PostProcessOptions {
+            log_dir: context.log_dir.clone(),
+            bin_path: None,
+            config_path: context.config_path.clone(),
+            trace_path: final_etl.clone(),
+            denials_path: final_denials.clone(),
+            verbose,
+        },
+        exe_dir,
+    )
+    .map_err(|error| format!("failed to generate audit compatibility artifacts: {error:#}"))?;
+
+    Ok(cleanup_warnings)
+}
+
+fn validate_metadata(
+    capture: &wxc_common::models::CaptureDenialsOutput,
+    document: &learning_mode_core::DenialsDocument,
+) -> Result<(), String> {
+    if capture.kind != wxc_common::models::CaptureDenialsOutput::KIND
+        || capture.exit_code != document.summary.exit_code
+        || capture.total_denials != document.summary.total_denials
+        || capture.denied_resources_truncated != document.summary.denied_resources_truncated
+    {
+        return Err(
+            "captureDenials metadata does not match the actionable denials document".to_string(),
         );
-        return false;
     }
-
-    let mut summary = String::new();
-    let _ = write!(summary, "[audit] running {}", plm.display());
-    for a in args {
-        let _ = write!(summary, " {}", a.to_string_lossy());
-    }
-    let _ = writeln!(logger, "{summary}");
-    if verbose {
-        eprintln!("{summary}");
-    }
-
-    // plm.exe normally acquires the `Global\Mxc_Plm_Audit` named-
-    // mutex singleton on direct operator invocations (`plm log` /
-    // `plm start` / `plm stop`) so its retry-on-conflict path can't
-    // silently `wpr -cancel` a peer trace. When wxc-exec spawns
-    // plm.exe we already hold that mutex for the whole audit window
-    // — tell the child to skip its own acquisition so we don't
-    // deadlock on the same global name. The signal used to be an env
-    // var (SINGLETON_HELD_BY_PARENT_ENV) but `ShellExecuteExW` +
-    // `runas` (used by run_plm_elevated) does not propagate the
-    // caller's environment across the elevation boundary, so it now
-    // rides on a hidden CLI flag.
-    match crate::plm_launch::run_plm_elevated(&plm, args, true) {
-        Ok(run) if run.exit_code == 0 => {
-            if verbose {
-                replay_captured(logger, &run.stdout, &run.stderr);
-            }
-            true
-        }
-        Ok(run) => {
-            let _ = writeln!(logger, "[audit] plm exited with code {}", run.exit_code);
-            replay_captured(logger, &run.stdout, &run.stderr);
-            if verbose {
-                eprintln!("[audit] plm exited with code {}", run.exit_code);
-            }
-            false
-        }
-        Err(msg) => {
-            let _ = writeln!(logger, "[audit] failed to launch elevated plm: {msg}");
-            if verbose {
-                eprintln!("[audit] failed to launch elevated plm: {msg}");
-            }
-            false
-        }
-    }
+    Ok(())
 }
 
-/// Replay captured stdout/stderr bytes to the current process's own
-/// streams. Used on failure (and in verbose mode on success) so the
-/// happy path can stay silent while diagnostics still surface. Byte
-/// slices come from `ShellExecuteExW`-elevated child capture, which
-/// cannot go through OS pipe inheritance and is redirected to temp
-/// files at the plm.exe end (see `plm_launch::run_plm_elevated`).
-fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
-    use std::fmt::Write as _;
-    use std::io::Write as _;
-    if !stdout.is_empty() {
-        let _ = std::io::stdout().write_all(stdout);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(stdout));
-    }
-    if !stderr.is_empty() {
-        let _ = std::io::stderr().write_all(stderr);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(stderr));
-    }
-}
-
-pub static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Set to `true` while `plm start` is being spawned and has not yet
-/// returned. `AUDIT_ACTIVE` is flipped to `true` BEFORE `plm.exe` is
-/// spawned (because `mark_audit_active()` has to run early to cover a
-/// Ctrl+C arriving mid-spawn), but the kernel ETW session is not
-/// actually engaged until `plm.exe`'s child `wpr -start` returns. A
-/// Ctrl+C in that gap would fire `wpr -cancel` against a not-yet-
-/// existing session, then `wpr -start` would silently succeed AFTER
-/// the cancel — leaking the session past `wxc-exec`'s own cleanup. We
-/// close the race by making the Ctrl+C handler wait (bounded) until
-/// `plm start` has finished its spawn round-trip before deciding
-/// whether to issue the cancel.
-pub static AUDIT_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Mark that the wxc-exec process owns a live PLM audit trace. Called
-/// just before `plm start` is spawned so a Ctrl-C arriving mid-spawn
-/// still triggers cleanup (over-cancelling a not-yet-started session
-/// is harmless — `wpr -cancel` returns non-zero and we discard).
-pub fn mark_audit_active() {
-    AUDIT_ACTIVE.store(true, Ordering::SeqCst);
-}
-
-/// Cancel an in-flight PLM audit trace iff one is active, then clear
-/// the flag. Idempotent; safe to call from the Ctrl-C handler and the
-/// stack guard's Drop. Failures (no active session, missing wpr.exe)
-/// are silenced because the call is best-effort cleanup.
+/// Relocates the capture artifacts into the audit log directory, keeping the
+/// on-disk state and the metadata paths mutually truthful even on partial
+/// failure.
 ///
-/// Invokes `wpr.exe` by absolute path (`%SystemRoot%\System32\wpr.exe`)
-/// rather than as a bare name so `CreateProcessW`'s implicit CWD-first
-/// search order can't be abused to substitute a planted binary.
-/// `wxc-exec` itself runs unelevated; the privileged `wpr -start` /
-/// `wpr -stop` calls are delegated to the elevated `plm.exe` child
-/// (see [`crate::plm_launch::run_plm_elevated`]). We still resolve
-/// wpr by absolute path here for the best-effort panic / ctrl-c
-/// cleanup so behavior is consistent with the plm.exe side, which
-/// applies the same hardening in its own resolver.
-pub fn cancel_active_audit_trace() {
-    if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
-        let _ = plm::wpr_path::wpr_command()
-            .arg("-cancel")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-}
-
-/// Stack-owned guard: ensures the audit trace is cancelled on panic
-/// unwind and on normal function return.
-pub struct AuditTraceGuard;
-
-impl Drop for AuditTraceGuard {
-    fn drop(&mut self) {
-        cancel_active_audit_trace();
-    }
-}
-
-/// Raw handle of the host-wide single-instance mutex for PLM audit
-/// mode. Two concurrent `wxc-exec --audit` runs would share a single
-/// NT Kernel Logger session, so the second one's `wpr -start` would
-/// either steal the first's session or fail and silently corrupt the
-/// first run's findings. `wxc-exec` (unelevated) acquires the named
-/// mutex (`Global\\` so it's machine-wide across sessions) and
-/// refuses to start if another wxc-exec audit is already running.
-/// The elevated `plm.exe` child skips its own acquisition of the
-/// same mutex via the `--wxc-singleton-held-by-parent` flag so the
-/// parent's handle remains the sole owner for the trace lifetime.
+/// The JSON pair is relocated transactionally and its final actionable path is
+/// published only after both siblings commit. The retained ETL moves last and
+/// its final path is published immediately on success. A later move failure
+/// therefore leaves every metadata path truthful.
 ///
-/// The handle is stashed in a static atomic (not just the stack guard)
-/// so the explicit cleanup before `process::exit` — which skips
-/// destructors — can release it too. `AuditSingletonGuard::drop` is
-/// a thin shim over `release_audit_singleton`; both paths are
-/// idempotent.
-static AUDIT_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
+/// `move_file` is injected so tests can force a second-move failure
+/// deterministically; production passes [`move_new_file`].
+struct ArtifactRelocation<'a> {
+    source_denials: &'a Path,
+    final_denials: &'a Path,
+    source_verbose_logging: &'a Path,
+    final_verbose_logging: &'a Path,
+    source_etl: &'a Path,
+    final_etl: &'a Path,
+}
 
-pub struct AuditSingletonGuard;
+fn relocate_artifacts(
+    capture: &mut wxc_common::models::CaptureDenialsOutput,
+    paths: &ArtifactRelocation<'_>,
+    relocate_pair: impl FnOnce(
+        &str,
+        &Path,
+        &Path,
+        &Path,
+        &Path,
+    ) -> std::io::Result<learning_mode_core::RelocationOutcome>,
+    mut move_file: impl FnMut(&Path, &Path) -> Result<learning_mode_core::RelocationOutcome, String>,
+) -> Result<Vec<String>, String> {
+    ensure_destination_available(paths.source_etl, paths.final_etl)?;
 
-impl Drop for AuditSingletonGuard {
-    fn drop(&mut self) {
-        release_audit_singleton();
+    let pair_outcome = relocate_pair(
+        "audit output relocation",
+        paths.source_denials,
+        paths.source_verbose_logging,
+        paths.final_denials,
+        paths.final_verbose_logging,
+    )
+    .map_err(|error| format!("failed to relocate audit output pair: {error}"))?;
+    capture.output_path = paths.final_denials.to_string_lossy().into_owned();
+    let mut cleanup_warnings = pair_outcome.into_cleanup_warnings();
+
+    // Retained ETL last: on failure it stays at its source and `etl_path`
+    // still points there (unchanged), so each artifact remains individually
+    // truthful even though the relocation as a whole failed.
+    let etl_outcome = move_file(paths.source_etl, paths.final_etl)?;
+    capture.etl_path = Some(paths.final_etl.to_string_lossy().into_owned());
+    cleanup_warnings.extend(etl_outcome.into_cleanup_warnings());
+    Ok(cleanup_warnings)
+}
+
+fn move_new_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<learning_mode_core::RelocationOutcome, String> {
+    learning_mode_core::relocate_output_file(
+        "audit artifact relocation",
+        "retained ETL",
+        source,
+        destination,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to move audit artifact {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
+    if source != destination && destination.exists() {
+        return Err(format!(
+            "audit artifact destination already exists: {}",
+            destination.display()
+        ));
     }
+    Ok(())
 }
 
-/// Release the host-wide audit singleton if held. Idempotent: safe to
-/// call from `Drop`, from the explicit pre-`process::exit` cleanup,
-/// and from error paths.
-pub fn release_audit_singleton() {
-    plm::coordination::singleton::release(&AUDIT_SINGLETON_HANDLE);
-}
-
-pub fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
-    use plm::coordination::singleton::{try_acquire, AcquireError};
-    match try_acquire(&AUDIT_SINGLETON_HANDLE) {
-        Ok(()) => Ok(AuditSingletonGuard),
-        Err(AcquireError::AlreadyHeld) => Err(String::from(
-            "another wxc-exec --audit run holds the Global\\Mxc_Plm_Audit mutex; \
-             refusing to start a second concurrent PLM trace (only one NT Kernel \
-             Logger session can exist per host)",
+fn remove_empty_managed_directory(
+    directory: Option<&Path>,
+    audit_dir: &Path,
+) -> Result<(), String> {
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    // Only prune a per-run directory promoted into the backend's retained-ETL
+    // store; the predicate is owned by `appcontainer_common` so this does not
+    // duplicate the store's private directory name.
+    let is_retained_capture_dir =
+        appcontainer_common::capture_output::is_retained_capture_run_dir(directory);
+    if directory == audit_dir || !is_retained_capture_dir {
+        return Ok(());
+    }
+    match std::fs::remove_dir(directory) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "failed to remove empty retained-ETL directory {}: {error}",
+            directory.display()
         )),
-        Err(AcquireError::CreateFailed(e)) => Err(format!("CreateMutexW failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use learning_mode_core::{
+        DenialSummary, DenialsDocument, VerboseLoggingDocument, VerboseLoggingSummary,
+    };
+    use wxc_common::models::{
+        CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
+    };
+
+    #[test]
+    fn prepare_injects_allow_capture_and_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        let config_path = PathBuf::from(r"C:\policy.json");
+        let mut request = ExecutionRequest::default();
+
+        let context =
+            prepare_request_in(&mut request, Some(config_path.clone()), log_dir.clone()).unwrap();
+        let capture = request.policy.capture_denials.as_ref().unwrap();
+
+        assert_eq!(capture.mode, CaptureDenialsMode::Allow);
+        assert!(capture.retain_etl);
+        assert_eq!(
+            capture.output_path.as_deref(),
+            Some(log_dir.join("denials.json").to_string_lossy().as_ref())
+        );
+        assert_eq!(context.config_path, Some(config_path));
+        assert!(context.log_dir.is_dir());
+    }
+
+    #[test]
+    fn finalize_relocates_outputs_and_updates_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        let retained_dir = directory.path().join("retained").join("run");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::create_dir_all(&retained_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = retained_dir.join("capture.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(23, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 23);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        finalize(&mut response, &context, directory.path(), false).unwrap();
+
+        assert!(!source_denials.exists());
+        assert!(
+            !learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
+        assert!(!source_etl.exists());
+        assert!(!retained_dir.exists());
+        assert_eq!(std::fs::read(log_dir.join("trace.etl")).unwrap(), b"etl");
+        assert!(log_dir.join("denials.verbose.json").is_file());
+        let capture = response
+            .output_metadata
+            .as_ref()
+            .unwrap()
+            .capture_denials
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            Path::new(&capture.output_path),
+            log_dir.join("denials.json")
+        );
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(log_dir.join("trace.etl").as_path())
+        );
+    }
+
+    #[test]
+    fn finalize_updates_metadata_before_postprocessing_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: Some(directory.path().join("missing-policy.json")),
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("audit compatibility artifacts"));
+        let capture = response
+            .output_metadata
+            .as_ref()
+            .unwrap()
+            .capture_denials
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            Path::new(&capture.output_path),
+            log_dir.join("denials.json")
+        );
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(log_dir.join("trace.etl").as_path())
+        );
+        assert!(log_dir.join("denials.json").is_file());
+        assert!(log_dir.join("denials.verbose.json").is_file());
+        assert!(log_dir.join("trace.etl").is_file());
+    }
+
+    #[test]
+    fn finalize_rejects_missing_or_failed_capture_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = AuditContext {
+            log_dir: directory.path().join("audit"),
+            config_path: None,
+        };
+        let mut missing = ScriptResponse::default();
+        assert!(finalize(&mut missing, &context, directory.path(), false)
+            .unwrap_err()
+            .contains("no output metadata"));
+
+        let mut failed = ScriptResponse {
+            output_metadata: Some(Box::new(SandboxOutputMetadata {
+                capture_denials: None,
+                capture_denials_error: Some(CaptureDenialsErrorOutput {
+                    message: "decode failed".to_string(),
+                    etl_path: r"C:\retained\capture.etl".to_string(),
+                }),
+            })),
+            ..Default::default()
+        };
+        let error = finalize(&mut failed, &context, directory.path(), false).unwrap_err();
+        assert!(error.contains("decode failed"));
+        assert!(error.contains("capture.etl"));
+    }
+
+    #[test]
+    fn finalize_rejects_malformed_json_without_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        std::fs::write(&source_denials, b"{").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir,
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("actionable denials JSON"));
+        assert!(source_denials.exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
+        assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn finalize_rejects_malformed_verbose_logging_without_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_verbose_logging =
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::write(&source_verbose_logging, b"{").unwrap();
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("verbose logging output"));
+        assert!(error.contains("not valid JSON"));
+        assert!(source_denials.is_file());
+        assert!(source_verbose_logging.is_file());
+        assert!(source_etl.is_file());
+        assert!(!log_dir.join("denials.json").exists());
+        assert!(!log_dir.join("denials.verbose.json").exists());
+        assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    #[test]
+    fn finalize_preflights_both_destinations_before_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        std::fs::write(log_dir.join("denials.json"), b"existing").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("actionable output file already exists"));
+        assert!(source_denials.exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
+        assert!(source_etl.exists());
+        assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    #[test]
+    fn etl_relocation_never_clobbers_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let destination = directory.path().join("destination.json");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+
+        let error = move_new_file(&source, &destination).unwrap_err();
+
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn finalize_rejects_missing_verbose_logging_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::remove_file(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap(),
+        )
+        .unwrap();
+        let context = AuditContext {
+            log_dir,
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("verbose logging output file is missing"));
+        assert!(source_denials.exists());
+        assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn relocate_keeps_metadata_truthful_when_etl_move_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_verbose_logging = log_dir.join("denials.unique.verbose.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let final_denials = log_dir.join("denials.json");
+        let final_verbose_logging = log_dir.join("denials.verbose.json");
+        let final_etl = log_dir.join("trace.etl");
+        std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut capture = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: source_denials.to_string_lossy().into_owned(),
+            exit_code: 0,
+            total_denials: 0,
+            denied_resources_truncated: false,
+            etl_path: Some(source_etl.to_string_lossy().into_owned()),
+        };
+
+        let mut calls = 0;
+        let error = relocate_artifacts(
+            &mut capture,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &final_denials,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &final_verbose_logging,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
+            learning_mode_core::relocate_paired_output_files,
+            |source, destination| {
+                calls += 1;
+                if calls == 1 {
+                    Err("injected ETL move failure".to_string())
+                } else {
+                    std::fs::rename(source, destination)
+                        .map(|_| learning_mode_core::RelocationOutcome::default())
+                        .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("injected ETL move failure"));
+        // Primary JSON moved; metadata truthfully points at the final path.
+        assert!(final_denials.is_file());
+        assert!(!source_denials.exists());
+        assert_eq!(Path::new(&capture.output_path), final_denials);
+        assert!(final_verbose_logging.is_file());
+        assert!(!source_verbose_logging.exists());
+        // ETL untouched; metadata still truthfully points at the source.
+        assert!(source_etl.is_file());
+        assert!(!final_etl.exists());
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(source_etl.as_path())
+        );
+    }
+
+    #[test]
+    fn relocate_rolls_back_json_pair_before_publishing_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_denials = directory.path().join("denials.unique.json");
+        let source_verbose_logging = directory.path().join("denials.unique.verbose.json");
+        let source_etl = directory.path().join("denials.unique.etl");
+        let shared_destination = directory.path().join("denials.json");
+        let final_etl = directory.path().join("trace.etl");
+        std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut capture = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: source_denials.to_string_lossy().into_owned(),
+            exit_code: 0,
+            total_denials: 0,
+            denied_resources_truncated: false,
+            etl_path: Some(source_etl.to_string_lossy().into_owned()),
+        };
+
+        let error = relocate_artifacts(
+            &mut capture,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &shared_destination,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &shared_destination,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
+            learning_mode_core::relocate_paired_output_files,
+            |_, _| panic!("ETL relocation must not run after JSON-pair failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to promote actionable"));
+        assert_eq!(Path::new(&capture.output_path), source_denials);
+        assert!(source_denials.is_file());
+        assert!(source_verbose_logging.is_file());
+        assert!(!shared_destination.exists());
+        assert!(source_etl.is_file());
+        assert!(!final_etl.exists());
+    }
+
+    fn response_with_capture(
+        denials_path: &Path,
+        etl_path: &Path,
+        exit_code: i32,
+    ) -> ScriptResponse {
+        let verbose_logging_path =
+            learning_mode_core::verbose_logging_sibling_path(denials_path).unwrap();
+        let verbose_logging = VerboseLoggingDocument::new(&VerboseLoggingSummary::default());
+        std::fs::write(
+            verbose_logging_path,
+            serde_json::to_vec(&verbose_logging).unwrap(),
+        )
+        .unwrap();
+        ScriptResponse {
+            exit_code,
+            output_metadata: Some(Box::new(SandboxOutputMetadata {
+                capture_denials: Some(CaptureDenialsOutput {
+                    kind: CaptureDenialsOutput::KIND.to_string(),
+                    output_path: denials_path.to_string_lossy().into_owned(),
+                    exit_code,
+                    total_denials: 0,
+                    denied_resources_truncated: false,
+                    etl_path: Some(etl_path.to_string_lossy().into_owned()),
+                }),
+                capture_denials_error: None,
+            })),
+            ..Default::default()
+        }
     }
 }

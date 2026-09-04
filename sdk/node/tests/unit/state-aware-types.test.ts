@@ -17,6 +17,11 @@ import {
   StopConfigFor,
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
+  WslcProvisionConfig,
+  WslcStartConfig,
+  WslcExecConfig,
+  WslcStopConfig,
+  WslcDeprovisionConfig,
 } from '../../src/state-aware-types.js';
 import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
@@ -125,9 +130,9 @@ describe('IsolationSessionProvisionConfig', () => {
   it('accepts an optional appId', () => {
     const cfg: IsolationSessionProvisionConfig = {
       network,
-      appId: 'Contoso.App_8wekyb3d8bbwe',
+      appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
     };
-    assert.strictEqual(cfg.appId, 'Contoso.App_8wekyb3d8bbwe');
+    assert.strictEqual(cfg.appId, 'PFN:Contoso.App_8wekyb3d8bbwe');
   });
 
   it('accepts an empty appId as a value distinct from omitting it', () => {
@@ -155,7 +160,7 @@ describe('IsolationSessionStartConfig', () => {
   it('rejects appId (provision-only; fixed for the sandbox lifetime)', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — appId is accepted only at provision.
-      appId: 'Contoso.App_8wekyb3d8bbwe',
+      appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
     };
     assert.ok(cfg);
   });
@@ -362,5 +367,112 @@ describe('ProvisionResult<C>', () => {
     assert.strictEqual(result.metadata?.agentUserName, 'iso\\agent');
     assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
+  });
+});
+
+describe('WslcProvisionConfig', () => {
+  it('accepts version, filesystem, network, and the backend-specific image knobs', () => {
+    const cfg: WslcProvisionConfig = {
+      version: '0.8.0-alpha',
+      filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
+      network: { defaultPolicy: 'allow' },
+      image: 'alpine:latest',
+      imageTarPath: 'C:\\images\\alpine.tar',
+    };
+    assert.strictEqual(cfg.image, 'alpine:latest');
+    assert.strictEqual(cfg.imageTarPath, 'C:\\images\\alpine.tar');
+    assert.strictEqual(cfg.filesystem?.readwritePaths?.[0], 'C:\\ws\\rw');
+  });
+
+  it('is entirely optional (every member optional)', () => {
+    const empty: WslcProvisionConfig = {};
+    assert.ok(empty);
+  });
+
+  it('rejects an undeclared backend-specific field', () => {
+    const cfg: WslcProvisionConfig = {
+      // @ts-expect-error — wslc provision declares no such field.
+      unsupportedSetting: { nested: true },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects ui at provision', () => {
+    const cfg: WslcProvisionConfig = {
+      // @ts-expect-error — ui is not exposed on the wslc provision config.
+      ui: { disable: true, clipboard: 'none', injection: false },
+    };
+    assert.ok(cfg);
+  });
+});
+
+describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
+  it('carry only version', () => {
+    const start: WslcStartConfig = { version: '0.8.0-alpha' };
+    const stop: WslcStopConfig = {};
+    const deprov: WslcDeprovisionConfig = {};
+    assert.strictEqual(start.version, '0.8.0-alpha');
+    assert.ok(stop);
+    assert.ok(deprov);
+
+    const wrongStart: WslcStartConfig = {
+      // @ts-expect-error — start accepts no backend-specific config.
+      image: 'alpine:latest',
+    };
+    assert.ok(wrongStart);
+  });
+});
+
+describe('WslcExecConfig', () => {
+  it('requires process and accepts an optional cooperative proxy', () => {
+    const cfg: WslcExecConfig = {
+      process: { commandLine: 'echo hi' },
+      network: { proxy: { url: 'http://127.0.0.1:8888' } },
+    };
+    assert.strictEqual(cfg.process.commandLine, 'echo hi');
+
+    // @ts-expect-error — exec config requires process.
+    const missing: WslcExecConfig = { network: { proxy: { url: 'http://127.0.0.1:8888' } } };
+    assert.ok(missing);
+  });
+});
+
+describe('Wslc metadata resolves to undefined for every phase', () => {
+  it('ProvisionResult carries no metadata and the id brands distinctly', () => {
+    const provMeta: ProvisionMetadataFor<'wslc'> = undefined;
+    const startMeta: StartMetadataFor<'wslc'> = undefined;
+    assert.strictEqual(provMeta, undefined);
+    assert.strictEqual(startMeta, undefined);
+
+    const result: ProvisionResult<'wslc'> = {
+      sandboxId: 'wslc:abcd' as SandboxId<'wslc'>,
+    };
+    assert.strictEqual(result.metadata, undefined);
+
+    function takesWslcId(_id: SandboxId<'wslc'>): void {
+      // body unused
+    }
+    // @ts-expect-error — an isolation_session id is not a wslc id.
+    takesWslcId('iso:abcd' as SandboxId<'isolation_session'>);
+    assert.ok(true);
+  });
+
+  it('routes a wslc: id to the wslc backend by prefix', () => {
+    const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+    assert.strictEqual(backendForSandboxId(id), 'wslc');
+  });
+});
+
+describe('ConfigsForBackend selects the wslc bundle', () => {
+  it('selects the Wslc bundle for the wslc backend', () => {
+    const bundle: ConfigsForBackend<'wslc'> = {
+      provision: { image: 'alpine:latest' },
+      start: {},
+      exec: { process: { commandLine: 'echo' } },
+      stop: {},
+      deprovision: {},
+    };
+    assert.strictEqual(bundle.provision.image, 'alpine:latest');
+    assert.strictEqual(bundle.exec.process.commandLine, 'echo');
   });
 });

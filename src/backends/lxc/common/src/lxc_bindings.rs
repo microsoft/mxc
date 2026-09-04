@@ -68,6 +68,15 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
+/// The keep-env argv shape, for tests that do not exercise env control.
+///
+/// No production caller wants it, so outside `cfg(test)` this is dead code,
+/// and the workspace clippy lane runs with `-D warnings`.
+#[cfg(test)]
+fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+    build_attach_args_with_env_control(env, working_directory, command, false)
+}
+
 /// Build the post-binary argv for `lxc-attach` (the args that follow the
 /// `-n NAME -P lxcpath` flags already appended by `lxc_command`).
 ///
@@ -75,11 +84,21 @@ pub fn resolve_default_lxcpath() -> String {
 /// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
 /// the full contract.
 ///
+/// An empty `env` is ambiguous: it is both "the caller expressed no opinion"
+/// and "a scrub removed every entry there was". `force_clear_env` is how a
+/// caller says which one it means, because only the second still has to shut
+/// the host environment out.
+///
 /// Gated to Linux + test builds because `attach_run` is a Windows stub
 /// that never calls this helper, and the workspace clippy lane on
 /// `windows-latest` would otherwise flag it as dead code.
 #[cfg(any(target_os = "linux", test))]
-fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+fn build_attach_args_with_env_control(
+    env: &[String],
+    working_directory: &str,
+    command: &str,
+    force_clear_env: bool,
+) -> Vec<String> {
     // Loose upper bound; realloc-avoidance hint only.
     let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
@@ -87,7 +106,7 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
     // slate, even if every entry is malformed. Matches Seatbelt exactly
     // and is the posture lxc-attach(1) recommends for sandbox callers.
     // See `attach_run` doc for the full contract.
-    if !env.is_empty() {
+    if force_clear_env || !env.is_empty() {
         args.push("--clear-env".to_string());
         for kv in env {
             // Well-formed = "KEY=VAL" with a non-empty KEY. `"=foo"` and
@@ -197,6 +216,32 @@ impl LxcContainer {
         }
     }
 
+    /// Return the PID of the container's init process, or `None` if the
+    /// container isn't running or the PID can't be parsed. Used to enter the
+    /// container's network namespace (`nsenter -t <pid> -n`) for inbound
+    /// iptables enforcement.
+    ///
+    /// `lxc-info -p` prints "just the container's pid"; depending on the LXC
+    /// version this is either a bare number or a `PID: <n>` line, so both
+    /// forms are accepted.
+    pub fn init_pid(&self) -> Option<u32> {
+        let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let token = line.trim();
+            let token = token.strip_prefix("PID:").map(str::trim).unwrap_or(token);
+            if let Ok(pid) = token.parse::<u32>() {
+                if pid > 0 {
+                    return Some(pid);
+                }
+            }
+        }
+        None
+    }
+
     /// Create the container from a template/distribution.
     pub fn create(&self, distribution: &str, release: &str) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-create");
@@ -294,7 +339,12 @@ impl LxcContainer {
     /// and are outside this function's control.
     ///
     /// When `env` is empty, the legacy keep-env behavior is preserved so
-    /// existing call sites without explicit env are undisturbed.
+    /// existing call sites without explicit env are undisturbed unless
+    /// `force_clear_env` is true. An empty `env` is ambiguous -- it is both
+    /// "no caller opinion" and "a scrub removed every entry there was" -- and
+    /// keep-env is only the right reading of the first, because it is the
+    /// mode under which this process's own environment, proxy variables and
+    /// host credentials included, reaches the container.
     ///
     /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
     /// [`crate::signal_cleanup::install`] blocks them in this process so
@@ -314,6 +364,7 @@ impl LxcContainer {
         command: &str,
         working_directory: &str,
         env: &[String],
+        force_clear_env: bool,
         timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
@@ -321,7 +372,12 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args(env, working_directory, command));
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -348,6 +404,7 @@ impl LxcContainer {
         _command: &str,
         _working_directory: &str,
         _env: &[String],
+        _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
@@ -747,6 +804,12 @@ mod tests {
     }
 
     #[test]
+    fn build_attach_args_can_force_clear_env_when_env_empty() {
+        let args = build_attach_args_with_env_control(&[], "", "cmd", true);
+        assert_eq!(args, vec!["--clear-env", "--", "/bin/sh", "-c", "cmd"]);
+    }
+
+    #[test]
     fn build_attach_args_clears_env_even_when_all_entries_malformed() {
         // Caller opted into env control by populating the field. Even if
         // every entry is malformed, `--clear-env` must still fire so the
@@ -778,6 +841,66 @@ mod tests {
             clear_idx < set_idx,
             "--clear-env must precede --set-var so caller value wins, got {:?}",
             args
+        );
+    }
+
+    // ── End-to-end: proxy policy → env → attach args ─────────────────────────
+    // These tests drive apply_proxy_env then build_attach_args_with_env_control
+    // together so the observable output (the lxc-attach argv) is what is
+    // asserted, not just an intermediate bool.
+
+    #[test]
+    fn proxy_disabled_keeps_caller_proxy_env_and_still_clears_inherited_env() {
+        // With no MXC proxy there is no egress path of ours for a caller's own
+        // proxy variable to bypass, and the firewall chain -- not an
+        // environment variable -- is what enforces the policy either way.
+        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
+        let mut env = vec![
+            "HTTP_PROXY=http://caller-proxy.example:9999".to_string(),
+            "PATH=/usr/bin".to_string(),
+        ];
+        apply_proxy_env(&mut env, &ProxyConfig::default());
+        let args = build_attach_args_with_env_control(&env, "", "cmd", true);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "the host environment must still be cleared; got {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "--set-var=HTTP_PROXY=http://caller-proxy.example:9999"),
+            "a caller's own proxy variable must reach the container; got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
+            "PATH must survive; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn proxy_enabled_emits_clear_env_and_proxy_keys_in_attach_args() {
+        use wxc_common::{
+            models::{ProxyAddress, ProxyConfig},
+            proxy_env::apply_proxy_env,
+        };
+        let proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+        apply_proxy_env(&mut env, &proxy);
+        let args = build_attach_args_with_env_control(&env, "", "cmd", true);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "proxy enabled must emit --clear-env; got {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--set-var=HTTP_PROXY=http://") && a.contains(":3128")),
+            "proxy enabled must set HTTP_PROXY (with port 3128); got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
+            "PATH must survive the proxy-env merge; got {args:?}"
         );
     }
 }

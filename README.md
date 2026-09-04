@@ -26,7 +26,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
@@ -219,21 +219,29 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
 ### Audit Mode (Permissive Learning Mode)
 
-`--audit` runs a Windows **ProcessContainer** policy in permissive mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend because those paths do not honor the AppContainer learning-mode capability. It is the developer inner-loop flow for discovering the capabilities and paths a workload needs. See [src/host/plm/readme.md](src/host/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
+`--audit` is a compatibility wrapper over `processContainer.captureDenials` in allow mode with ETL retention forced on. It injects `permissiveLearningMode`, so denied operations are recorded but allowed to proceed. On hosts with the complete PSEC/V2 Learning Mode API set, the selected ProcessContainer runner uses native capture without launching PLM or prompting for elevation. Older or policy-incompatible tiers use the guarded-WPR fallback: `wxc-exec.exe` remains unelevated and starts a session-scoped UAC-elevated PLM guardian only for the privileged WPR lifecycle, communicating over an authenticated local named pipe. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend.
 
 ```bash
 wxc-exec.exe --audit policy.json
 ```
 
+Successful non-dry-run audits require capture metadata, actionable denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
+
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
-## Telemetry (Experimental)
+## Telemetry
 
 MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
-Telemetry is **experimental** and requires:
-1. The `--experimental` CLI flag
-2. `"experimental": { "telemetry": { "enabled": true } }` in the JSON config
+Telemetry requires:
+1. Top-level `"telemetry": { "enabled": true }` in the JSON config
+2. Explicit per-user telemetry consent on Windows
+3. An administrative policy that permits collection, when a policy is configured
+
+The configuration flag is an additional per-run opt-in; it cannot grant consent
+or bypass an administrative block. Telemetry remains off unless every applicable
+gate is open. MXC does not use the Windows Diagnostics & feedback setting as a
+substitute for application consent.
 
 On non-Windows platforms, all telemetry functions are no-ops.
 
@@ -243,12 +251,11 @@ The software may collect information about you and your use of the software and 
 
 #### How to turn telemetry off
 
-Telemetry is **off by default**. MXC emits telemetry only when **both** of the following are set, so no action is required to keep it disabled:
+Telemetry is **off by default**. To keep it off, do not set
+`"telemetry": { "enabled": true }` for the run.
 
-1. The `--experimental` CLI flag is passed, **and**
-2. `"experimental": { "telemetry": { "enabled": true } }` is present in the JSON config.
-
-Omitting either (the default) turns telemetry off entirely. On non-Windows platforms all telemetry functions are no-ops.
+If telemetry is enabled in config, collection still does not occur unless
+Windows user consent is granted and administrative policy allows collection.
 
 #### What official builds send
 
@@ -267,14 +274,16 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
-| [docs/sandbox-policy/v1/policy.md](docs/sandbox-policy/v1/policy.md) | Sandbox policy v1 specification |
+| [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
-| [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
+| [docs/seatbelt/seatbelt-backend.md](docs/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
+| [docs/telemetry/telemetry-consent-design.md](docs/telemetry/telemetry-consent-design.md) | Telemetry consent contract |
+| [docs/telemetry/telemetry-administrative-policy.md](docs/telemetry/telemetry-administrative-policy.md) | Administrative telemetry controls |
 
 ## Contributing
 

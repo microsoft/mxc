@@ -49,6 +49,9 @@ fail() {
     exit 1
 }
 
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
+
 assert_programmed_rule() {
     local table="$1" dest="$2" target="$3"
     # The --debug log emits one line per destination rule actually generated,
@@ -60,15 +63,6 @@ assert_programmed_rule() {
     if ! grep -Fq "Programmed $table rule: -A $CHAIN_NAME -d $dest -j $target" <<<"$OUTPUT"; then
         fail "expected $table rule for '$dest' -> $target was not programmed."
     fi
-}
-
-# List the MXC-owned chains a tool currently holds. The chain name is derived
-# from a digest of the container name, so a hard-coded literal rots the moment
-# that derivation changes, and a cleanup assertion naming a chain that can no
-# longer exist passes while testing nothing. Matching the MXC- prefix stays
-# correct across naming changes.
-mxc_chains() {
-    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
 }
 
 # Compared against a snapshot taken before the run, so chains left behind by an
@@ -94,22 +88,6 @@ assert_no_new_mxc_chains() {
 assert_firewall_chain_cleaned_up() {
     assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
     assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
-}
-
-# The chain name is a digest of the container name, so it is read back from this
-# run's own debug output rather than hard-coded. Its shape and length ceiling are
-# asserted independently, so a malformed name still fails here.
-derive_chain_name() {
-    CHAIN_NAME="$(sed -n 's/^.*Programmed [a-z0-9]* rule: -A \([^ ]*\) .*$/\1/p' <<<"$OUTPUT" | head -n 1)"
-    if [ -z "$CHAIN_NAME" ]; then
-        fail "no programmed rule was logged, so the chain name could not be determined."
-    fi
-    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
-        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
-    fi
-    if [ "${#CHAIN_NAME}" -gt 28 ]; then
-        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
-    fi
 }
 
 load_config_hosts() {
@@ -151,7 +129,7 @@ MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 OUTPUT=$("$LXC_EXEC" --debug "$CONFIG" 2>&1 || true)
 echo "$OUTPUT"
 
-derive_chain_name
+derive_chain_name "$OUTPUT"
 
 # Every allow/block entry must survive resolution. An unparsed CIDR or IPv6
 # literal is reported here instead of silently dropping a rule.

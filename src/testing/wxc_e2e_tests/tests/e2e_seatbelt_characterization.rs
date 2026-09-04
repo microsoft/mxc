@@ -18,7 +18,12 @@
 #![cfg(target_os = "macos")]
 
 use std::fs;
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::json;
 use wxc_e2e_tests::{has_platform_exec, run_platform_config_value};
@@ -331,5 +336,262 @@ fn seatbelt_honors_uncanonicalized_var_readwrite_path() {
          was emitted but never matched\n{}",
         dir.display(),
         result.combined_output()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Egress enforcement
+//
+// The tests above prove `HTTP_PROXY` is *injected*. These prove egress is
+// actually *restricted* — a profile that emitted no rules at all would pass
+// the env-injection test.
+//
+// Each case pairs a destination that must be reachable (a loopback endpoint,
+// which the runtime proxy needs) with one that must not (a raw IP). Both the
+// 0.8 directional shape and its legacy 0.7 twin are covered, since a test that
+// only proves the new denial can't tell "correctly enforced" from "denies
+// everyone".
+//
+// Raw IP, never a hostname: a blocked DNS lookup fails the same way a blocked
+// connection does, so a hostname probe can't tell enforcement from a name
+// resolution artifact. Each denial is gated on the same probe succeeding under
+// an allow policy, so a runner with no outbound access skips instead of
+// reporting a denial it never actually observed.
+// ---------------------------------------------------------------------------
+
+/// A destination that is reachable from a GitHub-hosted runner and is not
+/// loopback, so a deny policy must block it.
+const DENY_TARGET: &str = "1.1.1.1";
+const DENY_TARGET_PORT: u16 = 443;
+
+/// Loopback TCP listener standing in for the runtime proxy endpoint. It only
+/// needs to accept a connection — Seatbelt filters at the socket layer, so
+/// reachability is the whole of what the profile controls.
+struct LoopbackEndpoint {
+    port: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl LoopbackEndpoint {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback endpoint");
+        let port = listener.local_addr().expect("endpoint addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self { port, stop }
+    }
+}
+
+impl Drop for LoopbackEndpoint {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Probe both destinations and print a marker for each outcome. Absolute paths
+/// because the Seatbelt exec path clears the child's environment.
+fn egress_probe(loopback_port: u16) -> String {
+    format!(
+        "if /usr/bin/nc -z -w 3 127.0.0.1 {loopback_port}; \
+         then echo LOOPBACK_REACHABLE; else echo LOOPBACK_BLOCKED; fi; \
+         if /usr/bin/nc -z -w 5 {DENY_TARGET} {DENY_TARGET_PORT}; \
+         then echo DIRECT_REACHABLE; else echo DIRECT_BLOCKED; fi"
+    )
+}
+
+/// Directional (0.8) config. `deny` needs the loopback runtime proxy, which is
+/// the only egress Seatbelt permits under a deny default.
+///
+/// The allow variant states `ingress` explicitly: an omitted `hostLoopback` is
+/// `deny`, which would close the loopback endpoint this probe uses as its
+/// control. Seatbelt requires `hostLoopback` to equal `default`.
+fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Value {
+    let mut cfg = json!({
+        "version": "0.8.0-alpha",
+        "containerId": format!("char-seatbelt-{label}"),
+        "process": { "commandLine": egress_probe(port) },
+        "network": { "egress": { "default": default } }
+    });
+    if default == "deny" {
+        cfg["runtimeConfig"] = json!({ "networkProxy": format!("http://127.0.0.1:{port}") });
+    } else {
+        cfg["network"]["ingress"] = json!({ "default": "allow", "hostLoopback": "allow" });
+    }
+    cfg
+}
+
+/// Directional config pinning `network.ingress.hostLoopback` while egress stays
+/// open, so the only thing under test is the host-loopback posture.
+fn host_loopback_config(label: &str, port: u16, action: &str) -> serde_json::Value {
+    json!({
+        "version": "0.8.0-alpha",
+        "containerId": format!("char-seatbelt-{label}"),
+        "process": { "commandLine": egress_probe(port) },
+        "network": {
+            "egress": { "default": "allow" },
+            "ingress": { "default": action, "hostLoopback": action }
+        }
+    })
+}
+
+/// Legacy (0.7) twin of [`directional_config`].
+fn legacy_config(label: &str, port: u16, default_policy: &str) -> serde_json::Value {
+    let mut cfg = config(label, &egress_probe(port));
+    cfg["network"] = if default_policy == "block" {
+        json!({
+            "defaultPolicy": "block",
+            "proxy": { "url": format!("http://127.0.0.1:{port}") }
+        })
+    } else {
+        json!({ "defaultPolicy": "allow" })
+    };
+    cfg
+}
+
+/// Run the allow-policy twin and report whether the deny target was actually
+/// reachable. When it isn't, the runner has no outbound access and a later
+/// `DIRECT_BLOCKED` would be evidence of nothing.
+fn deny_target_reachable_when_allowed(label: &str, cfg: &serde_json::Value) -> bool {
+    let result = run_platform_config_value(label, cfg, &[], None);
+    let output = result.combined_output();
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "{label} should run under an allow policy. Output:\n{output}"
+    );
+    assert!(
+        output.contains("LOOPBACK_REACHABLE"),
+        "{label}: loopback must be reachable under an allow policy. Output:\n{output}"
+    );
+
+    if output.contains("DIRECT_REACHABLE") {
+        return true;
+    }
+    println!(
+        "SKIPPED: {DENY_TARGET}:{DENY_TARGET_PORT} is unreachable from an allow-policy sandbox \
+         on this host, so a denial would not be evidence of enforcement"
+    );
+    false
+}
+
+/// Assert the deny twin blocks the raw IP while keeping the proxy endpoint up.
+fn assert_denies_direct_egress(label: &str, cfg: &serde_json::Value) {
+    let result = run_platform_config_value(label, cfg, &[], None);
+    let output = result.combined_output();
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "{label} should run to completion. Output:\n{output}"
+    );
+    assert!(
+        output.contains("DIRECT_BLOCKED"),
+        "{label}: direct egress to {DENY_TARGET}:{DENY_TARGET_PORT} must be blocked — it is \
+         reachable under the allow twin, so this is enforcement, not an unreachable host. \
+         Output:\n{output}"
+    );
+    assert!(
+        output.contains("LOOPBACK_REACHABLE"),
+        "{label}: the loopback proxy endpoint must stay reachable, otherwise the policy denies \
+         everything and the proxy could never be used. Output:\n{output}"
+    );
+}
+
+/// Schema 0.8 `network.egress.default: "deny"` restricts egress to the loopback
+/// runtime proxy. This is the enforcement half of
+/// `tests/examples/31_mac_network_0_8.json`, which CI cannot run because
+/// it expects an externally supplied proxy.
+#[test]
+fn seatbelt_directional_deny_blocks_direct_egress() {
+    if !has_platform_exec() {
+        return;
+    }
+    let endpoint = LoopbackEndpoint::start();
+
+    let allow = directional_config("dir-allow", endpoint.port, "allow");
+    if !deny_target_reachable_when_allowed("seatbelt 0.8 egress allow", &allow) {
+        return;
+    }
+
+    let deny = directional_config("dir-deny", endpoint.port, "deny");
+    assert_denies_direct_egress("seatbelt 0.8 egress deny", &deny);
+}
+
+/// The legacy twin: 0.8 must not have changed what `defaultPolicy` callers get.
+#[test]
+fn seatbelt_legacy_block_blocks_direct_egress() {
+    if !has_platform_exec() {
+        return;
+    }
+    let endpoint = LoopbackEndpoint::start();
+
+    let allow = legacy_config("legacy-allow", endpoint.port, "allow");
+    if !deny_target_reachable_when_allowed("seatbelt 0.7 defaultPolicy allow", &allow) {
+        return;
+    }
+
+    let block = legacy_config("legacy-block", endpoint.port, "block");
+    assert_denies_direct_egress("seatbelt 0.7 defaultPolicy block", &block);
+}
+
+/// `network.ingress.hostLoopback: "deny"` must close the host's own loopback
+/// even though egress is otherwise wide open.
+///
+/// Unlike the egress tests above, this one needs no reachable external host —
+/// its control is a loopback listener this process owns — so it proves
+/// enforcement on every macOS host instead of skipping on an offline one.
+#[test]
+fn seatbelt_host_loopback_deny_blocks_host_loopback() {
+    if !has_platform_exec() {
+        return;
+    }
+    let endpoint = LoopbackEndpoint::start();
+
+    // Control: same policy but hostLoopback=allow, proving the endpoint is up
+    // and that a denial below comes from the policy, not a dead listener.
+    let allow = host_loopback_config("hl-allow", endpoint.port, "allow");
+    let allow_result = run_platform_config_value("seatbelt hostLoopback allow", &allow, &[], None);
+    let allow_output = allow_result.combined_output();
+    assert_eq!(
+        allow_result.code,
+        Some(0),
+        "hostLoopback=allow should run to completion. Output:\n{allow_output}"
+    );
+    assert!(
+        allow_output.contains("LOOPBACK_REACHABLE"),
+        "hostLoopback=allow must leave host loopback reachable. Output:\n{allow_output}"
+    );
+
+    let deny = host_loopback_config("hl-deny", endpoint.port, "deny");
+    let deny_result = run_platform_config_value("seatbelt hostLoopback deny", &deny, &[], None);
+    let deny_output = deny_result.combined_output();
+    assert_eq!(
+        deny_result.code,
+        Some(0),
+        "hostLoopback=deny should run to completion. Output:\n{deny_output}"
+    );
+    assert!(
+        deny_output.contains("LOOPBACK_BLOCKED"),
+        "hostLoopback=deny must block host loopback — it is reachable under the allow twin \
+         above, so this is enforcement, not a dead listener. Output:\n{deny_output}"
     );
 }

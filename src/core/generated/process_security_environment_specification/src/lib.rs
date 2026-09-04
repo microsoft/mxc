@@ -23,6 +23,8 @@ pub mod process_security_environment_layout {
     pub use self::endpoint_rule_generated::*;
     mod endpoint_policy_generated;
     pub use self::endpoint_policy_generated::*;
+    mod ingress_policy_generated;
+    pub use self::ingress_policy_generated::*;
     mod network_policy_generated;
     pub use self::network_policy_generated::*;
 } // process_security_environment_layout

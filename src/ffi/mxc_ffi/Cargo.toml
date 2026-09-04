@@ -14,15 +14,28 @@ crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 mxc-sdk = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
+# WSL Container backend (Windows only, experimental). Both sidecars resolve
+# beside the loaded mxc_ffi native library (its runtimes/<rid>/native asset),
+# not beside the application host, so the managed package must stage
+# wxc-wslc-daemon.exe and wslcsdk.dll there.
+wslc = ["mxc-sdk/wslc"]
+# IsolationSession backend (Windows only, experimental). Needed by the
+# `attached_console_ffi` example.
+isolation_session = ["mxc-sdk/isolation_session"]
 # Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
 # default so normal builds — including the whole-workspace backend build
 # matrix — don't compile csbindgen or write into the source tree. The drift
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+
+[[example]]
+name = "attached_console_ffi"
+required-features = ["isolation_session"]
 
 [build-dependencies]
 csbindgen = { version = "1", optional = true }

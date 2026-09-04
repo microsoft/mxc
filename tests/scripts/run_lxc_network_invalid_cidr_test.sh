@@ -39,14 +39,8 @@ fail() {
     exit 1
 }
 
-# List the MXC-owned chains a tool currently holds. The chain name is derived
-# from a digest of the container name, so a hard-coded literal rots the moment
-# that derivation changes, and a cleanup assertion naming a chain that can no
-# longer exist passes while testing nothing. Matching the MXC- prefix stays
-# correct across naming changes.
-mxc_chains() {
-    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
-}
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
 
 # Compared against a snapshot taken before the run, so chains left behind by an
 # earlier failed run are not blamed on this one.

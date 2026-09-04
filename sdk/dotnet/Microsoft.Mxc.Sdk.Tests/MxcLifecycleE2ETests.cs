@@ -1,0 +1,292 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System.Text.Json;
+using Microsoft.Mxc.Sdk;
+using Xunit;
+
+namespace Microsoft.Mxc.Sdk.Tests;
+
+/// <summary>
+/// Drives the state-aware lifecycle against a live IsolationSession host, which
+/// needs Windows, the OS-side service, and a native library built with the
+/// isolation_session feature.
+/// </summary>
+/// <remarks>
+/// These establish that the lifecycle works end to end through this binding
+/// rather than only through the engine: the identity and workspace that
+/// provision reports, and the output and exit code an exec returns.
+/// </remarks>
+public class MxcLifecycleE2ETests
+{
+    // Evaluated once: this answer decides failure versus skip, so it has to be
+    // the same for every test in the class.
+    private static readonly Lazy<bool> HostRunsIsolationSession = new(() =>
+        MxcSandbox.GetAvailableBackends()
+            .Any(b => b.Backend == ContainmentBackend.IsolationSession));
+
+    // Without this, a run in which everything skipped is indistinguishable from
+    // one that passed. The same variable the Rust isolation-session suite honours.
+    private static bool SkipsAreFailures =>
+        Environment.GetEnvironmentVariable("MXC_ISO_TESTS_REQUIRED") is "1" or "true";
+
+    /// <summary>Skips the calling test when the backend is unavailable, or fails
+    /// it when skips have been declared failures.</summary>
+    private static void RequireIsolationSessionHost()
+    {
+        Assert.False(
+            SkipsAreFailures && !HostRunsIsolationSession.Value,
+            "MXC_ISO_TESTS_REQUIRED is set, but GetAvailableBackends() does not "
+                + "report the isolation-session backend. That needs both a build "
+                + "with MxcWithIsolationSession and a host running the OS-side "
+                + "service.");
+        Assert.SkipUnless(
+            HostRunsIsolationSession.Value,
+            "GetAvailableBackends() does not report the isolation-session backend");
+    }
+
+    private const string Cmd = @"C:\Windows\System32\cmd.exe";
+
+    /// <summary>
+    /// Deprovisions a sandbox the test did not deprovision itself. Provision
+    /// mints a real OS account, so an assertion that throws part-way would
+    /// otherwise leave it on the host.
+    /// </summary>
+    private sealed class Teardown : IDisposable
+    {
+        private SandboxId? _id;
+
+        public Teardown(SandboxId id) => _id = id;
+
+        /// <summary>
+        /// Gives up ownership once the test has deprovisioned itself.
+        /// Deprovision is not idempotent, so without this the disposal below
+        /// would report a failure that did not happen.
+        /// </summary>
+        public void Defuse() => _id = null;
+
+        public void Dispose()
+        {
+            if (_id is not { } id)
+            {
+                return;
+            }
+            _id = null;
+            try
+            {
+                MxcLifecycle.StopSandbox(id);
+            }
+            catch (MxcException)
+            {
+                // A sandbox that never started, or already stopped, still has to
+                // be deprovisioned — that is the step that frees the account.
+            }
+            try
+            {
+                MxcLifecycle.DeprovisionSandbox(id);
+            }
+            catch (MxcException e)
+            {
+                Console.Error.WriteLine(
+                    $"WARNING: deprovision failed, the agent account may leak: {e.Message}");
+            }
+        }
+    }
+
+    private sealed record Started(
+        SandboxId Id, string AgentUserName, string WorkspacePath, Teardown Teardown);
+
+    private static Started ProvisionAndStart()
+    {
+        var provisioned = MxcLifecycle.ProvisionSandbox(
+            StateAwareContainment.IsolationSession,
+            new IsolationSessionProvisionOptions(
+                new StateAwareNetworkPolicy
+                {
+                    DefaultPolicy = StateAwareNetworkDefault.Allow,
+                    AllowLocalNetwork = true,
+                })
+            {
+                AppId = null,
+            });
+
+        // Nothing asserts the id's shape: it is contractually opaque, and the
+        // later phases accepting it is the proof.
+        var teardown = new Teardown(provisioned.SandboxId);
+        try
+        {
+            var metadata = provisioned.IsolationSessionMetadata;
+            Assert.NotNull(metadata);
+            var agentUserName = metadata.AgentUserName;
+            Assert.False(
+                string.IsNullOrEmpty(agentUserName),
+                $"provision metadata carried no agentUserName: {provisioned.MetadataJson}");
+            var workspace = metadata.EphemeralWorkspacePath;
+            Assert.False(
+                string.IsNullOrEmpty(workspace),
+                $"provision metadata carried no ephemeralWorkspacePath: {provisioned.MetadataJson}");
+
+            MxcLifecycle.StartSandbox(provisioned.SandboxId);
+            return new Started(provisioned.SandboxId, agentUserName!, workspace!, teardown);
+        }
+        catch
+        {
+            teardown.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Runs a command to completion and returns its stdout.</summary>
+    private static async Task<string> ExecCapture(SandboxId id, string command)
+    {
+        var run = await MxcLifecycle.ExecInSandboxAsync(id, command);
+        return run.Stdout;
+    }
+
+    /// <summary>The account part of a <c>whoami</c> line, which prints
+    /// <c>machine\user</c>. Compared alone so the machine name cannot satisfy
+    /// the assertion.</summary>
+    private static string AccountOf(string whoamiOutput) =>
+        whoamiOutput.Trim().Split('\\').Last().ToLowerInvariant();
+
+    /// <summary>
+    /// The metadata this binding surfaces must describe the sandbox its exec
+    /// actually runs in. Asserting the agent user is also what stops the rest of
+    /// this file passing against an unsandboxed process.
+    /// </summary>
+    [Fact]
+    public async Task Exec_RunsAsTheAgentUserFromTheProvisionMetadata()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            var run = await MxcLifecycle.ExecInSandboxAsync(
+            started.Id,
+            $"{Cmd} /c whoami",
+            TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, run.ExitCode);
+            Assert.Equal(started.AgentUserName.ToLowerInvariant(), AccountOf(run.Stdout));
+        }
+    }
+
+    /// <summary>The sandboxed process's exit code must reach the caller
+    /// unchanged, through the streaming handle's wait.</summary>
+    [Fact]
+    public void Exec_PropagatesANonZeroExitCode()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            using var proc = MxcLifecycle.ExecInSandbox(started.Id, $"{Cmd} /c exit 42");
+            var result = proc.Wait();
+
+            Assert.False(result.TimedOut);
+            Assert.Equal(42, result.ExitCode);
+        }
+    }
+
+    /// <summary>A lifecycle exec timeout must be reported by the streaming
+    /// process wrapper just like a one-shot policy timeout.</summary>
+    [Fact]
+    public void Exec_ReportsConfiguredTimeout()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            using var proc = MxcLifecycle.ExecInSandbox(
+                started.Id,
+                $"{Cmd} /c ping -n 6 127.0.0.1 >nul",
+                new StateAwareExecOptions { TimeoutMs = 100 });
+            var result = proc.Wait();
+
+            Assert.True(result.TimedOut);
+        }
+    }
+
+    /// <summary>
+    /// Stop and deprovision must be reachable through this binding, and a
+    /// deprovisioned id must not still be usable.
+    /// </summary>
+    [Fact]
+    public void Deprovision_RetiresTheSandboxId()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            MxcLifecycle.StopSandbox(started.Id);
+            MxcLifecycle.DeprovisionSandbox(started.Id);
+            started.Teardown.Defuse();
+
+            var ex = Assert.Throws<MxcException>(
+                () => MxcLifecycle.StartSandbox(started.Id));
+            Assert.Equal(ErrorCode.StaleId, ex.Code);
+        }
+    }
+
+    /// <summary>The lifecycle runs a command and its output reaches the caller.</summary>
+    [Fact]
+    public async Task Lifecycle_RunsEndToEnd()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            var captured = await ExecCapture(started.Id, $"{Cmd} /c echo state-aware-marker");
+            Assert.Contains("state-aware-marker", captured);
+        }
+    }
+
+    /// <summary>
+    /// The ephemeral workspace named in the provision metadata is readable and
+    /// writable from both sides, and deprovision removes it.
+    /// </summary>
+    [Fact]
+    public async Task Workspace_IsSharedWithTheAgent_AndRemovedOnDeprovision()
+    {
+        RequireIsolationSessionHost();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            var workspace = started.WorkspacePath;
+            Assert.True(
+                Directory.Exists(workspace),
+                $"provision reported a workspace that is not a directory: {workspace}");
+
+            var nonce = $"nonce-{Environment.ProcessId}";
+            File.WriteAllText(Path.Combine(workspace, "from-caller.txt"), nonce + "\r\n");
+
+            // Copying the caller's file proves the agent read it; appending
+            // whoami proves the agent wrote, and names who did.
+            var command =
+                $"{Cmd} /c type \"{workspace}\\from-caller.txt\" > \"{workspace}\\from-agent.txt\"" +
+                $" & whoami >> \"{workspace}\\from-agent.txt\"";
+            await ExecCapture(started.Id, command);
+
+            var produced = File.ReadAllText(Path.Combine(workspace, "from-agent.txt"));
+            Assert.Contains(nonce, produced);
+            var lastLine = produced
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Last();
+            Assert.Equal(started.AgentUserName.ToLowerInvariant(), AccountOf(lastLine));
+
+            MxcLifecycle.StopSandbox(started.Id);
+            MxcLifecycle.DeprovisionSandbox(started.Id);
+            started.Teardown.Defuse();
+
+            Assert.False(
+                Directory.Exists(workspace),
+                $"deprovision returned but the workspace is still present: {workspace}");
+        }
+    }
+}

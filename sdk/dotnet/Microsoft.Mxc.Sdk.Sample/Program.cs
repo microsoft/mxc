@@ -26,12 +26,32 @@ var policy = new SandboxPolicy
     },
     TimeoutMs = 30_000,
 };
+SandboxContainment containment = new ProcessContainment();
+
+// Set MXC_SAMPLE_CAPTURE_DENIALS=1 to opt into Windows denial capture without
+// changing the sample's default host requirements or generating traces by default.
+if (OperatingSystem.IsWindows()
+    && string.Equals(
+        Environment.GetEnvironmentVariable("MXC_SAMPLE_CAPTURE_DENIALS"),
+        "1",
+        StringComparison.Ordinal))
+{
+    containment = new ProcessContainerContainment
+    {
+        CaptureDenials = new CaptureDenialsPolicy
+        {
+            Mode = CaptureDenialsMode.Block,
+            RetainEtl = false,
+        },
+    };
+}
 
 Console.WriteLine($"Running: {command}");
+var request = new SandboxRequest(policy, command) { Containment = containment };
 
 try
 {
-    var result = MxcSandbox.Run(policy, command);
+    var result = MxcSandbox.Run(request);
     Console.WriteLine($"exit code : {result.ExitCode}");
     Console.WriteLine($"timed out : {result.TimedOut}");
     Console.WriteLine($"stdout    : {result.Stdout.TrimEnd()}");
@@ -39,12 +59,29 @@ try
     {
         Console.WriteLine($"stderr    : {result.Stderr.TrimEnd()}");
     }
+    foreach (var warning in result.Warnings)
+    {
+        Console.WriteLine($"warning   : {warning}");
+    }
+    if (result.OutputMetadata?.CaptureDenials is { } capture)
+    {
+        Console.WriteLine($"denials   : {capture.OutputPath}");
+        if (capture.EtlPath is not null)
+        {
+            Console.WriteLine($"ETL       : {capture.EtlPath}");
+        }
+    }
+    if (result.OutputMetadata?.CaptureDenialsError is { } captureError)
+    {
+        Console.WriteLine($"capture error: {captureError.Message}");
+        Console.WriteLine($"retained ETL : {captureError.EtlPath}");
+    }
 
     // Streaming variant: spawn the same command as a live process and stream
     // its stdout as it is produced, then wait for exit.
     Console.WriteLine();
     Console.WriteLine("Streaming the same command live:");
-    using (var proc = MxcSandbox.Spawn(policy, command))
+    using (var proc = MxcSandbox.Spawn(request))
     {
         var stdout = proc.StandardOutput;
         if (stdout is not null)
@@ -59,6 +96,19 @@ try
 
         var streamResult = proc.Wait();
         Console.WriteLine($"streamed exit code : {streamResult.ExitCode}");
+        if (proc.OutputMetadata?.CaptureDenials is { } streamCapture)
+        {
+            Console.WriteLine($"stream denials    : {streamCapture.OutputPath}");
+            if (streamCapture.EtlPath is not null)
+            {
+                Console.WriteLine($"stream ETL        : {streamCapture.EtlPath}");
+            }
+        }
+        if (proc.OutputMetadata?.CaptureDenialsError is { } streamCaptureError)
+        {
+            Console.WriteLine($"stream capture error: {streamCaptureError.Message}");
+            Console.WriteLine($"stream retained ETL : {streamCaptureError.EtlPath}");
+        }
     }
 
     // State-aware lifecycle: provision -> start -> exec -> stop -> deprovision.
@@ -68,18 +118,44 @@ try
     Console.WriteLine("State-aware lifecycle:");
     try
     {
-        var provisioned = MxcLifecycle.ProvisionSandbox();
+        var provisioned = MxcLifecycle.ProvisionSandbox(
+            StateAwareContainment.IsolationSession,
+            new ProvisionSandboxOptions
+            {
+                // The isolation session runs on a network MXC can neither filter
+                // nor deny; provision accepts only this posture, stated
+                // explicitly, and refuses an absent policy.
+                Network = new StateAwareNetworkPolicy
+                {
+                    DefaultPolicy = StateAwareNetworkDefault.Allow,
+                    AllowLocalNetwork = true,
+                },
+            });
         Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
         try
         {
             MxcLifecycle.StartSandbox(provisioned.SandboxId);
             var lifecycleRun = await MxcLifecycle.ExecInSandboxAsync(provisioned.SandboxId, command);
             Console.WriteLine($"  exec exit={lifecycleRun.ExitCode} stdout={lifecycleRun.Stdout.TrimEnd()}");
-            MxcLifecycle.StopSandbox(provisioned.SandboxId);
         }
         finally
         {
-            MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+            try
+            {
+                MxcLifecycle.StopSandbox(provisioned.SandboxId);
+            }
+            catch (MxcException)
+            {
+                // A failed stop must not prevent the deprovision that frees the account.
+            }
+            try
+            {
+                MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+            }
+            catch (MxcException ex)
+            {
+                Console.WriteLine($"  WARNING: deprovision failed, the account may leak: {ex.Message}");
+            }
         }
     }
     catch (MxcException ex)

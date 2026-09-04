@@ -9,6 +9,36 @@ use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::PSID;
 
+/// Compare Windows path strings using ordinal case-insensitive semantics.
+pub fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+
+    use std::borrow::Cow;
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+    const STACK_UNITS: usize = 512;
+    fn encode<'a>(value: &str, stack: &'a mut [u16; STACK_UNITS]) -> Cow<'a, [u16]> {
+        let units = value.encode_utf16().count();
+        if units <= stack.len() {
+            for (destination, unit) in stack.iter_mut().zip(value.encode_utf16()) {
+                *destination = unit;
+            }
+            Cow::Borrowed(&stack[..units])
+        } else {
+            Cow::Owned(value.encode_utf16().collect())
+        }
+    }
+
+    let mut a_stack = [0u16; STACK_UNITS];
+    let mut b_stack = [0u16; STACK_UNITS];
+    let a = encode(a, &mut a_stack);
+    let b = encode(b, &mut b_stack);
+    // SAFETY: Both slices remain valid UTF-16 buffers for the duration of the call.
+    unsafe { CompareStringOrdinal(a.as_ref(), b.as_ref(), true) == CSTR_EQUAL }
+}
+
 /// Convert a UTF-8 string to a null-terminated UTF-16 wide string.
 pub fn to_wide(s: &str) -> Vec<u16> {
     U16CString::from_str_truncate(s).into_vec_with_nul()
@@ -325,6 +355,22 @@ mod tests {
         let value = OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]);
 
         assert_eq!(os_str_to_wide(&value), Err(EmbeddedNulError));
+    }
+
+    #[test]
+    fn windows_path_comparison_handles_ascii_and_unicode_case() {
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\Tools\App.exe",
+            r"c:\tools\app.EXE"
+        ));
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\TÄST\app.exe",
+            r"c:\täst\APP.EXE"
+        ));
+        assert!(windows_paths_equal_ignore_case(
+            &format!(r"C:\{}\APP.EXE", "Ä".repeat(600)),
+            &format!(r"c:\{}\app.exe", "ä".repeat(600))
+        ));
     }
 
     #[test]

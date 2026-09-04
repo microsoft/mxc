@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Firewall-Hostname-Rejected",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo FIREWALL_HOSTNAME_RAN"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"]
+  }
+}

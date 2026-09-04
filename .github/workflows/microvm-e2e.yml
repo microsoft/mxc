@@ -1,5 +1,7 @@
 name: Integration Tests
 
+# Retained until the unified test matrix has equivalent MicroVM coverage.
+
 on:
   push:
     branches: [main]
@@ -18,7 +20,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust toolchain
         run: |
@@ -29,7 +31,7 @@ jobs:
         uses: ./.github/actions/setup-cargo-feed
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src
 
@@ -86,7 +88,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: microvm-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 7
@@ -101,7 +103,7 @@ jobs:
 
       - name: Upload performance results
         if: steps.whp-check.outputs.whp_available == 'true' && !cancelled()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: microvm-perf-results-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 30

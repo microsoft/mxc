@@ -142,7 +142,8 @@ to the SDK.
 | Policy Version | Schema | Backend | Status |
 |---------------|--------|---------|--------|
 | 0.6.0-alpha | Stable (minimum supported) | ProcessContainer (BaseContainer when the host supports it, else AppContainer) | Production |
-| 0.7.0-alpha | Stable (current) | ProcessContainer (capability-resolved) | Production |
-| 0.8.0-alpha | Dev | ProcessContainer (capability-resolved) | Experimental |
+| 0.7.0-alpha | Stable | ProcessContainer (capability-resolved) | Production |
+| 0.8.0-alpha | Stable (current) | ProcessContainer (capability-resolved) | Production |
+| 0.9.0-alpha | Dev | ProcessContainer (capability-resolved) | Experimental |
 
-The SDK and Rust parser accept `>=0.6, <=0.8`. As of Phase 3a the schema version no longer selects the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.
+The SDK and Rust parser accept `>=0.6, <=0.9`. As of Phase 3a the schema version no longer selects the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.

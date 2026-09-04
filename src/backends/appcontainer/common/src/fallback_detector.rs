@@ -7,7 +7,7 @@
 //! runtime probes, produces a [`TierDecision`]. Tiers are described in
 //! `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`:
 //!
-//! 1. **Tier 1 — BaseContainer** (PSEC preferred for schema 0.8+, with
+//! 1. **Tier 1 — BaseContainer** (PSEC preferred whenever available, with
 //!    transitional `Experimental_CreateProcessInSandbox` fallback)
 //! 2. **Tier 2 — AppContainer + BFS** (`bfscfg.exe`-driven filesystem policy)
 //! 3. **Tier 3 — AppContainer + DACL** (host-side DACL ACE augmentation)

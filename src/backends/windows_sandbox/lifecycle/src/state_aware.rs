@@ -18,8 +18,10 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::process_util::resolve_sibling_binary;
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::Foundation::HANDLE;
 
@@ -215,6 +217,9 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         || !p.allowed_hosts.is_empty()
         || !p.blocked_hosts.is_empty()
         || p.network_proxy.is_enabled()
+        || p.network_mode_specified
+        || p.network_egress.is_some()
+        || p.network_ingress.is_some()
     {
         return Err(MxcError::policy_validation(
             "Windows Sandbox filesystem/network policy is fixed at provision; it cannot be \
@@ -320,11 +325,11 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
             eprintln!(
-                "[wxc-exec] WARNING: stdin is a TTY but the state-aware Windows Sandbox exec \
-                 path does not currently forward interactive PTY input to the guest. Any data \
-                 you type will be dropped; the guest child will see immediate EOF on stdin. \
-                 Pipe stdin instead (e.g. `< /dev/null` or `< file`), or use the one-shot \
-                 backend for now. (Tracked: TODO h6-pty-plumbing -- ConPTY support.)"
+                "WARNING: stdin is a TTY but the state-aware Windows Sandbox exec path does not \
+                 currently forward interactive PTY input to the guest. Any data you type will be \
+                 dropped; the guest child will see immediate EOF on stdin. Redirect stdin from a \
+                 file or the null device to send input. (Tracked: TODO h6-pty-plumbing -- ConPTY \
+                 support.)"
             );
             let _ = stream.shutdown(std::net::Shutdown::Write);
         } else {
@@ -755,7 +760,17 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
+        // Before any work: this backend relays to the calling process's stdio, so it
+        // cannot return exec streams to the caller, and running the workload first
+        // would make the refusal a lie about what has already happened.
+        if stdio == ExecStdio::Piped {
+            return Err(wxc_common::state_aware_backend::unsupported_piped_exec(
+                "Windows Sandbox",
+            ));
+        }
+
         extract_token(sandbox_id)?;
 
         // Locate the live daemon holding this sandbox and confirm it is ready
@@ -792,8 +807,14 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             stdout: null,
             stderr: null,
             stdin: null,
-            waiter: Box::new(move || Ok(exit_code)),
-            terminator: Box::new(|| {}),
+            stdin_closer: None,
+            // `Exited`, not `TimedOut`: this backend runs the workload to
+            // completion inside `exec` and reports what the guest returned, so
+            // there is no live process left to have timed out. A `Piped` path
+            // that could distinguish the two does not exist here yet.
+            waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+            // Nothing to terminate: the workload is already gone.
+            terminator: Box::new(|| Ok(())),
         })
     }
 
@@ -981,6 +1002,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         policy::plan_policy(request)
             .map(|_| ())
             .map_err(map_policy_error)
@@ -1030,8 +1052,36 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
+
+    /// A `Piped` exec is refused before the backend looks for the daemon.
+    ///
+    /// This backend relays the workload's output to *this process's* stdio, so
+    /// it cannot return exec streams to the caller. The refusal has to precede any
+    /// work: refusing after the workload ran would report "unsupported" for
+    /// something that already took effect.
+    ///
+    /// `extract_token` would reject this id, and there is no live daemon behind
+    /// it either — so any error other than the refusal means the check
+    /// came too late.
+    #[test]
+    fn a_piped_exec_is_refused_before_the_workload_runs() {
+        let mut runner = WindowsSandboxRunner::new();
+        let err = runner
+            .exec(
+                "not-a-valid-sandbox-id",
+                &ExecutionRequest::default(),
+                None,
+                ExecStdio::Piped,
+            )
+            .expect_err("a streams-consuming caller must be refused");
+        assert!(
+            err.message.contains("cannot return exec streams"),
+            "expected the shared refusal ahead of id and daemon checks, got: {}",
+            err.message
+        );
+    }
 
     #[test]
     fn backend_key_matches_wire_format() {
@@ -1270,10 +1320,31 @@ mod tests {
     }
 
     #[test]
+    fn validate_start_rejects_raw_directional_network() {
+        let backend = WindowsSandboxRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = backend
+            .validate_start("wsb:abcd1234", &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
     fn exec_without_live_daemon_is_not_started() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecStdio::Relayed,
+            )
             .unwrap_err();
         // With no daemon holding the sandbox, exec reports NotStarted rather
         // than running anything.
@@ -1284,7 +1355,12 @@ mod tests {
     fn exec_rejects_malformed_id_first() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("iso:abc", &ExecutionRequest::default(), None)
+            .exec(
+                "iso:abc",
+                &ExecutionRequest::default(),
+                None,
+                ExecStdio::Relayed,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
@@ -1496,7 +1572,12 @@ mod tests {
         let _g = StateAwareRootGuard::new();
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:cccc3333", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:cccc3333",
+                &ExecutionRequest::default(),
+                None,
+                ExecStdio::Relayed,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::NotStarted);
     }

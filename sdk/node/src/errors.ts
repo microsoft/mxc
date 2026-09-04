@@ -27,10 +27,9 @@ export type ErrorCode =
  * error envelope — `operation`, `nativeCode` and `remediation` sit alongside
  * `code` and `message`, not nested inside `details`.
  *
- * **Invariant:** `nativeCode` implies `operation`, and `remediation` implies
- * `operation`. `operation` marks that an underlying API call was in flight;
- * the other two refine it, and neither appears on its own. A failure MXC
- * raises before or outside any API call carries only `code` and `message`.
+ * **Invariant:** `operation` marks that an underlying API call was in flight.
+ * A failure MXC raises before or outside any API call carries neither
+ * `operation` nor `nativeCode`; it may still carry a `remediation`.
  *
  * The invariant is guaranteed by the executor, which cannot construct a
  * violating envelope. This interface mirrors the flat wire shape rather than
@@ -52,7 +51,7 @@ export interface MxcErrorFields {
    * `0x80070490` on Windows, an errno or equivalent elsewhere.
    */
   nativeCode?: string;
-  /** The API's actionable "how to fix it" hint, when it supplied one. */
+  /** An actionable "how to fix it" hint, when the failure has one. */
   remediation?: string;
   /**
    * Open extension point for backend-specific structured data that has no

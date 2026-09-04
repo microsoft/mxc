@@ -12,14 +12,14 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | Requirement | Details |
 |---|---|
 | **Windows 11** | Required for WSL2 and the WSLC SDK |
-| **WSL 2.9.3+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
+| **WSL 2.9.9+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
 | **Container images** | Pre-pulled or available from a registry with network access |
 
-## Step 1 — Install WSL 2.9.3+
+## Step 1 — Install WSL 2.9.9+
 
-The WSLC SDK requires WSL version 2.9.3 or later. Update WSL to the latest
-version. Note that 2.9.3 may only be available on the pre-release channel
+The WSLC SDK requires WSL version 2.9.9 or later. Update WSL to the latest
+version. Note that 2.9.9 may only be available on the pre-release channel
 until it reaches the default Store channel, so include `--pre-release`:
 
 ```powershell
@@ -32,7 +32,7 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.9.3.0 or later**. If `wsl --update --pre-release`
+The WSL version should be **2.9.9.0 or later**. If `wsl --update --pre-release`
 does not bring you to the required version, build WSL from the `master`
 branch:
 
@@ -372,6 +372,15 @@ filtering at the proxy layer, or remove the host lists. The bare
 `defaultPolicy` forms with **no** host lists remain supported: `"block"` is a
 full network cutoff and `"allow"` is full outbound (NAT).
 
+### `enforcementMode` must be `capabilities`
+
+`network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
+reason as per-host filtering: both ask for per-rule firewall enforcement inside a
+container that has no `CAP_NET_ADMIN` to apply it with. The default
+`"capabilities"` is accepted — it is an honest description of WSLC's
+all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
+rather than refused merely for being present.
+
 ### Inbound: `allowLocalNetwork` is not supported
 
 `network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
@@ -401,13 +410,43 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### `ui` is not supported
+
+A `ui` section is **rejected** — the backend has no mechanism to enforce UI
+restrictions on a container.
+
+The check is on **presence, not value**. `ui`'s defaults are full lockdown, so
+an explicitly supplied lockdown `ui` is indistinguishable *by value* from an
+absent one — a value-based check would let the single most restrictive request
+you can write through unenforced. Omit the section entirely.
+
+### `lifecycle`: only `destroyOnExit: true` is supported
+
+`lifecycle.destroyOnExit: true` (the default) is honored: it selects the SDK's
+`WSLC_CONTAINER_FLAG_AUTO_REMOVE`, and teardown stops and deletes the container.
+
+`lifecycle.destroyOnExit: false` is **rejected**. It asks for the container to
+outlive the run, which a one-shot invocation cannot deliver: the container is
+scoped to a session this process owns, terminating that session at the end of
+the run reaps the container regardless of the AutoRemove flag, and the WSLC SDK
+has no cross-process re-attach. Use the state-aware lifecycle if you need a
+container to persist — its daemon holds the session open across phase processes.
+
+`lifecycle.preservePolicy: true` is **rejected** — WSLC has no
+policy-persistence primitive, so there is nothing for the flag to select.
+
+Note the state-aware surface differs: it rejects the whole `lifecycle` section
+at parse time, because a multi-invocation sandbox's lifetime is driven by the
+explicit `provision` / `deprovision` phases rather than by per-run flags.
+
 ## Troubleshooting
 
 | Error | Cause | Fix |
 |---|---|---|
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.3, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
+| `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
+| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
 | `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |

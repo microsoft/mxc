@@ -1,0 +1,215 @@
+name: Create Validation Test Matrix
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: Test plan to resolve.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve "${{ inputs.plan }}" test matrix
+    runs-on: ubuntu-latest
+    outputs:
+      windows: ${{ steps.matrix.outputs.windows }}
+      linux: ${{ steps.matrix.outputs.linux }}
+      macos: ${{ steps.matrix.outputs.macos }}
+      has_windows: ${{ steps.matrix.outputs.has_windows }}
+      has_linux: ${{ steps.matrix.outputs.has_linux }}
+      has_macos: ${{ steps.matrix.outputs.has_macos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Resolve test combinations
+        id: matrix
+        run: node scripts/ci/resolve-validation-test-matrix.mjs --plan "${{ inputs.plan }}"
+
+  windows:
+    name: ${{ matrix.os }}, ${{ matrix.architecture }}, ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_windows == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.windows) }}
+    runs-on: [ "${{ matrix.pool }}" ]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Delayed start
+        if: matrix.startup_delay_seconds > 0
+        shell: pwsh
+        run: |
+          # Spreads network-heavy setup across the pool's shared egress address
+          # instead of issuing every job's downloads at once. Configured by
+          # backendDelayedStart in scripts/ci/validation-test-matrix.json.
+          $seconds = ${{ matrix.startup_delay_seconds }}
+          Write-Host "Waiting $seconds second(s) before downloading prerequisites."
+          Start-Sleep -Seconds $seconds
+
+      - name: Prepare backend prerequisites
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          & ./scripts/ci/prepare-windows-host.ps1 `
+            -Backend '${{ matrix.backend }}' `
+            -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') *>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run backend tests
+        timeout-minutes: 45
+        shell: pwsh
+        run: |
+          & ./tests/scripts/run_ci_backend_tests.ps1 `
+            -Backend '${{ matrix.backend }}' `
+            -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
+            -Architecture '${{ matrix.architecture }}' *>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          # The dispatcher points TEMP here, so suite logs and scratch trees are
+          # collected without enumerating each one. Exclude bulk binaries that
+          # tooling also drops in TEMP; they dwarf the logs and aid no triage.
+          path: |
+            ${{ runner.temp }}
+            !${{ runner.temp }}/**/*.vhd
+            !${{ runner.temp }}/**/*.vhdx
+            !${{ runner.temp }}/**/*.tar
+            !${{ runner.temp }}/**/*.msi
+            !${{ runner.temp }}/**/*.msix
+            !${{ runner.temp }}/**/*.appx
+            !${{ runner.temp }}/**/*.zip
+            !${{ runner.temp }}/**/*.exe
+            !${{ runner.temp }}/**/*.dll
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux:
+    name: ${{ matrix.os }}, ${{ matrix.architecture }}, ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_linux == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.linux) }}
+    runs-on: [ "${{ matrix.pool }}" ]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Delayed start
+        if: matrix.startup_delay_seconds > 0
+        shell: bash
+        run: |
+          # Spreads network-heavy setup across the pool's shared egress address
+          # instead of issuing every job's downloads at once. Configured by
+          # backendDelayedStart in scripts/ci/validation-test-matrix.json.
+          set -euo pipefail
+          seconds=${{ matrix.startup_delay_seconds }}
+          echo "Waiting $seconds second(s) before downloading prerequisites."
+          sleep "$seconds"
+
+      - name: Prepare backend prerequisites
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-linux-host.sh \
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
+
+      - name: Run backend tests
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ '${{ matrix.backend }}' == 'lxc' ]]; then
+            sudo --preserve-env=RUNNER_TEMP bash tests/scripts/run_ci_backend_tests.sh \
+              '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              tee -a "$RUNNER_TEMP/mxc-ci.log"
+          else
+            bash tests/scripts/run_ci_backend_tests.sh \
+              '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              tee -a "$RUNNER_TEMP/mxc-ci.log"
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mxc-ci.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos:
+    name: ${{ matrix.os }}, ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_macos == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.macos) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Delayed start
+        if: matrix.startup_delay_seconds > 0
+        shell: bash
+        run: |
+          # Spreads network-heavy setup across the pool's shared egress address
+          # instead of issuing every job's downloads at once. Configured by
+          # backendDelayedStart in scripts/ci/validation-test-matrix.json.
+          set -euo pipefail
+          seconds=${{ matrix.startup_delay_seconds }}
+          echo "Waiting $seconds second(s) before starting tests."
+          sleep "$seconds"
+
+      - name: Run backend tests
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
+          bash tests/scripts/run_ci_backend_tests.sh \
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee "$RUNNER_TEMP/mxc-ci.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mxc-ci.log
+          if-no-files-found: ignore
+          retention-days: 7

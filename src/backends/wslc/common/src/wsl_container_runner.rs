@@ -25,10 +25,15 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
+use crate::container_steps::sdk_error;
+use crate::error::WslcError;
+use crate::policy;
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
@@ -146,6 +151,13 @@ fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) -> std::io::Result
 /// output has been flushed and no further callback can arrive. Bounded so a
 /// misbehaving runtime can't park teardown forever.
 const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// VM/session boot budget, in milliseconds. This is the deadline for bringing
+/// the WSL session up, and is deliberately independent of the per-command
+/// `scriptTimeout` (the command runtime deadline is enforced separately at the
+/// wait, see [`wait_timeout_ms`]). A short `scriptTimeout` must not be able to
+/// abort a cold VM boot.
+const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
 
 /// Lock a mutex, tolerating poisoning: every mutex here guards plain output
 /// state with no invariant a panicking writer could break.
@@ -477,11 +489,12 @@ impl WSLContainerRunner {
     ) -> Result<(), ScriptResponse> {
         let path = std::path::Path::new(tar_path);
         if !path.exists() {
-            return Err(ScriptResponse::error(&format!(
+            return Err(WslcError::Rejected(format!(
                 "Image tar file not found: '{}'. Provide a valid rootfs tar \
                  (via 'docker export') or Docker image archive (via 'docker save').",
                 tar_path
-            )));
+            ))
+            .into_response());
         }
 
         // Resolve to absolute path, following symlinks. Fall back to the
@@ -492,10 +505,11 @@ impl WSLContainerRunner {
         let tar_format = match Self::detect_tar_format(&tar_path) {
             Ok(fmt) => fmt,
             Err(e) => {
-                return Err(ScriptResponse::error(&format!(
+                return Err(WslcError::Rejected(format!(
                     "Failed to read tar file '{}': {}",
                     tar_path, e
-                )));
+                ))
+                .into_response());
             }
         };
         let wide_path: Vec<u16> = to_wide(&tar_path);
@@ -571,11 +585,12 @@ impl WSLContainerRunner {
                 );
             }
             TarFormat::Unknown => {
-                return Err(ScriptResponse::error(&format!(
+                return Err(WslcError::Rejected(format!(
                     "Unrecognized tar format: '{}'. Provide a rootfs tar \
                      (via 'docker export') or a Docker image archive (via 'docker save').",
                     tar_path
-                )));
+                ))
+                .into_response());
             }
         }
 
@@ -593,24 +608,17 @@ enum TarFormat {
     Unknown,
 }
 
-/// Create a ScriptResponse error from an HRESULT failure with optional SDK error message.
-fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
-}
-
 /// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
 /// reports as missing. `missing` may combine multiple bits, and the guidance is branched
 /// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
-/// (which doesn't enable that Windows optional feature), and vice versa.
+/// (which doesn't enable that Windows optional feature), and vice versa. `SdkNeedsUpdate`
+/// points at MXC rather than WSL, since it means MXC's SDK is the stale side.
 pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     let needs_vmp =
         missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
     let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
+    let needs_sdk_update =
+        missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE.0 != 0;
 
     let mut guidance = Vec::new();
     if needs_vmp {
@@ -623,7 +631,15 @@ pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     }
     if needs_wsl_package {
         guidance
-            .push("install WSL 2.9.3 or newer and run `wsl --update --pre-release`".to_string());
+            .push("install WSL 2.9.9 or newer and run `wsl --update --pre-release`".to_string());
+    }
+    if needs_sdk_update {
+        // MXC's vendored SDK is behind the installed WSL, so the fix is on MXC's
+        // side — telling the user to install WSL would send them the wrong way.
+        guidance.push(
+            "update MXC — the WSLc SDK it ships is too old for your installed version of WSL"
+                .to_string(),
+        );
     }
     if guidance.is_empty() {
         guidance.push("ensure WSL2 and the WSLC SDK are installed".to_string());
@@ -642,28 +658,81 @@ impl ScriptRunner for WSLContainerRunner {
     /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
     /// instead of late in `execute` on the broken in-container iptables path.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        reject_unsupported_lifecycle(request)?;
+        policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
         if request.policy.needs_host_filtering() {
-            return Err(ScriptResponse::error(
+            return Err(WslcError::Rejected(
                 "WSLc: per-host egress filtering (allowedHosts with \
                  defaultPolicy='block', or blockedHosts with defaultPolicy='allow') \
-                 is not supported. A WSLc container has no CAP_NET_ADMIN for in-container \
+                 is not supported. A WSL container has no CAP_NET_ADMIN for in-container \
                  iptables, and VM-level enforcement is not available without breaking other \
                  security guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                 for cooperative host filtering, or remove the host lists.",
-            ));
+                 for cooperative host filtering, or remove the host lists."
+                    .to_string(),
+            )
+            .into_response());
         }
         if request.policy.allow_local_network {
-            return Err(ScriptResponse::error(
+            return Err(WslcError::Rejected(
                 "WSLc: network.allowLocalNetwork=true is not supported. Expose specific \
-                 ports with experimental.wslc portMappings instead.",
-            ));
+                 ports with experimental.wslc portMappings instead."
+                    .to_string(),
+            )
+            .into_response());
         }
+        policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
+        // The shared validator returns an untagged response; retag it so its
+        // rejections reach SDK callers as `policy_validation` like the checks above.
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
+            .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
         Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
     }
+}
+
+/// Retag a shared [`policy`] rejection so it reaches SDK callers as
+/// `policy_validation` with the same message the state-aware surface emits.
+fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
+    WslcError::Rejected(err.message).into_response()
+}
+
+/// The first line [`WSLContainerRunner::start_container`] writes, before any
+/// SDK call. Tests assert its absence to prove a rejection aborted early.
+pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
+
+/// Refuses the `lifecycle` settings the one-shot surface cannot honour.
+///
+/// Value-based, not presence-based: the default `destroyOnExit: true` is
+/// honoured. `false` cannot be, because [`StartedContainer`] owns the
+/// [`WslcSessionGuard`] whose `Drop` ends the session-scoped container either
+/// way. The state-aware surface needs no counterpart — the parser rejects the
+/// whole `lifecycle` section there.
+fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    if !request.lifecycle.destroy_on_exit {
+        return Err(WslcError::Rejected(
+            "WSLc: lifecycle.destroyOnExit=false is not supported by the one-shot WSLc surface. \
+             The container is scoped to a session this process owns, and terminating that \
+             session at the end of the run removes the container regardless of the AutoRemove \
+             flag. Omit the field (or set it to true), or use the state-aware lifecycle, whose \
+             daemon holds the session open across phases."
+                .to_string(),
+        )
+        .into_response());
+    }
+    if request.lifecycle.preserve_policy {
+        return Err(WslcError::Rejected(
+            "WSLc: lifecycle.preservePolicy=true is not supported. WSLc installs no persistent \
+             host-side filesystem or network enforcement — mounts and the container networking \
+             mode belong to the container itself — so there is no policy to preserve past the \
+             run."
+                .to_string(),
+        )
+        .into_response());
+    }
+    Ok(())
 }
 
 impl WSLContainerRunner {
@@ -688,16 +757,16 @@ impl WSLContainerRunner {
         match ComApartment::enter() {
             Ok(com) => std::mem::forget(com),
             Err(e) => {
-                return Err(ScriptResponse::error(&format!(
-                    "COM initialization failed: {e}"
-                )))
+                return Err(
+                    WslcError::Host(format!("COM initialization failed: {e}")).into_response()
+                )
             }
         }
         let _ = writeln!(logger, "[WSLC] COM initialized");
 
         let sdk = match WslcSdk::shared() {
             Ok(s) => s,
-            Err(e) => return Err(ScriptResponse::error(&e)),
+            Err(e) => return Err(WslcError::Unavailable(e).into_response()),
         };
 
         // Prerequisites check
@@ -707,7 +776,7 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
         }
         if missing.any_missing() {
-            return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
+            return Err(WslcError::Unavailable(wslc_prerequisite_error(missing)).into_response());
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
@@ -756,11 +825,12 @@ impl WSLContainerRunner {
             let mem_mb = match u32::try_from(mem_mb) {
                 Ok(v) => v,
                 Err(_) => {
-                    return Err(ScriptResponse::error(&format!(
+                    return Err(WslcError::Rejected(format!(
                         "Invalid config: memory_mb value {} exceeds maximum {} MB",
                         mem_mb,
                         u32::MAX
-                    )));
+                    ))
+                    .into_response());
                 }
             };
             let hr = sdk.WslcSetSessionSettingsMemory(&mut settings, mem_mb);
@@ -768,11 +838,9 @@ impl WSLContainerRunner {
                 return Err(sdk_error("WslcSetSessionSettingsMemory failed", hr, ""));
             }
         }
-        if request.script_timeout > 0 {
-            let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, request.script_timeout);
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
-            }
+        let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, SESSION_BOOT_TIMEOUT_MS);
+        if hr != S_OK {
+            return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
         }
         if self.config.gpu {
             let hr = sdk.WslcSetSessionSettingsFeatureFlags(
@@ -874,14 +942,15 @@ impl WSLContainerRunner {
                 ),
                 None => (String::new(), String::new()),
             };
-            return Err(ScriptResponse::error(&format!(
+            return Err(WslcError::Rejected(format!(
                 "WSLC image '{}' not found locally. Pre-pull it with: \
                  wxc-exec.exe --setup-wslc --image {}{} \
                  (or scripts\\setup-wslc.ps1 -Image {}{}). \
                  MXC does not pull images at run time; \
                  see docs/wsl/wsl-container-support-plan.md.",
                 image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
-            )));
+            ))
+            .into_response());
         }
 
         Ok(())
@@ -1046,7 +1115,10 @@ impl WSLContainerRunner {
                 30_000,
             );
             if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
-                return Err(ScriptResponse::error("iptables rules timed out after 30s"));
+                return Err(
+                    WslcError::Runtime("iptables rules timed out after 30s".to_string())
+                        .into_response(),
+                );
             }
         }
 
@@ -1060,11 +1132,12 @@ impl WSLContainerRunner {
             ));
         }
         if ipt_exit_code != 0 {
-            return Err(ScriptResponse::error(&format!(
+            return Err(WslcError::Runtime(format!(
                 "iptables rules failed with exit code {} \
                  (image may not have iptables installed)",
                 ipt_exit_code
-            )));
+            ))
+            .into_response());
         }
         let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
         Ok(())
@@ -1127,11 +1200,12 @@ impl WSLContainerRunner {
                 // told us nothing about the process, so neither "exited" nor
                 // "timed out" can be claimed. Fail rather than guess.
                 let last_error = windows::Win32::Foundation::GetLastError();
-                return Err(ScriptResponse::error(&format!(
+                return Err(WslcError::Runtime(format!(
                     "waiting on the WSLC process exit event failed: WaitForSingleObject returned \
                      0x{:08X} (GetLastError 0x{:08X})",
                     wait_result.0, last_error.0
-                )));
+                ))
+                .into_response());
             }
         }
 
@@ -1192,10 +1266,12 @@ impl WSLContainerRunner {
                 WaitOutcome::Exited
             }
             (false, _) => {
-                return Err(ScriptResponse::error(
+                return Err(WslcError::Runtime(
                     "the WSLC process never reported an exit: no exit event was available and the \
-                     SDK's exit callback did not fire, so the container may still be running",
-                ));
+                     SDK's exit callback did not fire, so the container may still be running"
+                        .to_string(),
+                )
+                .into_response());
             }
             (true, true) => {
                 let _ = writeln!(logger, "[WSLC] Process killed after timeout");
@@ -1286,19 +1362,16 @@ impl WSLContainerRunner {
         logger: &mut Logger,
         output: OutputMode,
     ) -> Result<StartedContainer, ScriptResponse> {
-        let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
+        let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw) before mapping to
-        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
-        // `denied` is simply not mounted by WSLC — unmounted = invisible.) Only
-        // clone the request when an aliasing conflict actually needs tightening;
-        // an unresolvable path with deniedPaths present fails closed.
+        // WSLc provision-time filesystem-policy gate (D6 normalization → D3
+        // delegation → denied-path overlap), shared verbatim with the
+        // state-aware provision path via `policy_mapping::apply_provision_policy_gate`
+        // so the two runners cannot drift. Only clone the request when
+        // normalization actually tightened something; any failure is surfaced on
+        // the streaming logger and returned as a `ScriptResponse` error.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
-            &request.policy,
-            logger,
-        ) {
+        let request = match policy_mapping::apply_provision_policy_gate(request, logger) {
             Ok(Some(policy)) => {
                 normalized = ExecutionRequest {
                     policy,
@@ -1307,34 +1380,11 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => {
+                let _ = writeln!(logger, "[WSLC] {}", msg);
+                return Err(WslcError::Rejected(msg).into_response());
+            }
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents. On Windows this covers directory readwrite paths (the common
-        // WSLC case).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
-
-        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
-        // overlay primitive, so a deniedPaths entry nested under a mounted
-        // (readwrite/readonly) parent cannot be masked and would stay accessible
-        // through the parent mount. A lexical tier catches `..`/case/whole-drive
-        // spellings; a canonicalizing tier resolves symlink/junction/8.3/`\\?\`
-        // aliases (including a not-yet-created deny under an aliased parent) and
-        // fails closed on unresolvable paths. Reject such configs rather than
-        // silently leaving the subtree exposed. Runs after object normalization
-        // so it sees the already-tightened intents.
-        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
-            &request.policy.readwrite_paths,
-            &request.policy.readonly_paths,
-            &request.policy.denied_paths,
-        ) {
-            let _ = writeln!(logger, "[WSLC] {}", msg);
-            return Err(ScriptResponse::error(&msg));
-        }
 
         // -- Init: COM + SDK + preflight --
         let sdk = Self::init_and_load_sdk(logger)?;
@@ -1411,11 +1461,13 @@ impl WSLContainerRunner {
             {
                 Some(url) => url,
                 None => {
-                    return Err(ScriptResponse::error(
+                    return Err(WslcError::Rejected(
                         "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
                          the localhost and builtinTestServer forms are not supported because a \
-                         WSLc container runs in its own network namespace.",
-                    ));
+                         WSL container runs in its own network namespace."
+                            .to_string(),
+                    )
+                    .into_response());
                 }
             };
             let _ = writeln!(
@@ -1497,25 +1549,27 @@ impl WSLContainerRunner {
         // therefore only ever sees `"tcp"` today, but the explicit branch is
         // retained so this code keeps compiling cleanly if/when the parser
         // starts accepting UDP after an SDK update.
-        if !self.config.port_mappings.is_empty() {
-            let mappings: Vec<WslcContainerPortMapping> = self
-                .config
-                .port_mappings
-                .iter()
-                .map(|pm| WslcContainerPortMapping {
-                    windowsPort: pm.windows_port,
-                    containerPort: pm.container_port,
-                    protocol: if pm.protocol == "udp" {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                    } else {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                    },
-                    // Default bind address (typically loopback/0.0.0.0 per
-                    // SDK config). Not exposed in the MXC config today.
-                    windowsAddress: ptr::null_mut(),
-                })
-                .collect();
-
+        // Built at function scope: these arrays must outlive
+        // `WslcCreateContainer` below, which is the call that actually consumes
+        // the pointers handed to `WslcSetContainerSettingsPortMappings`.
+        let mappings: Vec<WslcContainerPortMapping> = self
+            .config
+            .port_mappings
+            .iter()
+            .map(|pm| WslcContainerPortMapping {
+                windowsPort: pm.windows_port,
+                containerPort: pm.container_port,
+                protocol: if pm.protocol == "udp" {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
+                } else {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
+                },
+                // Default bind address (typically loopback/0.0.0.0 per
+                // SDK config). Not exposed in the MXC config today.
+                windowsAddress: ptr::null_mut(),
+            })
+            .collect();
+        if !mappings.is_empty() {
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut container_settings,
                 mappings.as_ptr(),
@@ -1541,7 +1595,7 @@ impl WSLContainerRunner {
             Ok(m) => m,
             Err(e) => {
                 let _ = writeln!(logger, "[WSLC] {}", e);
-                return Err(ScriptResponse::error(&e));
+                return Err(WslcError::Rejected(e).into_response());
             }
         };
 
@@ -1555,17 +1609,18 @@ impl WSLContainerRunner {
             })
             .collect();
 
-        if !mounts.is_empty() {
-            let volumes: Vec<WslcContainerVolume> = wide_paths
-                .iter()
-                .zip(mounts.iter())
-                .map(|((win, ctr), m)| WslcContainerVolume {
-                    windowsPath: win.as_ptr(),
-                    containerPath: ctr.as_ptr() as PCSTR,
-                    readOnly: if m.read_only { 1 } else { 0 },
-                })
-                .collect();
-
+        // Built at function scope alongside `wide_paths`: these structs point
+        // into `wide_paths` and must outlive `WslcCreateContainer` below.
+        let volumes: Vec<WslcContainerVolume> = wide_paths
+            .iter()
+            .zip(mounts.iter())
+            .map(|((win, ctr), m)| WslcContainerVolume {
+                windowsPath: win.as_ptr(),
+                containerPath: ctr.as_ptr() as PCSTR,
+                readOnly: if m.read_only { 1 } else { 0 },
+            })
+            .collect();
+        if !volumes.is_empty() {
             let hr = sdk.WslcSetContainerSettingsVolumes(
                 &mut container_settings,
                 volumes.as_ptr(),
@@ -1889,7 +1944,7 @@ impl StartedContainer {
     ) -> Result<(i32, WaitOutcome), ScriptResponse> {
         // The handle is `Send`, so this may run on a thread that never entered
         // the apartment `init_and_load_sdk` established; join it for the call.
-        let _com = ComApartment::enter().map_err(|e| ScriptResponse::error(&e))?;
+        let _com = ComApartment::enter().map_err(|e| WslcError::Host(e).into_response())?;
         // SAFETY: `self` owns live process / container handles and a live SDK.
         unsafe {
             WSLContainerRunner::wait_for_process(
@@ -2385,6 +2440,72 @@ mod tests {
         assert!(err.error_message.contains("allowLocalNetwork"));
     }
 
+    /// The two surfaces refuse `allowLocalNetwork` with deliberately different
+    /// remedies: one-shot has `experimental.wslc.portMappings` to point at,
+    /// state-aware has no port-mapping primitive at all. Unifying the messages
+    /// would send state-aware users after a dead end.
+    #[test]
+    fn both_surfaces_reject_allow_local_network_with_surface_specific_remedies() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let one_shot = WSLContainerRunner::new(&WslcConfig::default())
+            .validate_runner(&request)
+            .unwrap_err();
+        assert_eq!(
+            one_shot.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            one_shot.error_message.contains("portMappings"),
+            "one-shot has a port-mapping primitive and must name it; got: {}",
+            one_shot.error_message
+        );
+
+        let state_aware = crate::policy::validate_provision_policy(&request).unwrap_err();
+        assert_eq!(
+            state_aware.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            !state_aware.message.contains("portMappings"),
+            "state-aware has no port-mapping primitive to point at; got: {}",
+            state_aware.message
+        );
+        assert!(
+            state_aware.message.contains("allowLocalNetwork"),
+            "got: {}",
+            state_aware.message
+        );
+    }
+
+    #[test]
+    fn validate_runner_tags_shared_validator_rejections() {
+        // The shared network validator builds untagged responses; WSLc retags them
+        // so callers get `policy_validation` rather than an opaque backend error.
+        let mut request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("network.egress.default"));
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
     #[test]
     fn validate_runner_accepts_bare_defaults() {
         // Full cutoff / full NAT (no host lists) is enforceable — must pass.
@@ -2400,6 +2521,154 @@ mod tests {
             let runner = WSLContainerRunner::new(&WslcConfig::default());
             assert!(runner.validate_runner(&request).is_ok());
         }
+    }
+
+    #[test]
+    fn validate_runner_rejects_supplied_ui() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                ui: wxc_common::models::UiPolicy::default(),
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(
+            err.error_message.contains("ui section is not supported"),
+            "got: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
+    #[test]
+    fn validate_runner_accepts_absent_ui() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        assert!(!request.policy.ui_specified);
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// `destroyOnExit: true` matches what one-shot does; `false` and
+    /// `preservePolicy: true` do not. The accepted value is the near-miss a
+    /// blanket `lifecycle` rejection would swallow.
+    #[test]
+    fn validate_runner_rejects_the_lifecycle_settings_one_shot_cannot_honour() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+
+        let accepted = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            lifecycle: wxc_common::models::LifecycleConfig {
+                destroy_on_exit: true,
+                preserve_policy: false,
+            },
+            ..Default::default()
+        };
+        assert!(
+            runner.validate_runner(&accepted).is_ok(),
+            "destroyOnExit=true is what one-shot does and must stay accepted"
+        );
+
+        for (lifecycle, needle) in [
+            (
+                wxc_common::models::LifecycleConfig {
+                    destroy_on_exit: false,
+                    preserve_policy: false,
+                },
+                "destroyOnExit=false",
+            ),
+            (
+                wxc_common::models::LifecycleConfig {
+                    destroy_on_exit: true,
+                    preserve_policy: true,
+                },
+                "preservePolicy",
+            ),
+        ] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                lifecycle,
+                ..Default::default()
+            };
+            let err = runner.validate_runner(&request).unwrap_err();
+            assert!(
+                err.error_message.contains(needle),
+                "expected {needle}; got: {}",
+                err.error_message
+            );
+            assert_eq!(
+                err.failure_phase,
+                wxc_common::models::FailurePhase::Rejected
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_rejects_unimplementable_enforcement_modes() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+
+        for mode in [
+            wxc_common::models::NetworkEnforcementMode::Firewall,
+            wxc_common::models::NetworkEnforcementMode::Both,
+        ] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                policy: wxc_common::models::ContainerPolicy {
+                    network_enforcement_mode: mode.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = runner
+                .validate_runner(&request)
+                .expect_err(&format!("{mode:?} must be rejected"));
+            assert!(
+                err.error_message.contains("enforcementMode"),
+                "got: {}",
+                err.error_message
+            );
+        }
+
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                network_enforcement_mode: wxc_common::models::NetworkEnforcementMode::Capabilities,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// A rejection must abort the request rather than tear a container down
+    /// after building one. `SandboxBackend::spawn`'s half is in `sandbox.rs`.
+    #[test]
+    fn validate_runner_rejects_before_any_container_work() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            policy: wxc_common::models::ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected,
+            "a policy refusal is a rejection, not a runtime failure"
+        );
     }
 
     // -- Host-stdio forwarding (`StdioMode::Inherit`) --------------------
@@ -2582,7 +2851,7 @@ mod tests {
         let message = wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE);
 
         assert!(message.contains("WslPackage"));
-        assert!(message.contains("2.9.3"));
+        assert!(message.contains("2.9.9"));
         assert!(message.contains("wsl --update --pre-release"));
         assert!(!message.contains("Virtual Machine Platform"));
     }
@@ -2615,7 +2884,36 @@ mod tests {
         let message =
             wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE);
 
+        assert_eq!(
+            message,
+            "WSLC runtime unavailable. Missing components: SdkNeedsUpdate (0x4). \
+             Please update MXC — the WSLc SDK it ships is too old for your installed \
+             version of WSL."
+        );
         assert!(message.contains("SdkNeedsUpdate"));
+        assert!(message.contains("update MXC"));
+        // The user's WSL is fine (and newer) — no install/update advice for it.
+        assert!(!message.contains("ensure WSL2 and the WSLC SDK are installed"));
+        assert!(!message.contains("wsl --update"));
+        assert!(!message.contains("Virtual Machine Platform"));
+    }
+
+    #[test]
+    fn prerequisite_error_for_sdk_update_combined_with_another_component() {
+        let combined = WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE
+            | WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM;
+        let message = wslc_prerequisite_error(combined);
+
+        assert!(message.contains("update MXC"));
+        assert!(message.contains("Virtual Machine Platform"));
+        assert!(!message.contains("ensure WSL2 and the WSLC SDK are installed"));
+    }
+
+    #[test]
+    fn prerequisite_error_falls_back_for_unrecognized_components() {
+        // An unknown future bit still has to produce actionable text.
+        let message = wslc_prerequisite_error(WslcComponentFlags(0x8000));
+
         assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
     }
 }

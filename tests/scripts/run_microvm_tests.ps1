@@ -88,7 +88,14 @@ $wxcExe = Resolve-Path $WxcExePath
 
 # -- Verify MicroVM binaries --------------------------------------------------
 
-$requiredBinaries = @("nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img")
+$requiredBinaries = @(
+    "nanvixd.exe",
+    "nanvix_rootfs.img",
+    "python3.initrd",
+    "bin\kernel.elf",
+    "snapshots\kernel.vmem",
+    "snapshots\kernel.whp.cbor"
+)
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
 
@@ -153,8 +160,10 @@ foreach ($test in $tests) {
         $reason = "expected exit=$expectedExit, got exit=$actualExit"
     }
 
-    # Check stdout content if OutputContains is specified
-    if ($pass -and $test.OutputContains) {
+    # Check stdout content if OutputContains is specified. Not every test
+    # defines the key, and StrictMode makes a missing hashtable key throw, so
+    # test for its presence rather than accessing it directly.
+    if ($pass -and $test.ContainsKey('OutputContains')) {
         $combined = "$stdout`n$stderr"
         if ($combined -notmatch [regex]::Escape($test.OutputContains)) {
             $pass = $false

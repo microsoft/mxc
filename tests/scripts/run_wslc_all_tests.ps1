@@ -5,6 +5,11 @@
 # Requires: Windows 11, WSL2 enabled, WSLC SDK installed, pre-pulled images.
 # Cannot run in GitHub Actions CI (needs WSL2 + WSLC runtime).
 #
+# Runs the one-shot WSLC configs directly, then delegates to
+# run_wslc_state_aware_tests.ps1 for the state-aware lifecycle suite, folding its
+# result into the overall summary (so this is the single entry point for all
+# WSLC E2E coverage).
+#
 # Usage:
 #   .\run_wslc_all_tests.ps1              # release build (default), pulls images first
 #   .\run_wslc_all_tests.ps1 -Debug       # debug build
@@ -210,10 +215,39 @@ $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout me
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
-# wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
-$null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
-    -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
-$null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+
+# Fixed paths must match tests\configs\wslc_filesystem.json and
+# tests\configs\wslc_readonly_mount.json.
+$fsFixtureDir = "C:\wslcfs"
+$readonlyFixtureDir = "C:\wslcro"
+$readonlyFixture = Join-Path $readonlyFixtureDir "test.txt"
+
+function Remove-FilesystemFixtures {
+    Remove-Item -Recurse -Force $fsFixtureDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $readonlyFixtureDir -ErrorAction SilentlyContinue
+}
+
+# Both filesystem configs mount a host directory the suite owns outright, so a
+# run needs nothing hand-made and never touches C:\workspace, where the
+# prerequisites above tell the developer to keep alpine.tar.  wslc_filesystem
+# only needs its mount target to exist; wslc_readonly_mount also reads
+# test.txt, seeded the way the LXC and bubblewrap suites seed theirs
+# (run_lxc_filesystem_test.sh:21, run_bwrap_filesystem_test.sh:25).  The
+# finally removes both roots, including the probe file a wrongly-writable
+# mount would leave behind.
+Remove-FilesystemFixtures
+try {
+    $null = New-Item -ItemType Directory -Path $fsFixtureDir -Force
+    $null = New-Item -ItemType Directory -Path $readonlyFixtureDir -Force
+    Set-Content -Path $readonlyFixture -Value "test content" -Encoding ascii
+
+    # wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
+    $null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
+        -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
+    $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+} finally {
+    Remove-FilesystemFixtures
+}
 
 Write-Host "`n--- Object Validation Tests ---" -ForegroundColor Cyan
 # Object-based validation (roadmap D6): a directory under readwritePaths and a
@@ -311,14 +345,35 @@ Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
 Write-Host "`n--- Lifecycle Tests ---" -ForegroundColor Cyan
-# Smoke tests only: assert config parses and payload runs. WSLC's session
-# teardown reaps session-scoped containers regardless of AutoRemove, so
-# destroyOnExit has no externally observable effect via `wslc list`.
-# True semantic verification requires a runner-side log assertion (TODO).
+# `destroyOnExit: true` is a smoke test only: WSLC's session teardown reaps
+# session-scoped containers regardless of AutoRemove, so `true` has no
+# externally observable effect -- it is accepted because that teardown is
+# exactly what it asks for.
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
     -OutputContains "PASS: container ran (destroyOnExit=true)"))
-$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false.json" `
-    -OutputContains "PASS: container ran (destroyOnExit=false)"))
+# `false` asks for a container that outlives the run, which one-shot cannot
+# deliver. It is refused before any container is created, so the payload must
+# never run.
+$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains "destroyOnExit=false"))
+
+Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
+# Delegate the multi-invocation provision/start/exec/stop/deprovision lifecycle
+# to its owning harness (it needs the daemon binary, mints + threads sandbox ids,
+# and drives the idle-teardown watchdog). Images are already pre-pulled above, so
+# skip its redundant preflight. Fold its exit code into the summary.
+$saScript = Join-Path $PSScriptRoot "run_wslc_state_aware_tests.ps1"
+$saArgs = @{ WxcExecPath = $WxcExec; SkipSetup = $true }
+if ($Debug) { $saArgs.Debug = $true }
+& $saScript @saArgs
+$saPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "run_wslc_state_aware_tests.ps1 (lifecycle suite)"
+    Pass    = $saPass
+    Skipped = $false
+    Reason  = $(if ($saPass) { "" } else { "state-aware lifecycle suite failed" })
+})
 
 # Summary
 $passed = @($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

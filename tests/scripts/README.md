@@ -1,7 +1,7 @@
 # Test Scripts
 
-This directory contains PowerShell convenience scripts for running MXC end-to-end
-tests locally on Windows. The primary Rust executor E2E path is
+This directory contains convenience scripts for running MXC end-to-end tests
+locally and in CI. The primary Rust executor E2E path is
 `cargo test -p wxc_e2e_tests`, which invokes the MXC binaries directly instead
 of shelling through these scripts.
 
@@ -9,10 +9,20 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 
 ## Prerequisites
 
-- Windows 11
+Shared:
+
 - Rust toolchain installed (`rustup`, `cargo`)
 - Built binaries (`cargo build` from `src/`)
+
+Windows (`.ps1`):
+
+- Windows 11
 - PowerShell 7+ (`pwsh`)
+
+Linux / macOS (`.sh`):
+
+- Bash, plus the per-backend prerequisites listed in the backend's doc (for
+  example `bwrap` for Bubblewrap, the LXC stack for LXC)
 
 ## Scripts
 
@@ -33,22 +43,69 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
-These scripts are local helpers. Not every script is run by CI because several
-depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
-test duration.
+### Linux suites
 
-**Skip semantics for the IsolationSession suites.** Availability is decided by a
-single `wxc-exec --probe` call reading `probes.isolationSessionAvailable`, which
-covers both a host that cannot activate the API and a binary built without
-`--features isolation_session`. When unavailable the suite prints `SKIPPED` and
-exits 0, so running on an unsupported host degrades gracefully rather than
-reporting failures.
+| Script | Description | Extra prerequisites |
+|--------|-------------|---------------------|
+| `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap` |
+| `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
 
-Because a skip exits 0, **a caller that only reads the exit code cannot tell a
-skipped suite from a passing one.** Any automated runner that treats these
-suites as validation evidence must therefore check the `SKIPPED` line or the
-executed count, not just the exit status. Independently, a run that reaches the
-summary having executed zero tests always fails, since it substantiates nothing.
+Individual `run_bwrap_*.sh` / `run_lxc_*.sh` scripts run one case each; the
+aggregate scripts above are what CI dispatches to.
+
+Not every script runs in CI: several depend on local OS features such as
+Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
+run are reached through the dispatchers below rather than being invoked
+directly.
+
+### CI dispatch
+
+The validation matrix (see `scripts/ci/validation-test-matrix.json` and
+`.github/workflows/Validation.Tests.Matrix.Job.yml`, documented end to end in
+[`docs/ci-validation-infrastructure.md`](../../docs/ci-validation-infrastructure.md))
+never builds from source.
+It downloads a build artifact, prepares the host, and then hands off to one of
+these dispatchers, which map a matrix backend id to the suites above:
+
+| Dispatcher | Platforms | Backend ids |
+|------------|-----------|-------------|
+| `run_ci_backend_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
+| `run_ci_backend_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
+
+Pass the backend id exactly as it appears in the catalog — there is no separate
+handler name. Ids that share a suite have their own case in the dispatcher:
+`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
+determines the tier it expects from the host's own `wxc-exec --probe`.
+
+```powershell
+tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 `
+    -BinaryDirectory <dir> -Architecture x64
+```
+
+```bash
+tests/scripts/run_ci_backend_tests.sh bubblewrap <binary-directory>
+```
+
+A backend with no wired suite exits non-zero on purpose, so accidentally
+enabling it in a trigger fails loudly instead of reporting a false success.
+
+To see exactly what a plan would schedule without pushing:
+
+```bash
+node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
+```
+
+**Skip semantics.** Several suites degrade gracefully on an unsupported host:
+the IsolationSession suites decide availability from a single `wxc-exec --probe`
+read of `probes.isolationSessionAvailable`, print `SKIPPED`, and exit 0.
+
+Because a skip exits 0 and the dispatchers propagate only the exit code, **a
+green CI job does not by itself prove the suite ran.** Anything treating these
+suites as validation evidence must check the `SKIPPED` line or the executed
+count, not just the exit status — the matrix entry says the host is expected to
+support the backend, so a silent skip there is a gap in coverage rather than a
+graceful degradation. Independently, a run that reaches the summary having
+executed zero tests always fails, since it substantiates nothing.
 
 ### Manual smoke tests
 
@@ -80,9 +137,11 @@ itself and takes a `-ComputerName` / `-VMName` plus `-Credential`.
 | `push_batch_and_config_files_to_vm.ps1` | `tests\configs\`, `examples\`, runner batch files, helper scripts | TShell (active `Open-Device` session) |
 | `push_sdk_integration_tests_to_vm.ps1` | SDK integration test artifacts (`sdk\bin\x64`, compiled tests, `node_modules`, `package.json`, `run-tests.js`) | PowerShell Remoting (`-ComputerName`/`-VMName` + `-Credential`) |
 
-CI currently runs the MicroVM Rust E2E suite when WHP is available. Other
-executor E2E tests are local/prerequisite-gated and should be run on machines
-with the required Windows features and binaries.
+Backend E2E coverage runs on a schedule (not on PRs) through the validation
+matrix described under [CI dispatch](#ci-dispatch), against binaries downloaded
+from the build artifacts. Suites whose backend is not yet wired into a trigger —
+and any test needing a Windows feature or hardware the pool images lack — remain
+local/prerequisite-gated and should be run on a machine that has them.
 
 ## Test ownership
 

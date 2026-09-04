@@ -90,6 +90,60 @@ pub(super) fn build_process_options(
     }
 }
 
+/// How much longer than the caller's deadline the **service-side** timer is
+/// armed for on the streaming path.
+///
+/// The service arms its timer when the process is created and kills the process
+/// with an ordinary exit code (the host suite pins this as exit code 1). Our own
+/// `WaitForExit` starts later and, with an equal duration, therefore always
+/// loses the race — so a genuine timeout arrives looking exactly like a normal
+/// exit and cannot be reported as one.
+///
+/// Giving the service timer a margin lets the local deadline fire first, so a
+/// timeout is observed as the wait sentinel plus a still-running process. The
+/// service timer stays armed as a watchdog for the case this process dies
+/// before it can enforce anything.
+///
+/// **This is a margin, not a guarantee.** It orders the two timers only while
+/// the gap between arming the service timer and entering our own wait — a few
+/// COM calls and a thread spawn — stays under the margin; a host stall longer
+/// than that could still let the service win. No timeout *signal* is available
+/// to key off instead: the process interface exposes lifetime and console
+/// members (`ExitCode`, `WaitForExit`, `Terminate`, `CloseStandardInput`,
+/// `SendCtrlClose`, the stdio handles, `ResizeConsole`) and nothing that
+/// distinguishes a service-enforced kill from an ordinary exit. Five seconds is
+/// chosen to dwarf that startup gap rather than to bound the OS.
+pub(super) const SERVICE_TIMEOUT_GRACE_MS: u32 = 5_000;
+
+/// Relaxes the service-side timer so the caller's deadline is enforced locally.
+///
+/// Only for the streaming path, which has somewhere to report a timeout. The
+/// run-to-completion path keeps the service timer exactly as it was: it has no
+/// timeout channel, and its observable behaviour (exit code 1 on an OS-side
+/// timeout) is pinned by the host suite.
+///
+/// Two deadlines are left alone rather than shifted:
+///
+/// - **Zero** means INFINITE. There is no deadline to move behind, and adding a
+///   grace would invent one the caller never asked for.
+/// - **A deadline too large to move** (within `SERVICE_TIMEOUT_GRACE_MS` of
+///   `u32::MAX`) disarms the service timer instead. Saturating would silently
+///   shrink the margin to nothing and re-equalize the timers, restoring the
+///   exact misclassification this exists to prevent. At that magnitude — over
+///   forty-nine days — a watchdog is meaningless anyway, so the local deadline
+///   becomes the only one.
+pub(super) fn with_service_timeout_grace(mut options: ProcessOptions) -> ProcessOptions {
+    const NO_SERVICE_TIMEOUT: u32 = 0;
+    if options.timeout_ms == 0 {
+        return options;
+    }
+    options.timeout_ms = match options.timeout_ms.checked_add(SERVICE_TIMEOUT_GRACE_MS) {
+        Some(armed) => armed,
+        None => NO_SERVICE_TIMEOUT,
+    };
+    options
+}
+
 /// Translates the MXC-internal `ProcessOptions` into a fresh
 /// `IsoSessionProcessOptions` ready for `RunProcessWithOptionsAsync`.
 pub(super) fn build_iso_process_options(
@@ -173,6 +227,87 @@ mod tests {
         };
         let opts = build_process_options(&request, false);
         assert_eq!(opts.timeout_ms, 30000);
+    }
+
+    /// The service-side timer must not be able to fire before the caller's own
+    /// deadline on the streaming path.
+    ///
+    /// The regression this pins: both timers were armed with the same duration,
+    /// but the service arms its own at process creation while our wait starts
+    /// later, so the service always won the race. A genuine timeout then
+    /// arrived looking like an ordinary exit — the host suite pins the
+    /// OS-side timeout as exit code 1 — so it could not be reported as a
+    /// timeout at all, and the streaming path's timeout reporting never fired.
+    #[test]
+    fn the_service_timer_is_armed_behind_the_local_deadline() {
+        let request = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            script_timeout: 30000,
+            ..Default::default()
+        };
+        let local = build_process_options(&request, false);
+        let relaxed = with_service_timeout_grace(local);
+        assert!(
+            relaxed.timeout_ms > 30000,
+            "the service timer must outlast the caller's deadline, got {}",
+            relaxed.timeout_ms
+        );
+    }
+
+    /// INFINITE stays INFINITE: there is no deadline to move behind, and
+    /// giving it a grace would invent a deadline the caller never asked for.
+    #[test]
+    fn an_infinite_timeout_is_not_given_a_service_grace() {
+        let request = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            script_timeout: 0,
+            ..Default::default()
+        };
+        let relaxed = with_service_timeout_grace(build_process_options(&request, false));
+        assert_eq!(relaxed.timeout_ms, 0);
+    }
+
+    /// A deadline too large to move disarms the service timer rather than
+    /// silently re-equalizing the two.
+    ///
+    /// The regression this pins: saturating arithmetic clamps at `u32::MAX`, so
+    /// a deadline within the grace of the maximum would come back with a margin
+    /// shrunk to nothing — the timers equal again, and a genuine timeout once
+    /// more indistinguishable from an ordinary exit. `timeout` is an
+    /// unconstrained `u32` on the wire, so this is reachable input.
+    #[test]
+    fn a_deadline_too_large_to_move_disarms_the_service_timer() {
+        for script_timeout in [
+            u32::MAX,
+            u32::MAX - 1,
+            u32::MAX - SERVICE_TIMEOUT_GRACE_MS + 1,
+        ] {
+            let request = ExecutionRequest {
+                script_code: "echo hi".to_string(),
+                script_timeout,
+                ..Default::default()
+            };
+            let relaxed = with_service_timeout_grace(build_process_options(&request, false));
+            assert_eq!(
+                relaxed.timeout_ms, 0,
+                "a deadline of {script_timeout} must disarm the service timer rather than \
+                 arm it equal to the caller's deadline"
+            );
+        }
+    }
+
+    /// The largest deadline that can still be moved keeps a full margin.
+    #[test]
+    fn the_largest_movable_deadline_keeps_its_full_margin() {
+        let script_timeout = u32::MAX - SERVICE_TIMEOUT_GRACE_MS;
+        let request = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            script_timeout,
+            ..Default::default()
+        };
+        let relaxed = with_service_timeout_grace(build_process_options(&request, false));
+        assert_eq!(relaxed.timeout_ms, u32::MAX);
+        assert!(relaxed.timeout_ms > script_timeout);
     }
 
     #[test]

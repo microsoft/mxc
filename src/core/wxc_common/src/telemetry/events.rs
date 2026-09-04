@@ -54,6 +54,7 @@ impl std::fmt::Display for FailureReason {
 #[derive(Debug, Clone, Copy)]
 pub struct TelemetryContext<'a> {
     pub backend: &'a str,
+    pub sandbox_kind: &'a str,
     /// State-aware lifecycle phase — one of `provision|start|exec|stop|
     /// deprovision`, or `""` for one-shot (non-state-aware) executions.
     pub phase: &'a str,
@@ -66,6 +67,7 @@ pub struct TelemetryContext<'a> {
 /// Data for an MXC.Execution ETW event.
 pub struct ExecutionEvent<'a> {
     pub backend: &'a str,
+    pub sandbox_kind: &'a str,
     pub exit_code: i32,
     pub outcome: &'a str,
     pub duration_ms: u64,
@@ -91,6 +93,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 
     mxc_telemetry::log_execution(
         event.backend,
+        event.sandbox_kind,
         event.exit_code,
         event.outcome,
         event.duration_ms,
@@ -113,6 +116,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code: i32) {
     mxc_telemetry::log_error(
         ctx.backend,
+        ctx.sandbox_kind,
         error_type.as_str(),
         exit_code,
         ctx.phase,
@@ -136,7 +140,15 @@ pub enum ProcessEvent<'a> {
     KillFailed(&'a str, i32),
 }
 
+fn requirement_emission_allowed() -> bool {
+    super::emit_active() && super::emission_is_authorized()
+}
+
 pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     match event {
         ProcessEvent::Exited(exit_code) => {
             mxc_telemetry::log_process_exited(identity, process_id, exit_code);
@@ -160,6 +172,10 @@ pub fn log_enforcement_degraded(
     degradation_reasons: &str,
     effective_enforcement_level: &str,
 ) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     mxc_telemetry::log_enforcement_degraded(
         identity,
         tier,
@@ -190,6 +206,10 @@ pub fn log_enforcement_degraded(
 }
 
 pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     mxc_telemetry::log_policy_hash(identity, policy_hash, config_schema_version);
     #[cfg(test)]
     test_sink::record_requirement(
@@ -211,6 +231,10 @@ pub fn log_network_policy_applied(
     default_policy: &str,
     proxy_port: u64,
 ) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     mxc_telemetry::log_network_policy_applied(
         identity,
         enforcement_mode,
@@ -230,6 +254,10 @@ pub fn log_network_policy_applied(
 }
 
 pub fn log_sandbox_torn_down(identity: &str, status: &str, released_resources: &str) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     mxc_telemetry::log_sandbox_torn_down(identity, status, released_resources);
     #[cfg(test)]
     test_sink::record_requirement(
@@ -252,6 +280,10 @@ pub fn log_config_rejected(
     offending_field: &str,
     phase: &str,
 ) {
+    if !requirement_emission_allowed() {
+        return;
+    }
+
     mxc_telemetry::log_config_rejected(correlation_id, backend, reason, offending_field, phase);
     #[cfg(test)]
     test_sink::record_requirement(
@@ -290,6 +322,7 @@ pub(super) mod test_sink {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedExecution {
         pub backend: String,
+        pub sandbox_kind: String,
         pub exit_code: i32,
         pub outcome: String,
         pub duration_ms: u64,
@@ -302,6 +335,7 @@ pub(super) mod test_sink {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
         pub backend: String,
+        pub sandbox_kind: String,
         pub error_type: FailureReason,
         pub exit_code: i32,
         pub phase: String,
@@ -420,6 +454,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedExecution {
                 backend: event.backend.to_owned(),
+                sandbox_kind: event.sandbox_kind.to_owned(),
                 exit_code: event.exit_code,
                 outcome: event.outcome.to_owned(),
                 duration_ms: event.duration_ms,
@@ -442,6 +477,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedError {
                 backend: ctx.backend.to_owned(),
+                sandbox_kind: ctx.sandbox_kind.to_owned(),
                 error_type,
                 exit_code,
                 phase: ctx.phase.to_owned(),
@@ -471,6 +507,9 @@ mod tests {
         let _lock = test_sink::TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        super::super::reset_for_test();
+        super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
+        super::super::TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         test_sink::install();
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
         log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
@@ -487,7 +526,7 @@ mod tests {
             "validate",
         );
         let events = test_sink::take_requirements();
-        test_sink::clear();
+        super::super::reset_for_test();
 
         // Validate ProcessExited payload
         let process_exited = events
@@ -671,5 +710,32 @@ mod tests {
         assert!(rejected
             .fields
             .contains(&("phase".to_owned(), "validate".to_owned())));
+    }
+
+    #[test]
+    fn requirement_events_respect_live_authorization() {
+        let _lock = test_sink::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::super::reset_for_test();
+        super::super::TEST_FORCE_ACTIVE.with(|value| value.set(true));
+        super::super::TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(false)));
+        test_sink::install();
+
+        log_process_event("opaque", 42, ProcessEvent::Exited(0));
+        log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
+        log_policy_hash("opaque", "sha256:abc", "0.8.0-alpha");
+        log_network_policy_applied("opaque", "proxy", "deny", 8080);
+        log_sandbox_torn_down("opaque", "success", "released");
+        log_config_rejected(
+            "corr",
+            "process_container",
+            "invalid",
+            "process.commandLine",
+            "validate",
+        );
+
+        assert!(test_sink::take_requirements().is_empty());
+        super::super::reset_for_test();
     }
 }
