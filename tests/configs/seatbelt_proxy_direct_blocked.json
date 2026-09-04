@@ -13,6 +13,9 @@
         }
     },
     "filesystem": {
+        "readonlyPaths": [
+            "{{DEVDIR}}"
+        ],
         "readwritePaths": [
             "/private/tmp"
         ]

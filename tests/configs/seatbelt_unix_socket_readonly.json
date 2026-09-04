@@ -6,5 +6,5 @@
         "commandLine": "/usr/bin/python3 -c \"import socket; p='{{TESTDIR}}/ro/s.sock'; s=socket.socket(socket.AF_UNIX); s.bind(p); print('UNIX_BIND_SUCCEEDED')\"",
         "timeout": 20000
     },
-    "filesystem": { "readonlyPaths": ["{{TESTDIR}}/ro"] }
+    "filesystem": { "readonlyPaths": ["{{DEVDIR}}"], "readonlyPaths": ["{{TESTDIR}}/ro"] }
 }

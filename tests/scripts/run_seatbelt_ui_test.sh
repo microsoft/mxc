@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seatbelt_common.sh
 . "$SCRIPT_DIR/lib/seatbelt_common.sh"
 
-[ -x /usr/bin/python3 ] || fail "/usr/bin/python3 is required by this suite"
+require_python3_probe
 
 run_config "$(render seatbelt_ui_disabled.json)"
 expect_ok "ui.disable=true blocks WindowServer" "DISPLAY_ID=0"

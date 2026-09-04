@@ -54,4 +54,17 @@ run_config "$(render seatbelt_fs_baseline_reads.json)"
 expect_ok "the baseline profile allows reading system binaries" "FS_BASELINE_BIN_OK"
 expect_ok "the baseline profile allows writing /dev/null" "FS_DEVNULL_OK"
 
+# The baseline exists "so the dynamic linker, shells, and standard tools work".
+# /usr/bin/python3 is an xcrun shim that dlopens libxcrun.dylib from the active
+# developer directory; the baseline grants /Library (covering
+# CommandLineTools) but not /Applications, so on an Xcode-selected host a
+# standard tool cannot start. Host-dependent by nature -- that is the point.
+run_config "$(render seatbelt_fs_baseline_standard_tool.json)"
+if grep -qF "FS_BASELINE_TOOL_OK" <<<"$OUT"; then
+    pass "the baseline profile runs a standard system tool (/usr/bin/python3)"
+else
+    fail_soft "the baseline profile runs a standard system tool (/usr/bin/python3)" \
+        "active developer dir $(xcode-select -p 2>/dev/null) is not in the baseline grants"
+fi
+
 summary "Seatbelt filesystem"

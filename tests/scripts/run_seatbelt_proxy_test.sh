@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seatbelt_common.sh
 . "$SCRIPT_DIR/lib/seatbelt_common.sh"
 
-[ -x /usr/bin/python3 ] || fail "/usr/bin/python3 is required by this suite"
+require_python3_probe
 command -v curl >/dev/null 2>&1 || fail "curl is required by this suite"
 
 PROXY_BIN="$(dirname "$MXC_EXEC_MAC")/unix-test-proxy"

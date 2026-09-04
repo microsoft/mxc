@@ -8,5 +8,10 @@
     },
     "seatbelt": {
         "nestedPty": false
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{DEVDIR}}"
+        ]
     }
 }

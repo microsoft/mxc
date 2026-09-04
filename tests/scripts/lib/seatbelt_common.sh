@@ -51,6 +51,31 @@ fi
 SEATBELT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/mxc-seatbelt.XXXXXX")"
 trap 'rm -rf "$SEATBELT_TMP"' EXIT
 
+# /usr/bin/python3 is an xcrun shim: it dlopens libxcrun.dylib from the active
+# developer directory, so it cannot start unless that path is readable. The
+# baseline covers /Library/Developer/CommandLineTools via its /Library grant
+# but not /Applications/Xcode*.app, so probe configs grant this explicitly and
+# measure their own subject on either kind of host.
+DEVDIR="$(xcode-select -p 2>/dev/null || true)"
+[ -n "$DEVDIR" ] || DEVDIR="/Library/Developer/CommandLineTools"
+
+# Confirm the probe interpreter actually runs inside a sandbox before any
+# suite trusts a python3-based verdict. Without this a broken interpreter
+# reads as "the policy blocked it" and the suite reports the wrong subject.
+require_python3_probe() {
+    [ -x /usr/bin/python3 ] || fail "/usr/bin/python3 is required by this suite"
+    local probe="$SEATBELT_TMP/_probe.json"
+    cat >"$probe" <<EOF
+{"version":"0.8.0-alpha","containment":"seatbelt",
+ "process":{"commandLine":"/usr/bin/python3 -c 'print(\"PROBE_OK\")'","timeout":20000},
+ "filesystem":{"readonlyPaths":["$DEVDIR"]}}
+EOF
+    local out rc=0
+    out=$("$MXC_EXEC_MAC" "$probe" 2>&1) || rc=$?
+    grep -qF "PROBE_OK" <<<"$out" ||
+        fail "/usr/bin/python3 cannot run inside the sandbox (exit $rc); every python3 probe in this suite would report a false verdict" "$out"
+}
+
 # Substitute {{TESTDIR}} and friends, emitting a runnable config path.
 render() {
     local config="$1"
@@ -61,16 +86,14 @@ render() {
     # stderr; run_config re-checks the path in the caller's shell and aborts.
     [ -f "$src" ] || { echo "FAIL: config not found: $src" >&2; exit 1; }
     local dst="$SEATBELT_TMP/$config"
-    local script=""
+    # DEVDIR is a host fact rather than a per-test parameter, so it is always
+    # available without every call site having to pass it.
+    local script="s|{{DEVDIR}}|$DEVDIR|g"
     while [ $# -gt 0 ]; do
         script="$script;s|{{$1}}|$2|g"
         shift 2
     done
-    if [ -n "$script" ]; then
-        sed "${script#;}" "$src" >"$dst"
-    else
-        cp "$src" "$dst"
-    fi
+    sed "$script" "$src" >"$dst"
     echo "$dst"
 }
 

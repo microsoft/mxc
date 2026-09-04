@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/seatbelt_common.sh
 . "$SCRIPT_DIR/lib/seatbelt_common.sh"
 
-[ -x /usr/bin/python3 ] || fail "/usr/bin/python3 is required by this suite"
+require_python3_probe
 
 TESTDIR="$(mktemp -d /private/tmp/mxc-seatbelt-opt.XXXXXX)"
 trap 'rm -rf "$TESTDIR" "$SEATBELT_TMP"' EXIT

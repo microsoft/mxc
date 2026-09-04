@@ -25,7 +25,10 @@
 //! operation), so trailing deny rules take precedence over earlier allow
 //! rules — the behavior callers expect from MXC's `denied_paths`.
 
+use std::env;
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::seatbelt_policy;
 use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
@@ -65,6 +68,7 @@ pub fn build_profile_with_proxy(
 
     // Filesystem — read-only system paths every process needs.
     out.push_str(SYSTEM_READ_ALLOW);
+    write_developer_dir_rule(&mut out);
 
     // Pseudo-terminal access — when the executor binary runs under a pty
     // the sandboxed shell inherits that TTY, so it sees a real terminal
@@ -135,6 +139,63 @@ const SYSTEM_READ_ALLOW: &str = "\
     (literal \"/dev/random\")
     (literal \"/dev/urandom\"))
 ";
+
+/// Locations `xcode-select` uses to record the active developer directory.
+/// Both are symlinks owned by root; the first is what `xcode-select --switch`
+/// writes, the second is the older path some releases still populate.
+const DEVELOPER_DIR_LINKS: [&str; 2] = [
+    "/var/db/xcode_select_link",
+    "/private/var/select/developer_dir",
+];
+
+/// Resolve the active Xcode / Command Line Tools developer directory.
+///
+/// `/usr/bin/python3`, `/usr/bin/git` and the other `/usr/bin` stubs are
+/// `xcrun` shims: they `dlopen` `libxcrun.dylib` from this directory, so they
+/// cannot start unless it is readable. `SYSTEM_READ_ALLOW` covers the
+/// Command Line Tools install via its `/Library` grant, but an Xcode-selected
+/// host puts it under `/Applications`, where nothing in the baseline reaches.
+///
+/// Resolution follows the same precedence `xcrun` itself uses: the
+/// `DEVELOPER_DIR` override first, then the `xcode-select` symlink. Reading
+/// the symlink avoids spawning `xcode-select` on every sandbox launch.
+/// Returns `None` when no developer directory is installed, which is a normal
+/// configuration and simply emits no rule.
+fn active_developer_dir() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("DEVELOPER_DIR") {
+        let path = PathBuf::from(dir);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    DEVELOPER_DIR_LINKS
+        .iter()
+        .map(Path::new)
+        .filter_map(|link| fs::read_link(link).ok())
+        .find(|target| target.is_dir())
+}
+
+/// Emit the read-only grant for the active developer directory.
+///
+/// Read-only and scoped to that one subpath: it is the minimum that lets the
+/// documented "standard tools work" baseline hold on an Xcode-selected host.
+fn write_developer_dir_rule(out: &mut String) {
+    if let Some(dir) = active_developer_dir() {
+        push_developer_dir_rule(out, &dir);
+    }
+}
+
+/// Emit the grant for an already-resolved developer directory. Split from
+/// `write_developer_dir_rule` so the emitted rule can be tested without
+/// depending on what is installed on the host running the tests.
+fn push_developer_dir_rule(out: &mut String, dir: &Path) {
+    let Some(path) = dir.to_str() else {
+        return;
+    };
+    out.push_str(";; --- active developer directory (xcrun shims in /usr/bin) ---\n");
+    let _ = writeln!(out, "(allow file-read* (subpath {}))", quote_scheme(path));
+}
 
 /// Pseudo-terminal device access required by the inner shell when the
 /// runner attaches it to a pty. The secondary fd we hand the child as
@@ -1825,5 +1886,49 @@ mod tests {
         });
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(global-name \"weird\\\"name\")"));
+    }
+
+    #[test]
+    fn developer_dir_rule_grants_read_only_subpath() {
+        let mut out = String::new();
+        push_developer_dir_rule(
+            &mut out,
+            Path::new("/Applications/Xcode.app/Contents/Developer"),
+        );
+        assert!(out.contains(
+            "(allow file-read* (subpath \"/Applications/Xcode.app/Contents/Developer\"))"
+        ));
+        // The xcrun shims only need to read it; a write grant would widen the
+        // sandbox for no benefit.
+        assert!(!out.contains("file-write"));
+    }
+
+    #[test]
+    fn developer_dir_rule_escapes_embedded_quotes() {
+        let mut out = String::new();
+        push_developer_dir_rule(&mut out, Path::new("/tmp/we\"ird/Developer"));
+        assert!(out.contains("(subpath \"/tmp/we\\\"ird/Developer\")"));
+    }
+
+    #[test]
+    fn developer_dir_absent_emits_nothing() {
+        // `write_developer_dir_rule` is a no-op when nothing is installed, so
+        // a host without developer tools still builds a valid profile.
+        let mut out = String::new();
+        if active_developer_dir().is_none() {
+            write_developer_dir_rule(&mut out);
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn baseline_profile_grants_the_active_developer_dir() {
+        // The documented baseline promise is that standard tools work, and
+        // the /usr/bin xcrun shims cannot start without this directory.
+        let Some(dir) = active_developer_dir() else {
+            return;
+        };
+        let p = build_profile(&req()).unwrap();
+        assert!(p.contains(&format!("(subpath \"{}\")", dir.display())));
     }
 }

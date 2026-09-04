@@ -6,5 +6,5 @@
         "commandLine": "/usr/bin/python3 -c $'import socket as k\ndef t(h,p):\n try:\n  s=k.socket(); s.settimeout(5); s.connect((h,p)); s.close(); return True\n except Exception: return False\nprint(\"EXTERNAL_OK\" if t(\"1.1.1.1\",443) else \"EXTERNAL_BLOCKED\")\nprint(\"LOOPBACK_OK\" if t(\"127.0.0.1\",{{PORT}}) else \"LOOPBACK_BLOCKED\")\ntry:\n s=k.socket(); s.bind((\"127.0.0.1\",0)); s.listen(1); s.close(); print(\"LISTEN_OK\")\nexcept Exception: print(\"LISTEN_BLOCKED\")'",
         "timeout": 30000
     },
-    "filesystem": { "readwritePaths": ["/private/tmp"] }
+    "filesystem": { "readonlyPaths": ["{{DEVDIR}}"], "readwritePaths": ["/private/tmp"] }
 }

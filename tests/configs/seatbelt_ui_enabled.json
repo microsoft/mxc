@@ -7,5 +7,5 @@
         "timeout": 20000
     },
     "ui": { "disable": false },
-    "filesystem": { "readwritePaths": ["/private/tmp"] }
+    "filesystem": { "readonlyPaths": ["{{DEVDIR}}"], "readwritePaths": ["/private/tmp"] }
 }
