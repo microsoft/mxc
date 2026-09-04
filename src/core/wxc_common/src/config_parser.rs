@@ -34,6 +34,8 @@ pub enum ParseError {
     Decode(WxcError),
     /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
+    /// Discriminated as one-shot, but the JSON payload was malformed.
+    OneShotMalformed(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
@@ -48,14 +50,16 @@ enum ErrorOutput {
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
-            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::Decode(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => ErrorOutput::Primary,
             Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::Decode(error) | Self::OneShot(error) | Self::OneShotMalformed(error) => {
+                error.to_string()
+            }
             Self::StateAware(error) => error.to_string(),
         }
     }
@@ -367,8 +371,15 @@ fn parse_mxc_request_json(
     } else {
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
             .map_err(ParseError::OneShot)?;
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
+            let malformed = error.is_syntax_error();
+            let error = WxcError::ConfigParse(error.to_string());
+            if malformed {
+                ParseError::OneShotMalformed(error)
+            } else {
+                ParseError::OneShot(error)
+            }
+        })?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
@@ -5054,7 +5065,9 @@ mod tests {
         let err = load_mxc_request_from_json(json, &mut logger).unwrap_err();
         let msg = match err {
             ParseError::StateAware(error) => error.to_string(),
-            ParseError::Decode(error) | ParseError::OneShot(error) => error.to_string(),
+            ParseError::Decode(error)
+            | ParseError::OneShotMalformed(error)
+            | ParseError::OneShot(error) => error.to_string(),
         };
         assert!(
             msg.contains("correlationVector"),

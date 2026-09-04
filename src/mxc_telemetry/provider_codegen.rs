@@ -70,3 +70,38 @@ fn generate_provider_def(group_guid: Option<&str>) -> String {
             .to_string(),
     }
 }
+
+/// Generate the per-event metadata constants (`MXC_EVENT_KEYWORD` and
+/// `MXC_PRIVACY_TAG`) written alongside the provider definition.
+///
+/// These constants are derived from the **same** `group_guid` signal as
+/// [`generate_provider_def`] so a build can never end up telemetry-routed
+/// (joined to the group) but untagged, or tagged but not routed:
+///
+/// - No group GUID (default: public/OSS/local dev builds) → the provider is
+///   local ETW only. `MXC_EVENT_KEYWORD` is a provider-local bit with no UTC
+///   meaning, and `MXC_PRIVACY_TAG` is `0` — Microsoft's own WSL OSS
+///   TraceLogging configuration follows the same pattern, defining these
+///   telemetry constants as zero for non-official builds.
+/// - A valid group GUID (a deliberate, internal-only opt-in) → the provider
+///   joins the Microsoft telemetry pipeline via UTC, so the events are
+///   correctly tagged for it: `MXC_EVENT_KEYWORD` is
+///   `MICROSOFT_KEYWORD_MEASURES` and `MXC_PRIVACY_TAG` is
+///   `PDT_PRODUCT_AND_SERVICE_USAGE`, matching WIL's
+///   `traceloggingconfig.h`/`MicrosoftTelemetry.h` conventions.
+///
+/// The event field list (`PartA_PrivTags`) stays present in both modes so the
+/// wire schema is identical regardless of build — only the constant values
+/// differ.
+fn generate_event_metadata_consts(group_guid: Option<&str>) -> String {
+    let telemetry_enabled = matches!(group_guid, Some(guid) if !guid.is_empty());
+    if telemetry_enabled {
+        "pub(crate) const MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000; // MICROSOFT_KEYWORD_MEASURES\n\
+         pub(crate) const MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000; // PDT_PRODUCT_AND_SERVICE_USAGE\n"
+            .to_string()
+    } else {
+        "pub(crate) const MXC_EVENT_KEYWORD: u64 = 0x1; // provider-local, no UTC meaning\n\
+         pub(crate) const MXC_PRIVACY_TAG: u64 = 0x0; // not telemetry-classified (local ETW only)\n"
+            .to_string()
+    }
+}

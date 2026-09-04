@@ -31,7 +31,11 @@ use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
 pub use consent::ConsentState;
-pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use events::{
+    log_config_rejected, log_enforcement_degraded, log_error, log_execution,
+    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
+    ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext,
+};
 pub use policy::PolicyState;
 
 #[cfg(target_os = "windows")]
@@ -191,7 +195,20 @@ pub fn version() -> &'static str {
     MXC_VERSION
 }
 
+/// Returns whether the process-local ETW provider is currently registered.
+pub fn is_active() -> bool {
+    mxc_telemetry::is_active()
+}
+
 /// Returns whether this invocation may emit telemetry.
+///
+/// Resolution:
+/// - `telemetry.enabled` in JSON config — explicit kill-switch/opt-in.
+/// - Persisted user consent state — must be `Granted`.
+/// - Administrative policy ceiling — must allow collection.
+///
+/// All three terms must hold. The function fails closed if either consent or
+/// policy cannot be read: those helpers resolve to non-collecting states.
 pub fn is_enabled(config: &TelemetryConfig) -> bool {
     // Only an explicit opt-in enables telemetry for this invocation.
     if config.enabled != Some(true) {

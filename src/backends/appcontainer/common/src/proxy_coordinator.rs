@@ -453,7 +453,8 @@ impl ProxyCoordinator {
     }
 
     /// Stop the proxy: signal shim and test proxy cleanup, remove loopback exemption.
-    pub fn stop(&mut self, logger: &mut Logger) {
+    pub fn stop(&mut self, logger: &mut Logger) -> bool {
+        let was_active = self.is_active();
         signal_process_cleanup(
             self.shim_cleanup_event.take(),
             self.shim_process_handle.take(),
@@ -477,6 +478,7 @@ impl ProxyCoordinator {
         if let Some(container_name) = self.loopback_container_name.take() {
             remove_loopback_exemption(&container_name);
         }
+        was_active
     }
 }
 

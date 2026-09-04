@@ -304,9 +304,15 @@ impl UiJobObject {
     /// Terminates every process currently assigned to this job (the sandboxed
     /// child and all of its descendants) with the given exit code.
     pub fn terminate(&self, exit_code: u32) -> Result<(), WxcError> {
+        self.terminate_raw(exit_code)
+            .map_err(|error| WxcError::Process(format!("TerminateJobObject: {error}")))
+    }
+
+    /// Raw termination result for diagnostic callers that need the numeric OS
+    /// error code while preserving [`Self::terminate`]'s established API.
+    pub(crate) fn terminate_raw(&self, exit_code: u32) -> windows::core::Result<()> {
         // SAFETY: `self.handle` is a valid job handle owned by this struct.
         unsafe { TerminateJobObject(self.handle, exit_code) }
-            .map_err(|error| WxcError::Process(format!("TerminateJobObject: {error}")))
     }
 
     /// Waits until no processes remain assigned to the job.

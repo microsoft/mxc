@@ -58,14 +58,17 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use sandbox_spec::base_container_layout::IntegrityLevel;
+use wxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
+};
 use wxc_common::error::WxcError;
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ExecutionRequest, FailurePhase, ProxyAddress,
-    SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
+    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -1987,6 +1990,53 @@ impl BaseContainerRunner {
             });
         }
 
+        wxc_common::telemetry::log_network_policy_applied(
+            sanitize_identity(&identity),
+            request.policy.network_enforcement_mode.as_str(),
+            request.policy.default_network_policy.as_str(),
+            request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|address| address.port as u64)
+                .unwrap_or(0),
+        );
+        if logger.has_diagnostic_sink() {
+            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&identity))
+                .str(
+                    "tier",
+                    crate::fallback_detector::IsolationTier::BaseContainer.as_str(),
+                )
+                .str(
+                    "enforcement_mode",
+                    request.policy.network_enforcement_mode.as_str(),
+                )
+                .str(
+                    "default_policy",
+                    request.policy.default_network_policy.as_str(),
+                )
+                .u64(
+                    "proxy_port",
+                    request
+                        .policy
+                        .network_proxy
+                        .address
+                        .as_ref()
+                        .map(|address| address.port as u64)
+                        .unwrap_or(0),
+                )
+                .u64("firewall_rules_created", 0)
+                .bool("firewall_applied", false)
+                .str(
+                    "status",
+                    wxc_common::audit::OperationStatus::Success.as_str(),
+                );
+            logger.log_audit_event(&record);
+        }
+
         // Hand ownership to the caller via `BaseChild`, which performs
         // sandbox/proxy teardown after the child exits. `job` is always present
         // here (we failed closed above); the `Option` and the root-only fallback
@@ -2001,6 +2051,7 @@ impl BaseContainerRunner {
             stderr_read,
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
             destroy_on_exit: legacy_destroy_on_exit,
+            preserve_policy: request.lifecycle.preserve_policy,
             proxy_enabled: request.policy.network_proxy.is_enabled(),
             identity,
             sid_string,
@@ -2036,6 +2087,7 @@ struct BaseChild {
     stderr_read: Option<OwnedHandle>,
     timeout_ms: u32,
     destroy_on_exit: bool,
+    preserve_policy: bool,
     proxy_enabled: bool,
     identity: String,
     sid_string: String,
@@ -2193,7 +2245,9 @@ impl SandboxBackend for BaseContainerRunner {
         // the binary's own std handles / console (a TTY when the binary has one).
         let capture = stdio == StdioMode::Pipes;
         let child = self.spawn_base(request, logger, capture)?;
-        Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+        Ok(Box::new(BaseContainerSandboxProcess::from_child(
+            child, logger,
+        )))
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
@@ -2224,6 +2278,7 @@ struct BaseContainerSandboxProcess {
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
     destroy_on_exit: bool,
+    preserve_policy: bool,
     proxy_enabled: bool,
     identity: String,
     sid_string: String,
@@ -2250,6 +2305,7 @@ struct BaseContainerSandboxProcess {
     last_exit_code: Option<i32>,
     /// Structured output published after capture teardown succeeds.
     output_metadata: Option<SandboxOutputMetadata>,
+    audit_logger: Logger,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -2259,7 +2315,7 @@ struct BaseContainerSandboxProcess {
 unsafe impl Send for BaseContainerSandboxProcess {}
 
 impl BaseContainerSandboxProcess {
-    fn from_child(mut child: BaseChild) -> Self {
+    fn from_child(mut child: BaseChild, logger: &Logger) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
@@ -2279,8 +2335,9 @@ impl BaseContainerSandboxProcess {
             stderr_canceller,
             timeout_ms: child.timeout_ms,
             destroy_on_exit: child.destroy_on_exit,
+            preserve_policy: child.preserve_policy,
             proxy_enabled: child.proxy_enabled,
-            identity: std::mem::take(&mut child.identity),
+            identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_result: None,
@@ -2293,14 +2350,30 @@ impl BaseContainerSandboxProcess {
             retain_capture_etl: child.retain_capture_etl,
             last_exit_code: None,
             output_metadata: None,
+            audit_logger: logger.clone_diagnostic_sink(),
         }
+    }
+
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", &self.identity)
+            .str(
+                "tier",
+                crate::fallback_detector::IsolationTier::BaseContainer.as_str(),
+            )
+            .u64("pid", self.pid as u64)
+    }
+
+    fn audit_enabled(&self) -> bool {
+        self.audit_logger.has_diagnostic_sink()
     }
 
     fn run_teardown(&mut self, allow_retention: bool) -> std::io::Result<()> {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = self.audit_logger.clone_diagnostic_sink();
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
@@ -2481,13 +2554,48 @@ impl BaseContainerSandboxProcess {
             );
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
-        self.proxy_coordinator.stop(&mut logger);
+        let proxy_stopped = self.proxy_coordinator.stop(&mut logger);
         let result = capture_result
             .and(guarded_capture_result)
             .map(|_| ())
             .map_err(|error| error.to_string());
+        self.log_teardown(&result, proxy_stopped);
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
+    }
+
+    fn log_teardown(&mut self, capture_result: &Result<(), String>, proxy_stopped: bool) {
+        if !self.audit_enabled() && !wxc_common::telemetry::is_active() {
+            return;
+        }
+        let (status, skip_reason) = base_container_teardown_status(
+            capture_result.is_err(),
+            self.destroy_on_exit,
+            self.preserve_policy,
+        );
+        wxc_common::telemetry::log_sandbox_torn_down(
+            &self.identity,
+            status.as_str(),
+            &format!(
+                "firewall_rules_removed=0,bfs_removed=false,proxy_stopped={proxy_stopped},\
+                 container_released=false"
+            ),
+        );
+        if self.audit_enabled() {
+            let mut record = self
+                .audit(AuditEventName::SandboxTornDown)
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", 0)
+                .bool("firewall_removal_ok", true)
+                .bool("bfs_removed", false)
+                .bool("proxy_stopped", proxy_stopped)
+                .bool("preserve_policy", self.preserve_policy)
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            self.audit_logger.log_audit_event(&record);
+        }
     }
 
     fn release_guarded_capture_after_termination_failure(&mut self) {
@@ -2506,30 +2614,49 @@ impl BaseContainerSandboxProcess {
 
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
         if let Some(job) = &self.job {
+            if let Err(error) = job.terminate_raw(u32::MAX) {
+                self.record_kill_failure(KillMethod::TerminateJobObject, &error);
+                return Err(std::io::Error::other(format!(
+                    "TerminateJobObject: {error}"
+                )));
+            }
             if self.guarded_capture_session.is_some() {
                 // Guarded-WPR capture needs strict drain certainty: the ETL is
                 // only safely scoped if the job is proven to have fully drained
                 // before the trace is stopped/discarded.
-                job.terminate_and_wait(u32::MAX)
+                job.wait_for_empty()
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
             } else {
                 // Ordinary run: terminate the tree, but a slow drain is a
                 // warning, not a hard failure that would discard an otherwise
                 // valid result.
-                match job.terminate_best_effort(u32::MAX) {
-                    Ok(Some(drain_warning)) => write_stderr_line_best_effort(format_args!(
+                if let Err(drain_warning) = job.wait_for_empty() {
+                    write_stderr_line_best_effort(format_args!(
                         "sandbox job did not fully drain within the teardown window \
                          (continuing): {drain_warning}"
-                    )),
-                    Ok(None) => {}
-                    Err(error) => return Err(std::io::Error::other(error.to_string())),
+                    ));
                 }
             }
-        } else {
-            unsafe { TerminateProcess(self.process.get(), u32::MAX) }
-                .map_err(|error| std::io::Error::other(format!("TerminateProcess: {error}")))?;
+        } else if let Err(error) = unsafe { TerminateProcess(self.process.get(), u32::MAX) } {
+            self.record_kill_failure(KillMethod::TerminateProcess, &error);
+            return Err(std::io::Error::other(format!("TerminateProcess: {error}")));
         }
         Ok(())
+    }
+
+    fn record_kill_failure(&mut self, method: KillMethod, error: &windows::core::Error) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str(), error.code().0),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessKillFailed)
+                .str("kill_method", method.as_str())
+                .i64("error_code", error.code().0 as i64);
+            self.audit_logger.log_audit_event(&record);
+        }
     }
 
     fn terminate_and_reap(&mut self) -> std::io::Result<()> {
@@ -2679,6 +2806,29 @@ fn remove_managed_capture_path(path: &Path, directory: Option<&Path>) -> std::io
         ))),
     }
 }
+
+fn base_container_teardown_status(
+    capture_failed: bool,
+    destroy_on_exit: bool,
+    preserve_policy: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if capture_failed {
+        (TeardownStatus::Failure, None)
+    } else if preserve_policy {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        )
+    } else if destroy_on_exit {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::CleanupNotImplemented),
+        )
+    } else {
+        (TeardownStatus::Success, None)
+    }
+}
+
 impl SandboxProcess for BaseContainerSandboxProcess {
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
@@ -2748,13 +2898,38 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
-                    Ok(code as i32)
+                    let exit_code = code as i32;
+                    wxc_common::telemetry::log_process_event(
+                        &self.identity,
+                        self.pid,
+                        wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                    );
+                    if self.audit_enabled() {
+                        let record = self
+                            .audit(AuditEventName::ProcessExited)
+                            .i64("exit_code", exit_code as i64);
+                        self.audit_logger.log_audit_event(&record);
+                    }
+                    Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("script timed out after {}ms", self.timeout_ms),
-            )),
+            WAIT_TIMEOUT => {
+                wxc_common::telemetry::log_process_event(
+                    &self.identity,
+                    self.pid,
+                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+                );
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessTimedOut)
+                        .u64("timeout_ms", self.timeout_ms as u64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
+            }
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
