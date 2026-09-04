@@ -4,7 +4,7 @@ This directory contains the repository-owned packaging inputs used by
 `.azure-pipelines/1ES.IsoSession.Artifacts.yml`.
 
 The payload binaries are not built in this repository. The pipeline resolves a
-Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the seven
+Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the six
 required IsolationSession binaries and two WinMDs, generates the month-specific
 `IsoSession.manifest`, and then:
 
@@ -15,6 +15,12 @@ required IsolationSession binaries and two WinMDs, generates the month-specific
    shim into `Microsoft.Windows.AI.IsolationSession.SDK`; and
 4. publishes the per-architecture installer artifacts plus a combined release
    artifact containing the NuGet, installers, provenance, and release metadata.
+
+If the original BNS drops have expired, the pipeline can use a retained prior
+IsoSession pipeline run as its source. That path revalidates the source
+BuildGuid, branch, and architecture, then restages only the maintained lifted
+payload. It does not carry forward `IsoSessionCore.dll` from historical
+artifacts.
 
 The NuGet uses the x64 WinMD pair and signed x64 activation shim consumed by
 MXC. ARM64 WinMD hashes remain in release provenance but are not required to

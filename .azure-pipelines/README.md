@@ -31,6 +31,12 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 
 Queue parameters include `buildGuid`, `monthId`, and `patch`. The canonical
 release contract is `monthId + patch`, rendered as MSI/bundle `YY.M.patch.0`.
+When the original BNS drops have expired, set `sourcePipelineRunId` to a
+retained successful run from this pipeline. The build downloads that run's
+architecture artifacts, validates their BuildGuid/branch/architecture, and
+restages only the six lifted binaries plus two WinMDs. Any historical
+`IsoSessionCore.dll` in the retained artifact is ignored so the corrected
+inbox-Core contract remains enforced.
 
 For non-release validation, keep `signingMode=test` and
 `enablePromotion=false`.

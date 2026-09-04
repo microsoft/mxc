@@ -38,6 +38,10 @@ parameters:
   displayName: Exact ARM64 BIN drop name (optional)
   type: string
   default: ' '
+- name: sourcePipelineRunId
+  displayName: Prior IsoSession pipeline run ID used when OS drops have expired
+  type: number
+  default: 0
 - name: signingMode
   displayName: Artifact signing mode
   type: string
@@ -105,6 +109,7 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.x64DropNameOverride }}
+          sourcePipelineRunId: ${{ parameters.sourcePipelineRunId }}
           signingMode: ${{ parameters.signingMode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 
@@ -117,6 +122,7 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.arm64DropNameOverride }}
+          sourcePipelineRunId: ${{ parameters.sourcePipelineRunId }}
           signingMode: ${{ parameters.signingMode }}
           ESRPInfo: ${{ parameters.ESRPInfo }}
 

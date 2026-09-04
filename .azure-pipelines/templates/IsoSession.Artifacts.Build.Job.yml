@@ -17,6 +17,9 @@ parameters:
 - name: dropNameOverride
   type: string
   default: ' '
+- name: sourcePipelineRunId
+  type: number
+  default: 0
 - name: signingMode
   type: string
   default: test
@@ -101,50 +104,92 @@ jobs:
       Write-Host "Validated release $($release.canonicalRelease) -> MSI $($release.msiVersion)"
     displayName: Validate pipeline parameters and write release contract
 
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $serviceRoot = (
-          New-Object System.Uri('${{ parameters.dropServiceUri }}')
-      ).GetLeftPart([System.UriPartial]::Authority)
-      $zipPath = Join-Path '$(dropClientDirectory)' 'drop.zip'
-      $extractPath = Join-Path '$(dropClientDirectory)' 'client'
-      New-Item -ItemType Directory -Force -Path '$(dropClientDirectory)' | Out-Null
-      if ([string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
-          throw 'SYSTEM_ACCESSTOKEN is required to download drop.exe.'
-      }
-      $basicToken = [Convert]::ToBase64String(
-          [Text.Encoding]::ASCII.GetBytes(":$env:SYSTEM_ACCESSTOKEN"))
-      Invoke-WebRequest `
-          -Uri "$serviceRoot/_apis/drop/client/exe" `
-          -Headers @{ Authorization = "Basic $basicToken" } `
-          -OutFile $zipPath `
-          -UseBasicParsing
-      Add-Type -AssemblyName System.IO.Compression.FileSystem
-      [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
-      $dropExe = Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter drop.exe |
-          Select-Object -First 1
-      if (-not $dropExe) {
-          throw 'drop.exe was not found in the downloaded client package.'
-      }
-      Write-Host "##vso[task.setvariable variable=dropExe]$($dropExe.FullName)"
-    displayName: Bootstrap drop.exe
-    env:
-      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  - ${{ if eq(parameters.sourcePipelineRunId, 0) }}:
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $serviceRoot = (
+            New-Object System.Uri('${{ parameters.dropServiceUri }}')
+        ).GetLeftPart([System.UriPartial]::Authority)
+        $zipPath = Join-Path '$(dropClientDirectory)' 'drop.zip'
+        $extractPath = Join-Path '$(dropClientDirectory)' 'client'
+        New-Item -ItemType Directory -Force -Path '$(dropClientDirectory)' | Out-Null
+        if ([string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+            throw 'SYSTEM_ACCESSTOKEN is required to download drop.exe.'
+        }
+        $basicToken = [Convert]::ToBase64String(
+            [Text.Encoding]::ASCII.GetBytes(":$env:SYSTEM_ACCESSTOKEN"))
+        Invoke-WebRequest `
+            -Uri "$serviceRoot/_apis/drop/client/exe" `
+            -Headers @{ Authorization = "Basic $basicToken" } `
+            -OutFile $zipPath `
+            -UseBasicParsing
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
+        $dropExe = Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter drop.exe |
+            Select-Object -First 1
+        if (-not $dropExe) {
+            throw 'drop.exe was not found in the downloaded client package.'
+        }
+        Write-Host "##vso[task.setvariable variable=dropExe]$($dropExe.FullName)"
+      displayName: Bootstrap drop.exe
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $override = '${{ parameters.dropNameOverride }}'.Trim()
-      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-IsoSessionOsBinaries.ps1' `
-          -DropExe '$(dropExe)' `
-          -DropServiceUri '${{ parameters.dropServiceUri }}' `
-          -BuildGuid '${{ parameters.buildGuid }}' `
-          -ArchTag '${{ parameters.archTag }}' `
-          -OutDir '$(payloadDirectory)' `
-          -DropNameOverride $override `
-          -OsBranch '${{ parameters.osBranch }}'
-    displayName: Download filtered OS IsoSession payload
-    env:
-      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $override = '${{ parameters.dropNameOverride }}'.Trim()
+        & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-IsoSessionOsBinaries.ps1' `
+            -DropExe '$(dropExe)' `
+            -DropServiceUri '${{ parameters.dropServiceUri }}' `
+            -BuildGuid '${{ parameters.buildGuid }}' `
+            -ArchTag '${{ parameters.archTag }}' `
+            -OutDir '$(payloadDirectory)' `
+            -DropNameOverride $override `
+            -OsBranch '${{ parameters.osBranch }}'
+      displayName: Download filtered OS IsoSession payload
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - ${{ if ne(parameters.sourcePipelineRunId, 0) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: Download retained IsoSession source payload
+      inputs:
+        buildType: specific
+        project: Dart
+        definition: 199463
+        buildVersionToDownload: specific
+        pipelineId: ${{ parameters.sourcePipelineRunId }}
+        artifactName: isosession-installers-${{ parameters.archTag }}
+        targetPath: $(workDirectory)\source-pipeline-artifact
+
+    - powershell: |
+        $ErrorActionPreference = 'Stop'
+        $sourceRoot = '$(workDirectory)\source-pipeline-artifact'
+        $sourceManifests = @(
+            Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Filter 'source-manifest.json')
+        if ($sourceManifests.Count -ne 1) {
+            throw "Expected one retained source manifest; found $($sourceManifests.Count)."
+        }
+        $sourceManifest = Get-Content -LiteralPath $sourceManifests[0].FullName -Raw |
+            ConvertFrom-Json
+        if ($sourceManifest.buildGuid -ne '${{ parameters.buildGuid }}') {
+            throw "Retained artifact BuildGuid '$($sourceManifest.buildGuid)' does not match '${{ parameters.buildGuid }}'."
+        }
+        if ($sourceManifest.arch -ne '${{ parameters.archTag }}') {
+            throw "Retained artifact architecture '$($sourceManifest.arch)' does not match '${{ parameters.archTag }}'."
+        }
+        if ($sourceManifest.osBranch -ne '${{ parameters.osBranch }}') {
+            throw "Retained artifact OS branch '$($sourceManifest.osBranch)' does not match '${{ parameters.osBranch }}'."
+        }
+        & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Stage-IsoSessionOsBinaries.ps1' `
+            -DropRoot $sourceRoot `
+            -OutDir '$(payloadDirectory)' `
+            -ArchTag '${{ parameters.archTag }}' `
+            -BuildGuid '${{ parameters.buildGuid }}' `
+            -DropName $sourceManifest.dropName `
+            -OsBranch '${{ parameters.osBranch }}' `
+            -Flavor '${{ parameters.flavor }}'
+      displayName: Restage retained OS payload without inbox Core
 
   - task: EsrpCodeSigning@5
     displayName: Sign IsoSession payload
