@@ -82,21 +82,20 @@ try {
 
     Remove-Item -LiteralPath (
         Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd') -Force
-    $failed = $false
-    try {
-        & $script `
-            -DropRoot $dropRoot `
-            -OutDir (Join-Path $testRoot 'missing-winmd') `
-            -ArchTag x64 `
-            -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
-            -DropName 'wdg/test/amd64fre/BIN/test' `
-            -Flavor amd64fre
-    }
-    catch {
-        $failed = $_.Exception.Message -match 'windows.ai.isolationsession.preview.winmd'
-    }
-    if (-not $failed) {
-        throw 'Staging unexpectedly succeeded with a required WinMD missing.'
+    $missingPreviewOut = Join-Path $testRoot 'missing-preview-winmd'
+    & $script `
+        -DropRoot $dropRoot `
+        -OutDir $missingPreviewOut `
+        -ArchTag x64 `
+        -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
+        -DropName 'wdg/test/amd64fre/BIN/test' `
+        -Flavor amd64fre
+    $missingPreviewManifest = Get-Content (
+        Join-Path $missingPreviewOut 'source-manifest.json') -Raw |
+            ConvertFrom-Json
+    if ($missingPreviewManifest.files.name -contains
+        'windows.ai.isolationsession.preview.winmd') {
+        throw 'Staging recorded a Preview WinMD that was not present in the drop.'
     }
     [System.IO.File]::WriteAllText(
         (Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd'),
