@@ -103,13 +103,12 @@ if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"
     exit 1
 fi
-# Strict mode, for continuous integration. A developer box legitimately lacks
-# slirp4netns or outbound access to the external anchors and should be able to
-# run what it can, so a skip is only a warning there. On a runner provisioned
-# to execute this suite, a skip means a prerequisite silently disappeared, and
-# the gate would then go green while testing nothing -- which is how an
-# unenforced firewall shipped once already.
-if [ "${MXC_BWRAP_TESTS_REQUIRE_EXECUTION:-0}" != "0" ]; then
+# Strict by default: a skip means a prerequisite is missing, and a suite that
+# reports success having verified nothing is how an unenforced firewall shipped
+# once already. A developer box that legitimately lacks slirp4netns or outbound
+# access to the external anchors can opt out with
+# MXC_BWRAP_TESTS_REQUIRE_EXECUTION=0 to run whatever it can.
+if [ "${MXC_BWRAP_TESTS_REQUIRE_EXECUTION:-1}" != "0" ]; then
     if [ "$PASSED" -eq 0 ]; then
         echo "ERROR: strict mode: no test executed. Refusing to report success."
         exit 1

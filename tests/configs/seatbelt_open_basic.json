@@ -1,0 +1,25 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "pwd > {{OUT}}/pwd.txt 2>&1; printf \"%s\" \"$MXC_OPEN_VAR\" > {{OUT}}/env.txt 2>&1; printf \"%s\" \"$PWD\" > {{OUT}}/pwdvar.txt 2>&1; echo OPEN_RAN > {{OUT}}/marker.txt 2>&1",
+        "timeout": 15000,
+        "cwd": "{{OUT}}/work",
+        "env": [
+            "MXC_OPEN_VAR=open_env_ok"
+        ]
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "{{OUT}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "launchMethod": "open",
+        "guiAccess": true
+    }
+}

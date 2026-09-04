@@ -1,0 +1,11 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c \"import ctypes;q=ctypes.CDLL(\\\"/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics\\\");print(\\\"DISPLAY_ID=\\\"+str(q.CGMainDisplayID()))\"",
+        "timeout": 20000
+    },
+    "ui": { "disable": false },
+    "filesystem": { "readwritePaths": ["/private/tmp"] }
+}

@@ -1,0 +1,24 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{OUT}}/denied/secret.txt > {{OUT}}/leak.txt 2>/dev/null && echo LEAKED > {{OUT}}/verdict.txt || echo DENIED > {{OUT}}/verdict.txt",
+        "timeout": 15000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "{{OUT}}"
+        ],
+        "deniedPaths": [
+            "{{OUT}}/denied"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "launchMethod": "open",
+        "guiAccess": true
+    }
+}

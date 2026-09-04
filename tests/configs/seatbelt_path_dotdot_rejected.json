@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo PATH_DOTDOT_SHOULD_NOT_RUN",
+        "timeout": 10000
+    },
+    "filesystem": { "readonlyPaths": ["/private/tmp/../etc"] }
+}

@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "touch /usr/mxc-sip-probe && echo FS_SIP_WRITE_SUCCEEDED",
+        "timeout": 10000
+    },
+    "filesystem": { "readwritePaths": ["/usr"] }
+}

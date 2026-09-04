@@ -1,0 +1,21 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo ORPHAN_PROBE_RAN > {{OUT}}/orphan.txt 2>&1",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "{{OUT}}"
+        ]
+    },
+    "ui": {
+        "disable": false
+    },
+    "seatbelt": {
+        "launchMethod": "open",
+        "guiAccess": true
+    }
+}

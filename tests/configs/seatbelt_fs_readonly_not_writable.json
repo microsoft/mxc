@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo nope > {{TESTDIR}}/ro/written.txt && echo FS_RO_WRITE_SUCCEEDED",
+        "timeout": 10000
+    },
+    "filesystem": { "readonlyPaths": ["{{TESTDIR}}/ro"] }
+}

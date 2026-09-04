@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/rw/nested/secret.txt && echo FS_NESTED_DENIED_READ_SUCCEEDED",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["{{TESTDIR}}/rw"],
+        "deniedPaths": ["{{TESTDIR}}/rw/nested"]
+    }
+}

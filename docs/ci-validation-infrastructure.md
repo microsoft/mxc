@@ -151,10 +151,10 @@ backend **and** has a non-empty pool.
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
 
-Resolved `nightly` today = **17 jobs**: 9 Windows (prerelease × process-t1,
-isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc) and
-8 Linux (each of the four distros × bubblewrap + lxc). macOS resolves empty
-because Seatbelt has no wired suite.
+Resolved `nightly` today = **19 jobs**: 9 Windows (prerelease × process-t1,
+isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc),
+8 Linux (each of the four distros × bubblewrap + lxc) and 2 macOS
+(macOS 26 and macOS 15 × seatbelt).
 
 ### `backendDelayedStart`
 
@@ -205,7 +205,7 @@ get fixed or wired.
 | Windows Sandbox | ⛔ Not scheduled | Dispatcher case is wired; no trigger entry yet. |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Hyperlight | ⛔ Not implemented | No suite on any platform. |
-| Seatbelt | ⛔ Not implemented | The backend itself is healthy; there is no official E2E suite to dispatch to. |
+| Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
 ## Host preparation
 

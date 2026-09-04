@@ -82,8 +82,17 @@ case "$backend" in
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
         test -x "$binary_directory/unix-test-proxy"
-        echo "The Seatbelt CI backend is not wired to an existing test entry point yet." >&2
-        exit 2
+        mkdir -p "$release_directory"
+        # In CI these differ (artifact dir vs. build dir); running locally
+        # against src/target/release they are the same and cp would error.
+        if [[ "$(cd "$binary_directory" && pwd)" != "$(cd "$release_directory" && pwd)" ]]; then
+            cp -a "$binary_directory/." "$release_directory/"
+        fi
+        chmod +x "$release_directory/mxc-exec-mac" "$release_directory/unix-test-proxy"
+        # No strict-mode toggle: this suite has no skip path at all. Every
+        # prerequisite it needs is one a provisioned macOS runner is expected
+        # to have, so an absent one is a failure by construction.
+        bash "$script_root/run_seatbelt_all_tests.sh"
         ;;
     *)
         usage
