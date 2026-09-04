@@ -22,6 +22,11 @@ BuildGuid, branch, and architecture, then restages only the maintained lifted
 payload. It does not carry forward `IsoSessionCore.dll` from historical
 artifacts.
 
+An independently qualified run can also be selected as a promotion-only source
+when publication must be retried. This path does not rebuild or resign the
+artifacts; it downloads and verifies the exact aggregate produced by the
+qualified run before internal feed publication.
+
 The NuGet uses the x64 WinMD pair and signed x64 activation shim consumed by
 MXC. ARM64 WinMD hashes remain in release provenance but are not required to
 match the independently generated x64 metadata byte-for-byte. The package also

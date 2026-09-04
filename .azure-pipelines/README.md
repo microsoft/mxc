@@ -38,6 +38,13 @@ restages only the six lifted binaries plus two WinMDs. Any historical
 `IsoSessionCore.dll` in the retained artifact is ignored so the corrected
 inbox-Core contract remains enforced.
 
+If publication fails after a release candidate has already passed manual
+qualification, set `promotionSourceRunId` to that qualified run. The pipeline
+skips rebuilding, downloads the exact aggregated artifact from the selected
+run, repeats its production-signing and hash checks, and retries internal NuGet
+publication. ESRP MSI publication is intentionally unavailable in this retry
+mode.
+
 For non-release validation, keep `signingMode=test` and
 `enablePromotion=false`.
 

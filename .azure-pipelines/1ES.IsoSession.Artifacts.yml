@@ -42,6 +42,10 @@ parameters:
   displayName: Prior IsoSession pipeline run ID used when OS drops have expired
   type: number
   default: 0
+- name: promotionSourceRunId
+  displayName: Qualified pipeline run ID used for publication retry
+  type: number
+  default: 0
 - name: signingMode
   displayName: Artifact signing mode
   type: string
@@ -99,6 +103,7 @@ extends:
     stages:
     - stage: Build_IsoSession_Artifacts
       displayName: Build IsoSession artifacts
+      condition: eq(${{ parameters.promotionSourceRunId }}, 0)
       jobs:
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
@@ -171,6 +176,7 @@ extends:
       - stage: Promote_IsoSession_Artifacts
         displayName: Promote approved IsoSession artifacts
         dependsOn: Build_IsoSession_Artifacts
+        condition: or(succeeded(), ne(${{ parameters.promotionSourceRunId }}, 0))
         jobs:
         - job: wait_for_isosession_qualification
           displayName: Wait for supported-SF2 qualification
@@ -196,11 +202,24 @@ extends:
           steps:
           - checkout: self
 
-          - task: DownloadPipelineArtifact@2
-            displayName: Download aggregated IsoSession artifact
-            inputs:
-              artifact: isosession-artifacts
-              path: $(publishDirectory)
+          - ${{ if eq(parameters.promotionSourceRunId, 0) }}:
+            - task: DownloadPipelineArtifact@2
+              displayName: Download aggregated IsoSession artifact
+              inputs:
+                artifact: isosession-artifacts
+                path: $(publishDirectory)
+
+          - ${{ if ne(parameters.promotionSourceRunId, 0) }}:
+            - task: DownloadPipelineArtifact@2
+              displayName: Download qualified IsoSession artifact
+              inputs:
+                buildType: specific
+                project: Dart
+                definition: 199463
+                buildVersionToDownload: specific
+                pipelineId: ${{ parameters.promotionSourceRunId }}
+                artifactName: isosession-artifacts
+                targetPath: $(publishDirectory)
 
           - powershell: |
               $ErrorActionPreference = 'Stop'
@@ -249,7 +268,7 @@ extends:
                     -FeedUrl '${{ parameters.publishFeedUrl }}'
               displayName: Publish the final SDK NuGet
 
-        - ${{ if eq(parameters.publishMsiToEsrp, true) }}:
+        - ${{ if and(eq(parameters.publishMsiToEsrp, true), eq(parameters.promotionSourceRunId, 0)) }}:
           - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
             parameters:
               archTag: x64
