@@ -144,7 +144,7 @@ portMappings. `ContainerConfig` struct and `container_config` field on
 }
 ```
 
-Run with: `wxc-exec.exe config.json --experimental --debug`
+Run with: `wxc-exec.exe config.json --debug`
 
 ---
 
@@ -337,7 +337,7 @@ Setup script (`scripts/setup-wslc.ps1`):
 - TODO: Run a smoke test after the pull (tracked separately)
 
 **Current workaround:** Users write JSON configs with `"containment": "wslc"`
-and run with `wxc-exec.exe --experimental --debug config.json`.
+and run with `wxc-exec.exe --debug config.json`.
 
 ---
 
@@ -573,7 +573,7 @@ Config file (`app-policy.json`):
 }
 ```
 
-Run with: `wxc-exec.exe --experimental --debug app-policy.json`
+Run with: `wxc-exec.exe --debug app-policy.json`
 
 This mounts `C:\Projects\my-app` as `/mnt/c/Projects/my-app` (read-write) inside the Linux container, gives it network access (except to `internal.corp.net`), runs `app.py` with Python 3.12, and kills the container after 60 seconds
 if it hasn't exited.

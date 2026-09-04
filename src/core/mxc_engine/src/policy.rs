@@ -476,8 +476,7 @@ pub enum Containment {
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
     ///
-    /// **Experimental** — the request must have experimental features enabled
-    /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
+    /// Requires the crate's `wslc` build feature.
     Wslc(WslcSection),
     /// IsolationSession backend: a Windows isolated user session.
     ///
@@ -721,7 +720,7 @@ pub fn build_request(
 /// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
-///     version: "0.7.0-alpha".to_string(),
+///     version: "0.9.0-alpha".to_string(),
 ///     filesystem: None,
 ///     network: None,
 ///     ui: None,
@@ -729,7 +728,7 @@ pub fn build_request(
 /// };
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-/// request.set_script("python3 -c 'print(1)'").set_experimental(true);
+/// request.set_script("python3 -c 'print(1)'");
 /// # Ok::<(), mxc_engine::Error>(())
 /// ```
 pub fn build_request_with_containment(
@@ -1572,21 +1571,6 @@ mod tests {
         assert_eq!(config.target_os, "linux");
         assert!(config.port_mappings.is_empty());
         assert!(!config.gpu);
-    }
-
-    #[test]
-    fn wslc_does_not_require_the_experimental_gate() {
-        // WSLc is promoted to the stable surface: selecting it must neither
-        // require nor silently flip the experimental gate.
-        let mut request = build_request_with_containment(
-            &minimal_policy(),
-            &Containment::Wslc(WslcSection::default()),
-            None,
-        )
-        .expect("build_request_with_containment");
-        assert!(!request.inner.experimental_enabled);
-        request.set_experimental(true);
-        assert!(request.inner.experimental_enabled);
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub struct WslcProvision {
     pub image_tar_path: OptionalField<String>,
 }
 
-/// State-aware WSLC experimental settings.
+/// State-aware WSLC settings, carried by the top-level `wslc` section.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

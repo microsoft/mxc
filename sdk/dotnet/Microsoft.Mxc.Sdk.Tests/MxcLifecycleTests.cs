@@ -419,14 +419,11 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
             root.GetProperty("network").GetProperty("defaultPolicy").GetString());
-        // WSLc is promoted to the stable surface, so its phase section is a
-        // closed top-level `wslc.<phase>` object rather than nested under
-        // `experimental`. The parser rejects the old shape outright.
         Assert.False(
             root.TryGetProperty("experimental", out _),
             "a promoted backend must not emit an `experimental` section");
@@ -484,7 +481,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
@@ -536,7 +533,7 @@ public class MxcLifecycleTests
             new SandboxId("iso:abc"),
             new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
 
-        Assert.Equal("0.8.0-alpha", wslcStart["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
         Assert.Equal("0.6.0-alpha", wsbStop["version"]!.GetValue<string>());
         Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
     }

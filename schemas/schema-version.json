@@ -3,7 +3,7 @@
   "min": "0.6.0-alpha",
   "maxSupported": "0.9.0-alpha",
   "stateAware": "0.6.0-alpha",
-  "stateAwareWslc": "0.8.0-alpha",
+  "stateAwareWslc": "0.9.0-alpha",
   "stableLatest": "0.8.0-alpha",
   "devSchemaFile": "0.9.0-dev"
 }

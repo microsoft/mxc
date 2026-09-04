@@ -497,7 +497,7 @@ to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
 silently ignored on the other phases. State-awareness is not itself experimental —
 `experimental: true` must be set when the targeted backend is itself experimental, just
-as it is today for one-shot calls against `microvm` and `wslc`. IsolationSession is
+as it is today for one-shot calls against `microvm`. IsolationSession is
 experimental at the time of writing; that status is independent of the state-aware API
 surface (§13).
 
@@ -706,8 +706,9 @@ Configs (§6.1), not on this wire-shape type. Raw-JSON callers writing
 `ExperimentalStateAwareConfigs` directly are validated by the Rust parser and
 `validate_<phase>` hooks at runtime (§10.1).
 
-For one-shot calls (phase absent), `experimental.<backend>` directly holds the backend's
-one-shot config object (e.g., the top-level `wslc?: WslcConfig`), as documented in
+For one-shot calls (phase absent), an experimental backend's one-shot config object sits
+directly under `experimental.<backend>`; a backend on the stable surface uses its
+own top-level key instead (e.g. `wslc?: WslcConfig`). Both are documented in
 `docs/schema.md`. The TypeScript types make this distinction structural:
 `OneShotRequest.experimental` and `StateAwareRequest.experimental` have different shapes.
 

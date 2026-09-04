@@ -568,18 +568,23 @@ fn validate_experimental_backend_keys(
         return Ok(());
     };
 
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
-
     let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
         .copied()
         .filter(|key| map.contains_key(*key))
         .collect();
 
-    let rejected: Vec<&'static str> = match matching_key {
-        Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
+    let rejected: Vec<&'static str> = match containment {
+        Some(c) => match c
+            .section_path()
+            .and_then(|p| p.strip_prefix("experimental."))
+        {
+            Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
+
+            // An unrejected key is dropped when the experimental section is
+            // cleared.
+            None => present,
+        },
         None if present.len() > 1 => present,
         None => return Ok(()),
     };
@@ -1313,6 +1318,16 @@ fn convert_wire_config(
     // Top-level `wslc` config. Configs using `experimental.wslc` are rejected
     // above.
     let wslc = if let Some(cc) = cfg.wslc {
+        // The state-aware path clears `wslc` before delegating here, so a
+        // surviving `provision` is genuinely a one-shot request.
+        if cc.provision.is_some() {
+            return Err(WxcError::ConfigParse(
+                "One-shot requests do not accept 'wslc.provision'; it configures the \
+                 state-aware lifecycle. Remove it, or add a 'phase' field to make this \
+                 a state-aware request."
+                    .to_string(),
+            ));
+        }
         let mut config = WslcConfig::default();
         if let Some(os) = cc.target_os {
             config.target_os = os;
@@ -1503,18 +1518,22 @@ fn convert_wire_state_aware(
     // deserialize above already proved `json` is a JSON object.
     let stable_raw = serde_json::from_str::<serde_json::Value>(json).ok();
 
-    // `wslc` is promoted to the stable surface but, unlike the other promoted
-    // sections, is not one-shot-only: the state-aware lifecycle reads its
-    // provision config from `wslc.provision`. So it is not a stray section —
-    // instead accept `provision` and reject the one-shot-only siblings, which
-    // the daemon-backed lifecycle does not honor, rather than silently
-    // dropping them.
+    // The state-aware lifecycle reads WSLc's provision config from
+    // `wslc.provision`, so only the one-shot-only siblings below are rejected;
+    // the daemon-backed lifecycle does not honor them.
     if let Some(wslc) = cfg.wslc.as_ref() {
         if phase != Phase::Provision {
             return Err(WxcError::ConfigParse(format!(
                 "State-aware '{phase}' requests do not accept a 'wslc' section; \
                  WSLc backend configuration is fixed at provision time."
             )));
+        }
+        if containment != Some(ContainmentBackend::Wslc) {
+            return Err(WxcError::ConfigParse(
+                "The 'wslc' section requires 'containment': \"wslc\". Remove the section, \
+                 or set the matching containment."
+                    .to_string(),
+            ));
         }
         let mut one_shot_only: Vec<&'static str> = Vec::new();
         for (present, name) in [
@@ -5261,6 +5280,49 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_rejects_wslc_section_under_foreign_containment() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "wslc": {"provision": {"image": "alpine:latest"}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("requires 'containment'"), "got: {err}");
+    }
+
+    #[test]
+    fn state_aware_rejects_foreign_experimental_block_under_wslc() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "wslc",
+            "wslc": {"provision": {"image": "alpine:latest"}},
+            "experimental": {"windows_sandbox": {"provision": {}}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("experimental.windows_sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn state_aware_rejects_foreign_experimental_block_under_stable_backend() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "experimental": {"windows_sandbox": {"provision": {}}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(err.contains("experimental.windows_sandbox"), "got: {err}");
+    }
+
+    #[test]
     fn state_aware_rejects_experimental_macos_sandbox_alias() {
         let json = r#"{
             "phase": "provision",
@@ -6023,6 +6085,20 @@ mod tests {
         let wslc = req.wslc.unwrap();
         assert_eq!(wslc.image, "python:3.12");
         assert!(wslc.image_tar_path.is_none());
+    }
+
+    #[test]
+    fn one_shot_rejects_wslc_provision() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "wslc": {"provision": {"image": "alpine:latest"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wslc.provision"),
+            "one-shot 'wslc.provision' should be rejected, got: {msg}"
+        );
     }
 
     #[test]

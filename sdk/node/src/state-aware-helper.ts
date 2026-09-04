@@ -10,12 +10,11 @@ import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
-// WSLc's state-aware surface shipped at a later schema version than the
-// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
-// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
-// backends were promoted independently, so WSLc carries its own later default.
+// WSLc envelopes carry a top-level `wslc` section, which the closed stable
+// surface first defines in 0.9. Stamping them with the `STATE_AWARE_VERSION`
+// above would claim a schema in which that section does not exist.
 // See `DEFAULT_STATE_AWARE_VERSION`.
-export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
+export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is

@@ -322,9 +322,9 @@ fn exec_state_aware_attached_with(
 /// [`exec_state_aware_attached`] to attach the workload to this process's stdio,
 /// or [`exec_state_aware_json`] to drive the pipes yourself.
 ///
-/// `experimental` opts in to the experimental backends (WindowsSandbox,
-/// IsolationSession, WSLc); without it they are refused with
-/// `backend_unavailable` before any work is done.
+/// `experimental` opts in to the experimental backends (WindowsSandbox and
+/// IsolationSession); without it they are refused with `backend_unavailable`
+/// before any work is done.
 pub fn run_state_aware_json(
     request_json: &str,
     dry_run: bool,

@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
@@ -476,13 +476,15 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
-    assert.strictEqual(config.ui!.disable, true);
-    assert.strictEqual(config.ui!.clipboard, 'none');
-    assert.strictEqual(config.ui!.injection, false);
     assert.strictEqual(config.process!.timeout, 0);
     assert.strictEqual(config.process!.commandLine, '');
     assert.strictEqual(config.lifecycle!.destroyOnExit, true);
     assert.strictEqual(config.lifecycle!.preservePolicy, false);
+  });
+
+  it('should omit ui when the policy does not set it', () => {
+    const config = createConfigFromPolicy(defaultPolicy);
+    assert.strictEqual(config.ui, undefined);
   });
 
   it('should pass filesystem paths through', () => {
@@ -1099,6 +1101,19 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.lxc, undefined);
     });
 
+    it('should omit ui for wslc when the policy does not set it', () => {
+      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      assert.strictEqual(config.ui, undefined);
+    });
+
+    it('should emit ui for wslc when the policy sets it', () => {
+      const config = createConfigFromPolicy({
+        version: '0.6.0-alpha',
+        ui: { allowWindows: true },
+      }, 'wslc');
+      assert.strictEqual(config.ui!.disable, false);
+    });
+
     it('should map filesystem paths correctly', () => {
       const config = createConfigFromPolicy({
         version: '0.6.0-alpha',
@@ -1124,18 +1139,6 @@ describe('createConfigFromPolicy', () => {
     it('should set containerId', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc', 'my-container');
       assert.strictEqual(config.containerId, 'my-container');
-    });
-
-    it('should no longer require experimental mode for a wslc config', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      // WSLc is promoted, so the experimental gate no longer fires. A host
-      // without the WSLc runtime still rejects the request, but on
-      // availability — never on `--experimental`.
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        (e: Error) => !/experimental mode/.test(e.message),
-      );
     });
   });
 
@@ -1283,13 +1286,11 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   });
 
   it('should NOT require experimental mode for explicit wslc containment', () => {
-    // WSLc is promoted, so the experimental gate no longer fires for it. On a
-    // host without the WSLc runtime the availability check still rejects the
-    // request — that is a different error, and the point of this test.
-    assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
-      (e: Error) => !/experimental mode/.test(e.message),
-    );
+    const resolved = resolveExecutableAndArgs(makeConfig('wslc'), {
+      executablePath: fakeExe,
+      skipPlatformCheck: true,
+    });
+    assert.ok(!resolved.args.includes('--experimental'));
   });
 
   it('should NOT require experimental mode for explicit lxc containment', function (this: { skip: (reason?: string) => void }) {

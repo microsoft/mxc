@@ -96,7 +96,7 @@ export interface Experimental {
    */
   windows_sandbox?: WindowsSandbox | null;
   /**
-   * WSL container backend config (pre-promotion alias). Promoted to the top-level `wslc` section; still parsed here so the parser can reject it with a migration message instead of silently ignoring it.
+   * WSL container backend config (pre-promotion alias).
    */
   wslc?: Wslc | null;
   [k: string]: unknown;

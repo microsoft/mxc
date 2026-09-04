@@ -722,7 +722,7 @@ export interface StateAwareIsolationSession {
 }
 
 /**
- * State-aware WSLC experimental settings.
+ * State-aware WSLC settings, carried by the top-level `wslc` section.
  */
 export interface StateAwareWslc {
   /**

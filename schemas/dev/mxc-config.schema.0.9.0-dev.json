@@ -254,7 +254,7 @@
               "type": "null"
             }
           ],
-          "description": "WSL container backend config (pre-promotion alias). Promoted to the top-level `wslc` section; still parsed here so the parser can reject it with a migration message instead of silently ignoring it."
+          "description": "WSL container backend config (pre-promotion alias)."
         }
       },
       "type": "object"

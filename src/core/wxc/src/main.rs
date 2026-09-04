@@ -782,10 +782,9 @@ fn main() {
             output.probes.isolation_session_available = mxc_engine::isolation_session_available();
             output
         };
-        // Same story for WSLc: `appcontainer_common` cannot see that backend
-        // either. WSLc is promoted (non-experimental), so the SDK's
-        // availability check is the only gate on a `wslc` request — an
-        // un-overridden `false` here would make the backend unreachable.
+        // `appcontainer_common` cannot see the WSLc backend either, so it
+        // reports `wslcAvailable` as `false`; the SDK gates every `wslc`
+        // request on that value.
         #[cfg(target_os = "windows")]
         let output = {
             let mut output = output;

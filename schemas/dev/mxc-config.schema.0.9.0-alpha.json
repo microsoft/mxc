@@ -1300,7 +1300,7 @@
     },
     "StateAwareWslc": {
       "additionalProperties": false,
-      "description": "State-aware WSLC experimental settings.",
+      "description": "State-aware WSLC settings, carried by the top-level `wslc` section.",
       "properties": {
         "provision": {
           "$ref": "#/definitions/WslcProvision",

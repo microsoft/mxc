@@ -586,9 +586,7 @@ pub struct Experimental {
     pub test: Option<TestFeature>,
     /// Windows Sandbox backend config.
     pub windows_sandbox: Option<WindowsSandbox>,
-    /// WSL container backend config (pre-promotion alias). Promoted to the
-    /// top-level `wslc` section; still parsed here so the parser can reject it
-    /// with a migration message instead of silently ignoring it.
+    /// WSL container backend config (pre-promotion alias).
     pub wslc: Option<Wslc>,
     /// IsolationSession backend config (Windows).
     pub isolation_session: Option<IsolationSession>,

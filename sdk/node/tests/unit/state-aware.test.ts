@@ -553,14 +553,14 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to 0.8.0-alpha (not the isolation_session default)', () => {
+  it('defaults the version to 0.9.0-alpha (not the isolation_session default)', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.8.0-alpha');
+    assert.strictEqual(env.version, '0.9.0-alpha');
   });
 
   it('still honors a caller-supplied version over the wslc default', () => {
@@ -637,7 +637,7 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.8.0-alpha');
+      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

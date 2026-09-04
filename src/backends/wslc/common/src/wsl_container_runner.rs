@@ -657,25 +657,14 @@ impl ScriptRunner for WSLContainerRunner {
     /// Mirrors the config parser so requests reaching the engine directly
     /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
     /// instead of late in `execute` on the broken in-container iptables path.
-    ///
-    /// This is the single validation hook for **both** one-shot surfaces:
-    /// `ScriptRunner::run` calls it before `execute`, and
-    /// `SandboxBackend::spawn` calls it (via `SandboxBackend::validate`) before
-    /// `start_container`. Every rejection here therefore aborts the request
-    /// with no container, session, or WSL VM created.
-    ///
-    /// Checks run lifecycle → ui → network, so a request that trips several
-    /// gets a stable, most-structural-first message.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         reject_unsupported_lifecycle(request)?;
-        // Not phase-specific — a WSLc container runs Linux, so `ui` has no
-        // meaning on any surface. Shared with the state-aware phases.
-        policy::reject_ui_policy(request).map_err(as_rejection)?;
+        policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
         if request.policy.needs_host_filtering() {
             return Err(WslcError::Rejected(
                 "WSLc: per-host egress filtering (allowedHosts with \
                  defaultPolicy='block', or blockedHosts with defaultPolicy='allow') \
-                 is not supported. A WSLc container has no CAP_NET_ADMIN for in-container \
+                 is not supported. A WSL container has no CAP_NET_ADMIN for in-container \
                  iptables, and VM-level enforcement is not available without breaking other \
                  security guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
                  for cooperative host filtering, or remove the host lists."
@@ -691,7 +680,7 @@ impl ScriptRunner for WSLContainerRunner {
             )
             .into_response());
         }
-        policy::reject_unsupported_enforcement_mode(request).map_err(as_rejection)?;
+        policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
@@ -704,41 +693,23 @@ impl ScriptRunner for WSLContainerRunner {
     }
 }
 
-/// Retag a shared [`policy`] rejection as a WSLc one, so it reaches SDK callers
-/// as `policy_validation` (`FailurePhase::Rejected`) with the same message the
-/// state-aware surface emits.
-fn as_rejection(err: MxcError) -> ScriptResponse {
+/// Retag a shared [`policy`] rejection so it reaches SDK callers as
+/// `policy_validation` with the same message the state-aware surface emits.
+fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
 }
 
-/// The first line [`WSLContainerRunner::start_container`] writes, before the
-/// filesystem gate and any SDK call. Shared with the tests, which assert its
-/// absence to prove a rejection aborted before any container work.
+/// The first line [`WSLContainerRunner::start_container`] writes, before any
+/// SDK call. Tests assert its absence to prove a rejection aborted early.
 pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
 
 /// Refuses the `lifecycle` settings the one-shot surface cannot honour.
 ///
-/// Value-based rather than presence-based (unlike `ui`), because the defaults
-/// genuinely match the behaviour:
-///
-/// * `destroyOnExit: true` (the default) is honoured — it selects
-///   `WSLC_CONTAINER_FLAG_AUTO_REMOVE` and [`StartedContainer::destroy`] stops
-///   and deletes the container.
-/// * `destroyOnExit: false` is refused. [`StartedContainer`] owns the
-///   [`WslcSessionGuard`], whose `Drop` terminates the session — and with it
-///   the session-scoped container — regardless of the flag, and the WSLC SDK
-///   has no cross-process re-attach. The outcome is identical to `true`, so
-///   accepting `false` would promise a container that is already gone.
-/// * `preservePolicy: true` asks for filesystem and network policy to outlive
-///   the run. WSLc installs no persistent host-side enforcement: `rw`/`ro`
-///   paths become container volume mounts and the network posture is a
-///   container networking mode, both of which are properties of the container
-///   object itself and cannot be retained independently of it. There is
-///   nothing to preserve, so the request is refused rather than silently
-///   dropped.
-///
-/// The state-aware surface needs no counterpart: the parser rejects the whole
-/// one-shot `lifecycle` section on state-aware requests.
+/// Value-based, not presence-based: the default `destroyOnExit: true` is
+/// honoured. `false` cannot be, because [`StartedContainer`] owns the
+/// [`WslcSessionGuard`] whose `Drop` ends the session-scoped container either
+/// way. The state-aware surface needs no counterpart — the parser rejects the
+/// whole `lifecycle` section there.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if !request.lifecycle.destroy_on_exit {
         return Err(WslcError::Rejected(
@@ -1493,7 +1464,7 @@ impl WSLContainerRunner {
                     return Err(WslcError::Rejected(
                         "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
                          the localhost and builtinTestServer forms are not supported because a \
-                         WSLc container runs in its own network namespace."
+                         WSL container runs in its own network namespace."
                             .to_string(),
                     )
                     .into_response());
@@ -2472,9 +2443,7 @@ mod tests {
     /// The two surfaces refuse `allowLocalNetwork` with deliberately different
     /// remedies: one-shot has `wslc.portMappings` to point at,
     /// state-aware has no port-mapping primitive at all. Unifying the messages
-    /// — the obvious tidy-up — would send state-aware users after a dead end.
-    /// Both must classify as `policy_validation`, which is the phase, not the
-    /// message, that `mxc_engine::dispatch::map_spawn_error` reads.
+    /// would send state-aware users after a dead end.
     #[test]
     fn both_surfaces_reject_allow_local_network_with_surface_specific_remedies() {
         let request = ExecutionRequest {
@@ -2554,21 +2523,6 @@ mod tests {
         }
     }
 
-    // -- Accept-but-ignore closures --------------------------------------
-    //
-    // Each of these fields used to be parsed, carried into the runner, and
-    // then never read — so a caller got a container that silently did not
-    // have the posture they asked for. They are now refused, and refused
-    // from `validate_runner`, which both `ScriptRunner::run` and
-    // `SandboxBackend::spawn` call *before* any container exists.
-
-    /// A WSLc container runs Linux; `ui` maps to Windows job-object UI limits
-    /// (`JOB_OBJECT_UILIMIT_*`) with no analogue inside it.
-    ///
-    /// Presence-based: `UiPolicy::default()` is full lockdown, so an
-    /// explicitly-supplied lockdown `ui` is indistinguishable by value from an
-    /// absent one. A value-based check would let the single most restrictive
-    /// request a caller can write through unenforced.
     #[test]
     fn validate_runner_rejects_supplied_ui() {
         let request = ExecutionRequest {
@@ -2658,11 +2612,6 @@ mod tests {
         }
     }
 
-    /// `firewall` / `both` ask for per-rule enforcement the container cannot
-    /// perform (no `CAP_NET_ADMIN`). Value-based, unlike `ui`: the default
-    /// `capabilities` honestly describes WSLc's all-or-nothing network, so an
-    /// explicit `capabilities` is accepted rather than refused for being
-    /// present.
     #[test]
     fn validate_runner_rejects_unimplementable_enforcement_modes() {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
@@ -2700,11 +2649,8 @@ mod tests {
         assert!(runner.validate_runner(&request).is_ok());
     }
 
-    /// The rejections must abort the request, not tear a container down after
-    /// building one. Both one-shot entry points route through
-    /// `validate_runner`, and both call it before any container exists —
-    /// `ScriptRunner::run` ahead of `execute`, and `SandboxBackend::spawn`
-    /// ahead of `start_container` (asserted in `sandbox.rs`).
+    /// A rejection must abort the request rather than tear a container down
+    /// after building one. `SandboxBackend::spawn`'s half is in `sandbox.rs`.
     #[test]
     fn validate_runner_rejects_before_any_container_work() {
         let request = ExecutionRequest {

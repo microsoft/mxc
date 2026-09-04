@@ -273,9 +273,8 @@ var request = new SandboxRequest(
 ```
 
 The image must already be cached unless `ImageTarPath` is supplied. The image
-store wins over the tar when both identify an already-cached image. WSLC is a
-stable backend and needs no `Experimental` opt-in; the native unit must be built
-with WSLC support or execution returns `BackendUnavailable`.
+store wins over the tar when both identify an already-cached image. The native
+unit must be built with WSLC support or execution returns `BackendUnavailable`.
 
 ### Network proxy
 
@@ -537,7 +536,7 @@ Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
 ProcessContainer, Linux Bubblewrap, macOS Seatbelt for run/stream; the
 state-aware lifecycle supports IsolationSession, Windows Sandbox, and WSLC on
-Windows; all three are experimental).
+Windows; IsolationSession and Windows Sandbox are experimental).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
@@ -626,7 +625,7 @@ var wslc = new WslcProvisionOptions
 ```
 
 IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
-defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
+defaults to `0.9.0-alpha`. Set `Version` on provision or phase options to
 override the inferred version. State-aware exec options expose working
 directory, `KEY=VALUE` environment entries, and timeout. WSLC also accepts a
 proxy-only per-exec override:

@@ -154,7 +154,7 @@ export interface WindowsSandboxDeprovisionConfig {
 // may be injected per-exec.
 
 export interface WslcProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
+  /** Schema version (semver). When omitted, the SDK fills in `0.9.0-alpha`. */
   version?: string;
   /**
    * Filesystem policy applied at provision and frozen for the life of the

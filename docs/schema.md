@@ -311,8 +311,8 @@ omitted one without applying any UI restriction — so the section's default-den
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
 [`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
-while a WSLc container runs Linux and has no analogue of the Windows job-object
-limits `ui` maps to (see [`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
+while WSLc has no mechanism to enforce UI restrictions on a container (see
+[`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
 The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only

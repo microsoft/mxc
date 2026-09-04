@@ -51,9 +51,8 @@
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is opt-in at **build** time only: compile this crate with its `wslc`
-//! feature. It carries no `--experimental` gate — the section is part of the
-//! stable config surface. Its container has no stdin (the WSLC SDK exposes no
-//! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
+//! feature. Its container has no stdin (the WSLC SDK exposes no process-input
+//! API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
 //! Backends with no [`Containment`] variant return an [`Error`] with
 //! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
@@ -208,7 +207,6 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// `--experimental` flag. The experimental backends — WindowsSandbox and
 /// IsolationSession — are refused with
 /// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
-/// WSLc is promoted and needs no opt-in.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.
 pub fn run_state_aware_json(

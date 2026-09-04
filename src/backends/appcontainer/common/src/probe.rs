@@ -348,10 +348,6 @@ mod tests {
 
     #[test]
     fn probe_always_emits_wslc_available() {
-        // Twin of the isolation-session gate above: WSLc is a promoted
-        // (non-experimental) backend, so the SDK's availability check is the
-        // only thing standing between a caller and a `wslc` containment
-        // request. The field must always serialize, even when false.
         let out = run_probe(&ContainerPolicy::default());
         let v = serde_json::to_value(&out).expect("to_value");
         let probes = v["probes"].as_object().expect("probes object");
