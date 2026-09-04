@@ -2630,19 +2630,16 @@ impl BaseContainerSandboxProcess {
                 // Ordinary run: terminate the tree, but a slow drain is a
                 // warning, not a hard failure that would discard an otherwise
                 // valid result.
-                match job.wait_for_empty() {
-                    Err(drain_warning) => write_stderr_line_best_effort(format_args!(
+                if let Err(drain_warning) = job.wait_for_empty() {
+                    write_stderr_line_best_effort(format_args!(
                         "sandbox job did not fully drain within the teardown window \
                          (continuing): {drain_warning}"
-                    )),
-                    Ok(()) => {}
+                    ));
                 }
             }
-        } else {
-            if let Err(error) = unsafe { TerminateProcess(self.process.get(), u32::MAX) } {
-                self.record_kill_failure(KillMethod::TerminateProcess, &error);
-                return Err(std::io::Error::other(format!("TerminateProcess: {error}")));
-            }
+        } else if let Err(error) = unsafe { TerminateProcess(self.process.get(), u32::MAX) } {
+            self.record_kill_failure(KillMethod::TerminateProcess, &error);
+            return Err(std::io::Error::other(format!("TerminateProcess: {error}")));
         }
         Ok(())
     }
