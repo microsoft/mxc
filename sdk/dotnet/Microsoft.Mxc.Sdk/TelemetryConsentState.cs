@@ -4,27 +4,21 @@
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
-/// The user's persisted telemetry consent decision. See
-/// docs/telemetry/telemetry-consent-design.md for the full design: MXC only
-/// ever collects telemetry on Windows, and only when this flag is
-/// <see cref="Granted"/>. It is stored per-user by MXC itself
-/// (%LOCALAPPDATA%\mxc\telemetry-consent.json) and is never derived from, or
-/// synchronized with, any Windows-level diagnostics/consent setting.
+/// Telemetry consent state used for both persisted and effective values.
+/// Telemetry is collected only when the effective state is <see cref="Granted"/>.
 /// </summary>
 public enum TelemetryConsentState
 {
-    /// <summary>The user has explicitly agreed to telemetry collection.</summary>
+    /// <summary>Consent is granted.</summary>
     Granted,
 
-    /// <summary>The user has explicitly declined telemetry collection.</summary>
+    /// <summary>Consent is denied.</summary>
     Denied,
 
     /// <summary>
-    /// No decision has been recorded yet (fresh install, or an unreadable/corrupt
-    /// store). Treated identically to <see cref="Denied"/> for gating purposes —
-    /// callers must use <c>MxcTelemetry.NeedsConsentPrompt()</c>, not this state
-    /// alone, to decide whether presentation is appropriate under the current
-    /// policy.
+    /// Consent is unavailable or cannot currently authorize telemetry. Treated
+    /// as <see cref="Denied"/> for gating; use <c>MxcTelemetry.NeedsConsentPrompt()</c>
+    /// to determine whether to present consent.
     /// </summary>
     Undetermined,
 

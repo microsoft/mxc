@@ -161,9 +161,9 @@ public static class MxcTelemetry
     }
 
     /// <summary>
-    /// Read persisted telemetry consent. Returns <see cref="TelemetryConsentState.NotApplicable"/>
-    /// off Windows and <see cref="TelemetryConsentState.Undetermined"/> when the consent state
-    /// cannot be read.
+    /// Read effective telemetry consent. Returns <see cref="TelemetryConsentState.NotApplicable"/>
+    /// off Windows and <see cref="TelemetryConsentState.Undetermined"/> when consent cannot be
+    /// determined.
     /// </summary>
     public static TelemetryConsentState GetConsent()
     {
