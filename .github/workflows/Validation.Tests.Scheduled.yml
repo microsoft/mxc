@@ -14,6 +14,7 @@ on:
         options:
           - nightly
           - weekly
+          - copilot-cli-build
 
 concurrency:
   group: test-matrix-e2e-${{ github.ref }}-${{ github.event.schedule || inputs.plan }}
@@ -25,17 +26,21 @@ permissions:
 
 jobs:
   dependency-feed-check:
+    if: inputs.plan != 'copilot-cli-build'
     uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
 
   windows:
+    if: inputs.plan != 'copilot-cli-build'
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
 
   linux:
+    if: inputs.plan != 'copilot-cli-build'
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Linux.Job.yml
 
   macos:
+    if: inputs.plan != 'copilot-cli-build'
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
@@ -52,3 +57,7 @@ jobs:
     uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
       plan: weekly
+
+  copilot-cli-build:
+    if: github.event_name == 'workflow_dispatch' && inputs.plan == 'copilot-cli-build'
+    uses: ./.github/workflows/Validation.CopilotCli.Mxc.Job.yml
