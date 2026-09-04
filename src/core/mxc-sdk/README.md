@@ -260,8 +260,9 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `warnings()` returns policy security warnings detected while spawning the
-  sandbox, such as `permissiveLearningMode` weakening deny-by-default.
+- `warnings()` returns policy warnings detected while spawning the sandbox —
+  security warnings such as `permissiveLearningMode` weakening deny-by-default,
+  and warnings such as a network rule that installs but cannot carry traffic.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose

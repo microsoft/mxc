@@ -47,10 +47,9 @@ Requirements on an in-process caller:
   *"requires an interactive session"* (`0x80040233`), so a caller running as a
   service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
   `provision` succeeds first and mints an OS account that must be deprovisioned.
-- **A caller in a single-threaded apartment is refused**, with
-  `RPC_E_CHANGED_MODE` as the native code. Any other caller enters a
-  multi-threaded apartment held for the manager's lifetime and balanced on drop.
-  A UI application must marshal onto a background thread.
+- **A caller in a single-threaded apartment is refused.** Any other caller enters
+  a multi-threaded apartment held for the manager's lifetime and balanced on
+  drop. A UI application must marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
 
 The **one-shot** surface is not reachable in-process: `mxc_sdk::run` and
@@ -396,9 +395,9 @@ concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl blocks for an **`Executor`** consumer: it reuses the
+The runner's `exec` impl blocks under **`Relayed`**: it reuses the
 one-shot `create_process` path, and that call runs until the agent process
-exits and the relay drains. For a **`Library`** consumer it starts the
+exits and the relay drains. Under **`Piped`** it starts the
 process and returns without waiting, handing back the live pipe handles and a
 waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
@@ -425,10 +424,10 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 ### Structured failure fields
 
-The components of an API failure travel as **discrete fields** on the wire error
-envelope — `operation`, `nativeCode` and `remediation` — rather than being concatenated
-into `message`. `message` holds the bare human-readable text; for a semantic API failure
-that is the API's own message, passed through verbatim.
+The components of a failure travel as **discrete fields** on the wire error envelope —
+`operation`, `nativeCode` and `remediation` — rather than being concatenated into
+`message`. `message` holds the bare human-readable text; for a semantic API failure that
+is the API's own message, passed through verbatim.
 
 | Failure | `operation` | `nativeCode` | `remediation` |
 |---|---|---|---|
@@ -436,6 +435,7 @@ that is the API's own message, passed through verbatim.
 | Transport failure (the call could not be completed, or a result property could not be read) | ✅ | ✅ | — |
 | Activation failure (`backend_unavailable`) | ✅ | ✅ | — |
 | The API's status code itself could not be read | ✅ | — | best-effort |
+| Single-threaded-apartment refusal | — | — | ✅ |
 | MXC-internal failure (relay threads, console handles) | — | — | — |
 | `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
 
@@ -496,9 +496,9 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
   agent process before returning.
 
 `ExecHandle.terminator` is a no-op closure on the IsolationSession path
-when the consumer is `Executor`, which reuses the one-shot
+under `Relayed`, which reuses the one-shot
 `create_process` synchronously and so has no mid-flight cancellation
-seam. For a `Library` consumer the backend instead starts the process
+seam. Under `Piped` the backend instead starts the process
 without waiting and returns a terminator that calls
 `IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
 waiter that blocks on exit.
@@ -538,9 +538,7 @@ An exited process is never routed through the shutdown ladder, which reads only 
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
 `mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
-is reachable only for a `Library` consumer: the `Executor` arm has no
-timeout field in `ScriptResponse` to report one through, so the executor
-arm keeps reporting `Exited`.
+is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
 
 Teardown is bounded only insofar as the kill is: the streaming adapter's
 `Drop` joins the waiter when the kill was accepted, and abandons the

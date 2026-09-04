@@ -422,6 +422,7 @@ fn run_state_aware_main(
         telemetry_active,
         telemetry::TelemetryContext {
             backend,
+            sandbox_kind: backend,
             phase,
             correlation_vector: &correlation,
         },
@@ -791,6 +792,13 @@ fn main() {
             output.probes.wslc_available = mxc_engine::wslc_available();
             output
         };
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(all(target_os = "windows", feature = "hyperlight", target_arch = "x86_64"))]
+        let output = {
+            let mut output = output;
+            output.probes.hyperlight_available = hyperlight_common::is_whp_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -835,6 +843,16 @@ fn main() {
     if cli.setup_hyperlight {
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
+            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            #[cfg(target_os = "windows")]
+            if !hyperlight_common::is_whp_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot."
+                );
+                process::exit(1);
+            }
+
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {

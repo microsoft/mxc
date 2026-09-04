@@ -75,6 +75,10 @@ pub struct ProbeFacts {
     /// dependency on the WSLc backend; `wxc-exec --probe` overrides it when
     /// that backend is compiled in.
     pub wslc_available: bool,
+    /// Whether Hyperlight (WHP micro-VM) is available on this host. Always
+    /// `false` here — overridden by `wxc-exec --probe` when the hyperlight
+    /// feature is compiled in and WHP is loadable.
+    pub hyperlight_available: bool,
     /// Platform-agnostic UI restrictions this host can enforce.
     pub ui_capabilities: UiCapabilitySupport,
 }
@@ -138,6 +142,7 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
         isolation_session_available: false,
         wslc_available: false,
+        hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
     match fallback_detector::detect(policy, /* prefer_base_container */ true) {
@@ -215,6 +220,7 @@ mod tests {
                 base_container_supports_deny_paths: false,
                 isolation_session_available: true,
                 wslc_available: true,
+                hyperlight_available: false,
                 ui_capabilities: all_ui_capabilities(),
             },
             error: None,
@@ -254,6 +260,7 @@ mod tests {
                 base_container_supports_deny_paths: false,
                 isolation_session_available: false,
                 wslc_available: false,
+                hyperlight_available: false,
                 ui_capabilities: UiCapabilitySupport {
                     can_block_input_injection: false,
                     can_block_input_method_changes: false,

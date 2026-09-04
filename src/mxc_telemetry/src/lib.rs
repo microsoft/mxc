@@ -44,6 +44,13 @@ mod provider {
     /// Applied via a `PartA_PrivTags` field per the `TelemetryPrivacyDataTag` pattern.
     pub(crate) const PDT_PRODUCT_AND_SERVICE_USAGE: u64 = 0x0000_0000_0200_0000;
 
+    /// Privacy-approved WinExt product identifier for
+    /// MXC (Microsoft Execution Containers).
+    pub(crate) const PRIVACY_PRODUCT_MXC: u16 = 11;
+
+    /// WinExt permits only Client Diagnostic Data.
+    pub(crate) const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;
+
     /// Cached provider state, set once at init and read on every event.
     struct ProviderState {
         version: String,
@@ -60,7 +67,7 @@ mod provider {
     /// concurrent `init`/`shutdown` race from leaving the wrapper flag and the
     /// provider's real state out of sync (e.g. flag set to registered after a
     /// `register()` that actually failed, or a double register/unregister).
-    static REGISTERED: Mutex<bool> = Mutex::new(false);
+    static REGISTERED: Mutex<usize> = Mutex::new(0);
 
     /// Lock-free "is the provider currently registered" flag.
     ///
@@ -100,9 +107,10 @@ mod provider {
         });
 
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 0 {
             // Already registered — the tracelogging crate panics on double
-            // register, so we must not call `register()` again.
+            // register, so retain a reference instead.
+            *registered += 1;
             return true;
         }
 
@@ -110,12 +118,12 @@ mod provider {
         // executable (not a DLL), so unload ordering is not a concern.
         let status = unsafe { MXC_PROVIDER.register() };
         if status != 0 {
-            // Registration failed; leave `*registered` false so the wrapper
+            // Registration failed; leave the reference count at zero so the wrapper
             // state matches reality and a later attempt can retry.
             return false;
         }
 
-        *registered = true;
+        *registered = 1;
         ACTIVE.store(true, Ordering::Release);
         true
     }
@@ -123,9 +131,11 @@ mod provider {
     /// Unregister the ETW provider.
     pub fn shutdown() {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 1 {
+            *registered -= 1;
+        } else if *registered == 1 {
             MXC_PROVIDER.unregister();
-            *registered = false;
+            *registered = 0;
             ACTIVE.store(false, Ordering::Release);
         }
     }
@@ -144,8 +154,10 @@ mod provider {
     /// the shared base prefix). Carries no `sandbox_id` / UPN or other caller
     /// identity — privacy-safe by construction. Empty for one-shot executions
     /// (which are a single process already correlated by `AppSessionGuid`).
+    #[allow(clippy::too_many_arguments)]
     pub fn log_execution(
         backend: &str,
+        sandbox_kind: &str,
         exit_code: i32,
         outcome: &str,
         duration_ms: u64,
@@ -171,6 +183,11 @@ mod provider {
             // MXC.Error (Warning) and any future provider malfunction.
             level(Informational),
             keyword(MICROSOFT_KEYWORD_MEASURES),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
@@ -179,6 +196,7 @@ mod provider {
                 bool8("UTCReplace_AppSessionGuid", &true),
             }),
             str8("mxc.backend", backend),
+            str8("mxc.sandbox_kind", sandbox_kind),
             i32("mxc.exit_code", &exit_code),
             str8("mxc.outcome", outcome),
             u64("mxc.duration_ms", &duration_ms),
@@ -209,6 +227,7 @@ mod provider {
     /// under `__TlgCV__` (see [`log_execution`]); empty for one-shot executions.
     pub fn log_error(
         backend: &str,
+        sandbox_kind: &str,
         error_type: &str,
         exit_code: i32,
         phase: &str,
@@ -232,6 +251,11 @@ mod provider {
             // reserved for genuine provider/telemetry malfunctions.
             level(Warning),
             keyword(MICROSOFT_KEYWORD_MEASURES),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
@@ -240,6 +264,7 @@ mod provider {
                 bool8("UTCReplace_AppSessionGuid", &true),
             }),
             str8("mxc.backend", backend),
+            str8("mxc.sandbox_kind", sandbox_kind),
             str8("mxc.error_type", error_type),
             i32("mxc.exit_code", &exit_code),
             // State-aware lifecycle phase (provision|start|exec|stop|
@@ -267,8 +292,10 @@ mod provider {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_execution(
         _backend: &str,
+        _sandbox_kind: &str,
         _exit_code: i32,
         _outcome: &str,
         _duration_ms: u64,
@@ -280,6 +307,7 @@ mod provider {
 
     pub fn log_error(
         _backend: &str,
+        _sandbox_kind: &str,
         _error_type: &str,
         _exit_code: i32,
         _phase: &str,
@@ -304,6 +332,76 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn event_names_preserve_collector_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+        assert!(
+            provider_source.contains("\"MXC.Execution\","),
+            "execution event identity changed"
+        );
+        assert!(
+            provider_source.contains("\"MXC.Error\","),
+            "error event identity changed"
+        );
+        let error_section = provider_source
+            .split("\"MXC.Error\",")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            error_section.contains("str8(\"mxc.backend\", backend)"),
+            "MXC.Error must emit mxc.backend"
+        );
+        assert!(
+            error_section.contains("str8(\"mxc.sandbox_kind\", sandbox_kind)"),
+            "MXC.Error must emit mxc.sandbox_kind"
+        );
+    }
+
+    #[test]
+    fn winext_part_a_fields_preserve_privacy_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+
+        assert!(provider_source.contains("const PRIVACY_PRODUCT_MXC: u16 = 11;"));
+        assert!(provider_source
+            .contains("const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;"));
+        assert_eq!(
+            provider_source
+                .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
+                .count(),
+            2,
+            "every MXC event must carry privacy product 11"
+        );
+        assert_eq!(
+            provider_source
+                .matches("\"PartA_PrivacyDataCategory\"")
+                .count(),
+            2,
+            "every MXC event must carry a privacy data category"
+        );
+        assert_eq!(
+            provider_source
+                .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
+                .count(),
+            2,
+            "every MXC event must use Client Diagnostic Data category 1"
+        );
+        assert_eq!(
+            provider_source
+                .matches("u64(\"PartA_PrivTags\", &PDT_PRODUCT_AND_SERVICE_USAGE)")
+                .count(),
+            2,
+            "every MXC event must retain its approved privacy tag"
+        );
+    }
+
+    #[test]
     fn init_shutdown_roundtrip() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ok = init("0.0.0-test", "dev");
@@ -318,9 +416,20 @@ mod tests {
     #[test]
     fn double_init_is_safe() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = init("0.0.0-test", "dev");
-        let _ = init("0.0.0-test", "dev");
+        let first = init("0.0.0-test", "dev");
+        let second = init("0.0.0-test", "dev");
+        assert_eq!(second, first);
         shutdown();
+        assert_eq!(
+            is_active(),
+            first,
+            "one retained registration must remain active only when init succeeded"
+        );
+        shutdown();
+        assert!(
+            !is_active(),
+            "the final release must leave the provider inactive"
+        );
     }
 
     #[test]
@@ -346,6 +455,7 @@ mod tests {
         let _ = init("0.0.0-test", "dev");
         log_execution(
             "test_backend",
+            "test_backend",
             0,
             "success",
             100,
@@ -362,6 +472,7 @@ mod tests {
         let _ = init("0.0.0-test", "dev");
         log_error(
             "test_backend",
+            "test_backend",
             "config_error",
             1,
             "provision",
@@ -373,8 +484,17 @@ mod tests {
     #[test]
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        log_execution("test_backend", 0, "success", 50, "none", "", "");
-        log_error("test_backend", "unknown", 1, "", "");
+        log_execution(
+            "test_backend",
+            "test_backend",
+            0,
+            "success",
+            50,
+            "none",
+            "",
+            "",
+        );
+        log_error("test_backend", "test_backend", "unknown", 1, "", "");
     }
 
     #[test]
@@ -384,6 +504,7 @@ mod tests {
         shutdown();
         log_execution(
             "test_backend",
+            "test_backend",
             1,
             "failure",
             200,
@@ -391,16 +512,62 @@ mod tests {
             "exec",
             "iso:wxc-abcd",
         );
-        log_error("test_backend", "process_error", 1, "exec", "iso:wxc-abcd");
+        log_error(
+            "test_backend",
+            "test_backend",
+            "process_error",
+            1,
+            "exec",
+            "iso:wxc-abcd",
+        );
     }
 
     #[test]
     fn handles_empty_strings() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("", "");
-        log_execution("", 0, "", 0, "", "", "");
-        log_error("", "", 0, "", "");
+        log_execution("", "", 0, "", 0, "", "", "");
+        log_error("", "", "", 0, "", "");
         shutdown();
+    }
+
+    #[test]
+    fn concurrent_init_shutdown_is_safe() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let active = init("0.0.0-concurrent-test", "dev");
+                        if active {
+                            log_execution(
+                                "test_backend",
+                                "test_backend",
+                                0,
+                                "success",
+                                0,
+                                "",
+                                "",
+                                "",
+                            );
+                            shutdown();
+                        }
+                        active
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        if cfg!(target_os = "windows") {
+            assert!(results.iter().all(|active| *active));
+            assert!(!is_active());
+        } else {
+            assert!(results.iter().all(|active| !*active));
+        }
     }
 }
 

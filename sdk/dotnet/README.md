@@ -47,9 +47,9 @@ actionable hint whenever the failure has one. `Operation` and `NativeCode` are
 operation and status, so logging the exception alone keeps the diagnosis:
 
 ```csharp
-catch (MxcException ex) when (ex.Operation is not null)
+catch (MxcException ex)
 {
-    Console.Error.WriteLine($"{ex.Operation} failed with {ex.NativeCode}: {ex.Message}");
+    Console.Error.WriteLine(ex.ToString());
     if (ex.Remediation is not null)
     {
         Console.Error.WriteLine($"  try: {ex.Remediation}");
@@ -496,9 +496,9 @@ and its
 An IT administrator can still block MXC telemetry device-wide via MXC's own
 registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Any eventual .NET
-policy/consent query must fail closed rather than upgrading an unreadable
-device state into collection.
+for the stable registry contract and interaction rules. Policy and consent
+queries are not yet exposed by the .NET SDK; any eventual query must fail
+closed rather than upgrading an unreadable device state into collection.
 
 ## Projects
 
@@ -508,9 +508,12 @@ device state into collection.
   interactive terminal inside an isolation session. Terminal behaviour has no
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
-- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The lifecycle and streaming
-  end-to-end tests need a capable host and skip, with a reason, unless
-  `MXC_E2E_HOST_PREPPED=1`.
+- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
+  need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
+  The isolation-session lifecycle tests skip unless `GetAvailableBackends()`
+  reports that backend, which needs both a build with
+  `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
+  `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
 
 Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 

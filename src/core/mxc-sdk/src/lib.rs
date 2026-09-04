@@ -128,8 +128,9 @@
 //!
 //! [`exec_attached`] is verified against IsolationSession only.
 //!
-//! Policy security warnings are available through [`Sandbox::warnings`] and
-//! [`Output::warnings`].
+//! Policy warnings — security warnings, and warnings such as a network rule
+//! that installs but cannot carry traffic — are available through
+//! [`Sandbox::warnings`] and [`Output::warnings`].
 //!
 //! ## Relationship to `mxc_engine`
 //!

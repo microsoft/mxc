@@ -3,19 +3,76 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
+import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Worker } from 'node:worker_threads';
 import {
   getPlatformSupport,
   _resetPlatformSupportCache,
   _setProbeRunner,
   _parseBwrapVersion,
   _probeBubblewrap,
+  _mapBwrapHelperResult,
+  _bwrapProbeDeadlines,
+  _runBwrapVersionCommand,
+  _setBwrapProbeWorkerFactory,
   _setBwrapVersionRunner,
+  _setLxcAvailabilityProbe,
+  _setPlatformDiagnosticLogger,
   findWxcExecutable,
 } from '../../src/platform.js';
 
 const isWindows = os.platform() === 'win32';
+
+function readPidFileEventually(pidFile: string, timeoutMs = 5000): number {
+  const pollBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      Atomics.wait(pollBuffer, 0, 0, 10);
+    }
+  }
+  throw new Error(`probe did not write ${pidFile} within ${timeoutMs}ms`);
+}
+
+function isProcessGoneError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ESRCH';
+}
+
+function assertProcessTerminated(pid: number, message: string): void {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const state = stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+    assert.strictEqual(state, 'Z', message);
+  } catch (err) {
+    if (!isProcessGoneError(err)) throw err;
+  }
+}
+
+function directZombieChildren(): Set<number> {
+  const zombies = new Set<number>();
+  if (os.platform() !== 'linux') return zombies;
+  for (const entry of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const status = fs.readFileSync(`/proc/${entry}/status`, 'utf8');
+      if (
+        status.match(/^PPid:\s+(\d+)$/m)?.[1] === String(process.pid) &&
+        status.match(/^State:\s+(\w)/m)?.[1] === 'Z'
+      ) {
+        zombies.add(Number(entry));
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return zombies;
+}
 
 const allUiCapabilities = {
   canBlockClipboardRead: true,
@@ -461,6 +518,39 @@ describe('wslc availability gate', () => {
   });
 });
 
+describe('hyperlight availability gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('includes hyperlight when the probe reports it available', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { hyperlightAvailable: true } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      support.availableMethods.includes('hyperlight'),
+      `expected hyperlight present, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits hyperlight when the probe reports it unavailable', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { hyperlightAvailable: false } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      !support.availableMethods.includes('hyperlight'),
+      `expected hyperlight absent, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+});
+
 // The Bubblewrap probe gates on version, not just presence: `--clearenv`
 // (emitted unconditionally by the Rust argument builder) only exists in
 // bwrap 0.5.0+. Mirrors the Rust tests in
@@ -521,12 +611,601 @@ describe('bwrap version parsing', () => {
   });
 });
 
+describe('bwrap subprocess helpers', () => {
+  it('publishes a worker result only after the anchor closes', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-anchor-order-'));
+    const anchorPath = path.join(dir, 'delayed-anchor.js');
+    fs.writeFileSync(
+      anchorPath,
+      "process.stdout.write('{\"kind\":\"notFound\"}\\n');\n" +
+        'setTimeout(() => process.exit(0), 300);\n',
+    );
+    const shared = new SharedArrayBuffer(12 + 1024);
+    const header = new Int32Array(shared, 0, 3);
+    const worker = new Worker(
+      new URL('../../src/bwrap-probe-worker.js', import.meta.url),
+      {
+        workerData: {
+          shared,
+          anchorPath,
+          helperPath: anchorPath,
+          probeTimeoutMs: 1000,
+          publishTimeoutMs: 900,
+          outputLimit: 1024,
+        },
+      },
+    );
+    worker.on('error', () => {});
+    try {
+      const started = Date.now();
+      const waitResult = Atomics.wait(header, 0, 0, 1000);
+      const elapsed = Date.now() - started;
+      assert.notStrictEqual(waitResult, 'timed-out');
+      assert.ok(elapsed >= 200, `worker published after ${elapsed}ms, before anchor close`);
+    } finally {
+      worker.unref();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores anchor stderr so diagnostics cannot stall cleanup', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-anchor-stderr-'));
+    const anchorPath = path.join(dir, 'noisy-anchor.js');
+    fs.writeFileSync(
+      anchorPath,
+      "const fs = require('node:fs');\n" +
+        "fs.writeSync(2, Buffer.alloc(2 * 1024 * 1024, 'x'));\n" +
+        "process.stdout.write('{\"kind\":\"notFound\"}\\n');\n",
+    );
+    const shared = new SharedArrayBuffer(12 + 1024);
+    const header = new Int32Array(shared, 0, 3);
+    const worker = new Worker(
+      new URL('../../src/bwrap-probe-worker.js', import.meta.url),
+      {
+        workerData: {
+          shared,
+          anchorPath,
+          helperPath: anchorPath,
+          probeTimeoutMs: 1000,
+          publishTimeoutMs: 900,
+          outputLimit: 1024,
+        },
+      },
+    );
+    worker.on('error', () => {});
+    try {
+      const waitResult = Atomics.wait(header, 0, 0, 2000);
+      assert.notStrictEqual(waitResult, 'timed-out');
+      const length = Atomics.load(header, 1);
+      assert.deepStrictEqual(
+        JSON.parse(Buffer.from(shared, 12, length).toString()),
+        { kind: 'notFound' },
+      );
+    } finally {
+      worker.unref();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('maps bounded helper results', () => {
+    assert.deepStrictEqual(_mapBwrapHelperResult({ kind: 'timeout' }, 50), {
+      kind: 'failed',
+      status: null,
+      detail: 'timed out after 50ms',
+    });
+    assert.deepStrictEqual(_mapBwrapHelperResult({ kind: 'overflow' }), {
+      kind: 'failed',
+      status: null,
+      detail: 'probe output exceeded the 65536-byte cap',
+    });
+    assert.deepStrictEqual(
+      _mapBwrapHelperResult({ kind: 'notFound' }),
+      { kind: 'notFound' },
+    );
+    assert.deepStrictEqual(
+      _mapBwrapHelperResult({
+        kind: 'completed',
+        status: 124,
+        signal: null,
+        stdout: '',
+        stderr: 'wrapper failed\n',
+      }),
+      { kind: 'failed', status: 124, detail: 'wrapper failed' },
+    );
+    assert.deepStrictEqual(
+      _mapBwrapHelperResult({
+        kind: 'completed',
+        status: 126,
+        signal: null,
+        stdout: '',
+        stderr: '',
+      }),
+      { kind: 'failed', status: 126, detail: '' },
+    );
+  });
+
+  it(
+    'reaps the detached anchor after repeated probes',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-reap-'));
+      const originalPath = process.env.PATH;
+      const existingZombies = directZombieChildren();
+      try {
+        process.env.PATH = dir;
+        for (let i = 0; i < 5; i += 1) {
+          assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
+        }
+
+        const pollBuffer = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          const newZombies = [...directZombieChildren()].filter(
+            (pid) => !existingZombies.has(pid),
+          );
+          if (newZombies.length === 0) return;
+          Atomics.wait(pollBuffer, 0, 0, 10);
+        }
+        const newZombies = [...directZombieChildren()].filter(
+          (pid) => !existingZombies.has(pid),
+        );
+        assert.deepStrictEqual(newZombies, [], 'probe anchors must be reaped');
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'bounds actual subprocess output at 64 KiB',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-overflow-'));
+      const originalPath = process.env.PATH;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(
+          wrapper,
+          '#!/bin/sh\n' +
+            "dd if=/dev/zero bs=70000 count=1 2>/dev/null | tr '\\000' x\n",
+        );
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+
+        assert.deepStrictEqual(_runBwrapVersionCommand(3000), {
+          kind: 'failed',
+          status: null,
+          detail: 'probe output exceeded the 65536-byte cap',
+        });
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'forwards a multi-chunk helper result without truncating its JSON',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-large-result-'));
+      const originalPath = process.env.PATH;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(
+          wrapper,
+          '#!/bin/sh\n' +
+            "printf 'bubblewrap 0.5.0 '\n" +
+            "dd if=/dev/zero bs=60000 count=1 2>/dev/null | tr '\\000' x\n",
+        );
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+
+        const result = _runBwrapVersionCommand(3000);
+        assert.strictEqual(result.kind, 'output');
+        if (result.kind === 'output') {
+          assert.ok(result.stdout.startsWith('bubblewrap 0.5.0 '));
+          assert.ok(result.stdout.length > 60000);
+        }
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'bounds a wrapper whose background descendant retains stdout and stderr',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-descendant-'));
+      const originalPath = process.env.PATH;
+      const originalPidFile = process.env.MXC_TEST_DESCENDANT_PID_FILE;
+      const pidFile = path.join(dir, 'descendant.pid');
+      let descendantPid: number | undefined;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(
+          wrapper,
+          '#!/bin/sh\n' +
+            '(sleep 30) &\n' +
+            'echo "$!" > "$MXC_TEST_DESCENDANT_PID_FILE"\n' +
+            "exec /bin/echo 'bubblewrap 0.5.0'\n",
+        );
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+        process.env.MXC_TEST_DESCENDANT_PID_FILE = pidFile;
+
+        const result = _runBwrapVersionCommand(1000);
+        assert.deepStrictEqual(result, {
+          kind: 'failed',
+          status: null,
+          detail: 'timed out after 1000ms',
+        });
+        descendantPid = readPidFileEventually(pidFile);
+        const pollBuffer = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 1000;
+        let terminated = false;
+        while (Date.now() < deadline) {
+          try {
+            const stat = fs.readFileSync(`/proc/${descendantPid}/stat`, 'utf8');
+            const state = stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+            if (state === 'Z') {
+              terminated = true;
+              break;
+            }
+            Atomics.wait(pollBuffer, 0, 0, 10);
+          } catch (err) {
+            if (isProcessGoneError(err)) {
+              terminated = true;
+              break;
+            }
+            throw err;
+          }
+        }
+        assert.ok(terminated, 'probe must terminate the background descendant');
+      } finally {
+        if (descendantPid !== undefined) {
+          try {
+            process.kill(descendantPid, 'SIGKILL');
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+          }
+        }
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        if (originalPidFile === undefined) {
+          delete process.env.MXC_TEST_DESCENDANT_PID_FILE;
+        } else {
+          process.env.MXC_TEST_DESCENDANT_PID_FILE = originalPidFile;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'does not return a successful result before terminating closed-pipe descendants',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-closed-descendant-'));
+      const originalPath = process.env.PATH;
+      const originalPidFile = process.env.MXC_TEST_DESCENDANT_PID_FILE;
+      const pidFile = path.join(dir, 'descendant.pid');
+      let descendantPid: number | undefined;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(
+          wrapper,
+          '#!/bin/sh\n' +
+            '(sleep 30) >/dev/null 2>&1 &\n' +
+            'echo "$!" > "$MXC_TEST_DESCENDANT_PID_FILE"\n' +
+            "exec /bin/echo 'bubblewrap 0.5.0'\n",
+        );
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+        process.env.MXC_TEST_DESCENDANT_PID_FILE = pidFile;
+
+        const result = _runBwrapVersionCommand(1000);
+        assert.deepStrictEqual(result, {
+          kind: 'output',
+          stdout: 'bubblewrap 0.5.0\n',
+        });
+        descendantPid = readPidFileEventually(pidFile);
+        assertProcessTerminated(
+          descendantPid,
+          'probe returned before terminating the background descendant',
+        );
+      } finally {
+        if (descendantPid !== undefined) {
+          try {
+            process.kill(descendantPid, 'SIGKILL');
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+          }
+        }
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        if (originalPidFile === undefined) {
+          delete process.env.MXC_TEST_DESCENDANT_PID_FILE;
+        } else {
+          process.env.MXC_TEST_DESCENDANT_PID_FILE = originalPidFile;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('nests the probe and publish deadlines inside the caller budget', () => {
+    for (const timeoutMs of [5000, 1000, 100, 2]) {
+      const { probeTimeoutMs, publishTimeoutMs } = _bwrapProbeDeadlines(timeoutMs);
+      assert.ok(probeTimeoutMs >= 1, `probe deadline must be positive for ${timeoutMs}ms`);
+      assert.ok(
+        probeTimeoutMs < publishTimeoutMs,
+        `probe deadline must precede the publish deadline for ${timeoutMs}ms`,
+      );
+      assert.ok(
+        publishTimeoutMs <= timeoutMs,
+        `publish deadline must stay inside the caller budget for ${timeoutMs}ms`,
+      );
+    }
+  });
+
+  it('subtracts worker setup time from the caller-visible wait budget', async () => {
+    const delay = new Int32Array(new SharedArrayBuffer(4));
+    let worker: Worker | undefined;
+    _setBwrapProbeWorkerFactory(() => {
+      Atomics.wait(delay, 0, 0, 300);
+      worker = new Worker('setInterval(() => {}, 1000);', { eval: true });
+      return worker;
+    });
+    try {
+      const started = Date.now();
+      const result = _runBwrapVersionCommand(400);
+      const elapsed = Date.now() - started;
+      assert.deepStrictEqual(result, {
+        kind: 'failed',
+        status: null,
+        detail: 'timed out after 400ms',
+      });
+      assert.ok(elapsed >= 350, `probe returned before its remaining budget: ${elapsed}ms`);
+      assert.ok(elapsed < 550, `probe added a full wait after setup: ${elapsed}ms`);
+    } finally {
+      _setBwrapProbeWorkerFactory(null);
+      if (worker) await worker.terminate();
+    }
+  });
+
+  it('reports missing or corrupt worker modules without waiting for the probe timeout', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-worker-startup-'));
+    const corruptWorker = path.join(dir, 'corrupt-worker.mjs');
+    fs.writeFileSync(corruptWorker, 'export const = ;\n');
+    const cases = [
+      path.join(dir, 'missing-worker.mjs'),
+      corruptWorker,
+    ];
+    const workers: Worker[] = [];
+
+    try {
+      for (const workerPath of cases) {
+        _setBwrapProbeWorkerFactory((bootstrap, options) => {
+          const worker = new Worker(bootstrap, {
+            ...options,
+            workerData: {
+              ...(options.workerData as Record<string, unknown>),
+              workerPath,
+            },
+          });
+          workers.push(worker);
+          return worker;
+        });
+
+        const started = Date.now();
+        const result = _runBwrapVersionCommand(3000);
+        const elapsed = Date.now() - started;
+
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.match(result.detail, /^probe worker failed to start:/);
+          assert.doesNotMatch(result.detail, /timed out/i);
+        }
+        assert.ok(elapsed < 1500, `worker startup failure took ${elapsed}ms`);
+      }
+    } finally {
+      _setBwrapProbeWorkerFactory(null);
+      await Promise.all(workers.map((worker) => worker.terminate()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    'returns within the caller-visible timeout when the probe hangs',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-bound-'));
+      const originalPath = process.env.PATH;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(wrapper, '#!/bin/sh\nexec sleep 30\n');
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+
+        const started = Date.now();
+        const result = _runBwrapVersionCommand(1000);
+        const elapsed = Date.now() - started;
+        assert.deepStrictEqual(result, {
+          kind: 'failed',
+          status: null,
+          detail: 'timed out after 1000ms',
+        });
+        // The supervision layers run inside the caller's budget, so the total
+        // wait must not stack their margins on top of it.
+        assert.ok(elapsed < 1500, `probe took ${elapsed}ms, expected under 1500ms`);
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'reports an existing wrapper with a missing interpreter as broken',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-interpreter-'));
+      const originalPath = process.env.PATH;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(wrapper, '#!/this/interpreter/does/not/exist\n');
+        fs.chmodSync(wrapper, 0o755);
+        // Keep execvp from falling through to a real system bwrap after the
+        // synthetic wrapper's missing shebang interpreter returns ENOENT.
+        process.env.PATH = dir;
+
+        const result = _runBwrapVersionCommand(1000);
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.strictEqual(result.status, null);
+          assert.match(result.detail, /missing interpreter or loader/i);
+        }
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'reports an actually missing bwrap executable as not found',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-'));
+      const originalPath = process.env.PATH;
+      try {
+        process.env.PATH = dir;
+        assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'terminates the probe when the helper exits without printing a result',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      // The wrapper kills the probe helper but keeps running. A separate
+      // sentinel must retain process-group ownership until the worker kills the
+      // whole group; using the helper itself as leader orphaned this wrapper.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-no-result-'));
+      const originalPath = process.env.PATH;
+      const originalPidFile = process.env.MXC_TEST_DESCENDANT_PID_FILE;
+      const pidFile = path.join(dir, 'probe.pid');
+      let probePid: number | undefined;
+      try {
+        const wrapper = path.join(dir, 'bwrap');
+        fs.writeFileSync(
+          wrapper,
+          '#!/bin/sh\n' +
+            'echo "$$" > "$MXC_TEST_DESCENDANT_PID_FILE"\n' +
+            'kill $PPID\n' +
+            'sleep 30\n',
+        );
+        fs.chmodSync(wrapper, 0o755);
+        process.env.PATH = `${dir}${path.delimiter}${originalPath ?? ''}`;
+        process.env.MXC_TEST_DESCENDANT_PID_FILE = pidFile;
+
+        const result = _runBwrapVersionCommand(1000);
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.match(result.detail, /exited without a result/i);
+        }
+        probePid = readPidFileEventually(pidFile);
+        const pollBuffer = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 1000;
+        let terminated = false;
+        while (Date.now() < deadline) {
+          try {
+            const stat = fs.readFileSync(`/proc/${probePid}/stat`, 'utf8');
+            const state = stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+            if (state === 'Z') {
+              terminated = true;
+              break;
+            }
+            Atomics.wait(pollBuffer, 0, 0, 10);
+          } catch (err) {
+            if (isProcessGoneError(err)) {
+              terminated = true;
+              break;
+            }
+            throw err;
+          }
+        }
+        assert.ok(terminated, 'probe must terminate after its helper exits');
+      } finally {
+        if (probePid !== undefined) {
+          try {
+            process.kill(probePid, 'SIGKILL');
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+          }
+        }
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        if (originalPidFile === undefined) {
+          delete process.env.MXC_TEST_DESCENDANT_PID_FILE;
+        } else {
+          process.env.MXC_TEST_DESCENDANT_PID_FILE = originalPidFile;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 // The minimum-version comparison itself, driven through the injectable
 // runner. Without these the SDK gate could drift from the Rust gate in
 // `src/backends/bubblewrap/common/src/bwrap_version.rs` unnoticed.
 describe('bwrap minimum-version gate', () => {
   afterEach(() => {
     _setBwrapVersionRunner(null);
+    _setLxcAvailabilityProbe(null);
+    _setPlatformDiagnosticLogger(null);
     _resetPlatformSupportCache();
   });
 
@@ -548,8 +1227,11 @@ describe('bwrap minimum-version gate', () => {
     withVersion('bubblewrap 0.4.1\n');
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /0\.4\.1 is too old/);
-    assert.match(probe.reason, /0\.5\.0 or newer/);
+    assert.strictEqual(
+      probe.reason,
+      'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+        '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
+    );
   });
 
   it('rejects the release immediately below the floor', () => {
@@ -570,21 +1252,30 @@ describe('bwrap minimum-version gate', () => {
     withVersion('something else entirely\n');
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /could not determine/);
+    assert.strictEqual(
+      probe.reason,
+      'Could not determine the Bubblewrap (bwrap) version: `bwrap --version` printed ' +
+        '"something else entirely". Version 0.5.0 or newer is required.',
+    );
   });
 
   it('fails closed when unrelated output contains a number', () => {
     withVersion('some other tool 999\n');
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /could not determine/);
+    assert.match(probe.reason, /could not determine/i);
   });
 
   it('reports a missing binary as not installed', () => {
     _setBwrapVersionRunner(() => ({ kind: 'notFound' }));
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /not installed or not on PATH/);
+    assert.strictEqual(
+      probe.reason,
+      'Bubblewrap (bwrap) is not installed or not on PATH. ' +
+        'Install it via your package manager (e.g., apt install bubblewrap). ' +
+        'Version 0.5.0 or newer is required.',
+    );
   });
 
   it('reports a present but broken binary distinctly from a missing one', () => {
@@ -597,10 +1288,12 @@ describe('bwrap minimum-version gate', () => {
     }));
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /is present but/);
-    assert.match(probe.reason, /126/);
-    assert.match(probe.reason, /permission denied/);
-    assert.doesNotMatch(probe.reason, /not installed/);
+    assert.strictEqual(
+      probe.reason,
+      'The Bubblewrap (bwrap) availability probe `bwrap --version` exited with status 126: ' +
+        'bwrap: permission denied. Version 0.5.0 or newer is required; ' +
+        'check PATH and the installation before using the Bubblewrap backend.',
+    );
   });
 
   it('reports a timed-out probe as a failure rather than hanging', () => {
@@ -614,6 +1307,7 @@ describe('bwrap minimum-version gate', () => {
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
     assert.match(probe.reason, /timed out after 5000ms/);
+    assert.doesNotMatch(probe.reason, /is present/);
   });
 
   it('describes a failure that has no exit status without claiming it never ran', () => {
@@ -640,4 +1334,71 @@ describe('bwrap minimum-version gate', () => {
     _resetPlatformSupportCache();
     assert.ok(getPlatformSupport().availableMethods.includes('bubblewrap'));
   });
+
+  it(
+    'keeps Linux supported and logs the bwrap reason when LXC is available',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      _setLxcAvailabilityProbe(() => true);
+      withVersion('bubblewrap 0.4.1\n');
+      const logs: string[] = [];
+      _setPlatformDiagnosticLogger((message) => logs.push(message));
+      _resetPlatformSupportCache();
+
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, true);
+      assert.deepStrictEqual(support.availableMethods, ['lxc']);
+      assert.strictEqual(support.reason, '');
+      assert.deepStrictEqual(support.unavailableReasons, {
+        bubblewrap:
+          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
+      });
+      assert.strictEqual(logs.length, 1);
+      assert.match(logs[0], /0\.4\.1 is too old/i);
+    },
+  );
+
+  it(
+    'reports the bwrap failure reason when neither Linux backend is available',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      _setLxcAvailabilityProbe(() => false);
+      withVersion('bubblewrap 0.4.1\n');
+      _resetPlatformSupportCache();
+
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, false);
+      assert.deepStrictEqual(support.availableMethods, []);
+      assert.deepStrictEqual(support.unavailableReasons, {
+        lxc: 'LXC is not installed or not available on this system.',
+        bubblewrap:
+          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
+      });
+      assert.strictEqual(
+        support.reason,
+        'Neither LXC nor Bubblewrap is available on this system ' +
+          '(Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.)',
+      );
+    },
+  );
+
+  it(
+    'reports LXC as unavailable when Bubblewrap keeps Linux supported',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      _setLxcAvailabilityProbe(() => false);
+      withVersion('bubblewrap 0.5.0\n');
+      _resetPlatformSupportCache();
+
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, true);
+      assert.deepStrictEqual(support.availableMethods, ['bubblewrap']);
+      assert.deepStrictEqual(support.unavailableReasons, {
+        lxc: 'LXC is not installed or not available on this system.',
+      });
+    },
+  );
 });

@@ -105,6 +105,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // Keep the plan validation derived so the firewall path installs
         // exactly what was accepted instead of deriving it again.
         let egress_plan = self.validate_prepared(request)?;
+        if let Some(plan) = egress_plan.as_ref() {
+            warn_unreachable_v6_targets(plan, logger);
+        }
         // Tighten aliases of the same host object to the strictest intent
         // (deny > ro > rw). Done here, close to mount, to minimize the TOCTOU
         // window; an unresolvable path with deniedPaths present fails closed.
@@ -169,7 +172,27 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
     ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse> {
+        // Execution validation deliberately bypasses the advisory success
+        // cache: a prior platform-support query must not approve a different
+        // executable after `PATH` or its contents change.
+        self.validate_prepared_with_probe(request, bwrap_version::probe_bwrap_uncached)
+    }
+
+    /// `validate_prepared` with an injectable environment probe.
+    ///
+    /// Tests use this to assert that user-input validation runs *before* the
+    /// environmental `bwrap` probe, and to drive every probe failure without
+    /// depending on what the host happens to have installed.
+    fn validate_prepared_with_probe<F>(
+        &self,
+        request: &ExecutionRequest,
+        probe: F,
+    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse>
+    where
+        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+    {
         validate_network_policy_support(request, self.network_policy_support())?;
+
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -227,9 +250,18 @@ impl BubblewrapScriptRunner {
         // This is the only layer that checks what Bubblewrap can enforce: the
         // parser validates structure, and it only sees JSON configs, while a
         // Rust caller can build an `ExecutionRequest` and reach the runner
-        // directly. (The external-proxy case is the exception — the parser has
-        // rejected that combination since before this backend gained its own
-        // validation, so both layers refuse it.)
+        // directly. (The two proxy cases below are the exception — the parser
+        // has rejected those combinations since before this backend gained its
+        // own validation, so both layers refuse them.)
+        //
+        // Order matches the parser's: a proxy with an explicit firewall mode is
+        // also caught by the external-proxy check below (a default policy of
+        // `Block` alone satisfies it), so checking that first would hand the
+        // caller a different message than the parser gives for the same
+        // request.
+        if let Some(reason) = bwrap_command::proxy_with_firewall_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
         if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
@@ -298,7 +330,7 @@ impl BubblewrapScriptRunner {
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
-        if let Err(err) = bwrap_version::probe_bwrap() {
+        if let Err(err) = probe() {
             return Err(ScriptResponse::error(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
@@ -339,6 +371,34 @@ fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), Stri
         Some(address) => proxy_network::check_hosts_pin_against_policy(address, &request.policy),
         None => Ok(()),
     }
+}
+
+/// Warn that an IPv6 allow rule installs but cannot carry traffic.
+///
+/// It fails closed, so this warns rather than rejects: refusing would break
+/// configs the schema accepts today (see #955). Emitted from `spawn`, which has
+/// a logger and which every caller reaches, so the JSON and programmatic paths
+/// both hear it from one site.
+///
+/// Uses [`Logger::warning_line`], not `log_line`: it is the only sink both
+/// paths actually read. `log_line` lands in the console/debug buffer, which
+/// `mxc_engine::spawn` never folds into `Output::warnings` and which
+/// `lxc-exec` prints only on an error path (and only under `--debug`, onto
+/// stdout, where it would interleave with the workload's own output).
+fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Logger) {
+    let targets = plan.allowed_v6_targets();
+    if targets.is_empty() {
+        return;
+    }
+    logger.warning_line(&format!(
+        "WARNING: Bubblewrap allows {} IPv6 destination(s) ({}), but the sandbox \
+         namespace has no IPv6 connectivity: slirp4netns is launched without \
+         '--enable-ipv6', so these rules install and are never traversed. The \
+         destination stays unreachable despite the rule. Use an IPv4 address, or \
+         network.proxy, if the workload needs to reach it.",
+        targets.len(),
+        targets.join(", ")
+    ));
 }
 
 impl BubblewrapScriptRunner {
@@ -1360,6 +1420,72 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_allow_warns_that_it_cannot_carry_traffic() {
+        let mut req = base_request();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["2001:db8::1".into(), "203.0.113.5".into()];
+        let plan =
+            network_rules::EgressPlan::for_request(&req).expect("both literals are enforceable");
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_unreachable_v6_targets(&plan, &mut logger);
+        let out = logger.warnings().join("\n");
+        assert!(
+            out.contains("2001:db8::1"),
+            "must name the v6 target: {out}"
+        );
+        assert!(
+            !out.contains("203.0.113.5"),
+            "must not name the reachable v4 target: {out}"
+        );
+        // The retained-warning channel is the point: the debug buffer is not
+        // read back by `mxc_engine::spawn`, so a warning left there is silent.
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
+        );
+
+        // Nothing unreachable, nothing to say.
+        let mut v4_only = base_request();
+        v4_only.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        v4_only.policy.allowed_hosts = vec!["203.0.113.5".into()];
+        let plan =
+            network_rules::EgressPlan::for_request(&v4_only).expect("a v4 literal is enforceable");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_unreachable_v6_targets(&plan, &mut logger);
+        assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
+    }
+
+    #[test]
+    fn validate_reports_the_proxy_firewall_conflict_ahead_of_the_external_proxy_gate() {
+        // A bare programmatic request trips both gates: the default policy is
+        // `Block`, which on its own satisfies the external-proxy check. The
+        // parser reports the proxy/firewall conflict first, so the runner must
+        // too, or the two layers name different problems for one request.
+        let mut req = base_request();
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+
+        // Both gates must fire, or this asserts nothing about ordering.
+        assert!(bwrap_command::external_proxy_host_rules_rejection(&req).is_some());
+        assert!(bwrap_command::proxy_with_firewall_rejection(&req).is_some());
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner
+            .validate(&req)
+            .expect_err("the combination is refused");
+        assert!(
+            err.error_message
+                .contains(bwrap_command::BWRAP_PROXY_WITH_FIREWALL),
+            "expected the parser's proxy/firewall message, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
     fn validate_does_not_locally_gate_builtin_test_server() {
         // The builtinTestServer gate moved to `wxc_common::validator::validate_common`
         // (enforced centrally for every backend). The bwrap runner must therefore no
@@ -1373,7 +1499,9 @@ mod tests {
         req.testing_features_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        assert!(runner.validate(&req).is_ok());
+        assert!(runner
+            .validate_prepared_with_probe(&req, || Ok(bwrap_version::MIN_BWRAP_VERSION))
+            .is_ok());
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
@@ -1907,7 +2035,11 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("environment probe must not run for invalid input")
+            })
+            .unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
     }
 
@@ -1950,6 +2082,28 @@ mod tests {
             "the rejection leaked the password it was rejecting: {}",
             err.error_message
         );
+    }
+
+    #[test]
+    fn validate_surfaces_every_environment_probe_failure() {
+        let request = base_request();
+        let failures = [
+            bwrap_version::BwrapUnavailable::NotFound,
+            bwrap_version::BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
+            bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
+            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+        ];
+
+        for failure in failures {
+            let expected = failure.to_string();
+            let error = BubblewrapScriptRunner::new()
+                .validate_prepared_with_probe(&request, || Err(failure))
+                .unwrap_err();
+            assert_eq!(error.error_message, expected);
+        }
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
