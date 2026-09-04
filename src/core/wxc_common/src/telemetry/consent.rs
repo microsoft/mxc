@@ -729,22 +729,10 @@ mod platform {
         known_folder_local_app_data()
     }
 
-    struct StoreLock {
-        file: Option<fs::File>,
-    }
-
-    impl Drop for StoreLock {
-        fn drop(&mut self) {
-            self.file.take();
-        }
-    }
-
     pub(super) fn with_store_lock<T>(
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows::Win32::Foundation::GENERIC_WRITE;
-        use windows::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_DELETE_ON_CLOSE};
 
         let path = consent_file_path().ok_or_else(|| {
             "could not resolve %LocalAppData%; cannot lock telemetry consent".to_string()
@@ -757,17 +745,14 @@ mod platform {
         let mut attempts = 0;
         let file = loop {
             let mut options = fs::OpenOptions::new();
-            options
-                .write(true)
-                .create_new(true)
-                .access_mode(GENERIC_WRITE.0 | DELETE.0)
-                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0);
+            // The file persists; the exclusive open handle, not path
+            // existence or delayed delete-on-close, represents ownership.
+            options.write(true).create(true).share_mode(0);
             match options.open(&lock_path) {
                 Ok(file) => break file,
                 Err(error)
                     if attempts + 1 < STORE_LOCK_RETRY_ATTEMPTS
-                        && (error.kind() == std::io::ErrorKind::AlreadyExists
-                            || is_transient_io_error(&error)) =>
+                        && is_transient_io_error(&error) =>
                 {
                     attempts += 1;
                     std::thread::sleep(STORE_LOCK_RETRY_DELAY);
@@ -777,7 +762,7 @@ mod platform {
                 }
             }
         };
-        let _lock = StoreLock { file: Some(file) };
+        let _lock = file;
         operation()
     }
 
@@ -1618,7 +1603,7 @@ mod tests {
         }
 
         #[test]
-        fn store_lock_is_deleted_when_released() {
+        fn store_lock_file_persists_when_released() {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
             let lock_path = tmp.path().join("mxc").join("telemetry-consent.lock");
@@ -1630,9 +1615,22 @@ mod tests {
             .expect("acquire store lock");
 
             assert!(
-                !lock_path.exists(),
-                "delete-on-close must remove the released lock"
+                lock_path.exists(),
+                "lock ownership must not depend on deleting the lock file"
             );
+        }
+
+        #[test]
+        fn preexisting_unlocked_store_lock_file_can_be_reused() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let dir = tmp.path().join("mxc");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("telemetry-consent.lock"), []).unwrap();
+
+            set_consent(true, "cli").expect("pre-existing lock file must not block consent writes");
+
+            assert_eq!(get_consent(), ConsentState::Granted);
         }
 
         #[test]
@@ -2313,24 +2311,29 @@ mod tests {
             // file. Asserting only on the final file's parseability would
             // still pass if 15 of 16 writers lost a temp-name or rename
             // race, which is precisely the failure this fix targets.
-            let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = (0..16)
-                    .map(|i| scope.spawn(move || set_consent(i % 2 == 0, "cli")))
-                    .collect();
-                handles.into_iter().map(|h| h.join().unwrap()).collect()
-            });
-            for (i, result) in results.iter().enumerate() {
-                assert!(result.is_ok(), "concurrent writer {i} failed: {result:?}");
-            }
+            for iteration in 0..10 {
+                let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = (0..16)
+                        .map(|i| scope.spawn(move || set_consent(i % 2 == 0, "cli")))
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                for (writer, result) in results.iter().enumerate() {
+                    assert!(
+                        result.is_ok(),
+                        "iteration {iteration}, concurrent writer {writer} failed: {result:?}"
+                    );
+                }
 
-            // Whatever the last writer's outcome was, the store must be
-            // Granted or Denied — never Undetermined (which would mean a
-            // corrupt/missing file from a torn write).
-            let state = get_consent();
-            assert!(matches!(
-                state,
-                ConsentState::Granted | ConsentState::Denied
-            ));
+                // Whatever the last writer's outcome was, the store must be
+                // Granted or Denied — never Undetermined (which would mean a
+                // corrupt/missing file from a torn write).
+                let state = get_consent();
+                assert!(matches!(
+                    state,
+                    ConsentState::Granted | ConsentState::Denied
+                ));
+            }
         }
 
         /// Pre-versioned grants must be invalidated because they cannot prove
