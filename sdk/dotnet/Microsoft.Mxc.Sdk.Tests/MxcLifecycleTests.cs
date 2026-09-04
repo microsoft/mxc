@@ -633,11 +633,28 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecOptions_AreNotAcceptedByNonExecPhases()
+    public void ExecOptions_RemainAssignableButAreRejectedByNonExecPhases()
     {
-        Assert.False(
+        Assert.True(
             typeof(StateAwarePhaseOptions).IsAssignableFrom(
                 typeof(StateAwareExecOptions)));
+        Assert.True(
+            typeof(StateAwarePhaseOptions).IsAssignableFrom(
+                typeof(WslcExecOptions)));
+
+        var id = new SandboxId("iso:abc");
+        var options = new StateAwareExecOptions { WorkingDirectory = "C:\\" };
+
+        foreach (var build in new Action[]
+                 {
+                     () => _ = MxcLifecycle.BuildStartEnvelope(id, options),
+                     () => _ = MxcLifecycle.BuildStopEnvelope(id, options),
+                     () => _ = MxcLifecycle.BuildDeprovisionEnvelope(id, options),
+                 })
+        {
+            var ex = Assert.Throws<ArgumentException>(build);
+            Assert.Contains(nameof(StateAwarePhaseOptions), ex.Message, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

@@ -163,6 +163,7 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
+        ValidateNonExecOptions("start", options);
         var envelope = BuildIdEnvelope("start", id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
@@ -387,6 +388,7 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
+        ValidateNonExecOptions("stop", options);
         var envelope = BuildIdEnvelope("stop", id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
@@ -412,9 +414,23 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
+        ValidateNonExecOptions("deprovision", options);
         var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
+    }
+
+    private static void ValidateNonExecOptions(
+        string phase,
+        StateAwarePhaseOptions? options)
+    {
+        if (options is StateAwareExecOptions)
+        {
+            throw new ArgumentException(
+                $"{options.GetType().Name} cannot configure the {phase} phase; "
+                    + $"use {nameof(StateAwarePhaseOptions)}.",
+                nameof(options));
+        }
     }
 
     private static JsonObject BuildIdEnvelope(

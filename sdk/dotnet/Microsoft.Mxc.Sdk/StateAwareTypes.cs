@@ -175,17 +175,8 @@ public class StateAwarePhaseOptions
 }
 
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
-public class StateAwareExecOptions
+public class StateAwareExecOptions : StateAwarePhaseOptions
 {
-    /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
-    public string? Version { get; set; }
-
-    /// <summary>
-    /// Optional per-phase telemetry request. Emission is still gated by the
-    /// MXC-owned user consent and administrative policy.
-    /// </summary>
-    public TelemetrySettings? Telemetry { get; set; }
-
     /// <summary>Working directory inside the sandbox.</summary>
     public string? WorkingDirectory { get; set; }
 

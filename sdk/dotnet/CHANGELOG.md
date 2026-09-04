@@ -45,6 +45,8 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   call sites keep compiling. Because adding a parameter changes the emitted
   method signature, assemblies compiled against 0.8.0 must be recompiled
   rather than dropped in place.
+- Non-exec phases reject `StateAwareExecOptions` instead of ignoring exec-only
+  fields. Use `StateAwarePhaseOptions`.
 
 ### Deprecated
 
