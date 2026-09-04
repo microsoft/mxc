@@ -120,7 +120,7 @@ Write-Host "`n--- Starting ETW trace session '$sessionName' ---" -ForegroundColo
 logman stop  $sessionName -ets 2>$null | Out-Null
 logman delete $sessionName -ets 2>$null | Out-Null
 
-logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 2>&1 | Out-Host
+logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 0xFFFFFFFFFFFFFFFF 5 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to create ETW trace session"
 }
@@ -192,8 +192,17 @@ $xmlContent = Get-Content -Path $xmlFile -Raw
 $eventCount = ([regex]::Matches($xmlContent, '<Event ')).Count
 Write-Host "Events captured: $eventCount"
 
-if ($eventCount -gt 0) {
-    $expectedFields = @('mxc.backend', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
+if ($eventCount -gt 0 -and $xmlContent -match [regex]::Escape($providerGuid)) {
+    $expectedFields = @(
+        'PartA_PrivacyProduct',
+        'PartA_PrivacyDataCategory',
+        'PartA_PrivTags',
+        'mxc.sandbox_kind',
+        'mxc.backend',
+        'mxc.exit_code',
+        'mxc.outcome',
+        'mxc.duration_ms'
+    )
     $eventBlocks = [regex]::Matches($xmlContent, '(?s)<Event\b.*?</Event>')
     $matchingEvent = $null
 
@@ -224,11 +233,16 @@ if ($eventCount -gt 0) {
     foreach ($field in $expectedFields) {
         Write-Host ('  [OK] Found field in one event: ' + $field) -ForegroundColor Green
     }
-} else {
+} elseif ($eventCount -eq 0) {
     $noEventsMessage = 'ETL file had content (' + $etlSize + ' bytes) but no parseable events were found.'
     Write-Host ''
     Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
     Write-Host $noEventsMessage -ForegroundColor Red
+    exit 1
+} else {
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
+    Write-Host "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)." -ForegroundColor Red
     exit 1
 }
 

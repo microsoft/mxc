@@ -188,7 +188,7 @@ fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
-        ParseError::Decode(err) | ParseError::OneShot(err) => {
+        ParseError::Decode(err) | ParseError::OneShot(err) | ParseError::OneShotMalformed(err) => {
             MxcError::malformed_request(err.to_string())
         }
     }

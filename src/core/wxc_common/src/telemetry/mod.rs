@@ -28,7 +28,11 @@ use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
 pub use consent::ConsentState;
-pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use events::{
+    log_config_rejected, log_enforcement_degraded, log_error, log_execution,
+    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
+    ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext,
+};
 pub use policy::PolicyState;
 
 #[cfg(target_os = "windows")]
@@ -206,6 +210,11 @@ const MXC_CHANNEL: &str = "release";
 /// Returns the MXC version string.
 pub fn version() -> &'static str {
     MXC_VERSION
+}
+
+/// Returns whether the process-local ETW provider is currently registered.
+pub fn is_active() -> bool {
+    mxc_telemetry::is_active()
 }
 
 /// Resolve whether telemetry is enabled for this invocation.
