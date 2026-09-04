@@ -187,7 +187,7 @@ try {
 
     $providerGuid = Get-TraceLoggingProviderGuid -Name $providerName
     logman stop $sessionName -ets 2>$null | Out-Null
-    logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 2>&1 | Out-Host
+    logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 0xFFFFFFFFFFFFFFFF 5 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create ETW trace session.' }
     $traceStarted = $true
 
@@ -209,11 +209,35 @@ try {
     tracerpt "$etlFile" -o "$xmlFile" -of XML -lr -y 2>&1 | Out-Host
     if (-not (Test-Path $xmlFile)) { throw 'tracerpt did not produce XML.' }
     $xml = Get-Content $xmlFile -Raw
-    if (([regex]::Matches($xml, '<Event ')).Count -eq 0) {
+    $eventCount = ([regex]::Matches($xml, '<Event ')).Count
+    if ($eventCount -eq 0) {
         throw 'No parseable MXC events were captured.'
+    }
+    if ($xml -notmatch [regex]::Escape($providerGuid)) {
+        throw "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)."
     }
     if ($xml -notmatch 'MXC\.Execution|MXC\.Error') {
         throw 'Captured events did not preserve the MXC.Execution/MXC.Error identities.'
+    }
+    $expectedFields = @(
+        'PartA_PrivacyProduct',
+        'PartA_PrivacyDataCategory',
+        'PartA_PrivTags',
+        'mxc.sandbox_kind',
+        'mxc.backend',
+        'mxc.exit_code',
+        'mxc.outcome',
+        'mxc.duration_ms'
+    )
+    $eventBlocks = [regex]::Matches($xml, '(?s)<Event\b.*?</Event>')
+    $matchingEvent = $eventBlocks | Where-Object {
+        $eventXml = $_.Value
+        -not ($expectedFields | Where-Object {
+            $eventXml -notmatch [regex]::Escape($_)
+        })
+    } | Select-Object -First 1
+    if ($null -eq $matchingEvent) {
+        throw "No MXC event contained all required telemetry fields: $($expectedFields -join ', ')."
     }
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {
