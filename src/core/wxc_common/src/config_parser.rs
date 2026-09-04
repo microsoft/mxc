@@ -2440,6 +2440,25 @@ mod tests {
         PublishedDevelopmentContainment,
         PublishedExperimental,
         PublishedStateAware,
+        DevelopmentContractTightening,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ExpectedCorpusDivergence {
+        kind: CorpusDivergenceKind,
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<&'static str>,
+        message_fragment: &'static str,
+    }
+
+    impl ExpectedCorpusDivergence {
+        fn matches(self, actual: &DiagnosticSnapshot) -> bool {
+            actual.route == self.route
+                && actual.category == self.category
+                && actual.path.as_deref() == self.path
+                && actual.message.contains(self.message_fragment)
+        }
     }
 
     impl CorpusDivergenceKind {
@@ -2460,512 +2479,85 @@ mod tests {
                 Self::PublishedStateAware => {
                     "Published 0.6-0.8 contracts are one-shot only; state-aware roots exist in the development contract."
                 }
+                Self::DevelopmentContractTightening => {
+                    "The migrated 0.9 contract intentionally rejects a parse-and-ignore one-shot extension or a phase/backend policy that the rolling parser defers to backend validation."
+                }
             }
         }
     }
 
     fn expected_corpus_divergences(
-    ) -> std::collections::BTreeMap<&'static str, CorpusDivergenceKind> {
+    ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
         let entries = [
             (
-                "tests/configs/basic_windows_sandbox.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/experimental_hello_lxc.json",
-                CorpusDivergenceKind::PublishedExperimental,
-            ),
-            (
-                "tests/configs/experimental_hello_processcontainer.json",
-                CorpusDivergenceKind::PublishedExperimental,
-            ),
-            (
-                "tests/configs/hyperlight_exit_code.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_fs.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_hello.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_networking.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_networking_blocked.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_pandas.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/hyperlight_timeout.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_concurrent_A.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_concurrent_B.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_concurrent_C.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_concurrent_D.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
                 "tests/configs/isolation_session_configid_ignored.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_exit42.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_hello.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_lifecycle_rejected.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_network_rejected.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_network_rejected_hosts.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_network_rejected_no_local.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `isolation_session`",
+                },
             ),
             (
                 "tests/configs/isolation_session_one_shot_stray_config_ignored.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_ui_rejected.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_powershell_interactive.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_deprovision.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_basic.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_cwd.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_env_absent.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_env_initial.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_env_modified.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_exit_0.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_exit_1.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_exit_2.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_read_marker.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_read_persist.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_setx_initial.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_setx_modified.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_exec_write_marker.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_appid.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_appid_control.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_appid_empty.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_appid_too_long.json",
-                CorpusDivergenceKind::MissingVersion,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `isolation_session`",
+                },
             ),
             (
                 "tests/configs/isolation_session_state_aware_provision_rejected_denied.json",
-                CorpusDivergenceKind::MissingVersion,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `filesystem`",
+                },
             ),
             (
                 "tests/configs/isolation_session_state_aware_provision_rejected_network.json",
-                CorpusDivergenceKind::MissingVersion,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    message_fragment: "unknown variant `block`, expected `allow`",
+                },
             ),
             (
                 "tests/configs/isolation_session_state_aware_provision_rejected_ui.json",
-                CorpusDivergenceKind::MissingVersion,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `ui`",
+                },
             ),
             (
                 "tests/configs/isolation_session_state_aware_provision_with_filesystem.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_start.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_stop.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/isolation_session_stderr.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_stdout_stderr_interleaved.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_streaming_smoke.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/isolation_session_timeout.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/microvm_error.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_error_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_exit_code.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_exit_code_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_hello.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_hello_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_large_output.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_large_output_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_multiline.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_multiline_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_network.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_network_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_stdlib.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_stdlib_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_timeout.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/microvm_timeout_linux.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_custom_timeout.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/windows_sandbox_echo.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_exit_code.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_powershell.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_powershell_env.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_stderr.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/windows_sandbox_timeout.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/configs/wslc_custom_registry.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_custom_registry_ghcr.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_custom_registry_quay.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_denied_dotdot_alias.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_denied_masking.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_destroy_on_exit_false_rejected.json",
-                CorpusDivergenceKind::PublishedComment,
-            ),
-            (
-                "tests/configs/wslc_destroy_on_exit_true.json",
-                CorpusDivergenceKind::PublishedComment,
-            ),
-            (
-                "tests/configs/wslc_env_vars.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_exit_code.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_filesystem.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_filesystem_object.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_large_output.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_most_specific_denied_parent.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_network_isolated.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_network_proxy.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_port_mapping_multiple.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_port_mapping_tcp.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_python_hello.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_python_stdlib.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_readonly_mount.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_state_aware_deprovision.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_basic.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_drip.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_env.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_exit_0.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_exit_1.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_exit_7.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_proxy.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_read_marker.json",
-                CorpusDivergenceKind::PublishedStateAware,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `filesystem`",
+                },
             ),
             (
                 "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_write_marker.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_bridged.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_rejected_denied.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_rejected_hosts.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_with_filesystem.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_start.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_state_aware_stop.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/configs/wslc_stderr.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_tar_import_docker_save.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_tar_import_rootfs.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/configs/wslc_timeout.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/examples/09_windows_sandbox_hello_world.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/examples/10_windows_sandbox_network_isolated.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/examples/28_telemetry_enabled.json",
-                CorpusDivergenceKind::MissingVersion,
-            ),
-            (
-                "tests/examples/wslc_hello_world.json",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "tests/policy/state-aware-wslc-exec.json",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "tests/policy/state-aware-wslc-provision.json",
-                CorpusDivergenceKind::PublishedStateAware,
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    message_fragment: "unknown field `filesystem`",
+                },
             ),
         ];
         let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
@@ -3204,6 +2796,27 @@ mod tests {
         }
 
         let version = object.get("version")?.as_str()?;
+        if version == "0.9.0-alpha" {
+            let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
+                && exact.category == ErrorCategory::TypedStructure
+                && exact.message.contains("unknown field `isolation_session`");
+            let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
+                && matches!(
+                    exact.category,
+                    ErrorCategory::TypedStructure | ErrorCategory::Semantic
+                )
+                && (object.contains_key("filesystem")
+                    || object.contains_key("ui")
+                    || object
+                        .get("network")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|network| network.get("defaultPolicy"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("block"));
+            return (is_closed_one_shot_extension || is_state_aware_policy_tightening)
+                .then_some(CorpusDivergenceKind::DevelopmentContractTightening);
+        }
+
         if !matches!(version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
             || exact.route != ErrorRoute::OneShot
             || exact.category != ErrorCategory::TypedStructure
@@ -4300,12 +3913,15 @@ mod tests {
 
         let expected = expected_corpus_divergences();
         let expected_diagnostics = expected_corpus_diagnostic_divergences();
-        let expected_counts = corpus_divergence_counts(expected.values().copied());
+        let expected_counts =
+            corpus_divergence_counts(expected.values().map(|expected| expected.kind));
         let mut observed = std::collections::BTreeMap::new();
         let mut observed_diagnostics = std::collections::BTreeSet::new();
         let mut seen_files = std::collections::BTreeSet::new();
         let mut classified = Vec::new();
         let mut blockers = Vec::new();
+        let mut equivalent_accepts = 0;
+        let mut shared_rejections = 0;
 
         for path in &files {
             let relative = path
@@ -4325,9 +3941,11 @@ mod tests {
             let (rolling, exact) = parse_both(&json);
             match (&rolling, &exact) {
                 (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
-                    if let Some(kind) = expected.get(relative.as_str()) {
+                    equivalent_accepts += 1;
+                    if let Some(expected) = expected.get(relative.as_str()) {
                         blockers.push(format!(
-                            "{relative}: expected {kind:?} exact-stricter divergence, but both parsers accepted"
+                            "{relative}: expected {:?} exact-stricter divergence, but both parsers accepted",
+                            expected.kind
                         ));
                     }
                     if rolling != exact {
@@ -4340,9 +3958,11 @@ mod tests {
                     ParserSnapshot::Rejected(rolling_diagnostic),
                     ParserSnapshot::Rejected(exact_diagnostic),
                 ) => {
-                    if let Some(kind) = expected.get(relative.as_str()) {
+                    shared_rejections += 1;
+                    if let Some(expected) = expected.get(relative.as_str()) {
                         blockers.push(format!(
-                            "{relative}: expected {kind:?} exact-stricter divergence, but both parsers rejected"
+                            "{relative}: expected {:?} exact-stricter divergence, but both parsers rejected",
+                            expected.kind
                         ));
                     }
                     match expected_diagnostics.get(relative.as_str()) {
@@ -4388,11 +4008,14 @@ mod tests {
                             kind.reason()
                         ));
                         match expected.get(relative.as_str()) {
-                            Some(expected_kind) if *expected_kind == kind => {
-                                observed.insert(relative.clone(), kind);
+                            Some(expected)
+                                if expected.kind == kind
+                                    && expected.matches(exact_diagnostic) =>
+                            {
+                                observed.insert(relative.clone(), expected.kind);
                             }
-                            Some(expected_kind) => blockers.push(format!(
-                                "{relative}: expected {expected_kind:?}, observed {kind:?}\nexact={exact_diagnostic:?}"
+                            Some(expected) => blockers.push(format!(
+                                "{relative}: expected {expected:?}, observed kind={kind:?}\nexact={exact_diagnostic:?}"
                             )),
                             None => blockers.push(format!(
                                 "{relative}: newly divergent corpus file requires explicit classification as {kind:?}\nexact={exact_diagnostic:?}"
@@ -4412,10 +4035,11 @@ mod tests {
             }
         }
 
-        for (relative, kind) in &expected {
+        for (relative, expected) in &expected {
             if !seen_files.contains(*relative) {
                 blockers.push(format!(
-                    "{relative}: expected {kind:?} divergence fixture is missing from the corpus"
+                    "{relative}: expected {:?} divergence fixture is missing from the corpus",
+                    expected.kind
                 ));
             }
         }
@@ -4443,6 +4067,11 @@ mod tests {
         assert_eq!(
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
+        );
+        assert_eq!(
+            (files.len(), equivalent_accepts, shared_rejections),
+            (282, 266, 9),
+            "the Phase 8 corpus inventory changed; regenerate the migration report and explain the delta"
         );
     }
 

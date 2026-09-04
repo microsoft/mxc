@@ -33,14 +33,20 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+/** The exact contract currently registered for state-aware requests. */
+export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+
+/** Exact contract versions accepted by state-aware config types. */
+export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;
+
 // IsolationSession per-(backend, phase) Configs. Each declares only
 // the fields the SDK currently exposes at that phase — scoped to
 // what the backend honors per the policy honor matrix and currently
 // implements. TypeScript rejects passing fields outside this set.
 
 export interface IsolationSessionProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   /**
    * Optional identifier for the calling application.
@@ -76,27 +82,27 @@ export interface IsolationSessionProvisionConfig {
 }
 
 export interface IsolationSessionStartConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface IsolationSessionStopConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
@@ -119,8 +125,8 @@ export interface IsolationSessionProvisionMetadata {
 // immutable thereafter.
 
 export interface WindowsSandboxProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
@@ -134,27 +140,27 @@ export interface WindowsSandboxProvisionConfig {
 }
 
 export interface WindowsSandboxStartConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface WindowsSandboxStopConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
@@ -165,8 +171,8 @@ export interface WindowsSandboxDeprovisionConfig {
 // may be injected per-exec.
 
 export interface WslcProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
@@ -201,14 +207,14 @@ export interface WslcProvisionConfig {
 }
 
 export interface WslcStartConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface WslcExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
   process: ProcessConfig;
   /**
@@ -225,14 +231,14 @@ export interface WslcExecConfig {
 }
 
 export interface WslcStopConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
 export interface WslcDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   telemetry?: TelemetryConfig;
 }
 
@@ -240,7 +246,7 @@ export interface WslcDeprovisionConfig {
  * The five per-phase Config slots every state-aware backend must declare.
  * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
  * no implicit index signature, so a `Record<string, unknown>` base would
- * spuriously reject `{ version?: string }`-shaped configs.
+ * spuriously reject configs carrying an optional schema version.
  */
 type StateAwarePhaseConfigs = Record<Phase, object>;
 

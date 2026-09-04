@@ -60,11 +60,11 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
 | `0.8.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
-| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-dev.json) |
+| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-alpha.json) |
 
 Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. During Phase 8, production executor requests still run through the rolling `wxc_common::wire` parser, so some rolling-parser compatibility behavior remains until exact dispatch becomes authoritative; `--experimental` is still required to activate experimental backends.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -329,7 +329,7 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests normally default to schema `0.8.0-alpha`; requests that include `telemetry` default to `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. All state-aware requests default to the exact development schema `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 

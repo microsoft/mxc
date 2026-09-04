@@ -69,7 +69,10 @@ public sealed class StateAwareFilesystemPolicy
 /// <summary>Base class for backend-specific provision options.</summary>
 public abstract class StateAwareProvisionOptions
 {
-    /// <summary>Overrides the backend's default state-aware schema version.</summary>
+    /// <summary>
+    /// Optional explicit state-aware schema version. It must equal the
+    /// registered version for the selected backend.
+    /// </summary>
     public string? Version { get; set; }
 }
 
@@ -158,7 +161,10 @@ public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
 /// <summary>Options shared by start, stop, and deprovision phases.</summary>
 public class StateAwarePhaseOptions
 {
-    /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
+    /// <summary>
+    /// Optional explicit state-aware schema version. It must equal the
+    /// registered version inferred from the sandbox id.
+    /// </summary>
     public string? Version { get; set; }
 }
 

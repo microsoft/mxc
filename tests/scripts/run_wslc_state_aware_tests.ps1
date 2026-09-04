@@ -152,6 +152,10 @@ function Invoke-StateAware {
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
     } elseif ($Request) {
+        if (-not $Request.ContainsKey('version')) {
+            $Request = $Request.Clone()
+            $Request['version'] = '0.9.0-alpha'
+        }
         $json = $Request | ConvertTo-Json -Compress -Depth 12
     } else {
         throw "Invoke-StateAware requires either -Request or -ConfigFile"

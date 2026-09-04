@@ -13,7 +13,9 @@ import {
   ProvisionResult,
   SandboxId,
   StartMetadataFor,
+  STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
+  StateAwareSchemaVersion,
   StopConfigFor,
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
@@ -47,6 +49,13 @@ describe('SandboxId<C> brand', () => {
   });
 });
 
+describe('StateAwareSchemaVersion', () => {
+  it('is derived from the canonical runtime constant', () => {
+    const version: StateAwareSchemaVersion = STATE_AWARE_VERSION;
+    assert.strictEqual(version, '0.9.0-alpha');
+  });
+});
+
 describe('IsolationSessionProvisionConfig', () => {
   // The one accepted network value: the unrestricted-network acknowledgment.
   const network: { defaultPolicy: 'allow'; allowLocalNetwork: true } = {
@@ -55,12 +64,16 @@ describe('IsolationSessionProvisionConfig', () => {
   };
 
   it('requires the canonical network acknowledgment', () => {
-    const ok: IsolationSessionProvisionConfig = { version: '0.6.0-alpha', network };
+    const ok: IsolationSessionProvisionConfig = { version: '0.9.0-alpha', network };
     assert.strictEqual(ok.network.defaultPolicy, 'allow');
     assert.strictEqual(ok.network.allowLocalNetwork, true);
 
+    // @ts-expect-error — no state-aware contract is registered for 0.8.
+    const oldVersion: IsolationSessionProvisionConfig = { version: '0.8.0-alpha', network };
+    assert.ok(oldVersion);
+
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
-    const missing: IsolationSessionProvisionConfig = { version: '0.6.0-alpha' };
+    const missing: IsolationSessionProvisionConfig = { version: '0.9.0-alpha' };
     assert.ok(missing);
   });
 
@@ -213,7 +226,7 @@ describe('IsolationSessionExecConfig', () => {
 
 describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () => {
   it('only carry version', () => {
-    const stopCfg: StopConfigFor<'isolation_session'> = { version: '0.6.0-alpha' };
+    const stopCfg: StopConfigFor<'isolation_session'> = { version: '0.9.0-alpha' };
     const deprovCfg: DeprovisionConfigFor<'isolation_session'> = {};
 
     const wrongStop: StopConfigFor<'isolation_session'> = {
@@ -229,7 +242,7 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
 describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
-      provision: { version: '0.6.0-alpha', network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+      provision: { version: '0.9.0-alpha', network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -240,7 +253,7 @@ describe('ConfigsForBackend', () => {
 
   it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
     const bundle: ConfigsForBackend<'windows_sandbox'> = {
-      provision: { version: '0.6.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
+      provision: { version: '0.9.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -253,7 +266,7 @@ describe('ConfigsForBackend', () => {
 describe('WindowsSandboxProvisionConfig', () => {
   it('accepts version and filesystem (incl. deniedPaths)', () => {
     const cfg: WindowsSandboxProvisionConfig = {
-      version: '0.6.0-alpha',
+      version: '0.9.0-alpha',
       filesystem: {
         readwritePaths: ['C:\\workspace'],
         readonlyPaths: ['C:\\inputs'],
@@ -287,8 +300,8 @@ describe('WindowsSandboxProvisionConfig', () => {
 
 describe('WindowsSandboxStartConfig', () => {
   it('carries only version (no configurationId, no backend-specific fields)', () => {
-    const ok: WindowsSandboxStartConfig = { version: '0.6.0-alpha' };
-    assert.strictEqual(ok.version, '0.6.0-alpha');
+    const ok: WindowsSandboxStartConfig = { version: '0.9.0-alpha' };
+    assert.strictEqual(ok.version, '0.9.0-alpha');
 
     const withConfigurationId: WindowsSandboxStartConfig = {
       // @ts-expect-error — windows_sandbox start has no configurationId.
@@ -373,7 +386,7 @@ describe('ProvisionResult<C>', () => {
 describe('WslcProvisionConfig', () => {
   it('accepts version, filesystem, network, and the backend-specific image knobs', () => {
     const cfg: WslcProvisionConfig = {
-      version: '0.8.0-alpha',
+      version: '0.9.0-alpha',
       filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
       network: { defaultPolicy: 'allow' },
       image: 'alpine:latest',
@@ -408,10 +421,10 @@ describe('WslcProvisionConfig', () => {
 
 describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
   it('carry only version', () => {
-    const start: WslcStartConfig = { version: '0.8.0-alpha' };
+    const start: WslcStartConfig = { version: '0.9.0-alpha' };
     const stop: WslcStopConfig = {};
     const deprov: WslcDeprovisionConfig = {};
-    assert.strictEqual(start.version, '0.8.0-alpha');
+    assert.strictEqual(start.version, '0.9.0-alpha');
     assert.ok(stop);
     assert.ok(deprov);
 

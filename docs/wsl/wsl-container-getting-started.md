@@ -332,7 +332,7 @@ address the container can reach:
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
   "network": {

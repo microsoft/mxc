@@ -251,7 +251,7 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.8.0-alpha",
+        Version = "0.9.0-alpha",
         Network = new NetworkPolicy { AllowOutbound = true },
     },
     "python3 -c 'print(42)'")
@@ -629,11 +629,12 @@ var wslc = new WslcProvisionOptions
 };
 ```
 
-IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
-defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
-override the inferred version. State-aware exec options expose working
-directory, `KEY=VALUE` environment entries, and timeout. WSLC also accepts a
-proxy-only per-exec override:
+All state-aware backends use the exact development schema `0.9.0-alpha`.
+`Version` may be omitted or explicitly set to that registered value; the SDK
+rejects other values rather than emitting an envelope for an unregistered
+state-aware contract. State-aware exec options expose working directory,
+`KEY=VALUE` environment entries, and timeout. WSLC also accepts a proxy-only
+per-exec override:
 
 ```csharp
 var options = new WslcExecOptions

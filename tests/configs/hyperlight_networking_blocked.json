@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/', timeout=5)\n    print('FAIL: request should have been blocked')\nexcept Exception as e:\n    print('BLOCKED:', type(e).__name__)",
         "timeout": 30000

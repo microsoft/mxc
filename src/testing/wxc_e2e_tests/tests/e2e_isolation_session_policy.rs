@@ -138,6 +138,7 @@ fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
     }
 
     let request = json!({
+        "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
         "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
@@ -170,6 +171,7 @@ fn state_aware_provision_accepts_canonical_request_shape() {
     // anything, so this is safe on a host with the OS-side service and on one
     // without it alike.
     let request = json!({
+        "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
         "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }

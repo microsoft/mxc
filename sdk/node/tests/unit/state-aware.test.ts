@@ -33,7 +33,7 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.experimental, undefined);
   });
 
-  it('rejects telemetry with an explicitly older schema version', () => {
+  it('rejects an explicitly older schema version when telemetry is present', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'start',
@@ -44,7 +44,9 @@ describe('buildStateAwareEnvelope', () => {
       (error: unknown) =>
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
-        error.message.includes('telemetry requires schema version 0.9.0-alpha'),
+        error.message.includes(
+          "State-aware windows_sandbox requests require schema version '0.9.0-alpha'",
+        ),
     );
   });
 
@@ -54,7 +56,7 @@ describe('buildStateAwareEnvelope', () => {
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: { readwritePaths: ['C:\\workspace'] },
         network: { defaultPolicy: 'block' },
         ui: { disable: true, clipboard: 'none', injection: false },
@@ -106,14 +108,18 @@ describe('buildStateAwareEnvelope', () => {
     }
   });
 
-  it('uses caller-supplied version when provided', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'isolation_session',
-      containment: 'isolation_session',
-      config: { version: '0.6.5-alpha' },
-    });
-    assert.strictEqual(env.version, '0.6.5-alpha');
+  it('rejects an untyped caller-supplied version with malformed_request', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'isolation_session',
+        containment: 'isolation_session',
+        config: { version: '0.6.5-alpha' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('nests provision appId under experimental.isolation_session.provision', () => {
@@ -441,7 +447,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
@@ -516,24 +522,28 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to 0.8.0-alpha (not the isolation_session default)', () => {
+  it('defaults the version to the shared 0.9.0-alpha development contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.8.0-alpha');
+    assert.strictEqual(env.version, '0.9.0-alpha');
   });
 
-  it('still honors a caller-supplied version over the wslc default', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'wslc',
-      containment: 'wslc',
-      config: { version: '0.8.1-alpha', image: 'alpine:latest' },
-    });
-    assert.strictEqual(env.version, '0.8.1-alpha');
+  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'wslc',
+        containment: 'wslc',
+        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
@@ -597,7 +607,7 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.8.0-alpha');
+      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

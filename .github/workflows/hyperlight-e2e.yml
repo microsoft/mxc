@@ -87,7 +87,7 @@ jobs:
         shell: pwsh
         run: |
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $json = '{"process":{"commandLine":"print(\"snapshot warm\")"},"containment":"hyperlight"}'
+          $json = '{"version":"0.9.0-alpha","process":{"commandLine":"print(\"snapshot warm\")"},"containment":"hyperlight"}'
           $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
           & "$binDir\wxc-exec.exe" --experimental --config-base64 $b64 2>&1
           if ($LASTEXITCODE -ne 0) {
