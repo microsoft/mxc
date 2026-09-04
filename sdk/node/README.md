@@ -64,7 +64,7 @@ child.on('close', (code) => console.log('exit:', code));
 
 Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. During Phase 8, production executor requests still run through the rolling `wxc_common::wire` parser, so some rolling-parser compatibility behavior remains until exact dispatch becomes authoritative; `--experimental` is still required to activate experimental backends.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` parser remains only for differential characterization. `--experimental` is still required to activate experimental backends.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Wire-type conformance oracle (Phase 2C, option C).
+// Wire-type conformance oracle.
 //
 // The generated module `../../src/generated/wire.ts` is emitted from the Rust
 // wire model (`wxc_common::wire`) by the `mxc_schema_gen types` Rust TypeScript

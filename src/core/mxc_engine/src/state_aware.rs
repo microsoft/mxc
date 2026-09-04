@@ -813,35 +813,6 @@ mod tests {
             .contains("compiled without the `wslc` feature"));
     }
 
-    #[test]
-    fn parse_state_aware_preserves_parser_warnings_on_caller_logger() {
-        let mut logger = Logger::new(Mode::Buffer);
-        let parsed = super::parse_state_aware(
-            r#"{
-                "phase": "provision",
-                "containment": "bubblewrap",
-                "experimental": {"bubblewrap": {"start": {}}},
-                "process": {"commandLine": "echo hi"},
-                "network": {
-                    "proxy": {"builtinTestServer": true},
-                    "defaultPolicy": "block"
-                }
-            }"#,
-            false,
-            &mut logger,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.phase, Phase::Provision);
-        assert!(
-            logger
-                .take_warnings()
-                .iter()
-                .any(|warning| warning.contains("Bubblewrap network.proxy")),
-            "parser warnings should stay on the caller-owned logger"
-        );
-    }
-
     #[cfg(target_os = "windows")]
     #[test]
     fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {

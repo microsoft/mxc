@@ -67,7 +67,7 @@ reasons:
   step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
   constants in step — but the two axes are not tied to each other.
 - **Host capability** is resolved by runtime negotiation, not by a version string.
-  As of Phase 3a the schema `version` no longer selects the Windows backend:
+  The schema `version` does not select the Windows backend:
   ProcessContainer resolves to BaseContainer or AppContainer purely by host
   capability (see [Version Negotiation](#version-negotiation)). An identical
   config runs the same way regardless of which (in-range) schema version it
@@ -84,30 +84,30 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
 │   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.9.0-dev.json    (rolling parser — currently authoritative)
-    └── mxc-config.schema.0.9.0-alpha.json  (exact closed contract — future authority)
+    ├── mxc-config.schema.0.9.0-dev.json    (rolling differential oracle)
+    └── mxc-config.schema.0.9.0-alpha.json  (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development schemas coexist during the version-specific parser
-transition:
+The two development schemas coexist for production parsing and differential
+characterization:
 
 - `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It remains authoritative for runtime parsing and
-  corpus validation until exact dispatch is enabled.
+  `wxc_common::wire` model. It is retained as a migration oracle for
+  differential parser and SDK-conformance tests.
 - `mxc-config.schema.0.9.0-alpha.json` is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
-  state-aware roots, including recursively closed experimental structures, but
-  does not become authoritative until exact dispatch replaces the rolling
-  parser.
+  state-aware roots, including recursively closed experimental structures, and
+  is the authoritative contract for declared `0.9.0-alpha` requests.
 
-The Rust SDK policy builders use the rolling production path, keeping the SDK,
-FFI, executor, and state-aware surfaces under one authority. Test-only
-per-version builders construct the published or development exact root selected
-by the declared version and compare its runtime model with the rolling builder.
+The runtime parser and Rust SDK policy builders dispatch through the exact
+contract registered for the declared version. The rolling parser and builder
+remain only to characterize intentional migration differences and detect
+unplanned drift. Corpus validation likewise selects the exact registered schema
+from each document's `version`.
 
 Both files are generated development artifacts rather than released schemas.
 See [Schema Code Generation](schema-codegen.md) for their regeneration commands
@@ -206,8 +206,8 @@ pub struct Experimental {
 }
 ```
 
-During the exact-parser transition, edit both the rolling `wire.rs` model used
-by the current parser and the closed mutable contract under
+While the differential oracle remains, edit both the rolling `wire.rs` model
+and the authoritative closed mutable contract under
 `src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
 
 ```text
@@ -389,8 +389,7 @@ on the roadmap.
 ## Version Negotiation
 
 Execution resolves a request in three ordered stages. The schema version gates
-only the first; it does **not** influence stages 2 or 3 (Phase 3a removed that
-coupling).
+only the first; it does **not** influence stages 2 or 3.
 
 ```
 Stage 1 — Schema-range check (the trust boundary, `config_parser`)

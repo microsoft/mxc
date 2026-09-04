@@ -132,7 +132,7 @@ fn one_shot_refuses_destroy_on_exit_false() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
+fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
     if !cached_has_wxc_exe() {
         return;
     }
@@ -154,9 +154,14 @@ fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
         return;
     }
     assert_eq!(
-        code, "policy_validation",
-        "expected policy_validation for a supplied `ui`, got {:?}; stdout={:?}",
+        code, "malformed_request",
+        "expected malformed_request for a supplied `ui`, got {:?}; stdout={:?}",
         code, result.stdout
+    );
+    assert!(
+        result.stdout.contains("unknown field `ui`"),
+        "expected the exact contract diagnostic, got stdout={:?}",
+        result.stdout
     );
 }
 
