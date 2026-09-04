@@ -62,9 +62,7 @@ use mxc_sdk::{
     SandboxRequest, WaitOutcome,
 };
 
-mod diplomat;
 mod error_detail;
-mod request;
 mod state_aware;
 mod streaming;
 pub use error_detail::*;
@@ -326,7 +324,7 @@ fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
         }
         None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
     };
-    let request = match request::build_request_from_json(request_json) {
+    let request = match mxc_sdk::build_request_from_json(request_json) {
         Ok(request) => request,
         Err(error) => return MxcRunResult::from_sdk_error(&error),
     };

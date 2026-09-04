@@ -1,26 +1,24 @@
 {
-  "name": "@microsoft/mxc-sdk-native-prototype",
+  "name": "@microsoft/mxc-sdk-uniffi-prototype",
   "version": "0.0.0-prototype",
   "private": true,
-  "description": "Disposable Node-API prototype for the MXC SDK unification design",
+  "description": "Generated native Node prototype for the MXC UniFFI design",
   "type": "module",
-  "main": "./dist/src/index.js",
-  "types": "./dist/src/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/src/index.d.ts",
-      "import": "./dist/src/index.js"
-    }
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "generate": "node scripts/generate-operations.mjs",
-    "check:generated": "node scripts/generate-operations.mjs --check",
-    "build": "npm run generate && node ../node_modules/node-gyp/bin/node-gyp.js rebuild --release && node ../node_modules/typescript/bin/tsc -p tsconfig.json",
-    "build:debug": "npm run generate && node ../node_modules/node-gyp/bin/node-gyp.js rebuild --debug && node ../node_modules/typescript/bin/tsc -p tsconfig.json",
-    "test:real": "node --test dist/tests/real-library-smoke.test.js",
-    "test": "npm run build:debug && npm run test:real"
+    "build": "tsc -p tsconfig.json && esbuild generated/index.ts --bundle --platform=node --format=esm --external:@ubjs/* --outfile=dist/index.js && node scripts/stage-native.mjs",
+    "test": "npm run build && node --test tests/real-library-smoke.test.mjs"
+  },
+  "dependencies": {
+    "@ubjs/core": "0.31.0-5",
+    "@ubjs/node": "0.31.0-5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

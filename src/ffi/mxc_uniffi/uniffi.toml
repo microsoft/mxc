@@ -1,0 +1,8 @@
+[bindings.typescript]
+strictTypeChecking = true
+
+[bindings.csharp]
+namespace = "Microsoft.Mxc.Sdk.Uniffi"
+cdylib_name = "mxc_uniffi"
+global_methods_class_name = "MxcNative"
+access_modifier = "public"

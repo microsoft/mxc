@@ -32,6 +32,7 @@ members = [
     "core/wxc",
     "core/wxc_common",
     "ffi/mxc_ffi",
+    "ffi/mxc_uniffi",
     "host/plm",
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
@@ -42,7 +43,6 @@ members = [
     "testing/wxc_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
-    "tools/mxc_diplomat_codegen",
     "tools/mxc_schema_gen",
 ]
 exclude = ["testing/fuzz"]
@@ -71,10 +71,8 @@ bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 cidr = "0.3.2"
 clap = { version = "4", features = ["derive"] }
-diplomat = "=0.16.1"
-diplomat-runtime = "=0.16.0"
-diplomat-tool = "=0.16.1"
 flatbuffers = "25"
+futures-channel = "0.3"
 getrandom = "0.2"
 hyperlight_common = { path = "backends/hyperlight/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
@@ -106,6 +104,7 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+uniffi = "=0.31.0"
 # Pure-Rust ETW TraceLogging provider used by `mxc_telemetry` (Windows-only;
 # the crate compiles to no-ops on other targets). Pinned at the workspace
 # level so every consumer resolves the same version.
@@ -151,9 +150,3 @@ windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 winreg = "0.55"
 wslc_common = { path = "backends/wslc/common" }
 wxc_common = { path = "core/wxc_common" }
-
-# Disposable prototype patch: Diplomat 0.16.1's HIR compiler uses two unstable
-# match guards, so the repository-local source keeps the generator buildable
-# on MXC's pinned stable Rust toolchain. Remove with the prototype.
-[patch.crates-io]
-diplomat_core = { path = "prototype/vendor/diplomat_core-0.16.1" }

@@ -13,8 +13,6 @@ name = "mxc_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-diplomat.workspace = true
-diplomat-runtime.workspace = true
 mxc-sdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

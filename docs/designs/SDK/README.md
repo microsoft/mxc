@@ -1,81 +1,88 @@
 # MXC SDK unification
 
-## Scope
+## Decision
 
-Unify callable Rust, Node, and .NET SDK functions without changing:
-
-- JSON request types or schemas
-- request parsing or policy validation
-- `mxc_engine`
-- containment backends
-
-## Target
+Keep MXC behavior in Rust and use [UniFFI 0.31](https://github.com/mozilla/uniffi-rs) as the single projection
+system for native Node and .NET SDKs.
 
 ```mermaid
 flowchart LR
-    R[Rust application] --> RS[Rust SDK: mxc-sdk]
-    N[Node application] --> NS[Generated Node SDK]
-    D[.NET application] --> DS[Generated .NET SDK]
-    NS --> FFI[Core C FFI]
-    DS --> FFI
-    FFI --> RS
-    RS --> E[mxc_engine]
-    E --> B[Backends]
+    R[Rust application] --> S[mxc-sdk]
+    N[Node application] --> TS[Generated TypeScript]
+    D[.NET application] --> CS[Generated C#]
+    TS --> NR["@ubjs/node<br/>N-API + libffi"]
+    CS --> PI[Generated P/Invoke]
+    NR --> U[mxc_uniffi dynamic library]
+    PI --> U
+    U --> S
+    S --> E[mxc_engine]
+    E --> B[Containment backends]
 ```
 
-Rust applications call `mxc-sdk` directly. Node and .NET reach the same `mxc-sdk` functions through `mxc_ffi`.
+Both foreign SDKs load the same host-compiled Rust dynamic library in-process. Node does not use WebAssembly,
+a child process, a daemon, or MXC-specific C++.
+
+## Scope
+
+This design unifies callable operations, results, errors, async behavior, and owned handles. It does not yet replace:
+
+- JSON request types and schema generation
+- request parsing or policy validation
+- `mxc_engine`
+- containment backends
+- the existing `mxc_ffi` ABI used by the shipping C# SDK
+
+## Ownership
+
+| Layer | Owns | Must not own |
+|---|---|---|
+| `mxc-sdk` | Safe Rust API and behavior | Language projection |
+| `mxc_uniffi` | UniFFI records, objects, conversion, panic boundary | Backend selection |
+| Generated TypeScript and C# | Calls, records, object lifetimes, future plumbing | MXC behavior |
+| `@ubjs/node` | Generic native loading and UniFFI invocation | MXC-specific glue |
+| `mxc_engine` | Backend dispatch and execution | SDK-specific behavior |
 
 ## One operation
 
 ```mermaid
 flowchart TD
-    A[1. Implement function in mxc-sdk]
-    A --> B[2. Add thin Rust bridge in mxc_ffi]
-    B --> C[Diplomat generates C export in mxc_ffi]
-    B --> D[Diplomat generates .NET method]
-    B --> E[MXC Diplomat backend generates Node method]
-    D --> C
-    E --> C
+    A[Implement safe operation in mxc-sdk]
+    A --> B[Expose thin operation in mxc_uniffi]
+    B --> M[UniFFI metadata in dynamic library]
+    M --> N[Generate TypeScript]
+    M --> D[Generate C#]
 ```
 
-Initially, steps 1 and 2 are handwritten. The generated outputs must never be edited.
+The thin projection remains handwritten because UniFFI intentionally exports an interop-safe object model rather than
+arbitrary Rust types. It only converts values, synchronizes handles, catches panics, and delegates to `mxc-sdk`.
 
-## Boundary
+## API naming
 
-| Layer | Owns | Must not own |
+Use the same verbs across generated SDKs:
+
+| Behavior | Synchronous | Asynchronous |
 |---|---|---|
-| Rust SDK: `mxc-sdk` | Public Rust operations, results, errors, live process object | C pointers, P/Invoke, Node APIs |
-| Core C FFI | ABI, panic containment, allocation, opaque handles | Backend selection or SDK behavior |
-| Generated SDKs | Canonical names, sync/async functions, native calls, conversion | A second MXC implementation |
-| SDK runtime support | Scheduling, streams, cancellation, loading | Operation names or parameters |
-| `mxc_engine` | Backend dispatch and execution | Language-specific behavior |
+| Run to completion | `runSync` / `RunSync` | `run` / `Run` |
+| Spawn live process | `spawnSync` / `SpawnSync` | `spawn` / `Spawn` |
+| Wait | `waitSync` / `WaitSync` | `wait` / `Wait` |
+| Kill | `killSync` / `KillSync` | `kill` / `Kill` |
 
-The C ABI is synchronous. Generated Node and .NET async methods schedule the same synchronous operation; they do not
-call a second native implementation.
-
-## Migration order
-
-```mermaid
-flowchart LR
-    A[Version and discovery] --> B[Run to completion]
-    B --> C[Spawn and live stdio]
-    C --> D[Provision, start, stop, deprovision]
-    D --> E[Exec with live stdio]
-    E --> F[Attached terminal exec]
-```
-
-Each step is switched independently. Existing entry points remain until parity tests pass.
+Shipping facades may retain established names such as `Run` and `RunAsync`, but they must delegate without changing
+semantics.
 
 ## Documents
 
-1. [Rust SDK (`mxc-sdk`) architecture](rust-sdk-architecture.md)
-2. [Diplomat and C FFI generation](diplomat-ffi-generation.md)
+1. [Rust SDK architecture](rust-sdk-architecture.md)
+2. [UniFFI binding generation](uniffi-binding-generation.md)
 3. [Node and .NET SDK generation](node-dotnet-sdk-generation.md)
 
-## Selected tooling
+## Prototype
 
-- [Diplomat](https://github.com/rust-diplomat/diplomat) generates the C ABI and .NET bindings.
-- [Diplomat design](https://github.com/rust-diplomat/diplomat/blob/main/docs/design_doc.md) defines its C-first model.
-- [Node-API](https://nodejs.org/api/n-api.html) is the stable native boundary for Node.
+The prototype is intentionally production-shaped:
 
-Diplomat's JavaScript backend uses WebAssembly. MXC needs a native Node-API backend or generator.
+- `src/ffi/mxc_uniffi` exports discovery, run, live process, streams, and state-aware operations.
+- `scripts/generate-uniffi-bindings.ps1` pins both generators and regenerates both SDKs.
+- `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
+- `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.
+
+Promotion requires cross-platform tests, API snapshot checks, ownership stress tests, and an upstream-risk review.

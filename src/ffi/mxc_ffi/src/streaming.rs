@@ -59,9 +59,9 @@ use std::ptr;
 use mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, StreamCloser, WaitOutcome};
 
 use crate::{
-    alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,
-    MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST,
-    MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
+    alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
+    MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_NULL_ARGUMENT,
+    MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
 // ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ fn spawn_request_inner(request_json_utf8: *const c_char) -> Result<Sandbox, (i32
             ))
         }
     };
-    let request = request::build_request_from_json(request_json).map_err(sdk_error_detail)?;
+    let request = mxc_sdk::build_request_from_json(request_json).map_err(sdk_error_detail)?;
     spawn_sandbox(request).map_err(sdk_error_detail)
 }
 

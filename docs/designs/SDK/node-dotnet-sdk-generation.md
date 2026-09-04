@@ -2,148 +2,114 @@
 
 ## Decision
 
-Generate public foreign SDK functions from the same Diplomat API description that generates the C ABI.
-Each operation has a synchronous native call. Node and .NET add asynchronous wrappers that schedule that call off the
-caller thread.
+Generate both foreign SDKs from `mxc_uniffi`. Keep only thin public compatibility facades where existing names require
+them.
 
-```mermaid
-flowchart TD
-    A[Diplomat API description]
-    A --> C[C ABI generator]
-    A --> D[.NET generator]
-    A --> N[MXC Node-API generator]
-    D --> DS[Generated .NET methods]
-    N --> NS[Generated Node methods]
-    DS --> CABI[Core C FFI]
-    NS --> CABI
-```
-
-Existing request classes and JSON serialization stay in place. This phase generates callable functions.
-## .NET output
-
-Diplomat's .NET backend generates a raw `[LibraryImport]` layer and safe managed classes.
+## Node
 
 ```mermaid
 flowchart LR
-    A[MxcSandbox.Run] --> B[Generated safe wrapper]
-    B --> C[Generated LibraryImport]
-    C --> D[mxc_ffi]
+    A[Node application] --> T[Generated TypeScript]
+    T --> R["@ubjs/node"]
+    R --> F[libffi]
+    F --> L[mxc_uniffi library]
 ```
 
-Keep the existing public class names as compatibility facades while switching their internals one family at a time.
-## Node output
+[`uniffi-bindgen-react-native` Node support][node] generates TypeScript that describes the UniFFI symbols and value
+conversions. The generic `@ubjs/node` N-API addon opens `mxc_uniffi` and calls it through libffi.
 
-Diplomat's JavaScript backend targets WebAssembly, so MXC needs a native
-[Node-API](https://nodejs.org/api/n-api.html) generator.
+There is no MXC-specific addon, C++, subprocess, daemon, RPC path, or WebAssembly module.
+
+[node]: https://jhugman.github.io/uniffi-bindgen-react-native/reference/nodejs.html
+
+The prototype bundles generated TypeScript because upstream currently emits extensionless internal imports while MXC
+targets ESM. This is packaging, not an operation-specific adapter.
+
+## .NET
 
 ```mermaid
 flowchart LR
-    A[runSandbox] --> B[Generated TypeScript method]
-    B --> C[Generated Node-API call]
-    C --> D[mxc_ffi]
+    A[.NET application] --> C[Generated C# objects]
+    C --> P[Generated P/Invoke]
+    P --> L[mxc_uniffi library]
 ```
 
-The production design is a [Diplomat backend](https://rust-diplomat.github.io/diplomat/developer.html)
-or a Rust-emitted manifest consumed by both Node and .NET. The current Node
-prototype is a temporary header-driven generator: it validates the generated C
-headers but still carries Node-specific public-name and argument/result mapping
-inside the generator. It is not yet the shared source of truth.
-## Exact ownership
+[`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates records, owned objects, async Task
+plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
-| Generated per operation | Handwritten once per SDK |
-|---|---|
-| Public sync and async names and parameters | Native library discovery and loading |
-| Return and error conversion | Worker scheduling for blocking native calls |
-| Documentation | `AbortSignal` or `CancellationToken` coordination |
-| C symbol selection | Node `Readable`/`Writable` over native byte calls |
-| P/Invoke or Node-API declaration | .NET `Stream` over native byte calls |
-| Async method shell | Attached-terminal input, output, resize, and signals |
+The shipping SDK may expose `Run` and `RunAsync` as compatibility names over generated `RunSync` and `Run`.
 
-The handwritten support library cannot contain an operation list or operation-specific parameter mapping.
-## API names
+## API alignment
 
-Maintain one manifest emitted from the Diplomat API description. A name may
-differ only for the target language's casing and async convention. A
-header-driven prototype must not be treated as that manifest, even if it
-validates generated C symbols.
-
-| Operation | Rust SDK | Node generated API | .NET generated API |
+| Concept | Node generated | C# generated | Rust canonical |
 |---|---|---|---|
-| Run to completion | `run` | `runSandboxSync`, `runSandbox` | `Run`, `RunAsync` |
-| Spawn live process | `spawn_sandbox` | `spawnSandbox` | `Spawn` |
-| Wait for process | `Sandbox::wait` | `waitSync`, `wait` | `Wait`, `WaitAsync` |
-| Kill process | `Sandbox::kill` | `kill` | `Kill` |
+| Version | `version()` | `Version()` | package version |
+| Discovery | `discover()` | `Discover()` | discovery functions |
+| Run sync | `runSync()` | `RunSync()` | `run()` |
+| Run async | `run()` | `Run()` | worker calling `run()` |
+| Spawn sync | `spawnSync()` | `SpawnSync()` | `spawn_sandbox()` |
+| Spawn async | `spawn()` | `Spawn()` | worker calling `spawn_sandbox()` |
+| Poll | `tryWait()` | `TryWait()` | `Sandbox::try_wait()` |
+| Wait sync | `waitSync()` | `WaitSync()` | `Sandbox::wait()` |
+| Wait async | `wait()` | `Wait()` | worker calling `Sandbox::wait()` |
+| Kill sync | `killSync()` | `KillSync()` | `Sandbox::kill()` |
+| Kill async | `kill()` | `Kill()` | worker calling `Sandbox::kill()` |
 
-Only operations that can materially block receive an async pair. The synchronous method calls the C ABI directly. The
-async method schedules that same call; it does not call a separate native function.
+State-aware envelope execution, streaming exec, and attached exec follow the same sync/async suffix rule.
 
-The Node prototype currently implements this scheduling with
-`napi_async_work`, which uses libuv's shared worker pool. That is sufficient
-for API-shape validation but is not a production execution scheduler:
-long-running MXC calls can starve unrelated libuv native work. Production must
-provide dedicated execution scheduling.
-
-Current Node `spawnSandboxAsync` means run to completion, while `spawnSandbox` returns a live process. Keep
-`spawnSandboxAsync` as a deprecated compatibility facade over `runSandbox`. Do not carry that semantic mismatch into
-the generated API.
-
-Rust remains synchronous and runtime-neutral. A Rust async adapter belongs in a separate runtime integration because
-the core SDK cannot choose Tokio, async-std, or another executor for its callers.
-
-## What the operation generator emits
+## True async behavior
 
 ```mermaid
 sequenceDiagram
-    participant G as Generator
-    participant TS as Node SDK
-    participant CS as .NET SDK
-    participant ABI as Native declarations
-    G->>TS: Method, docs, result/error mapping
-    G->>CS: Method, docs, result/error mapping
-    G->>ABI: Node-API and P/Invoke declarations
+    participant A as Node or .NET caller
+    participant F as Generated future bridge
+    participant W as Rust worker thread
+    participant S as mxc-sdk
+    A->>F: run(...)
+    F->>W: Start blocking operation
+    W->>S: mxc_sdk::run
+    F-->>A: Promise or Task remains pending
+    S-->>W: Result
+    W-->>F: Complete Rust future
+    F-->>A: Resolve generated value
 ```
 
-For the canonical `run` operation, the output is:
+UniFFI's TypeScript `forceAsync` option is not used. It changes a signature but does not make blocking Rust work async.
 
-```text
-Rust:  run(request) -> Result<Output, Error>
-C ABI: mxc_run(request) -> status + output handle
-Node:  runSandboxSync(request) -> RunResult
-       runSandbox(request) -> Promise<RunResult>
-.NET:  Run(request) -> RunResult
-       RunAsync(request) -> Task<RunResult>
-```
+## Ownership
 
-The current request objects serialize before the native call. Type/schema generation is outside this design.
-## Concrete migration slices
+| Value | Ownership rule |
+|---|---|
+| Sandbox | Generated object owns an `Arc` to a synchronized Rust `Sandbox` |
+| stdin | May be taken once; dropping or disposing closes the writer |
+| stdout/stderr | Each may be taken once; reads return owned byte buffers |
+| Error | Generated thrown object owns an `Arc<BindingError>` |
+| Result records | Copied into language-native values |
 
-1. `NativeVersion`, available backends, and platform support.
-2. Run one command and return buffered stdout, stderr, exit code, timeout, warnings, and metadata.
-3. Spawn a live process without attaching it to a terminal.
-4. Read stdout/stderr, write stdin, poll, wait, kill, close, and dispose.
-5. Provision, start, stop, and deprovision the same state-aware sandbox across calls.
-6. Execute in that sandbox and return a live process.
-7. Execute attached to a terminal with input, output, resize, signals, and cancellation.
+Generated finalizers prevent leaks after abandoned objects. Callers should still dispose objects deterministically.
 
-## Required tests for each slice
+## Cancellation
 
-```mermaid
-flowchart LR
-    R[Rust expected result] --> V[Shared scenario]
-    V --> N[Node result]
-    V --> D[.NET result]
-    N --> P{Equivalent?}
-    D --> P
-    P -->|Yes| S[Switch implementation]
-    P -->|No| K[Keep existing path]
-```
+Generated async calls can cancel future polling, but cancellation cannot safely imply process termination. MXC should
+only advertise kill-on-cancel after `mxc-sdk` provides cancellation independent of the lock held by `wait`.
 
-## Exit criteria
+## Conformance scenarios
 
-- Node and .NET expose the same operation inventory.
-- Every blocking operation has a sync API and an async wrapper where the language supports one.
-- API names are emitted from the canonical operation catalog.
-- Regeneration adds each value-returning operation to both SDKs.
-- No generated file is manually edited.
-- Operation-specific serialization and error mapping are not duplicated in handwritten code.
-- The executable and `node-pty` path remains until attached-terminal parity is demonstrated.
+Both prototypes run against the real library and verify:
+
+1. version and host discovery
+2. structured malformed-request errors
+3. synchronous and asynchronous run-to-completion
+4. state-aware and attached-exec error paths
+5. live process ownership
+6. take-once stdin, stdout, and stderr
+7. stream read, write, and flush
+8. prompt busy errors during concurrent handle use
+
+## Promotion gates
+
+- Run generated SDK scenarios on Windows, Linux, and macOS where supported.
+- Stress futures, finalizers, worker threads, streams, and process teardown.
+- Snapshot generated public APIs and exported ABI symbols.
+- Package one native library per target without changing generated operation code.
+- Keep the current SDK paths until behavioral and performance parity is proven.

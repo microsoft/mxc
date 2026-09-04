@@ -140,6 +140,7 @@
 //! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
 //! handle in [`Sandbox`].
 
+mod request;
 mod sandbox;
 
 pub use mxc_engine::configs;
@@ -153,6 +154,7 @@ pub use mxc_engine::{
     SandboxRequest, WslcSection,
 };
 
+pub use request::build_request_from_json;
 pub use sandbox::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,
     StreamCloser, WaitOutcome,

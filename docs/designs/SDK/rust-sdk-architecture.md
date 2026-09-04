@@ -1,118 +1,105 @@
-# Rust SDK (`mxc-sdk`) architecture
+# Rust SDK architecture
 
 ## Decision
 
-Keep the [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) crate as the only safe callable layer above
+Keep [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable layer above
 [`mxc_engine`](../../../src/core/mxc_engine/src/lib.rs).
 
 ```mermaid
 flowchart LR
-    R[Rust application] --> S[Rust SDK: mxc-sdk]
-    F[Core C FFI] --> S
+    R[Rust application] --> S[mxc-sdk]
+    U[mxc_uniffi] --> S
+    C[Legacy mxc_ffi] --> S
     S --> E[mxc_engine]
 ```
 
-Do not add another dispatcher crate. Do not route Rust through C.
+Rust callers never route through an FFI layer. Foreign projection crates translate and immediately delegate to
+`mxc-sdk`.
 
 ## Responsibilities
 
-| Rust SDK (`mxc-sdk`) owns | `mxc_engine` owns |
+| `mxc-sdk` owns | `mxc_engine` owns |
 |---|---|
-| Public `run`, `spawn_sandbox`, and state-aware functions | Backend selection |
+| Public run, spawn, and state-aware functions | Backend selection |
 | Safe request, result, and error types | Backend construction |
-| `Sandbox`: the live process object returned by `spawn_sandbox` | Platform execution |
-| Taking stdin/stdout/stderr and calling try-wait, wait, or kill | Process implementation |
+| `Sandbox`, live streams, wait, poll, and kill | Platform execution |
 | Stable SDK errors | Backend-specific errors and probes |
-| Safe functions called by Rust applications and `mxc_ffi` | Containment implementation |
+| Request JSON conversion shared by FFI projections | Containment implementation |
 
-## Existing operation families
+## Operation families
 
 ```mermaid
 flowchart TD
-    S[Rust SDK: mxc-sdk]
+    S[mxc-sdk]
     S --> D[Discovery]
     S --> R[Run to completion]
     S --> P[Live process]
-    S --> A[State-aware operations]
+    S --> A[State-aware lifecycle]
     D --> D1[available_backends]
     D --> D2[platform_support]
     R --> R1[run]
     P --> P1[spawn_sandbox]
-    P1 --> P2[stdin, stdout, stderr]
+    P1 --> P2[take stdin, stdout, stderr]
     P1 --> P3[try_wait, wait, kill]
     A --> A1[run_state_aware_json]
-    A1 --> A4[provision, start, stop, deprovision]
-    A --> A2[exec_sandbox: return live process]
-    A --> A3[exec_attached: use caller terminal]
+    A --> A2[exec_sandbox]
+    A --> A3[exec_attached]
 ```
 
-## Terms
+## Request parsing
 
-| Term | Meaning |
-|---|---|
-| `Sandbox` | Rust live process object returned by `spawn_sandbox` or `exec_sandbox` |
-| `Output` | Result from `run`: exit outcome, buffered stdout/stderr, warnings, and metadata |
-| Run to completion | Wait internally and return exit status plus buffered stdout and stderr |
-| Try-wait | Check whether the process exited without blocking |
-| Wait | Block until the process exits or reaches its configured timeout |
-| Kill | Request termination of the running process |
-| State-aware | Provision, start, exec, stop, and deprovision the same sandbox across calls |
-| `exec_attached` | Run state-aware `exec` on the caller's terminal and return its exit outcome |
-
-## Runtime call path
+The co-versioned binding request parser lives in `mxc-sdk`, not in either FFI crate:
 
 ```mermaid
 sequenceDiagram
-    participant Caller as Rust application or mxc_ffi
-    participant SDK as Rust SDK: mxc-sdk
-    participant Engine as mxc_engine
-    Caller->>SDK: Call run, spawn, or state-aware operation
-    SDK->>Engine: Call existing engine operation
-    Engine-->>SDK: Typed result or Error
-    SDK-->>Caller: Stable SDK result
+    participant F as FFI projection
+    participant S as mxc-sdk
+    participant E as mxc_engine
+    F->>S: build_request_from_json
+    S->>S: Deserialize binding request
+    S->>E: build_request
+    E-->>S: SandboxRequest or Error
+    S-->>F: Stable SDK value
 ```
 
-## Per-operation handwritten work
+This removes parser duplication between `mxc_ffi` and `mxc_uniffi`. It does not redesign the public schema.
 
-An MXC API developer implements one safe Rust function in `mxc-sdk`. That function contains the product behavior.
+## Projection rule
 
-## Work required before foreign SDK generation
+`mxc_uniffi` may:
 
-1. Inventory every Rust, FFI, Node, and .NET operation.
-2. Add behavior tests at the `mxc-sdk` boundary.
-3. Move request construction out of FFI functions when an equivalent safe helper is missing.
-4. Move result normalization out of foreign SDKs when it represents MXC behavior.
-5. Leave pointer checks, allocation, panic handling, and status conversion in `mxc_ffi`.
+- map safe SDK values to UniFFI records and objects
+- retain `Sandbox` and stream ownership behind synchronized objects
+- move blocking SDK calls to dedicated worker threads for exported async functions
+- convert `mxc_sdk::Error` to a structured projected error
+- contain panics before they cross the generated ABI
 
-## Export declaration
+It may not validate policy, select a backend, reinterpret results, or maintain another operation implementation.
 
-Diplomat reads tagged bridge modules, not arbitrary crate APIs. Add a separate bridge in `mxc_ffi` that delegates:
+## Synchronous and asynchronous behavior
 
-```rust
-#[diplomat::bridge]
-mod ffi_api {
-    pub fn run(request: FfiRequest) -> Result<Box<FfiOutput>, FfiError> {
-        convert(mxc_sdk::run(convert(request)?))
-    }
-}
+`mxc-sdk` remains synchronous where the engine is synchronous. `mxc_uniffi` exports:
+
+```text
+run_sync(request) -> RunResult
+async run(request) -> RunResult
 ```
 
-This is illustrative. The body may only convert FFI representations and delegate to `mxc-sdk`.
-It must not select a backend or reimplement an SDK operation.
+The async function starts work on a dedicated Rust thread and resolves a Rust future. It does not merely relabel a
+blocking call as async, and it does not depend on the embedding runtime's thread pool.
 
-## Handwritten versus generated
+## Live object behavior
 
-| Handwritten | Generated |
-|---|---|
-| Safe `mxc-sdk` implementation | Nothing inside this layer |
-| Thin Diplomat bridge declaration | C ABI and foreign SDK output in later layers |
-| Rust behavior tests | Foreign conformance test scaffolding |
-
-Generating the bridge from annotated Rust functions can be considered after the initial API pattern is stable.
+- A `Sandbox` owns one native process handle.
+- stdin, stdout, and stderr are take-once owned objects.
+- operations use `try_lock`, so concurrent access returns a typed busy error instead of blocking a runtime thread.
+- `kill` cannot interrupt a concurrent `wait` until `mxc-sdk` exposes independent cancellation.
+- generated object finalizers are a safety net; deterministic disposal remains recommended.
 
 ## Exit criteria
 
-- Every FFI operation immediately delegates to a safe `mxc-sdk` operation.
-- No FFI function contains backend selection or product policy decisions.
-- Existing Rust callers keep their direct, typed API.
-- Rust behavior tests define the expected result before a foreign binding is switched.
+- Every projected operation immediately delegates to `mxc-sdk`.
+- Rust behavior tests define the canonical result.
+- The old and new FFI crates share request conversion rather than copying it.
+- Rust callers retain direct typed APIs.
+- No backend dependency is introduced into `mxc_uniffi`.

@@ -1,0 +1,20 @@
+[package]
+name = "mxc_uniffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UniFFI projection of the MXC Rust SDK for Node and .NET."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+wslc = ["mxc-sdk/wslc"]
+isolation_session = ["mxc-sdk/isolation_session"]
+
+[dependencies]
+futures-channel.workspace = true
+mxc-sdk.workspace = true
+serde_json.workspace = true
+uniffi.workspace = true
