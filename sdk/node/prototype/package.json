@@ -1,0 +1,26 @@
+{
+  "name": "@microsoft/mxc-sdk-native-prototype",
+  "version": "0.0.0-prototype",
+  "private": true,
+  "description": "Disposable Node-API prototype for the MXC SDK unification design",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "generate": "node scripts/generate-operations.mjs",
+    "check:generated": "node scripts/generate-operations.mjs --check",
+    "build": "npm run generate && node ../node_modules/node-gyp/bin/node-gyp.js rebuild --release && node ../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "build:debug": "npm run generate && node ../node_modules/node-gyp/bin/node-gyp.js rebuild --debug && node ../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test:real": "node --test dist/tests/real-library-smoke.test.js",
+    "test": "npm run build:debug && npm run test:real"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

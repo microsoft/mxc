@@ -42,6 +42,7 @@ members = [
     "testing/wxc_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
+    "tools/mxc_diplomat_codegen",
     "tools/mxc_schema_gen",
 ]
 exclude = ["testing/fuzz"]
@@ -70,6 +71,9 @@ bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 cidr = "0.3.2"
 clap = { version = "4", features = ["derive"] }
+diplomat = "=0.16.1"
+diplomat-runtime = "=0.16.0"
+diplomat-tool = "=0.16.1"
 flatbuffers = "25"
 getrandom = "0.2"
 hyperlight_common = { path = "backends/hyperlight/common" }
@@ -147,3 +151,9 @@ windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 winreg = "0.55"
 wslc_common = { path = "backends/wslc/common" }
 wxc_common = { path = "core/wxc_common" }
+
+# Disposable prototype patch: Diplomat 0.16.1's HIR compiler uses two unstable
+# match guards, so the repository-local source keeps the generator buildable
+# on MXC's pinned stable Rust toolchain. Remove with the prototype.
+[patch.crates-io]
+diplomat_core = { path = "prototype/vendor/diplomat_core-0.16.1" }

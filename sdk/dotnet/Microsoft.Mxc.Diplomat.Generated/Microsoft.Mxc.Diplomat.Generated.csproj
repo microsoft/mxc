@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <Target Name="RequireGeneratedBindings" BeforeTargets="CoreCompile">
+    <Error Condition="!Exists('Generated/RawMxcDiplomat.cs')"
+           Text="Run scripts/generate-diplomat-bindings.ps1 before building the generated Diplomat bindings." />
+  </Target>
+
+</Project>

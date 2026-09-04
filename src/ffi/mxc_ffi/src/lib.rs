@@ -62,6 +62,7 @@ use mxc_sdk::{
     SandboxRequest, WaitOutcome,
 };
 
+mod diplomat;
 mod error_detail;
 mod request;
 mod state_aware;

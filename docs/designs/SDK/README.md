@@ -46,9 +46,12 @@ Initially, steps 1 and 2 are handwritten. The generated outputs must never be ed
 |---|---|---|
 | Rust SDK: `mxc-sdk` | Public Rust operations, results, errors, live process object | C pointers, P/Invoke, Node APIs |
 | Core C FFI | ABI, panic containment, allocation, opaque handles | Backend selection or SDK behavior |
-| Generated SDKs | Public functions, native calls, result/error conversion | A second MXC implementation |
-| SDK runtime support | `Task`, `Promise`, streams, cancellation, loading | Operation names or parameters |
+| Generated SDKs | Canonical names, sync/async functions, native calls, conversion | A second MXC implementation |
+| SDK runtime support | Scheduling, streams, cancellation, loading | Operation names or parameters |
 | `mxc_engine` | Backend dispatch and execution | Language-specific behavior |
+
+The C ABI is synchronous. Generated Node and .NET async methods schedule the same synchronous operation; they do not
+call a second native implementation.
 
 ## Migration order
 

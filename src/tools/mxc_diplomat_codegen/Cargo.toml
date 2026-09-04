@@ -1,0 +1,9 @@
+[package]
+name = "mxc_diplomat_codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Repository-local generator for the experimental MXC Diplomat bindings."
+
+[dependencies]
+diplomat-tool.workspace = true
