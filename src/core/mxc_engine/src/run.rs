@@ -168,7 +168,7 @@ fn resolve_runner_inner_windows(
                             let _ = writeln!(logger, "dacl warning: {w}");
                         }
                     }
-                    Err(MxcError::backend_unavailable(format!("{e}")))
+                    Err(crate::dispatch::map_process_container_dispatch_error(e))
                 }
             }
         }
