@@ -395,9 +395,9 @@ concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl blocks for an **`Executor`** consumer: it reuses the
+The runner's `exec` impl blocks under **`Relayed`**: it reuses the
 one-shot `create_process` path, and that call runs until the agent process
-exits and the relay drains. For a **`Library`** consumer it starts the
+exits and the relay drains. Under **`Piped`** it starts the
 process and returns without waiting, handing back the live pipe handles and a
 waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
@@ -496,9 +496,9 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
   agent process before returning.
 
 `ExecHandle.terminator` is a no-op closure on the IsolationSession path
-when the consumer is `Executor`, which reuses the one-shot
+under `Relayed`, which reuses the one-shot
 `create_process` synchronously and so has no mid-flight cancellation
-seam. For a `Library` consumer the backend instead starts the process
+seam. Under `Piped` the backend instead starts the process
 without waiting and returns a terminator that calls
 `IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
 waiter that blocks on exit.
@@ -538,9 +538,7 @@ An exited process is never routed through the shutdown ladder, which reads only 
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
 `mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
-is reachable only for a `Library` consumer: the `Executor` arm has no
-timeout field in `ScriptResponse` to report one through, so the executor
-arm keeps reporting `Exited`.
+is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
 
 Teardown is bounded only insofar as the kill is: the streaming adapter's
 `Drop` joins the waiter when the kill was accepted, and abandons the
