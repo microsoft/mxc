@@ -432,9 +432,14 @@ pub(super) fn deprovision_into_wire(request: contract::DeprovisionRequest) -> wi
 }
 
 pub(super) fn into_state_aware_wire_input(
-    config: wire::MxcConfig,
+    mut config: wire::MxcConfig,
     source_text: &str,
 ) -> Result<StateAwareWireInput, serde_json::Error> {
+    // State-aware backend data is carried losslessly in `experimental_raw`.
+    // Clear the redundant rolling-wire copy before the shared normalizer sees
+    // the input, matching the rolling parser's canonical representation.
+    config.experimental = None;
+
     Ok(StateAwareWireInput {
         config,
         experimental_raw: extract_experimental_value(source_text)?,

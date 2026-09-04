@@ -1132,6 +1132,26 @@ if discriminator.phase.is_some() {
 }
 ```
 
+`parse_rolling_state_aware_wire_input` is the rolling source adapter. It
+extracts and validates the raw experimental block, masks that block for base
+wire deserialization, and produces:
+
+```rust
+StateAwareWireInput {
+    config,             // common wire fields; experimental is always None
+    experimental_raw,   // lossless backend payload and telemetry source
+    source_text,        // exact decoded request text
+}
+```
+
+`convert_wire_state_aware` composes that source adapter with the shared
+`normalize_state_aware` seam, which owns request-kind and containment
+validation, one-shot-section rejection, common policy conversion,
+post-provision Network presence handling, and typed telemetry population. The
+exact development adapter produces the same neutral representation so the
+private exact router can enter this seam without duplicating rolling
+normalization.
+
 The trailing-command path keeps the exact phase probe separate because it owns
 error routing. Backend selection and command editing share one
 duplicate-preserving raw root parse, and the resulting effective document then
@@ -1140,9 +1160,13 @@ enters `parse_mxc_request_json` directly.
 
 `wire::MxcConfig` is closed (`deny_unknown_fields`) on its stable surface, so
 unknown fields are rejected at the trust boundary. `phase` maps to the
-`wire::Phase` enum. The `experimental` block stays permissive and is captured as
-a raw `serde_json::Value` on the state-aware path so the dispatcher can type each
-backend's per-phase config from it (`experimental.<backend>.<phase>`).
+`wire::Phase` enum. The rolling `experimental` block stays permissive and is
+captured as a raw `serde_json::Value`; the exact contract closes the same shape
+before its adapter preserves the source value. In both cases
+`config.experimental` is cleared, and the dispatcher types each backend's
+per-phase config from `experimental_raw`
+(`experimental.<backend>.<phase>`). This raw value is the temporary transport
+between structural parsing and backend phase deserialization.
 
 Per-phase requirements (`containment` for `provision`, `sandboxId` for the
 others) are enforced in the conversion step, not at the deserializer. The
@@ -1150,12 +1174,14 @@ one-shot path rejects `phase` / `sandboxId`, and the state-aware path rejects
 one-shot-only sections (`seatbelt` / `processContainer` / `lxc` / `lifecycle`),
 so each mode only accepts its valid fields.
 
-Conversion populates the cross-cutting wire fields (`filesystem`, `network`,
+Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
-`script_code` / `working_directory` / `script_timeout` / `env` fields. The
-state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`)
-are extracted alongside the `ExecutionRequest` and bundled into a
+`script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
+telemetry is populated from `experimental_raw`; the same raw object remains
+available for backend phase configuration. The state-aware-only fields
+(`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are bundled with the
+`ExecutionRequest` in a
 `ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
 Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
 experimental_raw: Option<serde_json::Value>, source_text: Option<Box<str>> }` —

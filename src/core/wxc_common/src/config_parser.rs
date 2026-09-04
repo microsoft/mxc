@@ -18,6 +18,7 @@ use crate::network_parser::{
     supports_directional_network, NetworkSections,
 };
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::state_aware_wire::StateAwareWireInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use serde::{Deserialize, Deserializer};
@@ -414,17 +415,12 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
     if discriminator.phase.is_some() {
-        let experimental = discriminator.experimental.map(|raw| raw.get());
-        let experimental_span = experimental
-            .map(|raw| experimental_source_span(json_str, raw))
-            .transpose()
-            .map_err(ParseError::Decode)?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
         validate_versioned_fields(&raw).map_err(|error| {
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
-        convert_wire_state_aware(json_str, experimental, experimental_span, logger)
+        convert_wire_state_aware(json_str, discriminator.experimental, logger)
             .map(MxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
@@ -1589,12 +1585,14 @@ fn convert_wire_config(
     })
 }
 
-fn convert_wire_state_aware(
+pub(crate) fn parse_rolling_state_aware_wire_input(
     json: &str,
-    experimental: Option<&str>,
-    experimental_span: Option<(usize, usize)>,
-    logger: &mut Logger,
-) -> Result<ParsedStateAwareRequest, WxcError> {
+    experimental: Option<&RawValue>,
+) -> Result<StateAwareWireInput, WxcError> {
+    let experimental = experimental.map(RawValue::get);
+    let experimental_span = experimental
+        .map(|raw| experimental_source_span(json, raw))
+        .transpose()?;
     let experimental_raw = experimental
         .map(|raw| {
             config_deserialize::from_str::<serde_json::Value>(raw)
@@ -1602,15 +1600,8 @@ fn convert_wire_state_aware(
         })
         .transpose()?;
 
-    // Peeling `experimental` off above also removes it from the typed
-    // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
-    // through unchecked here and be silently ignored — unlike the one-shot path,
-    // where `experimental` is a typed `Option<Experimental>` and a non-object is
-    // a hard parse error. Reject a present, non-null, non-object value up front
-    // so both paths fail malformed configs consistently. (`null` maps to "absent"
-    // on both paths and is accepted.)
-    if let Some(exp) = experimental_raw.as_ref() {
-        if !exp.is_null() && !exp.is_object() {
+    if let Some(experimental) = experimental_raw.as_ref() {
+        if !experimental.is_null() && !experimental.is_object() {
             return Err(WxcError::ConfigParse(
                 "Invalid configuration at `experimental`: expected an object".to_string(),
             ));
@@ -1618,8 +1609,39 @@ fn convert_wire_state_aware(
     }
 
     let base_json = mask_state_aware_experimental_with_span(json, experimental, experimental_span)?;
-    let mut cfg: wire::MxcConfig = config_deserialize::from_str(&base_json)
+    let mut config: wire::MxcConfig = config_deserialize::from_str(&base_json)
         .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+
+    // The raw value above is authoritative for state-aware experimental data.
+    config.experimental = None;
+
+    Ok(StateAwareWireInput {
+        config,
+        experimental_raw,
+        source_text: json.into(),
+    })
+}
+
+fn convert_wire_state_aware(
+    json: &str,
+    experimental: Option<&RawValue>,
+    logger: &mut Logger,
+) -> Result<ParsedStateAwareRequest, WxcError> {
+    let input = parse_rolling_state_aware_wire_input(json, experimental)?;
+    normalize_state_aware(input, logger)
+}
+
+/// Apply the state-aware validation and runtime normalization shared by the
+/// rolling and exact-contract parser paths.
+fn normalize_state_aware(
+    input: StateAwareWireInput,
+    logger: &mut Logger,
+) -> Result<ParsedStateAwareRequest, WxcError> {
+    let StateAwareWireInput {
+        config: mut cfg,
+        experimental_raw,
+        source_text,
+    } = input;
 
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
@@ -1746,7 +1768,7 @@ fn convert_wire_state_aware(
         // Retain the decoded request text so the dispatcher can deserialize each
         // `experimental.<backend>.<phase>` sub-slice positionally and report
         // typed errors with whole-file line/column (parity with base config).
-        source_text: Some(json.to_owned().into_boxed_str()),
+        source_text: Some(source_text),
     })
 }
 
@@ -1844,6 +1866,165 @@ mod tests {
         Logger::new(Mode::Buffer)
     }
 
+    fn neutral_state_aware_input(
+        config_json: &str,
+        experimental_raw: Option<serde_json::Value>,
+        source_text: &str,
+    ) -> StateAwareWireInput {
+        StateAwareWireInput {
+            config: config_deserialize::from_str(config_json).unwrap(),
+            experimental_raw,
+            source_text: source_text.into(),
+        }
+    }
+
+    #[test]
+    fn normalize_state_aware_owns_config_and_raw_validations() {
+        let config_input = neutral_state_aware_input(
+            r#"{
+                "phase": "start",
+                "sandboxId": "iso:abcd1234",
+                "containment": "wslc"
+            }"#,
+            None,
+            "config validation source",
+        );
+        let config_error = match normalize_state_aware(config_input, &mut test_logger()) {
+            Ok(_) => panic!("containment on start should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            config_error
+                .to_string()
+                .contains("requests must not carry 'containment'"),
+            "unexpected config validation error: {config_error}"
+        );
+
+        let raw_input = neutral_state_aware_input(
+            r#"{
+                "phase": "start",
+                "sandboxId": "iso:abcd1234"
+            }"#,
+            Some(serde_json::json!({"seatbelt": {}})),
+            "raw validation source",
+        );
+        let raw_error = match normalize_state_aware(raw_input, &mut test_logger()) {
+            Ok(_) => panic!("moved experimental Seatbelt config should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            raw_error
+                .to_string()
+                .contains("'experimental.seatbelt' has moved"),
+            "unexpected raw validation error: {raw_error}"
+        );
+    }
+
+    #[test]
+    fn normalize_state_aware_populates_telemetry_from_neutral_input() {
+        let input = neutral_state_aware_input(
+            r#"{
+                "phase": "start",
+                "sandboxId": "iso:abcd1234",
+                "telemetry": {"enabled": true}
+            }"#,
+            None,
+            "telemetry source",
+        );
+
+        let parsed = normalize_state_aware(input, &mut test_logger()).unwrap();
+
+        assert_eq!(parsed.phase, Phase::Start);
+        assert_eq!(
+            parsed
+                .request
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(true)
+        );
+        assert!(parsed.experimental_raw.is_none());
+        assert_eq!(parsed.source_text.as_deref(), Some("telemetry source"));
+    }
+
+    #[test]
+    fn normalize_state_aware_rejects_moved_experimental_telemetry() {
+        let input = neutral_state_aware_input(
+            r#"{
+                "phase": "start",
+                "sandboxId": "iso:abcd1234"
+            }"#,
+            Some(serde_json::json!({"telemetry": 42})),
+            "malformed telemetry source",
+        );
+
+        let error = match normalize_state_aware(input, &mut test_logger()) {
+            Ok(_) => panic!("moved experimental telemetry should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("'experimental.telemetry' has moved"),
+            "unexpected telemetry error: {error}"
+        );
+    }
+
+    #[test]
+    fn phase_7_2_preserves_rolling_only_validation_diagnostics() {
+        for (case, json, expected) in [
+            (
+                "containment on a non-provision phase",
+                r#"{
+                    "phase": "start",
+                    "sandboxId": "iso:abcd1234",
+                    "containment": "wslc"
+                }"#,
+                "requests must not carry 'containment'",
+            ),
+            (
+                "moved experimental Seatbelt section",
+                r#"{
+                    "phase": "start",
+                    "sandboxId": "iso:abcd1234",
+                    "experimental": {"seatbelt": {}}
+                }"#,
+                "'experimental.seatbelt' has moved",
+            ),
+            (
+                "one-shot lifecycle section",
+                r#"{
+                    "phase": "start",
+                    "sandboxId": "iso:abcd1234",
+                    "lifecycle": {}
+                }"#,
+                "do not accept one-shot section(s): lifecycle",
+            ),
+            (
+                "multiple experimental backend sections",
+                r#"{
+                    "phase": "start",
+                    "sandboxId": "iso:abcd1234",
+                    "experimental": {
+                        "isolation_session": {},
+                        "wslc": {}
+                    }
+                }"#,
+                "Multiple containment backends configured",
+            ),
+        ] {
+            let error = match load_mxc(json) {
+                Err(ParseError::StateAware(error)) => error,
+                other => panic!("{case}: expected state-aware error, got {other:?}"),
+            };
+            assert!(
+                error.message.contains(expected),
+                "{case}: unexpected error: {}",
+                error.message
+            );
+        }
+    }
+
     #[test]
     fn reused_phase_probe_classifies_one_shot_and_state_aware_phases() {
         assert_eq!(
@@ -1914,6 +2095,191 @@ mod tests {
                 cli_command,
             },
         )
+    }
+
+    fn load_state_aware(json: &str) -> ParsedStateAwareRequest {
+        match load_mxc(json).expect("state-aware request should parse") {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        }
+    }
+
+    #[test]
+    fn phase_7_2_characterizes_every_state_aware_phase_and_provision_backend() {
+        for (
+            case,
+            json,
+            expected_phase,
+            expected_declared_containment,
+            expected_runtime_containment,
+            expected_sandbox_id,
+            expected_script,
+        ) in [
+            (
+                "windows sandbox provision",
+                r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::WindowsSandbox),
+                ContainmentBackend::WindowsSandbox,
+                None,
+                "",
+            ),
+            (
+                "isolation session provision",
+                r#"{"phase":"provision","containment":"isolation_session"}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::IsolationSession),
+                ContainmentBackend::IsolationSession,
+                None,
+                "",
+            ),
+            (
+                "wslc provision",
+                r#"{"phase":"provision","containment":"wslc"}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::Wslc),
+                ContainmentBackend::Wslc,
+                None,
+                "",
+            ),
+            (
+                "start",
+                r#"{"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                Phase::Start,
+                None,
+                ContainmentBackend::WindowsSandbox,
+                Some("wsb:abcd1234"),
+                "",
+            ),
+            (
+                "exec",
+                r#"{"phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hi"}}"#,
+                Phase::Exec,
+                None,
+                ContainmentBackend::Wslc,
+                Some("wslc:abcd1234"),
+                "echo hi",
+            ),
+            (
+                "stop",
+                r#"{"phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                Phase::Stop,
+                None,
+                ContainmentBackend::IsolationSession,
+                Some("iso:abcd1234"),
+                "",
+            ),
+            (
+                "deprovision",
+                r#"{"phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                Phase::Deprovision,
+                None,
+                ContainmentBackend::Wslc,
+                Some("wslc:abcd1234"),
+                "",
+            ),
+        ] {
+            let parsed = load_state_aware(json);
+
+            assert_eq!(parsed.phase, expected_phase, "{case}");
+            assert_eq!(
+                parsed.containment, expected_declared_containment,
+                "{case}: declared containment"
+            );
+            assert_eq!(
+                parsed.request.containment, expected_runtime_containment,
+                "{case}: runtime containment"
+            );
+            assert_eq!(
+                parsed.sandbox_id.as_deref(),
+                expected_sandbox_id,
+                "{case}: sandbox id"
+            );
+            assert_eq!(parsed.request.script_code, expected_script, "{case}");
+            assert!(parsed.experimental_raw.is_none(), "{case}");
+            assert_eq!(parsed.source_text.as_deref(), Some(json), "{case}");
+        }
+    }
+
+    #[test]
+    fn phase_7_2_characterizes_raw_experimental_and_stable_telemetry() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "telemetry": {
+                "enabled": true
+            },
+            "experimental": {
+                "isolation_session": {
+                    "provision": {
+                        "appId": "Contoso.App"
+                    }
+                }
+            }
+        }"#;
+
+        let parsed = load_state_aware(json);
+
+        assert_eq!(
+            parsed.experimental_raw,
+            Some(serde_json::json!({
+                "isolation_session": {
+                    "provision": {
+                        "appId": "Contoso.App"
+                    }
+                }
+            }))
+        );
+        assert_eq!(
+            parsed
+                .request
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(true)
+        );
+        assert!(parsed.request.experimental.test.is_none());
+        assert!(parsed.request.experimental.windows_sandbox.is_none());
+        assert!(parsed.request.experimental.wslc.is_none());
+        assert_eq!(parsed.source_text.as_deref(), Some(json));
+    }
+
+    #[test]
+    fn phase_7_2_characterizes_post_provision_network_presence() {
+        let omitted = load_state_aware(r#"{"phase":"start","sandboxId":"wslc:abcd1234"}"#);
+        assert!(!omitted.request.policy.network_specified);
+        assert!(!omitted.request.policy.network_mode_specified);
+        assert!(omitted.request.policy.network_egress.is_none());
+        assert!(omitted.request.policy.network_ingress.is_none());
+        assert!(!omitted.request.policy.network_proxy.is_enabled());
+
+        let proxy_only = load_state_aware(
+            r#"{
+                "phase": "exec",
+                "sandboxId": "wslc:abcd1234",
+                "process": {"commandLine": "echo hi"},
+                "network": {"proxy": {"url": "http://proxy.example:8080"}}
+            }"#,
+        );
+        assert!(proxy_only.request.policy.network_specified);
+        assert!(!proxy_only.request.policy.network_mode_specified);
+        assert!(proxy_only.request.policy.network_proxy.is_enabled());
+
+        let mode = load_state_aware(
+            r#"{
+                "phase": "exec",
+                "sandboxId": "wslc:abcd1234",
+                "process": {"commandLine": "echo hi"},
+                "network": {"defaultPolicy": "allow"}
+            }"#,
+        );
+        assert!(mode.request.policy.network_specified);
+        assert!(mode.request.policy.network_mode_specified);
+        assert_eq!(
+            mode.request.policy.default_network_policy,
+            NetworkPolicy::Allow
+        );
+        assert!(!mode.request.policy.network_proxy.is_enabled());
     }
 
     #[test]
@@ -2683,6 +3049,74 @@ mod tests {
             MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
+    }
+
+    #[test]
+    fn rolling_state_aware_wire_input_preserves_config_raw_experimental_and_source() {
+        let json = r#"{
+        "phase": "start",
+        "sandboxId": "iso:abcd1234",
+        "experimental": {
+            "isolation_session": {
+                "start": {"opaqueFutureField": true}
+            }
+        }
+    }"#;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+
+        let input = parse_rolling_state_aware_wire_input(json, discriminator.experimental).unwrap();
+
+        assert!(matches!(input.config.phase, Some(wire::Phase::Start)));
+        assert_eq!(input.config.sandbox_id.as_deref(), Some("iso:abcd1234"));
+        assert!(input.config.experimental.is_none());
+        assert_eq!(
+            input.experimental_raw,
+            Some(serde_json::json!({
+                "isolation_session": {
+                    "start": {"opaqueFutureField": true}
+                }
+            }))
+        );
+        assert_eq!(input.source_text.as_ref(), json);
+    }
+
+    #[test]
+    fn rolling_state_aware_wire_input_preserves_absent_experimental() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234"
+        }"#;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+
+        let input = parse_rolling_state_aware_wire_input(json, discriminator.experimental).unwrap();
+
+        assert!(matches!(input.config.phase, Some(wire::Phase::Start)));
+        assert_eq!(input.config.sandbox_id.as_deref(), Some("iso:abcd1234"));
+        assert!(input.config.experimental.is_none());
+        assert!(input.experimental_raw.is_none());
+        assert_eq!(input.source_text.as_ref(), json);
+    }
+
+    #[test]
+    fn rolling_state_aware_wire_input_rejects_non_object_experimental() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": 42
+        }"#;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+
+        let error = match parse_rolling_state_aware_wire_input(json, discriminator.experimental) {
+            Ok(_) => panic!("non-object experimental should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid configuration at `experimental`: expected an object"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
