@@ -70,8 +70,8 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_ci_backend_tests.ps1 -Backend <backend id>`. |
-| `linux` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_ci_backend_tests.sh <backend id>` (under `sudo` for LXC). |
+| `windows` | `A self-hosted 1ES pool` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_ci_backend_tests.ps1 -Backend <backend id>`. |
+| `linux` | `A self-hosted 1ES pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_ci_backend_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_ci_backend_tests.sh <backend id>`. No host-prep step. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
