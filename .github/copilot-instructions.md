@@ -73,7 +73,8 @@ workflows) before calling the matrix job.
 - `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
   with per-architecture target/artifact/1ES pool and the backends that platform
   supports), `triggers` (which OS/backend pairs each plan runs), and the
-  optional `backendDelayedStart` (per-backend job-start stagger, in seconds).
+  optional `backendDelayedStart` (per-backend job-start stagger, in seconds;
+  currently empty — nothing is staggered).
   The `triggers` keys *are* the plan list — the resolver reads them at run time,
   so adding a plan needs no script change.
 - `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
@@ -86,16 +87,69 @@ workflows) before calling the matrix job.
   GitHub-hosted `runner` instead of a 1ES `pool`.
 
 **Host preparation** happens in the matrix job before the tests, keyed by the
-matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
-`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
-explicit no-op, so the step runs unconditionally for every entry.
+matrix `backend` id: `scripts/ci/prepare-windows-host.ps1`,
+`scripts/ci/prepare-linux-host.sh`, and `scripts/ci/prepare-macos-host.sh`. A
+backend with no prerequisites is an explicit no-op, so the step runs
+unconditionally for every entry. Independent of the backend id, all three also
+verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
+`npx`, `python`, `pip`, `dotnet`, `az`, `gh`, `openssl`, plus `nuget`, `winapp`,
+`winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
+Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
+duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
+platform's list can diverge. Every pool runs an image provisioned ahead of time,
+so the whole list is normally present before a job starts. The provisioning
+scripts are **not in this repository** — they live in the
+`validation-provision-artifacts` branch of the ADO repo as
+`ubuntu-debian-provision.sh` / `rhel-provision.sh` (Linux) and
+`windows-provision.ps1` (Windows). No job installs a workload interpreter on any
+platform: all three scripts verify and report only, and a missing one warns
+rather than failing (except `pwsh` on Windows). A backend's own prerequisites
+are separate and are still installed per job — `install_bubblewrap` /
+`install_lxc` in `prepare-linux-host.sh` reach the package manager through
+`resolve_package_manager` and `install_packages`, so a new distribution family
+is one arm in `install_packages` rather than a branch in every installer. The
+Windows provisioning script installs
+no packaged application and never uses winget, because neither is available
+during image provisioning; it takes only `-Architecture` (`x64`/`arm64`, which
+selects the `gh` MSI and the .NET SDK bundle — the Azure CLI has no ARM64 build
+and is used emulated) and `-ScoopRoot`. It launches every installer through
+`Start-Process` rather
+than the call operator, because `msiexec` is a GUI-subsystem program for which
+the call operator leaves `$LASTEXITCODE` unset — which previously read as
+success and turned a failed install into a silent one. Windows Installer
+serializes machine-wide installs behind the `Global\_MSIExecute` mutex and
+returns 1618 to whoever arrives while another provisioning artifact holds it, so
+every MSI-touching call waits for that mutex to clear before each attempt and
+retries a 1618 up to three times. Its scope is the .NET SDK, `choco`, `scoop`,
+`az`, `gh` and `nuget`. The .NET SDK comes from the arch-matched
+`aka.ms/dotnet/LTS/dotnet-sdk-win-<arch>.exe` bundle rather than
+`dotnet-install.ps1`, because that script's only PATH write is to `$env:path` —
+it persists nothing, so an SDK it installs is on disk but resolves from nowhere
+in any later process. The remaining runtimes (`node`, `python`, `pwsh`, `git`)
+arrive from separate image artifacts, which it only inventories.
+Windows therefore provisions
+two entries at job time, also best-effort and also ahead of the inventory.
+`Repair-Winget`
+re-registers the App Installer package (`Add-AppxPackage -RegisterByFamilyName`)
+when `winget` resolves on `PATH` but fails to run, the symptom of a package the
+image shipped but never registered for the account the job runs as. It decides
+by invoking `winget --version`, not by resolving the command, since a resolvable
+alias is the broken case. `Install-PackagedTooling` then installs `winapp` and
+`openssl`, the two interpreters that cannot be baked into an image at all
+because both ship only as packaged applications; `winapp` is requested as
+`--installer-type zip` so the portable build lands on `PATH` instead of behind a
+`WindowsApps` alias the inventory's store-alias filter would reject, and
+`openssl`'s `bin` directory is appended to `PATH` afterwards because its
+installer publishes none.
 
-**Test dispatch** goes through `tests/scripts/run_ci_backend_tests.ps1`
-(Windows) and `tests/scripts/run_ci_backend_tests.sh` (Linux/macOS), which map
+**Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
+(Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map
 the matrix `backend` id to the repository's existing backend suite. Ids that
 share a suite get their own case (`process-t1` and `process-t3` both run
 `WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
-host's own `--probe`). A backend with no wired suite fails loudly rather than
+host's own `--probe`; `process-t3` additionally runs `T3-Workloads.ps1` and
+reports both suites' exit codes together, so one failing suite never hides the
+other). A backend with no wired suite fails loudly rather than
 reporting a false success. The Windows dispatcher points `TEMP` at
 `$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
 directory is picked up by the job's log upload without per-file CI wiring.
@@ -151,19 +205,20 @@ tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
-sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_ci_backend_tests.sh.
+sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_backend_validation_tests.sh.
+
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
 
 # WSLC has no cargo E2E suite — it is covered by tests\scripts\run_wslc_all_tests.ps1,
-# which the validation matrix runs via tests\scripts\run_ci_backend_tests.ps1.
+# which the validation matrix runs via scripts\ci\run_backend_validation_tests.ps1.
 
 # CI validation entry points — run a backend suite against a downloaded artifact
 # the way the validation matrix does. Take the matrix backend id exactly as it
 # appears in scripts/ci/validation-test-matrix.json.
-tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
-tests\scripts\run_ci_backend_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
+scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
+scripts\ci\run_backend_validation_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
 
 # Resolve a plan locally to see exactly what CI would schedule
 node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly

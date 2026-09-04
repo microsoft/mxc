@@ -73,7 +73,7 @@ jobs:
         timeout-minutes: 45
         shell: pwsh
         run: |
-          & ./tests/scripts/run_ci_backend_tests.ps1 `
+          & ./scripts/ci/run_backend_validation_tests.ps1 `
             -Backend '${{ matrix.backend }}' `
             -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
             -Architecture '${{ matrix.architecture }}' *>&1 |
@@ -147,11 +147,11 @@ jobs:
         run: |
           set -euo pipefail
           if [[ '${{ matrix.backend }}' == 'lxc' ]]; then
-            sudo --preserve-env=RUNNER_TEMP bash tests/scripts/run_ci_backend_tests.sh \
+            sudo --preserve-env=RUNNER_TEMP bash scripts/ci/run_backend_validation_tests.sh \
               '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
               tee -a "$RUNNER_TEMP/mxc-ci.log"
           else
-            bash tests/scripts/run_ci_backend_tests.sh \
+            bash scripts/ci/run_backend_validation_tests.sh \
               '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
               tee -a "$RUNNER_TEMP/mxc-ci.log"
           fi
@@ -195,15 +195,24 @@ jobs:
           echo "Waiting $seconds second(s) before starting tests."
           sleep "$seconds"
 
+      - name: Prepare backend prerequisites
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-macos-host.sh \
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee "$RUNNER_TEMP/mxc-ci.log"
+
       - name: Run backend tests
         timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
           chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
-          bash tests/scripts/run_ci_backend_tests.sh \
+          bash scripts/ci/run_backend_validation_tests.sh \
             '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
-            tee "$RUNNER_TEMP/mxc-ci.log"
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Upload logs
         if: always()

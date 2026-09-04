@@ -29,10 +29,11 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
-| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
-| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
-| `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
-| `tests/scripts/run_ci_backend_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
+| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the packaged-tooling install. |
+| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
+| `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
 ### Flow
 
@@ -42,9 +43,9 @@ Validation.Tests.Scheduled.yml
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_ci_backend_tests.ps1
-                 ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_ci_backend_tests.sh
-                 └─ macos   job (matrix) → download artifact →                            run_ci_backend_tests.sh
+                 ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
+                 └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
 
 An entry point **must** build the artifacts before calling the matrix job — the
@@ -70,9 +71,9 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `A self-hosted 1ES pool` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_ci_backend_tests.ps1 -Backend <backend id>`. |
-| `linux` | `A self-hosted 1ES pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_ci_backend_tests.sh <backend id>` (under `sudo` for LXC). |
-| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_ci_backend_tests.sh <backend id>`. No host-prep step. |
+| `windows` | `A self-hosted 1ES Pool` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
+| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
@@ -128,10 +129,32 @@ A backend id is passed straight through: the matrix job hands it to the host-pre
 script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
 share a suite each keep their own case so they can diverge later without a
 mapping table — `process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1` today. Teaching the Process Container test suite to 
+`WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
+`T3-Workloads.ps1`. Teaching the Process Container test suite to
 accept an explicit tier (so a T1 host can also be exercised
-at the T3 fallback) is a worthwhile future improvement; see
-[Possible future improvements](#possible-future-improvements).
+at the T3 fallback) is a worthwhile future improvement.
+
+`process-t3` runs its two suites back to back and reports them together: a
+failure in the primitives suite does not skip the workloads suite, so one job
+run shows both results instead of costing a second run to triage.
+
+The dispatcher passes `T3-Workloads.ps1` its `-GrantDriveRoot` switch. The
+pwsh- and git-driven workloads resolve the whole ancestor chain of their working
+directory at startup, so granting only the scratch leaf leaves them failing
+before they reach the behaviour under test. Granting the drive root covers the
+chain, but at T3 a policy path becomes an inheritable ACE, so it rewrites ACLs
+across the system drive on every run and again on teardown — acceptable on a
+disposable runner, which is why the switch is off by default and only CI opts
+in. Temporary until pwsh 7.7 leaves preview.
+
+The suite's git workloads also restamp the ownership of the repo they build.
+The 1ES agent runs elevated, and an elevated token's *default owner* is
+`BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
+git refuses such a repo ("detected dubious ownership") unless the caller is
+itself an elevated administrator, which a contained process never is. That is a
+property of the agent rather than of containment — the identical fixture is
+user-owned on a dev box — so the suite reowns it to the current user and keeps
+the two environments testing the same thing.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -158,12 +181,12 @@ because Seatbelt has no wired suite.
 
 ### `backendDelayedStart`
 
-Optional. Staggers the start of jobs for a named backend instead of letting
-them all begin at once:
+Optional. This section staggers the start of jobs
+for a named backend instead of letting them all begin at once:
 
 ```json
 "backendDelayedStart": [
-  { "backend": "wslc", "seconds": 300 }
+  { "backend": "wslc", "seconds": 30 }
 ]
 ```
 
@@ -173,21 +196,10 @@ traffic into a burst the moment its jobs start together. Public registries
 answer with rate limiting and stalled downloads.
 
 `seconds` is the gap between consecutive jobs of that backend, counted per
-backend and following the resolved job order. With the entry above, four WSLC
-jobs start at 0, 300, 600, and 900 seconds.
+backend and following the resolved job order. With the example entry above,
+four WSLC jobs would start at 0, 30, 60, and 90 seconds.
 
-The resolver puts the offset on every matrix entry as
-`startup_delay_seconds` — `0` where no stagger applies — and the job sleeps
-that long before its first network step. Job timeout is a flat 180 minutes,
-with plenty of room for any wait you'd reasonably configure.
-
-Leave the section out (or empty) and every job starts as soon as its runner is
-ready. A backend id that no plan schedules is accepted; it just never applies.
-
-Do keep in mind that the runner is held while it sleeps — Actions can't defer
-allocating a matrix job, so the wait has to happen inside it. Use no more than
-the contention calls for. This spreads simultaneous load and nothing else; a
-single download that stalls on its own is unaffected.
+Avoid long delays since idle runners might be harvested.
 
 ## Backend status
 
@@ -196,13 +208,13 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Prerelease Windows only. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Non-prerelease Windows builds only, until the testing suite is updated. |
+| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite. Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
-| IsolationSession | ⚠️ Blocked | `Feature_AgentSessionsBaseSupport` is not enabled on the pool image yet. |
-| Windows Sandbox | ⛔ Not scheduled | Dispatcher case is wired; no trigger entry yet. |
+| IsolationSession | ✅ Good | |
+| Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Hyperlight | ⛔ Not implemented | No suite on any platform. |
 | Seatbelt | ⛔ Not implemented | The backend itself is healthy; there is no official E2E suite to dispatch to. |
@@ -231,6 +243,12 @@ Windows optional features are **verified, never enabled**: turning one on needs 
 reboot the job cannot take, so a mis-imaged pool fails here with a pointed
 message instead of surfacing later as an opaque backend error.
 
+The script does provision two things, for every backend rather than a particular
+one: `Repair-Winget` re-registers the App Installer package when `winget` is on
+`PATH` but cannot run, and `Install-PackagedTooling` then installs `winapp` and
+`openssl`
+([below](#who-installs-what)).
+
 `prepare-linux-host.sh`:
 
 - `bubblewrap` — installs `bwrap`, `slirp4netns`, `util-linux`, and `iptables`
@@ -243,7 +261,95 @@ message instead of surfacing later as an opaque backend error.
 - `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
-macOS has no preparation step.
+Every install above goes through two shared helpers rather than its own
+package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
+`dnf`, `yum`, or `microdnf` on the host and caches it, and `install_packages`
+holds the single `case` that knows how each one is invoked. Supporting a new
+distribution family is therefore one new arm in `install_packages`, not another
+branch in every installer. `install_packages` returns the package manager's own
+status rather than acting on it, so each caller decides what a failure means.
+
+`prepare-macos-host.sh`:
+
+- `seatbelt` — asserts `mxc-exec-mac` shipped. The sandbox is part of the OS, so
+  there is nothing to install; the script exists so macOS has the same shape as
+  the other two and a future prerequisite has an obvious home.
+
+Every one of the three scripts also takes the workload-interpreter inventory
+([below](#workload-interpreters)) before it dispatches on the backend id.
+
+### Workload interpreters
+
+Some suites do not just exercise MXC's primitives — they run *real programs*
+inside the sandbox and assert on what those programs produce. Each preparation
+script inventories those programs on the host up front, so a missing one is
+reported once, as a preparation result, rather than repeatedly as a confusing
+mid-suite failure.
+
+#### The list
+
+| Interpreter | Platforms | Version | Notes |
+|-------------|-----------|---------|-------|
+| `pwsh` | all | Latest 7.x | The only entry whose absence fails a job, and only on Windows. |
+| `git` | all | Latest | |
+| `node`, `npm`, `npx` | all | 24.x | `npm` and `npx` arrive with Node. |
+| `python`, `pip` | all | Latest | Windows tries `python` first, Unix `python3`. |
+| `dotnet` | all | Latest LTS | Currently 10.x, from the `LTS` channel — resolved at image-build time, not pinned. |
+| `az` | all | Latest | No ARM64 Windows build exists; ARM64 images get the x64 one under emulation. |
+| `gh` | all | Latest | |
+| `openssl` | all | Latest | On Windows, installed per job — see below. |
+| `nuget` | Windows | Latest | Unix reaches NuGet through `dotnet nuget`, so looking for a binary there would warn forever. |
+| `winapp` | Windows | Latest | The Windows App Development CLI. Installed per job — see below. |
+| `winget` | Windows | Image | The only entry allowed to resolve inside `WindowsApps`. |
+| `scoop`, `choco` | Windows | Latest | |
+| `brew` | macOS | Latest | |
+
+Nothing is pinned: every entry is whatever was current when the image was built,
+within the constraint in the Version column. Only Node is held to a major
+version, because the SDK targets it.
+
+The list is **suite-agnostic by design** and is checked for every backend, not
+only the ones whose suites need it today: it describes what a validation *host*
+provides, not what any one suite consumes. `T3-Workloads.ps1` is simply the
+first caller, and wiring up the next one needs no change here.
+
+Each script carries its own copy — `Assert-WorkloadInterpreters` in
+`prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
+scripts — so the platform lists can diverge.
+
+#### Missing means a warning, not a failure
+
+Only `pwsh` on Windows is required; everything else warns, because suites are
+expected to report their dependent cases as skipped rather than failing. Nothing
+is required on Unix yet.
+
+The cost is that an absent interpreter silently shrinks coverage while the job
+still shows green. GitHub's pass/fail icon cannot express "passed, but with less
+coverage than yesterday" — a future test-analysis portal is intended to surface
+skip counts so that erosion is visible.
+
+On Windows a command resolving under `WindowsApps` does not count. That is
+normally a Microsoft Store `AppExecutionAlias` stub: a 0-byte redirect that
+opens the Store rather than running. App Installer legitimately ships `winget`
+that way, and a working alias is indistinguishable from a stub — both are 0-byte
+reparse points — so `winget` alone opts out of the filter.
+
+#### Who installs what
+
+Every pool runs images pre-provisioned with programs installed by
+`ubuntu-debian-provision.sh` / `rhel-provision.sh` for Linux and 
+`windows-provision.ps1` for Windows. These scripts are located in the
+`validation-provision-artifacts` branch in the ADO repo. On Windows that
+script covers `dotnet`, `choco`, `scoop`, `az`, `gh` and `nuget`; the remaining
+runtimes (`node`, `python`, `pwsh`, `git`) come from separate image artifacts.
+
+During the start of a job, the installed programs are inventoried; no job
+installs a workload interpreter. Windows is the one exception, installing
+OpenSSL and WinApp via the repaired WinGet, because both are published as
+packaged applications.
+
+A backend's own prerequisites are separate and are still installed per job by
+`prepare-linux-host.sh` — see [Host preparation](#host-preparation).
 
 ## Log collection
 
@@ -256,7 +362,7 @@ scratch trees, transcripts, and results files under the user's temp directory
 `${{ runner.temp }}` (`C:\a\_work\_temp`). Anything left in the former is simply
 never collected, which is why the artifact used to arrive nearly empty.
 
-So `run_ci_backend_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
+So `run_backend_validation_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
 it dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
 processes all read those variables, so everything temp-rooted lands in the
 upload directory without CI having to know a single filename.
@@ -300,13 +406,13 @@ test runner is allocated.
 1. **Catalog:** add the id to the `backends` list of every platform/arch that
    can run it. There is no separate registration step — the id *is* the
    dispatcher argument.
-2. **Dispatcher:** add a case to `run_ci_backend_tests.ps1` (`ValidateSet` +
-   `switch`) or `run_ci_backend_tests.sh` (`usage` + `case`), pointing at the
+2. **Dispatcher:** add a case to `run_backend_validation_tests.ps1` (`ValidateSet` +
+   `switch`) or `run_backend_validation_tests.sh` (`usage` + `case`), pointing at the
    suite. Until a suite exists, leave the explicit throw / `exit 2` so
    accidental activation fails loudly.
 3. **Host prep:** add a branch to `prepare-windows-host.ps1` (`ValidateSet` +
-   `switch`) or `prepare-linux-host.sh` (`usage` + `case`). Skip only if there
-   is genuinely nothing to install or assert.
+   `switch`), `prepare-linux-host.sh`, or `prepare-macos-host.sh` (`usage` +
+   `case`). Skip only if there is genuinely nothing to install or assert.
 4. **Artifact:** make sure everything the suite needs is in the
    `Upload binaries` list of the relevant `Build.*.Job.yml`, and that the build
    enables the backend's cargo feature.
@@ -326,7 +432,10 @@ passing a distinguishing argument later without touching the matrix.
 3. For a Windows prerelease image set `"prerelease": true` and use a neutral
    `windows-prerelease-<name>` id — the id appears in public job names.
 4. For a new Linux distro, check that `prepare-linux-host.sh` handles its
-   package manager and service layout.
+   package manager and service layout. A new package-manager family needs one
+   arm in `install_packages` and one entry in `resolve_package_manager`; a
+   family whose package *names* differ also needs its column in the tables in
+   `install_lxc` and `install_bubblewrap`.
 5. Add it to a plan's `triggers`, then resolve locally.
 
 ### Wire an unwired backend to a suite

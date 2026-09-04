@@ -71,7 +71,7 @@
     },
     {
       "id": "windows-canary",
-      "displayName": "Windows canary",
+      "displayName": "Windows Canary",
       "family": "windows",
       "architectures": {
         "x64": {
@@ -79,9 +79,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "",
           "backends": [
-            "process-t1",
             "process-t3",
-            "isolation-session",
             "wslc",
             "windows-sandbox",
             "microvm",
@@ -93,9 +91,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "",
           "backends": [
-            "process-t1",
             "process-t3",
-            "isolation-session",
             "wslc",
             "windows-sandbox"
           ]
@@ -325,12 +321,7 @@
       }
     }
   ],
-  "backendDelayedStart": [
-    {
-      "backend": "wslc",
-      "seconds": 45
-    }
-  ],
+  "backendDelayedStart": [],
   "triggers": {
     "pr": [],
     "nightly": [
