@@ -56,9 +56,9 @@ The pipeline supports both test-signed validation artifacts and
 production-signed release candidates. Release-candidate runs use MXC's approved
 `CP-230012` production signing policy, build and sign once, publish the
 immutable pipeline artifacts, and then wait on the configured Azure Pipelines
-manual validation and environment approval. Resume and approve those gates only
-after supported-SF2 qualification confirms the matching MSI and SDK hashes and
-the inbox `IsoSessionCore.dll` contract.
+manual validation. Resume that gate only after supported-SF2 qualification
+confirms the matching MSI and SDK hashes and the inbox `IsoSessionCore.dll`
+contract.
 
 After approval, the same run can publish the SDK to the restricted Azure
 Artifacts feed. The production-signed x64 and ARM64 MSI/bootstrapper files

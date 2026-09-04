@@ -61,10 +61,6 @@ parameters:
   displayName: Hold this run for approved internal publication
   type: boolean
   default: false
-- name: promotionEnvironment
-  displayName: Azure Pipelines environment that approves internal publication
-  type: string
-  default: IsoSession-Internal-Release
 - name: manualValidationNotifyUsers
   displayName: Manual validation notification recipients
   type: string
@@ -186,24 +182,9 @@ extends:
                 from System32.
               onTimeout: reject
 
-        - deployment: approve_isosession_internal_release
-          displayName: Approve qualified internal release
-          dependsOn: wait_for_isosession_qualification
-          environment: ${{ parameters.promotionEnvironment }}
-          strategy:
-            runOnce:
-              deploy:
-                steps:
-                - checkout: none
-
-                - powershell: |
-                    Write-Host 'Internal release approval recorded.'
-                    Write-Host 'Approve only after the matching MSI and SDK hashes pass supported-SF2 VM qualification.'
-                  displayName: Record release approval
-
         - job: validate_and_publish_isosession_sdk
           displayName: Validate and publish the internal SDK package
-          dependsOn: approve_isosession_internal_release
+          dependsOn: wait_for_isosession_qualification
           variables:
             publishDirectory: $(Pipeline.Workspace)/isosession-publish
           steps:
