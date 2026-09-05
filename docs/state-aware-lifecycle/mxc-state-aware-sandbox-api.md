@@ -1139,7 +1139,7 @@ wire deserialization, and produces:
 ```rust
 StateAwareWireInput {
     config,             // common wire fields; experimental is always None
-    experimental_raw,   // lossless backend payload and telemetry source
+    experimental_raw,   // lossless backend payload
     source_text,        // exact decoded request text
 }
 ```
@@ -1178,8 +1178,8 @@ Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
 `script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
-telemetry is populated from `experimental_raw`; the same raw object remains
-available for backend phase configuration. The state-aware-only fields
+telemetry is populated from the neutral config's top-level `config.telemetry`;
+`experimental_raw` remains available for backend phase configuration. The state-aware-only fields
 (`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are bundled with the
 `ExecutionRequest` in a
 `ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
