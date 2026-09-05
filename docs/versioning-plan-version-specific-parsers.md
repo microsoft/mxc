@@ -1,19 +1,27 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
-and merged: Phase 5A in PR #909, Phase 5B in PR #910, Phase 5C in PR #929,
-Phase 5D in PR #941, the Phase 5A review follow-up in PR #949, and the
-capabilities parity remediation in PR #966. Phase 6 merged in PR #968. The
-legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
-reconstructed its exact Rust contract and advanced exact development to
-`0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
-PR #969. Phase 7.2 is complete on
-`user/gudge/version_specific_config_parsers_phase7b` at `840f8c07` and is open
-as PR #1091, stacked on #969. Phase 7.3 is complete in PR #1096, and Phases
-7.4 is complete in PR #1097, stacked on #1096. Phase 7.5 is complete on the
-dedicated plan branch. Phases 8-9.5 and 10-11 remain; the planned end state
-publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
+Status: implementation plan and decision record. Phases 1-6.5 are merged
+through PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941,
+#949, #966, #968, and #1027. The legacy rolling-model v0.8 release shipped
+from tag `v0.8.0`; Phase 6.5 reconstructed its exact Rust contract and
+advanced exact development to `0.9.0-alpha`.
+
+The current implementation stack is complete and open for review:
+
+| Scope | PR | Published tip |
+| --- | --- | --- |
+| Phase 7a: command-before-parse integration | #969 | `aa6c12d3` |
+| Phase 7.2: shared state-aware normalization | #1091 | `656213ec` |
+| Phase 7.3: private exact parser and builders | #1096 | `825490f2` |
+| Phase 7.4: differential equivalence harness | #1097 | `4fb1d177` |
+| Phase 8: producer and corpus migration | #1099 | `8c19352e` |
+| Phase 9: authoritative exact dispatch | #1104 | `7e8ee675` |
+
+All six branches were rebased in stack order onto `origin/main` at `29702c3a`,
+validated, and published with explicit force-with-lease on 2026-09-04. Phase
+7.5 is maintained on this dedicated plan branch. Phases 9.5-11 remain; the
+planned end state publishes `0.9.0-alpha` and opens `0.10.0-alpha`
+development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -128,7 +136,7 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 | Version model | a range, `min` to `maxSupported` | an exact enum |
 | Artifacts | `…0.9.0-dev.json`, `generated/wire.ts` | immutable published modules plus `…0.9.0-alpha.json` and `generated/v0_9_0_alpha/wire.ts` |
 | Gates | `check-schema-versions`, `check-schema-codegen`, `validate-configs` | `check-contract-codegen` |
-| Enforced at runtime | yes, parser and SDK | no, until Phase 9 |
+| Enforced at runtime | yes through Phase 8 | yes beginning with Phase 9 |
 
 #### Current resolution
 
@@ -138,7 +146,8 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 - Both rolling and exact development now use the v0.9 line, with `-dev` reserved
   for rolling artifacts and `-alpha` used by exact contracts.
 - The exact codegen gate covers mutable development artifacts only.
-- Runtime range metadata remains rolling until exact dispatch takes over.
+- The Phase 9 implementation stack makes exact registry dispatch authoritative
+  and retains rolling parsing only as a test oracle.
 - Phase 11 still replaces duplicated version metadata and adds general
   published-contract freeze/digest enforcement.
 
@@ -808,6 +817,10 @@ published v0.6/v0.7/v0.8 syntax remains immutable.
 
 ### Phase 8: Migrate producers and the config corpus
 
+Status: complete at `8c19352e` on
+`user/gudge/version_specific_config_parsers_phase8`, open as PR #1099 and
+stacked on Phase 7.4 PR #1097.
+
 Do not rely on the original base-commit counts; the corpus changes frequently.
 Regenerate and check in an inventory report at the start of this phase,
 covering configs, examples, SDK producers, state-aware envelopes, and schema
@@ -844,19 +857,19 @@ uses a shape that its declared exact contract cannot express.
 
 | Item | File | Edit type | Work | Status |
 | --- | --- | --- | --- | --- |
-| 8a | `docs/versioning-phase8-migration-inventory.md` plus the corpus and producer directories below | Addition and audit | Regenerate the inventory from the Phase 7d tip. For each input record its request kind, current declaration, exact classification, target declaration, schema reference, and owning producer. Retain the report as the review and migration audit record | Not started |
-| 8b | `tests/configs/**/*.json`, `tests/examples/**/*.json`, `tests/policy/**/*.json` | JSON changes | Assign an exact version to all 55 documents with no declaration. Stable one-shot documents select the earliest published contract that expresses their shape; development containment, experimental, and state-aware documents select `0.9.0-alpha` | Not started |
-| 8c | The 45 explicitly inventoried development-containment documents | JSON changes | Replace their published declaration with `0.9.0-alpha`; do not change the containment or policy merely to fit an older contract | Not started |
-| 8d | The two explicitly inventoried published-experimental documents | JSON changes | Move them to `0.9.0-alpha` while preserving the experimental payload | Not started |
-| 8e | The 21 explicitly inventoried published state-aware documents | JSON changes | Move provision, start, exec, stop, and deprovision envelopes to `0.9.0-alpha` | Not started |
-| 8f | `tests/configs/wslc_destroy_on_exit_false.json`, `tests/configs/wslc_destroy_on_exit_true.json` | JSON changes | Migrate the two WSLC documents whose first exact rejection is `_comment`; preserve the annotation and record that containment becomes the next structural distinction | Not started |
-| 8g | `sdk/node/src/state-aware-helper.ts`, `sdk/node/tests/unit/state-aware.test.ts`, `sdk/node/tests/unit/state-aware-types.test.ts`, development-backend cases in `sdk/node/tests/unit/sandbox.test.ts`, and applicable Node examples/README sections | TypeScript, tests, and documentation | Change state-aware and development-only producers from `0.6.0-alpha` to `0.9.0-alpha`. Keep stable one-shot minimum-version and compatibility coverage on its published version | Not started |
-| 8h | `sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs`, `sdk/dotnet/Microsoft.Mxc.Sdk.Tests/MxcLifecycleTests.cs`, and `sdk/dotnet/README.md` | C#, tests, and documentation | Change `SchemaVersions.StateAware` and lifecycle producer expectations to `0.9.0-alpha`; do not change `SchemaVersions.Minimum` | Not started |
-| 8i | `src/core/mxc-sdk/examples/**/*.rs`, `src/core/mxc-sdk/tests/**/*.rs`, FFI request/state-aware tests under `src/ffi/mxc_ffi`, and `tests/policy/**/*.json` | Rust, tests, and JSON changes | Migrate state-aware and development-backend producers and fixtures while retaining published-version compatibility tests | Not started |
-| 8j | `$schema` members under `tests/configs` and `tests/examples`, SDK documentation links, and editor examples | JSON and documentation changes | Make every schema reference agree with its document's selected exact version. Do not add `$schema` solely to satisfy the parser; add or change it only where the document already carries or documents an editor schema reference | Not started |
-| 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each declaration-only migration from the exact-stricter inventory. Keep the focused non-corpus divergence tests and the seven explicitly recorded development-contract tightenings below. Any unclassified, exact-looser, or runtime-model divergence must fail with its path and classification | Not started |
-| 8l | Rust workspace, `sdk/node`, `sdk/dotnet`, FFI, schema/versioning scripts, and corpus validators | Validation | Run the complete validation matrix below and repair producer expectations without weakening exact contracts or the differential harness | Not started |
-| 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Not started |
+| 8a | `docs/version-specific-parser-migration-inventory.md` plus the corpus and producer directories below | Addition and audit | Regenerate the inventory from the Phase 7d tip. For each input record its request kind, current declaration, exact classification, target declaration, schema reference, and owning producer. Retain the report as the review and migration audit record | Complete in #1099 |
+| 8b | `tests/configs/**/*.json`, `tests/examples/**/*.json`, `tests/policy/**/*.json` | JSON changes | Assign an exact version to all 55 documents with no declaration. Stable one-shot documents select the earliest published contract that expresses their shape; development containment, experimental, and state-aware documents select `0.9.0-alpha` | Complete in #1099 |
+| 8c | The 45 explicitly inventoried development-containment documents | JSON changes | Replace their published declaration with `0.9.0-alpha`; do not change the containment or policy merely to fit an older contract | Complete in #1099 |
+| 8d | The two explicitly inventoried published-experimental documents | JSON changes | Move them to `0.9.0-alpha` while preserving the experimental payload | Complete in #1099 |
+| 8e | The 21 explicitly inventoried published state-aware documents | JSON changes | Move provision, start, exec, stop, and deprovision envelopes to `0.9.0-alpha` | Complete in #1099 |
+| 8f | `tests/configs/wslc_destroy_on_exit_false.json`, `tests/configs/wslc_destroy_on_exit_true.json` | JSON changes | Migrate the two WSLC documents whose first exact rejection is `_comment`; preserve the annotation and record that containment becomes the next structural distinction | Complete in #1099 |
+| 8g | `sdk/node/src/state-aware-helper.ts`, `sdk/node/tests/unit/state-aware.test.ts`, `sdk/node/tests/unit/state-aware-types.test.ts`, development-backend cases in `sdk/node/tests/unit/sandbox.test.ts`, and applicable Node examples/README sections | TypeScript, tests, and documentation | Change state-aware and development-only producers from `0.6.0-alpha` to `0.9.0-alpha`. Keep stable one-shot minimum-version and compatibility coverage on its published version | Complete in #1099 |
+| 8h | `sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs`, `sdk/dotnet/Microsoft.Mxc.Sdk.Tests/MxcLifecycleTests.cs`, and `sdk/dotnet/README.md` | C#, tests, and documentation | Change `SchemaVersions.StateAware` and lifecycle producer expectations to `0.9.0-alpha`; do not change `SchemaVersions.Minimum` | Complete in #1099 |
+| 8i | `src/core/mxc-sdk/examples/**/*.rs`, `src/core/mxc-sdk/tests/**/*.rs`, FFI request/state-aware tests under `src/ffi/mxc_ffi`, and `tests/policy/**/*.json` | Rust, tests, and JSON changes | Migrate state-aware and development-backend producers and fixtures while retaining published-version compatibility tests | Complete in #1099 |
+| 8j | `$schema` members under `tests/configs` and `tests/examples`, SDK documentation links, and editor examples | JSON and documentation changes | Make every schema reference agree with its document's selected exact version. Do not add `$schema` solely to satisfy the parser; add or change it only where the document already carries or documents an editor schema reference | Complete in #1099 |
+| 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each declaration-only migration from the exact-stricter inventory. Keep the focused non-corpus divergence tests and the seven explicitly recorded development-contract tightenings below. Any unclassified, exact-looser, or runtime-model divergence must fail with its path and classification | Complete in #1099 |
+| 8l | Rust workspace, `sdk/node`, `sdk/dotnet`, FFI, schema/versioning scripts, and corpus validators | Validation | Run the complete validation matrix below and repair producer expectations without weakening exact contracts or the differential harness | Complete in #1099 |
+| 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Complete at `8c19352e` in #1099 |
 
 #### Phase 8 authority and compatibility boundaries
 
@@ -950,6 +963,10 @@ This step is primarily mechanical and is suitable for delegation.
 
 ### Phase 9: Enable exact dispatch
 
+Status: complete at `7e8ee675` on
+`user/gudge/version_specific_config_parsers_phase9a`, open as PR #1104 and
+stacked on Phase 8 PR #1099.
+
 Replace the major/minor range check with exact registry dispatch.
 
 **Adopted 2026-09-03:** the declared exact version is sufficient authorization
@@ -985,6 +1002,16 @@ Exact dispatch must be authoritative before the v0.9 stable-candidate contract
 removes legacy Network syntax. This sequencing protects all published
 v0.6/v0.7/v0.8 callers from the version-insensitive breaking-change failure
 mode that caused PR #676 to be reverted.
+
+The implementation makes the exact parser authoritative for CLI, probe,
+one-shot, state-aware, Rust SDK, and FFI request construction. Input sources
+are still decoded once, and CLI command overrides are spliced into the source
+before exact typed parsing. Stable top-level telemetry remains outside
+`experimental`, and obsolete `experimental.telemetry` receives a focused
+migration diagnostic. Public SDK version properties remain strings; exact
+registered-version enforcement is private runtime behavior rather than a
+premature handwritten public version registry. The rolling parser and rolling
+builders remain only as test oracles.
 
 ### Phase 9.5: Replace raw state-aware dispatch payloads
 
@@ -1168,25 +1195,25 @@ Good tasks to delegate:
 - SDK constants and documentation sweeps
 - CI JavaScript updates
 
-### Remaining implementation PR plan
+### Implementation PR plan
 
-**Adopted 2026-09-02.** The remaining work uses ten reviewable PRs rather than
-one PR per fine-grained work item or one very large PR per major phase. Each PR
-must build and test green on its own; later PRs may be stacked while review is
-in progress, but merge in the order below.
+**Adopted 2026-09-02; status updated 2026-09-04.** The work uses ten reviewable
+PRs rather than one PR per fine-grained work item or one very large PR per
+major phase. Each PR must build and test green on its own; later PRs may be
+stacked while review is in progress, but merge in the order below.
 
-| PR | Plan scope | Boundary |
-| --- | --- | --- |
-| 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests |
-| 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders |
-| 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory |
-| 4 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references |
-| 5 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization |
-| 6 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads |
-| 7 | Phase 10a | Add the IsolationSession acknowledgment and canonical runtime preparation without removing legacy v0.9 input yet |
-| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation |
-| 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state |
-| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling metadata |
+| Sequence / PR | Plan scope | Boundary | Status |
+| --- | --- | --- | --- |
+| 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests | Complete at `656213ec` |
+| 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders | Complete at `825490f2` |
+| 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory | Complete at `4fb1d177` |
+| 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Complete at `8c19352e` |
+| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `7e8ee675` |
+| 6 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Not started |
+| 7 | Phase 10a | Add the IsolationSession acknowledgment and canonical runtime preparation without removing legacy v0.9 input yet | Not started |
+| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Not started |
+| 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state | Not started |
+| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling metadata | Not started |
 
 Phase 10's internal subphases are detailed in Appendix C. Phase 11a is
 deliberately additive so publication mechanics can be reviewed before they
@@ -2524,9 +2551,10 @@ coverage, and updated the user and architecture documentation. They were
 squashed on 2026-09-02 as `499fcda8`, then rebased onto `origin/main` at
 `878936a4` and verified again. The presquash history is retained on
 `backup/version_specific_config_parsers_phase7a_redux_presquash-993a651a`.
-The local and remote `user/gudge/version_specific_config_parsers_phase7a` refs
-were moved to the rebased tip `2675e624` with `--force-with-lease`, so PR #969
-now points to the converged implementation.
+The stack was most recently rebased onto `origin/main` at `29702c3a` and the
+local and remote `user/gudge/version_specific_config_parsers_phase7a` refs were
+moved to `aa6c12d3` with `--force-with-lease`, so PR #969 points to the
+validated converged implementation.
 
 The squashed commit covers the steps the plan broke out separately:
 
@@ -2605,9 +2633,9 @@ reads `RUSTDOCFLAGS`, so deleting a documented item breaks intra-doc links that
 no other gate reports. Second, the repository has 11 pre-existing broken
 intra-doc links, so compare against a baseline rather than requiring zero.
 
-Phases 7.2 through 7.5 remain. The parser-parity remediation that paused the
-phase is PR #966, which is open against `main`; see "Phase 6 review finding:
-contract value-rule gaps".
+Phases 7.2 through 7.5 are complete. The parser-parity remediation that paused
+the work merged in PR #966; see "Phase 6 review finding: contract value-rule
+gaps".
 
 #### Phase 7 step breakdown
 
@@ -2756,7 +2784,7 @@ backend is known is the defect this design exists to prevent.
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7b` at `840f8c07`; open as
+`user/gudge/version_specific_config_parsers_phase7b` at `656213ec`; open as
 PR #1091, stacked on Phase 7a PR #969.
 
 Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
@@ -2822,7 +2850,7 @@ branch.
 ##### Phase 7.3: Add the private exact-contract path
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7c` at `f790ec76`, stacked on
+`user/gudge/version_specific_config_parsers_phase7c` at `825490f2`, stacked on
 the Phase 7.2 branch and open as PR #1096. The development commits were
 squashed on 2026-09-03; their original history is retained locally on
 `backup/version_specific_config_parsers_phase7c_presquash-764a9850`.
@@ -2880,7 +2908,8 @@ The Phase 7c development sequence was:
 | 7c-d | Test-only per-version Rust policy builders and rolling parity oracle |
 | 7c-e | SDK, authoring, versioning, and architecture documentation |
 
-The final squashed commit is `f790ec76` (`Add private exact contract parsing`).
+The original squashed commit was `f790ec76`; the current rebased tip is
+`825490f2` (`Add private exact contract parsing`).
 The earlier exact-production variant is retained locally on
 `backup/version_specific_config_parsers_phase7c_exact-production-27717182`.
 
@@ -2891,7 +2920,7 @@ The full Rust workspace format, compile, clippy, and test gates pass. The
 
 ##### Phase 7.4: Build the equivalence harness and classify differences
 
-Status: complete at `225977f2` on
+Status: complete at `4fb1d177` on
 `user/gudge/version_specific_config_parsers_phase7d`, open as PR #1097 and
 stacked on Phase 7.3 PR #1096.
 
