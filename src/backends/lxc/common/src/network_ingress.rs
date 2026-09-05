@@ -5,15 +5,14 @@
 //! own network namespace.
 //!
 //! Implements the `allowLocalNetwork` inbound control for the LXC backend:
-//! host-to-container and external inbound traffic is dropped by default. This
+//! host-to-container and external inbound traffic is dropped by default.  This
 //! is a **separate, orthogonal chain** from the egress control in
-//! [`crate::network_iptables`]: the egress chain lives in the host netns, is
-//! hooked into `FORWARD` on the container's veth interface, and filters by
-//! destination; this ingress chain lives in the *container's* netns (reached
-//! via `nsenter -t <init-pid> -n`), is hooked into `INPUT`, and filters by
-//! connection state. The two chains share only main's chain-naming and IPv6
-//! probing machinery, and they carry distinct chain names
-//! ([`ingress_chain_name_for`] vs
+//! [`crate::network_iptables`]: both live in the *container's* netns, reached
+//! via `nsenter -t <init-pid> -n`.  The egress chain is hooked into `OUTPUT`
+//! and filters by destination; this ingress chain is hooked into `INPUT` and
+//! filters by connection state.  The two chains share only main's
+//! chain-naming and IPv6 probing machinery, and they carry distinct chain
+//! names ([`ingress_chain_name_for`] vs
 //! [`chain_name_for`](crate::network_iptables::chain_name_for)) so neither can
 //! ever tear down or collide with the other.
 //!
@@ -34,21 +33,20 @@
 //! cannot run, the inbound deny is unenforceable for that family, so the run
 //! fails closed rather than silently leaving IPv6 open.
 //!
-//! **Permissive path is not yet implemented.** Three settings ask for
-//! reachability the deny path withholds: `allowLocalNetwork: true`, its 0.8
-//! successor `network.ingress.default: "allow"`, and
-//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8, has no 0.7
-//! equivalent, and governs host-loopback traffic in both directions. LXC has a
-//! single inbound chain and the policy carries no way to narrow an accept to
-//! particular ports, sources, or interfaces, so the only rule available today
-//! is an unscoped `--state NEW -j ACCEPT` accepting inbound from every
-//! interface and source, LAN and WAN included. Rather than install that
-//! silently, [`IngressManager::apply_firewall_rules`] returns a
-//! not-yet-implemented error naming the field the operator wrote. Honoring the
-//! host-loopback field on its own additionally needs cross-namespace plumbing
-//! in both directions — the container's `127.0.0.1` is not the host's — and a
-//! runtime port-mapping contract the allow/deny policy does not carry, tracked
-//! as AB#63505947. The internal rule *builder* still supports both toggle
+//! **Permissive path is not yet implemented.** Three settings ask for the
+//! sandboxed process to bind, listen, and accept incoming connections:
+//! `allowLocalNetwork: true`, its 0.8 successor
+//! `network.ingress.default: "allow"`, and
+//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8 and has no 0.7
+//! equivalent. LXC has a single inbound chain and the policy carries no way to
+//! narrow an accept to particular ports, sources, or interfaces, so the only
+//! rule available today is an unscoped
+//! `--state NEW -j ACCEPT` accepting inbound from every interface and source, LAN
+//! and WAN included. Rather than install that silently,
+//! [`IngressManager::apply_firewall_rules`] returns a not-yet-implemented error
+//! naming the field the operator wrote. Scoping the host-loopback field on its own
+//! additionally needs a `loopbackPorts` policy field and an MXC-owned forwarder,
+//! tracked as AB#63505947. The internal rule *builder* still supports both toggle
 //! values so the decision table is testable.
 //!
 //! **Why the container netns.** A packet destined to a container socket
@@ -65,7 +63,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::network_iptables::{
-    ingress_chain_name_for, installs_firewall, HostIpv6State, Ip6tablesStatus,
+    ingress_chain_name_for, plan_network, uses_directional_keys, HostIpv6State, Ip6tablesStatus,
     NetworkIptablesManager,
 };
 
@@ -185,11 +183,6 @@ pub struct IngressManager {
     /// not only by the runner's explicit teardown call, because `Drop` fires on
     /// every path out of the run and would otherwise silently undo the request.
     preserve_policy: bool,
-    /// True when the request declared the directional (0.8) network schema.
-    /// Required at construction: unlike the egress manager there is no legacy
-    /// caller to default for, and a run that forgot to state it would silently
-    /// enforce the wrong schema.
-    uses_directional_schema: bool,
 }
 
 /// The outcome of a single `iptables`/`ip6tables` invocation, structured so the
@@ -417,7 +410,7 @@ impl IngressManager {
     ///
     /// The PID is required: the chain is enforced inside the container's own
     /// netns, so there is no way to install or probe it without one.
-    pub fn new(container_name: &str, netns_pid: u32, uses_directional_schema: bool) -> Self {
+    pub fn new(container_name: &str, netns_pid: u32) -> Self {
         Self {
             chain_name: ingress_chain_name_for(container_name),
             netns_pid,
@@ -426,7 +419,6 @@ impl IngressManager {
             v4_hooked: false,
             v6_hooked: false,
             preserve_policy: false,
-            uses_directional_schema,
         }
     }
 
@@ -511,9 +503,9 @@ impl IngressManager {
     /// legacy schema.
     fn stated_ingress(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&NetworkIngressPolicy> {
-        if uses_directional_schema {
+        if uses_directional_keys {
             policy.network_ingress.as_ref()
         } else {
             None
@@ -528,9 +520,9 @@ impl IngressManager {
     /// LXC's single inbound chain refuses either `allow` value alike.
     fn permissive_inbound_field(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&'static str> {
-        if let Some(ingress) = Self::stated_ingress(policy, uses_directional_schema) {
+        if let Some(ingress) = Self::stated_ingress(policy, uses_directional_keys) {
             if ingress.default == NetworkAction::Allow {
                 return Some("network.ingress.default");
             }
@@ -553,8 +545,8 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_schema = self.uses_directional_schema;
-        if !installs_firewall(policy, uses_directional_schema) {
+        let uses_directional_keys = uses_directional_keys(policy);
+        if !plan_network(policy).installs_firewall() {
             logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
         }
@@ -564,7 +556,7 @@ impl IngressManager {
         // claimed is a promise to either enforce the field or reject it.
         // Unconditional: we always have a real container netns to hook (the PID
         // is mandatory), so there is no inert path that could safely emit it.
-        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_schema) {
+        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_keys) {
             return Err(format!(
                 "{field} asks for permissive inbound, which is not yet implemented for \
                  the LXC firewall path. LXC has a single inbound chain and the policy \
@@ -580,7 +572,7 @@ impl IngressManager {
             "Creating inbound iptables chain: {}",
             self.chain_name
         ));
-        let inbound_field = if uses_directional_schema {
+        let inbound_field = if uses_directional_keys {
             "network.ingress"
         } else {
             "allowLocalNetwork"
@@ -626,7 +618,7 @@ impl IngressManager {
         let ipv4_rules = Self::build_ingress_rules(
             &self.chain_name,
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             IpFamily::V4,
         );
 
@@ -648,7 +640,7 @@ impl IngressManager {
             let ipv6_rules = Self::build_ingress_rules(
                 &self.chain_name,
                 policy,
-                uses_directional_schema,
+                uses_directional_keys,
                 IpFamily::V6,
             );
             self.install_family(IpFamily::V6, &ipv6_rules, &mut runner, logger)?;
@@ -799,7 +791,7 @@ impl IngressManager {
     fn build_ingress_rules(
         chain: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         family: IpFamily,
     ) -> IngressRules {
         fn argv(args: &[&str]) -> Vec<String> {
@@ -854,7 +846,7 @@ impl IngressManager {
         // Accept or drop NEW inbound connections to the container's listening
         // sockets. A permissive request is refused before any rule is built.
         let inbound_verb =
-            if Self::permissive_inbound_field(policy, uses_directional_schema).is_some() {
+            if Self::permissive_inbound_field(policy, uses_directional_keys).is_some() {
                 accept
             } else {
                 drop
@@ -1095,9 +1087,7 @@ impl IngressManager {
     /// cleanup where we do not know what a dead run installed. Used by
     /// [`Self::force_cleanup`].
     fn for_full_reset(container_name: &str, netns_pid: u32) -> Self {
-        // Teardown removes whatever is there; no rule is built, so the schema
-        // this manager reports is never read.
-        let mut mgr = Self::new(container_name, netns_pid, false);
+        let mut mgr = Self::new(container_name, netns_pid);
         mgr.v4_chain_created = true;
         mgr.v6_chain_created = true;
         mgr.v4_hooked = true;
@@ -1152,56 +1142,10 @@ impl IngressManager {
     fn container_ipv6_state(&self) -> HostIpv6State {
         let if_inet6 = format!("/proc/{}/net/if_inet6", self.netns_pid);
         let proc_net = format!("/proc/{}/net", self.netns_pid);
-        Self::classify_container_ipv6_state(
+        NetworkIptablesManager::classify_container_ipv6_state(
             std::fs::read_to_string(&if_inet6),
             std::path::Path::new(&proc_net).is_dir(),
         )
-    }
-
-    /// Classify the container namespace's IPv6 state from a
-    /// `/proc/<pid>/net/if_inet6` read.
-    ///
-    /// Deliberately **not** [`NetworkIptablesManager::classify_host_ipv6_state`].
-    /// That classifier inspects the file's *contents* — an address list — and
-    /// reports `Inactive` when nothing but `lo` is present.  For a long-lived
-    /// host that is a fair reading.  For a container it is a fail-open race:
-    /// `wait_for_network` returns on the first address of *any* family and its
-    /// return value is discarded, so a container whose IPv6 address has not
-    /// arrived yet presents exactly the same address-less file as one with IPv6
-    /// switched off.  Reading that as `Inactive` lets an unusable `ip6tables`
-    /// take the IPv4-only path, leaving the IPv6 address that arrives a moment
-    /// later unfiltered inbound — the fail-open this module exists to close.
-    ///
-    /// Existence is the stable signal; contents are the volatile one.  The
-    /// kernel never creates `if_inet6` when IPv6 is disabled at boot (see
-    /// [`HostIpv6State::Inactive`]), so the file being present — even with no
-    /// addresses yet — means the stack is there, and only its absence is
-    /// evidence of "off".
-    ///
-    /// Strictly more conservative than the host classifier: this can turn a
-    /// silent IPv4-only install into a fail-closed abort, never the reverse.
-    fn classify_container_ipv6_state(
-        read_result: std::io::Result<String>,
-        proc_net_present: bool,
-    ) -> HostIpv6State {
-        match read_result {
-            // Present at all, so the IPv6 stack exists in this namespace. The
-            // current address list cannot demote that to "off", because an
-            // address may still be on its way.
-            Ok(_) => HostIpv6State::Active,
-            // Absent while `/proc/<pid>/net` is there means IPv6 really is off
-            // in this namespace. Absent along with `/proc/<pid>/net` means the
-            // process is gone or `/proc` is not visible, which is "we do not
-            // know" and must not become a confirmed negative.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if proc_net_present {
-                    HostIpv6State::Inactive
-                } else {
-                    HostIpv6State::Unknown
-                }
-            }
-            Err(_) => HostIpv6State::Unknown,
-        }
     }
 
     /// Run a read-only `ip6tables -S` inside the container namespace, reporting
@@ -1245,7 +1189,7 @@ mod permissive_spec_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network_iptables::installs_firewall;
+    use crate::network_iptables::plan_network;
     use wxc_common::models::{
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
@@ -1348,11 +1292,17 @@ mod tests {
                 ..Default::default()
             };
             if directional {
+                // A policy admitting no peer at all is given no interface to
+                // hook.
+                policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                });
                 policy.network_ingress = Some(NetworkIngressPolicy::default());
             }
 
             let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-            let mut manager = IngressManager::new("log-field-test", 1, directional);
+            let mut manager = IngressManager::new("log-field-test", 1);
             let _ = manager.apply_firewall_rules(&policy, &mut logger);
             let logged = logger.get_buffer().to_string();
 
@@ -1410,7 +1360,7 @@ mod tests {
     /// one with IPv6 switched off, so contents cannot be read as "IPv6 is off".
     #[test]
     fn container_if_inet6_with_only_loopback_is_still_active() {
-        let state = IngressManager::classify_container_ipv6_state(
+        let state = NetworkIptablesManager::classify_container_ipv6_state(
             Ok(LOOPBACK_ONLY_IF_INET6.to_string()),
             true,
         );
@@ -1426,7 +1376,7 @@ mod tests {
     /// it, so the stack is there; it simply has no addresses yet.
     #[test]
     fn container_empty_if_inet6_is_still_active() {
-        let state = IngressManager::classify_container_ipv6_state(Ok(String::new()), true);
+        let state = NetworkIptablesManager::classify_container_ipv6_state(Ok(String::new()), true);
         assert_eq!(
             state,
             HostIpv6State::Active,
@@ -1439,7 +1389,7 @@ mod tests {
     /// quietly install IPv4-only enforcement.
     #[test]
     fn address_less_container_with_unusable_ip6tables_fails_closed() {
-        let state = IngressManager::classify_container_ipv6_state(
+        let state = NetworkIptablesManager::classify_container_ipv6_state(
             Ok(LOOPBACK_ONLY_IF_INET6.to_string()),
             true,
         );
@@ -1460,7 +1410,7 @@ mod tests {
     /// that still means "off".
     #[test]
     fn container_missing_if_inet6_with_proc_net_is_inactive() {
-        let state = IngressManager::classify_container_ipv6_state(
+        let state = NetworkIptablesManager::classify_container_ipv6_state(
             Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             true,
         );
@@ -1476,7 +1426,7 @@ mod tests {
     /// it", not "IPv6 is off" -- the process may simply be gone.
     #[test]
     fn container_missing_if_inet6_without_proc_net_is_unknown() {
-        let state = IngressManager::classify_container_ipv6_state(
+        let state = NetworkIptablesManager::classify_container_ipv6_state(
             Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             false,
         );
@@ -1491,7 +1441,7 @@ mod tests {
     /// Any other read error is uncertainty, which must not be downgraded.
     #[test]
     fn container_unreadable_if_inet6_is_unknown() {
-        let state = IngressManager::classify_container_ipv6_state(
+        let state = NetworkIptablesManager::classify_container_ipv6_state(
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
             true,
         );
@@ -1508,15 +1458,11 @@ mod tests {
     /// exact install order while the builder keeps body and hook separate.
     fn full_sequence(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         family: IpFamily,
     ) -> Vec<Vec<String>> {
-        let rules = IngressManager::build_ingress_rules(
-            TEST_CHAIN,
-            policy,
-            uses_directional_schema,
-            family,
-        );
+        let rules =
+            IngressManager::build_ingress_rules(TEST_CHAIN, policy, uses_directional_keys, family);
         let mut seq = vec![vec!["-N".to_string(), TEST_CHAIN.to_string()]];
         seq.extend(rules.body.iter().cloned());
         seq.push(rules.hook.clone());
@@ -2053,7 +1999,7 @@ mod tests {
     #[test]
     fn ingress_chain_name_is_distinct_from_egress() {
         let name = "my-container";
-        let ingress = IngressManager::new(name, 4242, false);
+        let ingress = IngressManager::new(name, 4242);
         let egress = crate::network_iptables::chain_name_for(name);
         assert_ne!(
             ingress.chain_name(),
@@ -2089,7 +2035,7 @@ mod tests {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         // The PID value is irrelevant: the refusal precedes every use of it.
         for pid in [1u32, 42u32, 999_999u32] {
-            let mut mgr = IngressManager::new("permissive-container", pid, false);
+            let mut mgr = IngressManager::new("permissive-container", pid);
             let result = mgr.apply_firewall_rules(&permissive_firewall_policy(), &mut logger);
             assert!(
                 result.is_err(),
@@ -2120,15 +2066,14 @@ mod tests {
     fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
-        for (policy, uses_directional_schema, field) in [
+        for (policy, field) in [
             (
                 directional_ingress(NetworkAction::Allow, NetworkAction::Deny),
-                true,
                 "network.ingress.default",
             ),
-            (permissive_firewall_policy(), false, "allowLocalNetwork"),
+            (permissive_firewall_policy(), "allowLocalNetwork"),
         ] {
-            let mut mgr = IngressManager::new("lan-inbound", 42, uses_directional_schema);
+            let mut mgr = IngressManager::new("lan-inbound", 42);
             let msg = mgr
                 .apply_firewall_rules(&policy, &mut logger)
                 .expect_err("permissive inbound must still be refused");
@@ -2149,7 +2094,7 @@ mod tests {
     #[test]
     fn every_emitted_command_is_nsenter_prefixed() {
         let pid = 31337u32;
-        let mgr = IngressManager::new("argv-container", pid, false);
+        let mgr = IngressManager::new("argv-container", pid);
         let cases: &[&[&str]] = &[
             &["-N", "MXC-t"],
             &["-A", "MXC-t", "-i", "lo", "-j", "ACCEPT"],
@@ -2190,7 +2135,7 @@ mod tests {
     #[test]
     fn teardown_commands_are_nsenter_prefixed_and_chain_scoped() {
         let pid = 4242u32;
-        let mut mgr = IngressManager::new("teardown-container", pid, false);
+        let mut mgr = IngressManager::new("teardown-container", pid);
         // Simulate a full dual-stack install: both families created and hooked.
         mgr.v4_chain_created = true;
         mgr.v6_chain_created = true;
@@ -2243,7 +2188,7 @@ mod tests {
     /// which would reach the real `nsenter`.
     #[test]
     fn drop_honors_preserve_policy() {
-        let mut mgr = IngressManager::new("preserve-container", 4242, false);
+        let mut mgr = IngressManager::new("preserve-container", 4242);
 
         // Nothing installed: never any cleanup to do, either way.
         assert!(
@@ -2290,9 +2235,7 @@ mod tests {
     fn force_cleanup_removes_all_resources_via_nsenter() {
         let pid = 9001u32;
         let container = "force-cleanup-container";
-        let chain = IngressManager::new(container, pid, false)
-            .chain_name()
-            .to_string();
+        let chain = IngressManager::new(container, pid).chain_name().to_string();
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
         let mut runner = FakeRunner {
@@ -2416,7 +2359,7 @@ mod tests {
         let pid = 4242u32;
         let container = "install-order-container";
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new(container, pid, false);
+        let mut mgr = IngressManager::new(container, pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2487,7 +2430,7 @@ mod tests {
         let pid = 55u32;
         let container = "reset-repeat-container";
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new(container, pid, false);
+        let mut mgr = IngressManager::new(container, pid);
 
         let mut d_seen = 0;
         let mut runner = FakeRunner {
@@ -2550,7 +2493,7 @@ mod tests {
     fn partial_body_failure_plans_flush_delete_no_unhook() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("partial-container", pid, false);
+        let mut mgr = IngressManager::new("partial-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2616,7 +2559,7 @@ mod tests {
     fn reset_spawn_failure_aborts_before_create_with_no_ownership() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("reset-spawn-fail-container", pid, false);
+        let mut mgr = IngressManager::new("reset-spawn-fail-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2663,7 +2606,7 @@ mod tests {
     fn reset_unhook_exhaustion_aborts_before_create() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("reset-exhaustion-container", pid, false);
+        let mut mgr = IngressManager::new("reset-exhaustion-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2955,7 +2898,7 @@ mod tests {
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
             assert!(
-                installs_firewall(&policy, false),
+                plan_network(&policy).installs_firewall(),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
                  deny chain even with nothing to restrict outbound"
             );
@@ -2971,7 +2914,7 @@ mod tests {
             legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
-            !installs_firewall(&policy, false),
+            !plan_network(&policy).installs_firewall(),
             "a policy naming no firewall mode, no posture, no hosts and no proxy has \
              nothing inbound to enforce"
         );
@@ -2981,10 +2924,18 @@ mod tests {
     // chain has to follow from the schema itself.
     #[test]
     fn a_stated_directional_posture_installs_the_inbound_chain() {
-        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        let mut policy = directional_ingress(NetworkAction::Allow, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
 
-        assert!(installs_firewall(&policy, true));
+        assert!(plan_network(&policy).installs_firewall());
+    }
+
+    #[test]
+    fn a_posture_admitting_no_peer_installs_no_inbound_chain() {
+        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        policy.network_egress = Some(Default::default());
+
+        assert!(!plan_network(&policy).installs_firewall());
     }
 }

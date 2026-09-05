@@ -15,9 +15,11 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
-use crate::lxc_bindings::LxcContainer;
+use crate::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
+use crate::network_iptables::{
+    needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
+};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -28,6 +30,13 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 /// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
 /// builtins and must never inherit the script's own timeout budget.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How a failed run disposes of the container it started.
+#[derive(Clone, Copy)]
+enum ContainerRelease {
+    Destroy,
+    Stop,
+}
 
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
@@ -96,26 +105,70 @@ impl LxcScriptRunner {
         false
     }
 
-    fn enforce_network_readiness<P, D>(
+    /// Destroy a container this run created, or one the caller asked to have
+    /// destroyed.  Otherwise stop it: a reused container this run started
+    /// would be left running without the rules the policy asked for.
+    fn release_kind(&self, container_created: bool) -> ContainerRelease {
+        if self.destroy_on_exit || container_created {
+            ContainerRelease::Destroy
+        } else {
+            ContainerRelease::Stop
+        }
+    }
+
+    /// Report a container the run could not dispose of.  A stop or destroy
+    /// that fails leaves it running with whatever access an earlier policy
+    /// gave it, and no other line records that.
+    fn report_release_failure(
+        release: ContainerRelease,
+        result: Result<(), String>,
+        logger: &mut Logger,
+    ) {
+        let Err(e) = result else {
+            return;
+        };
+        let verb = match release {
+            ContainerRelease::Destroy => "destroy",
+            ContainerRelease::Stop => "stop",
+        };
+        let _ = writeln!(logger, "Warning: failed to {} container: {}", verb, e);
+    }
+
+    /// Dispose of a container whose setup failed, before returning the error
+    /// that setup produced.
+    fn release_after_failure(
+        &self,
+        container: &LxcContainer,
+        container_created: bool,
+        logger: &mut Logger,
+    ) {
+        let release = self.release_kind(container_created);
+        let result = match release {
+            ContainerRelease::Destroy => container.destroy(),
+            ContainerRelease::Stop => container.stop(),
+        };
+        Self::report_release_failure(release, result, logger);
+    }
+
+    fn enforce_network_readiness<P, R>(
         &self,
         container_name: &str,
         container_created: bool,
         timeout: Duration,
         logger: &mut Logger,
         readiness_probe: P,
-        mut destroy_container: D,
+        mut release_container: R,
     ) -> Option<ScriptResponse>
     where
         P: FnOnce(&str, Duration, &mut Logger) -> bool,
-        D: FnMut(),
+        R: FnMut(ContainerRelease) -> Result<(), String>,
     {
         if readiness_probe(container_name, timeout, logger) {
             return None;
         }
 
-        if self.destroy_on_exit || container_created {
-            destroy_container();
-        }
+        let release = self.release_kind(container_created);
+        Self::report_release_failure(release, release_container(release), logger);
 
         Some(ScriptResponse::error(&format!(
             "Container network did not initialize within {:.0}s; \
@@ -248,24 +301,48 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        // Ensure the container is running so that the veth interface exists
-        if !container.is_running() {
-            let _ = writeln!(logger, "Starting LXC container...");
-            if let Err(e) = container.start() {
+        // A run's config reaches only the start it is passed to, and LXC reads
+        // the network section only at start.  A container an earlier run left
+        // running is still on that run's topology.
+        if container.is_running() {
+            let _ = writeln!(
+                logger,
+                "Container already running; stopping it so this run's network policy applies."
+            );
+            if let Err(e) = container.stop() {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
-                return ScriptResponse::error(&format!("Failed to start container: {}", e));
+                return ScriptResponse::error(&format!(
+                    "Failed to stop a container left running by an earlier run: {}. \
+                     Its network policy is the earlier run's, so the script was not run.",
+                    e
+                ));
             }
-            let _ = writeln!(logger, "Container started successfully.");
-        } else {
-            let _ = writeln!(logger, "Container already running.");
         }
 
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
+        let plan = plan_network(&request.policy);
 
-        let needs_network = needs_network(&request.policy, uses_directional_schema);
+        let network = if plan.omits_interface() {
+            let _ = writeln!(
+                logger,
+                "Policy permits no network; starting the container with no interface."
+            );
+            StartNetwork::NoInterface
+        } else {
+            StartNetwork::FromContainerConfig
+        };
+
+        let _ = writeln!(logger, "Starting LXC container...");
+        if let Err(e) = container.start(network) {
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
+            return ScriptResponse::error(&format!("Failed to start container: {}", e));
+        }
+        let _ = writeln!(logger, "Container started successfully.");
+
+        let needs_network = needs_network(&request.policy);
 
         if needs_network {
             // Fail closed: proceeding without an IP silently breaks DNS and produces
@@ -277,115 +354,96 @@ impl LxcScriptRunner {
                 timeout,
                 logger,
                 Self::wait_for_network,
-                || {
-                    let _ = container.destroy();
+                |release| match release {
+                    ContainerRelease::Destroy => container.destroy(),
+                    ContainerRelease::Stop => container.stop(),
                 },
             ) {
                 return response;
             }
         }
 
-        // Configure network rules
-        let mut fw_manager = NetworkIptablesManager::new(&container_name);
-        fw_manager.set_preserve_policy(!self.cleanup_policy);
-        fw_manager.set_directional_schema(uses_directional_schema);
-
-        // Try to discover the container's veth interface for scoped rules
-        if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
-            let _ = writeln!(logger, "Discovered veth interface: {}", veth);
-            fw_manager.set_veth_interface(&veth);
-            if self.destroy_on_exit {
-                // Tell the watchdog about the veth so signal-time cleanup
-                // can also remove the FORWARD hook, not just the chain.
-                signal_cleanup::set_active_veth(&veth);
+        // Both chains this backend installs live inside the container's own
+        // network namespace -- egress hooks its OUTPUT, inbound hooks its
+        // INPUT -- so neither can be programmed before the init PID names the
+        // namespace to enter.
+        let netns_pid = container.init_pid();
+        match netns_pid {
+            Some(pid) => {
+                let _ = writeln!(logger, "Container init PID: {}", pid);
+                if self.destroy_on_exit {
+                    // Tell the watchdog about the netns PID so signal-time
+                    // cleanup can remove both chains before the container is
+                    // destroyed and the namespace goes with it.
+                    signal_cleanup::set_active_pid(pid);
+                }
+            }
+            None if plan.installs_firewall() => {
+                // The run asked for a firewall but we could not find the
+                // container netns to enforce it in. Running anyway would
+                // silently disable every rule the caller asked for, so abort.
+                self.release_after_failure(&container, container_created, logger);
+                return ScriptResponse::error(
+                    "Failed to discover the container init PID; cannot enter the container \
+                     network namespace to enforce the requested firewall. Aborting rather \
+                     than running with enforcement silently disabled.",
+                );
+            }
+            None => {
+                // No firewall requested and no netns PID: there is nothing to
+                // enforce in either direction.
             }
         }
+
+        // Configure network rules
+        let hook_point = match netns_pid {
+            Some(pid) => EgressHookPoint::ContainerNetns(pid),
+            None => EgressHookPoint::Unhooked,
+        };
+
+        let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
             }
         }
-
-        let use_firewall = installs_firewall(&request.policy, uses_directional_schema);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).
         let mut ingress_manager: Option<IngressManager> = None;
 
-        match container.init_pid() {
-            Some(pid) => {
-                let _ = writeln!(logger, "Container init PID: {}", pid);
-                if self.destroy_on_exit {
-                    // Tell the watchdog about the netns PID so signal-time
-                    // cleanup can remove the container's INPUT rules before it's
-                    // destroyed.
-                    signal_cleanup::set_active_pid(pid);
+        if let Some(pid) = netns_pid {
+            let mut mgr = IngressManager::new(&container_name, pid);
+            match mgr.apply_firewall_rules(&request.policy, logger) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return ScriptResponse::error(
+                        "Failed to apply inbound network firewall rules.",
+                    );
                 }
-                let mut mgr = IngressManager::new(&container_name, pid, uses_directional_schema);
-                match mgr.apply_firewall_rules(&request.policy, logger) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        if self.destroy_on_exit || container_created {
-                            let _ = container.destroy();
-                        }
-                        return ScriptResponse::error(
-                            "Failed to apply inbound network firewall rules.",
-                        );
-                    }
-                    Err(e) => {
-                        if self.destroy_on_exit || container_created {
-                            let _ = container.destroy();
-                        }
-                        return ScriptResponse::error(&format!(
-                            "Inbound network policy error: {}",
-                            e
-                        ));
-                    }
+                Err(e) => {
+                    self.release_after_failure(&container, container_created, logger);
+                    return ScriptResponse::error(&format!("Inbound network policy error: {}", e));
                 }
-                // Every non-success arm above returns, so the apply call
-                // succeeded. Only now may the policy be marked for
-                // preservation: the flag also suppresses `Drop`, and a partial
-                // chain from a failed install must still be torn down. Success
-                // does not imply a chain exists — a non-firewall enforcement
-                // mode succeeds without installing one — but in that case no
-                // ownership flag is set and `Drop` has nothing to do either way.
-                mgr.set_preserve_policy(!self.cleanup_policy);
-                ingress_manager = Some(mgr);
             }
-            None if use_firewall => {
-                // The run asked for a firewall but we could not find the
-                // container netns to enforce it in. There is no legitimate
-                // ingress-without-a-netns case: enforcing inbound requires
-                // entering the container's namespace, so running anyway would
-                // silently disable the requested inbound deny (a fail-open).
-                // Abort instead. This guard is specific to the LXC ingress
-                // path, which addresses its namespace by init PID; other
-                // backends reach their firewall handling through their own
-                // runners and never construct an `IngressManager`.
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error(
-                    "Failed to discover the container init PID; cannot enter the container \
-                     network namespace to enforce the requested inbound firewall. Aborting \
-                     rather than running with inbound enforcement silently disabled.",
-                );
-            }
-            None => {
-                // No firewall requested and no netns PID: nothing to enforce
-                // inbound, so no ingress chain is installed.
-            }
+            // Every non-success arm above returns, so the apply call
+            // succeeded. Only now may the policy be marked for
+            // preservation: the flag also suppresses `Drop`, and a partial
+            // chain from a failed install must still be torn down. Success
+            // does not imply a chain exists — a non-firewall enforcement
+            // mode succeeds without installing one — but in that case no
+            // ownership flag is set and `Drop` has nothing to do either way.
+            mgr.set_preserve_policy(!self.cleanup_policy);
+            ingress_manager = Some(mgr);
         }
 
         let mut pinned = false;
@@ -411,13 +469,7 @@ impl LxcScriptRunner {
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = pin_error {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                } else {
-                    // A reused container this run will not destroy would
-                    // otherwise be left running with a policy it cannot use.
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!(
                     "Failed to pin the network proxy host inside the container: {}. \
                      The proxy would be unreachable, so the script was not run.",
@@ -445,11 +497,7 @@ impl LxcScriptRunner {
             // a failure still changes what the script would resolve. Refuse the
             // run rather than execute against a mapping this policy never made.
             if let Some(reason) = stale_pin_error {
-                if self.destroy_on_exit {
-                    let _ = container.destroy();
-                } else {
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!(
                     "Failed to clear a stale network proxy pin from the container's \
                      /etc/hosts: {}. The script was not run, because it could have resolved \
@@ -980,9 +1028,10 @@ mod tests {
     fn fail_network_readiness(
         runner: &LxcScriptRunner,
         container_created: bool,
-    ) -> (ScriptResponse, bool) {
+    ) -> (ScriptResponse, bool, bool) {
         let mut logger = Logger::new(Mode::Buffer);
         let mut destroyed = false;
+        let mut stopped = false;
         let response = runner
             .enforce_network_readiness(
                 "mxc-network-test",
@@ -990,10 +1039,16 @@ mod tests {
                 Duration::from_secs(1),
                 &mut logger,
                 |_name, _timeout, _logger| false,
-                || destroyed = true,
+                |release| {
+                    match release {
+                        ContainerRelease::Destroy => destroyed = true,
+                        ContainerRelease::Stop => stopped = true,
+                    }
+                    Ok(())
+                },
             )
             .expect("a failing readiness probe should return an error response");
-        (response, destroyed)
+        (response, destroyed, stopped)
     }
 
     /// What the 0.8 parser produces for a config stating only `network.egress`:
@@ -1127,7 +1182,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_returns_the_fail_closed_error_response() {
         let runner = runner_for_network_readiness_tests(false);
-        let (response, _) = fail_network_readiness(&runner, false);
+        let (response, _, _) = fail_network_readiness(&runner, false);
 
         assert!(
             response
@@ -1145,7 +1200,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_preserves_a_reused_container_when_destroy_on_exit_is_false() {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed) = fail_network_readiness(&runner, false);
+        let (_, destroyed, _) = fail_network_readiness(&runner, false);
 
         assert!(
             !destroyed,
@@ -1154,10 +1209,57 @@ mod tests {
     }
 
     #[test]
+    fn network_readiness_timeout_stops_a_reused_container_when_destroy_on_exit_is_false() {
+        let runner = runner_for_network_readiness_tests(false);
+        let (_, _, stopped) = fail_network_readiness(&runner, false);
+
+        assert!(
+            stopped,
+            "a reused container this run started must be stopped on readiness timeout, \
+             not left running without the rules the policy asked for"
+        );
+    }
+
+    #[test]
+    fn network_readiness_timeout_does_not_stop_a_container_it_destroys() {
+        let runner = runner_for_network_readiness_tests(true);
+        let (_, destroyed, stopped) = fail_network_readiness(&runner, false);
+
+        assert!(destroyed, "destroyOnExit=true must destroy the container");
+        assert!(
+            !stopped,
+            "destroying the container already removes it; stopping it as well would act on a \
+             container that no longer exists"
+        );
+    }
+
+    #[test]
+    fn a_failed_release_is_reported_rather_than_discarded() {
+        let runner = runner_for_network_readiness_tests(false);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let _ = runner.enforce_network_readiness(
+            "mxc-network-test",
+            false,
+            Duration::from_secs(1),
+            &mut logger,
+            |_name, _timeout, _logger| false,
+            |_release| Err("lxc-stop exited 1".to_string()),
+        );
+
+        assert!(
+            logger.get_buffer().contains("lxc-stop exited 1"),
+            "a container still running because its stop failed is the fail-open this guard \
+             exists to prevent, and it must be named in the log rather than discarded: {}",
+            logger.get_buffer()
+        );
+    }
+
+    #[test]
     fn network_readiness_timeout_destroys_newly_created_container_even_when_destroy_on_exit_is_false(
     ) {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed) = fail_network_readiness(&runner, true);
+        let (_, destroyed, _) = fail_network_readiness(&runner, true);
 
         assert!(
             destroyed,
@@ -1168,7 +1270,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_destroys_a_reused_container_when_destroy_on_exit_is_true() {
         let runner = runner_for_network_readiness_tests(true);
-        let (_, destroyed) = fail_network_readiness(&runner, false);
+        let (_, destroyed, _) = fail_network_readiness(&runner, false);
 
         assert!(
             destroyed,

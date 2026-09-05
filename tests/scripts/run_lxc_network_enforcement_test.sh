@@ -1,7 +1,7 @@
 #!/bin/bash
 # LXC network policy enforcement test
 #
-# Every other network script asserts that the FORWARD hook was *installed*.
+# Every other network script asserts that the OUTPUT hook was *installed*.
 # That is a log line, and a hook can install cleanly, name the right chain,
 # and still match no packet -- which is exactly how a fully populated deny-all
 # chain that filtered nothing once passed every script in this directory.
@@ -215,6 +215,12 @@ fi
 if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
     fail "the deny case produced no verdict at all; the container command did not run."
 fi
+if echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_BLOCKED"; then
+    fail "the container could not reach its own loopback. 0.8 allows intra-container loopback on every backend holding a private one, and the egress chain hangs off OUTPUT, where an '-i lo' exemption installs cleanly and matches nothing."
+fi
+if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_OK"; then
+    fail "the deny case returned no loopback verdict; the in-container listener did not run."
+fi
 
 derive_chain_name "$DENY_OUTPUT"
 assert_no_forward_reference "$CHAIN_NAME"
@@ -237,5 +243,6 @@ derive_chain_name "$ALLOW_OUTPUT"
 assert_no_forward_reference "$CHAIN_NAME"
 assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
-echo "PASS: a disallowed destination was blocked and an allowed destination was reachable."
+echo "PASS: a disallowed destination was blocked, an allowed destination was reachable,"
+echo "      and the blocked container still reached its own loopback."
 echo "LXC network policy enforcement test complete."

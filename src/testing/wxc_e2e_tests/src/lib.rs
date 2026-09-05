@@ -193,6 +193,23 @@ pub fn has_lxc_exe() -> bool {
     }
 }
 
+/// Return whether this host can start a system container.
+///
+/// [`has_lxc_exe`] only answers whether the binary was built. The Linux build
+/// lane builds it and never installs LXC, so a test that starts a container
+/// needs this instead.
+pub fn has_lxc_host() -> bool {
+    match Command::new("lxc-start").arg("--version").output() {
+        Ok(_) => true,
+        Err(_) => {
+            println!(
+                "SKIPPED: lxc-start not installed — this host cannot start a system container"
+            );
+            false
+        }
+    }
+}
+
 /// Return whether the NanVix runtime binaries are available next to lxc-exec (Linux).
 pub fn has_lxc_nanvix_binaries() -> bool {
     let Some(exe) = find_binary("lxc-exec") else {

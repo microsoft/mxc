@@ -40,8 +40,7 @@ fn apply_and_collect(
     Result<bool, String>,
 ) {
     let fake = super::test_firewall::install();
-    let mut manager = NetworkIptablesManager::new(container);
-    manager.set_veth_interface("veth-proxy0");
+    let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
@@ -163,13 +162,14 @@ fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
     let rules = appended_rules(&issued, "iptables", manager.chain_name());
     let accepts: Vec<&&Vec<String>> = rules
         .iter()
-        .filter(|rule| action_of(rule) == Some("ACCEPT"))
+        .filter(|rule| action_of(rule) == Some("ACCEPT") && !has_pair(rule, "-o", "lo"))
         .collect();
 
     assert_eq!(
         accepts.len(),
         1,
-        "a proxied chain must carry exactly one ACCEPT, for the proxy; actual: {rules:?}"
+        "a proxied chain must carry exactly one ACCEPT reaching off-box, for the proxy; \
+         actual: {rules:?}"
     );
     let accept = accepts[0];
     assert!(
@@ -200,8 +200,17 @@ fn the_proxy_accept_is_appended_before_the_closing_drop() {
 
     assert_eq!(
         actions,
-        vec![Some("ACCEPT"), Some("DROP")],
-        "a proxied chain must read exactly 'accept the proxy, drop the rest'; actual: {rules:?}"
+        vec![Some("ACCEPT"), Some("ACCEPT"), Some("DROP")],
+        "a proxied chain must read exactly 'keep loopback, accept the proxy, drop the rest'; \
+         actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[0], "-o", "lo"),
+        "loopback comes first; actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[1], "-d", "10.9.8.7"),
+        "the proxy ACCEPT comes second; actual: {rules:?}"
     );
 }
 
@@ -257,11 +266,12 @@ fn proxy_mode_opens_no_dns_port() {
     }
 }
 
-// The base exemptions belong to the ordinary allow/block posture. `-i lo`
-// and ESTABLISHED,RELATED in a deny-all proxy chain would let flows the proxy
-// never brokered keep running.
+// Intra-container loopback is allowed on every backend with a private
+// loopback, proxy or not. The conntrack exemption is a different matter: in a
+// deny-all proxy chain it would let flows the proxy never brokered keep
+// running.
 #[test]
-fn proxy_mode_emits_no_base_exemptions() {
+fn proxy_mode_keeps_loopback_and_drops_the_conntrack_exemption() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
     let (manager, issued, result) = apply_and_collect("proxy-nobase", &policy);
@@ -273,10 +283,15 @@ fn proxy_mode_emits_no_base_exemptions() {
         "the proxied chain must have been programmed at all; issued: {issued:?}"
     );
 
+    assert!(
+        rules.iter().any(|rule| has_pair(rule, "-o", "lo")),
+        "a proxied container must still reach its own loopback; actual: {rules:?}"
+    );
+
     for rule in rules {
         assert!(
             !has_pair(rule, "-i", "lo"),
-            "a proxied chain must not carry the loopback exemption; actual: {rule:?}"
+            "this chain hangs off OUTPUT, where -i never matches; actual: {rule:?}"
         );
         assert!(
             !has_pair(rule, "--state", "ESTABLISHED,RELATED"),
@@ -327,11 +342,11 @@ fn a_proxy_combined_with_a_block_list_is_refused() {
     );
 }
 
-// The proxy endpoint is IPv4, so nothing authorizes IPv6 egress. The v6
-// chain must therefore hold its closing DROP and nothing else -- leaving it
-// empty would fail open the moment the chain is hooked.
+// The proxy endpoint is IPv4, so nothing authorizes IPv6 egress off-box. The
+// v6 chain must therefore reach its closing DROP with only loopback allowed --
+// leaving it empty would fail open the moment the chain is hooked.
 #[test]
-fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
+fn the_ipv6_chain_allows_only_loopback_before_its_closing_drop_in_proxy_mode() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
     let (manager, issued, result) = apply_and_collect("proxy-v6", &policy);
@@ -342,8 +357,13 @@ fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
 
     assert_eq!(
         actions,
-        vec![Some("DROP")],
-        "the IPv6 chain of a proxied container must be a bare deny-all; actual: {rules:?}"
+        vec![Some("ACCEPT"), Some("DROP")],
+        "the IPv6 chain of a proxied container must deny everything it can route; \
+         actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[0], "-o", "lo"),
+        "the only IPv6 ACCEPT must be the loopback one; actual: {rules:?}"
     );
 }
 
@@ -363,7 +383,7 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
 
     let rules = appended_rules(&issued, "iptables", manager.chain_name());
     assert!(
-        rules.iter().any(|rule| has_pair(rule, "-i", "lo")),
+        rules.iter().any(|rule| has_pair(rule, "-o", "lo")),
         "a non-proxied chain must still carry the loopback exemption; actual: {rules:?}"
     );
     assert!(
@@ -374,6 +394,120 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
         rules.iter().any(|rule| has_pair(rule, "-d", "10.1.1.1")),
         "a non-proxied chain must still program its allow list; actual: {rules:?}"
     );
+}
+
+// A chain hanging off OUTPUT inside the container's namespace sees the
+// container's own DHCP renewal, which a default-deny egress chain would
+// otherwise drop -- costing the container the address the rest of the policy
+// is written against.
+#[test]
+fn a_filtered_chain_lets_the_dhcp_client_renew_its_lease() {
+    let policy = ContainerPolicy {
+        network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        default_network_policy: NetworkPolicy::Block,
+        allowed_hosts: vec!["10.1.1.1".to_string()],
+        ..Default::default()
+    };
+
+    let (manager, issued, result) = apply_and_collect("dhcp-renew", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    let v4 = appended_rules(&issued, "iptables", manager.chain_name());
+    let v6 = appended_rules(&issued, "ip6tables", manager.chain_name());
+    assert!(
+        !v4.is_empty() && !v6.is_empty(),
+        "both chains must have been programmed; issued: {issued:?}"
+    );
+
+    let dhcp_v4 = |rule: &Vec<String>| has_pair(rule, "--sport", "68");
+    let dhcp_v6 = |rule: &Vec<String>| has_pair(rule, "--sport", "546");
+
+    let renewal = v4
+        .iter()
+        .find(|rule| dhcp_v4(rule))
+        .expect("the IPv4 chain must let the DHCPv4 client through");
+    assert!(
+        has_pair(renewal, "-d", "255.255.255.255") && has_pair(renewal, "--dport", "67"),
+        "the DHCPv4 exemption must be scoped to the link broadcast; actual: {renewal:?}"
+    );
+
+    let renewal6 = v6
+        .iter()
+        .find(|rule| dhcp_v6(rule))
+        .expect("the IPv6 chain must let the DHCPv6 client through");
+    assert!(
+        has_pair(renewal6, "-d", "ff02::1:2") && has_pair(renewal6, "--dport", "547"),
+        "the DHCPv6 exemption must be scoped to the all-servers group; actual: {renewal6:?}"
+    );
+
+    // Each family carries only its own ports -- the other family's pair would
+    // be a rule that can never match.
+    assert!(
+        !v4.iter().any(|rule| dhcp_v6(rule)),
+        "the IPv4 chain must not carry the DHCPv6 ports; actual: {v4:?}"
+    );
+    assert!(
+        !v6.iter().any(|rule| dhcp_v4(rule)),
+        "the IPv6 chain must not carry the DHCPv4 ports; actual: {v6:?}"
+    );
+}
+
+// The DHCP exemption must not become an egress bypass: an ACCEPT on the port
+// pair with no destination lets container root send UDP from port 68 to any
+// off-box host on port 67, through a policy that denies exactly that.
+#[test]
+fn no_dhcp_rule_reaches_an_off_box_destination() {
+    let policy = ContainerPolicy {
+        network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        default_network_policy: NetworkPolicy::Block,
+        allowed_hosts: vec!["10.1.1.1".to_string()],
+        ..Default::default()
+    };
+
+    let (manager, issued, result) = apply_and_collect("dhcp-noexfil", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    for binary in ["iptables", "ip6tables"] {
+        for rule in appended_rules(&issued, binary, manager.chain_name()) {
+            let is_dhcp = has_pair(rule, "--dport", "67") || has_pair(rule, "--dport", "547");
+            if !is_dhcp {
+                continue;
+            }
+            let destination = rule
+                .iter()
+                .position(|arg| arg == "-d")
+                .and_then(|i| rule.get(i + 1))
+                .unwrap_or_else(|| panic!("a DHCP rule must name a destination: {rule:?}"));
+            assert!(
+                destination == "255.255.255.255" || destination == "ff02::1:2",
+                "a DHCP rule may only name a link-scoped destination; actual: {rule:?}"
+            );
+        }
+    }
+}
+
+// Proxy mode is "the proxy and nothing else", and a client that cannot
+// unicast a renewal falls back to broadcast rebinding, which udhcpc drives
+// over an AF_PACKET raw socket that never reaches netfilter at all.
+#[test]
+fn proxy_mode_opens_no_dhcp_port() {
+    let policy = policy_with_proxy("10.9.8.7", 3128);
+
+    let (manager, issued, result) = apply_and_collect("proxy-nodhcp", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    assert!(
+        !rules.is_empty(),
+        "the proxied chain must have been programmed at all; issued: {issued:?}"
+    );
+
+    for rule in rules {
+        assert!(
+            !has_pair(rule, "--dport", "67") && !has_pair(rule, "--dport", "547"),
+            "a proxied chain must not open DHCP; actual: {rule:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

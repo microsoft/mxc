@@ -32,7 +32,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
-use lxc_common::network_iptables::NetworkIptablesManager;
+use lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
@@ -878,17 +878,15 @@ impl Drop for BubblewrapSandboxProcess {
 
 /// Build the iptables manager for a Bubblewrap sandbox.
 ///
-/// Unprivileged bwrap has no veth: the sandbox either shares the host network
-/// namespace or gets a private one, and neither leaves a host-side interface
-/// for a chain to match on (see `local_network_diagnostic` in
-/// `bwrap_command`). The absence is structural, not a lookup that failed, and
-/// that distinction is the whole of what makes it safe to accept here: there
-/// is no case in this backend where a veth was expected and went missing, so
-/// accepting one cannot mask a discovery that broke.
+/// Unprivileged bwrap has no container network namespace MXC can enforce in:
+/// the sandbox either shares the host's, where a chain would filter the host
+/// itself, or holds a private one bwrap created and MXC does not manage (see
+/// `local_network_diagnostic` in `bwrap_command`). The chain is therefore
+/// built and never hooked, which leaves this backend's egress policy
+/// unenforced -- the same outcome this backend has had all along, now stated
+/// at the call site rather than reached by a missing lookup.
 fn build_firewall_manager(container_name: &str) -> NetworkIptablesManager {
-    let mut mgr = NetworkIptablesManager::new(container_name);
-    mgr.allow_missing_veth_interface();
-    mgr
+    NetworkIptablesManager::new(container_name, EgressHookPoint::Unhooked)
 }
 
 /// Best-effort iptables cleanup. Called on both success and error paths.
@@ -1405,17 +1403,17 @@ mod tests {
     }
 
     #[test]
-    fn the_firewall_manager_tolerates_the_veth_bubblewrap_never_has() {
-        // bwrap never calls set_veth_interface, so the shared manager's
-        // fail-closed path would refuse every firewall-mode sandbox at startup.
-        // The manager this backend builds must therefore have declared the
-        // absence up front.
+    fn the_firewall_manager_this_backend_builds_has_nowhere_to_enforce() {
+        // Unprivileged bwrap leaves MXC no container namespace to hook, so the
+        // manager must say so at construction. A manager that claimed a
+        // namespace would hook an OUTPUT chain in whatever namespace the
+        // process happens to be in -- the host's -- and filter the host itself.
         let mgr = build_firewall_manager("bwrap-cov");
 
         assert!(
-            mgr.veth_scoping_is_optional(),
-            "Bubblewrap has no veth, so the manager it builds must declare that a \
-             missing one is expected -- otherwise firewall-mode sandboxes cannot start"
+            !mgr.is_hooked(),
+            "Bubblewrap has no namespace to enforce in, so the manager it builds \
+             must not claim one"
         );
     }
 

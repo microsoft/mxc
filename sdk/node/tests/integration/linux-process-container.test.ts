@@ -46,6 +46,12 @@ async function runLxc(
   return spawnFromConfigAsync(config, debugSpawnOptions);
 }
 
+function outboundNetwork(version: (typeof supportedVersions)[number]) {
+  return version.compare('0.8.0-alpha') >= 0
+    ? { egress: { default: 'allow' as const } }
+    : { allowOutbound: true };
+}
+
 for (const schemaVersion of supportedVersions) {
 describe(`Linux LXC Container (schema ${schemaVersion})`, {
   skip: lxcSkipReason,
@@ -109,7 +115,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should allow outbound network access', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { version: schemaVersion.raw, network: { allowOutbound: true } };
+    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'Network accessible'`,
       policy,
@@ -147,7 +153,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
     const policy = {
       version: schemaVersion.raw,
       filesystem: { readwritePaths: [tempDir] },
-      network: { allowOutbound: true },
+      network: outboundNetwork(schemaVersion),
     };
     const script =
       `wget -q -T 10 -O ${tempDir}/download.json '${NETWORK_TEST_URL}'` +
@@ -158,7 +164,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should access HTTPS endpoint', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { version: schemaVersion.raw, network: { allowOutbound: true } };
+    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'HTTPS endpoint accessible'`,
       policy,
@@ -180,3 +186,27 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 });
 }
+
+describe('Linux LXC Container default-deny network posture', {
+  skip: lxcSkipReason,
+}, () => {
+  it('should give schema 0.8 no network interface when the policy names no network fields', async () => {
+    const probe =
+      "echo \"ifaces=[$(awk 'NR>2 {sub(/:.*/, \"\", $1); print $1}' /proc/net/dev | sort | tr '\\n' ' ')]\"; " +
+      "ip -4 addr show lo 2>/dev/null | grep -q '127.0.0.1' && echo 'loopback=up' || echo 'loopback=down'";
+    const result = await runLxc(probe, { version: '0.8.0-alpha' }, 'lxc-deny-080');
+
+    assert.strictEqual(result.exitCode, 0, `Expected the container to run: ${result.stderr}`);
+    assert.ok(
+      result.stdout.includes('ifaces=[lo ]'),
+      `Schema 0.8 promises no network access when the policy names no network fields` +
+        ` (docs/sandbox-policy/0.8.0/policy.md), but the container was given more than` +
+        ` loopback: ${result.stdout}`,
+    );
+    // Taking the network away must not take localhost with it.
+    assert.ok(
+      result.stdout.includes('loopback=up'),
+      `Expected loopback to carry 127.0.0.1: ${result.stdout}`,
+    );
+  });
+});

@@ -18,23 +18,17 @@
 #            GATEWAY_DNS_*          DNS to the bridge gateway's own resolver
 #          The *_LEAK counterparts mean the isolation failed.
 #
-# Scope of the DNS assertions, measured rather than assumed. The chain is
-# hooked into FORWARD, so it sees traffic the host *routes* for the container.
-# Traffic addressed to the bridge gateway itself — 10.0.3.1, where LXC's
-# dnsmasq listens — is delivered locally and traverses INPUT, never FORWARD.
-# Counting rules installed in both chains during a live run recorded 2 packets
-# on the INPUT probe and 0 on the FORWARD probe for container DNS. So
-# GATEWAY_DNS is reported, not asserted: closing it needs an INPUT hook, which
-# is a separate work item. FORWARDED_DNS is what this chain does govern, and it
-# is asserted.
+# Scope of the DNS assertions. The chain is hooked into the container's own
+# OUTPUT chain, so it sees every packet the container originates regardless of
+# where that packet is addressed. Traffic to the bridge gateway itself —
+# 10.0.3.1, where LXC's dnsmasq listens — is governed like any other
+# destination, so GATEWAY_DNS is asserted rather than reported.
 #
-# The same measurement applies to PROXY_OK when the proxy runs on the host, as
-# it does here: the proxy ACCEPT rule is not what admits that traffic, because
-# the packet never reaches the chain (6 packets on the INPUT probe, 0 in
-# FORWARD). PROXY_OK proves the env-var injection is right and that the
-# deny-all posture did not break the proxy path; it does not exercise the
-# ACCEPT rule. That rule is exercised by the unit specs in
-# network_iptables_proxy_spec.rs, and in production by an off-host proxy.
+# PROXY_OK does exercise the proxy ACCEPT rule even when the proxy runs on the
+# host, as it does here: the packet leaves the container through OUTPUT, where
+# the chain sits, before the host delivers it locally. It also proves the
+# env-var injection is right and that the deny-all posture did not break the
+# proxy path.
 #
 # It does not exercise the hosts pin either. This fixture names the proxy by IP
 # literal (10.0.3.1), and `ProxyAddress::host_pin` returns no pin for a literal
@@ -204,16 +198,11 @@ reject_sentinel  "DIRECT_IPV4_LEAK"
 require_sentinel "FORWARDED_DNS_BLOCKED"
 reject_sentinel  "FORWARDED_DNS_LEAK"
 
-# DNS to the bridge gateway's own resolver is delivered locally and traverses
-# INPUT, which this chain does not hook. Report the verdict rather than
-# asserting it, so the gap is visible in the output instead of being either a
-# false pass or a failure of something this work item does not cover.
-if grep -q "GATEWAY_DNS_REACHED" <<<"$OUT"; then
-    echo "NOTE: DNS to the bridge gateway resolver is still reachable — it is an"
-    echo "      INPUT path, and this chain hooks FORWARD only. Tracked separately."
-elif ! grep -q "GATEWAY_DNS_BLOCKED" <<<"$OUT"; then
-    fail "no gateway-DNS verdict in container output"
-fi
+# DNS to the bridge gateway's own resolver leaves the container like any other
+# packet, so the chain on the container's OUTPUT governs it and the deny-all
+# posture must drop it.
+require_sentinel "GATEWAY_DNS_BLOCKED"
+reject_sentinel  "GATEWAY_DNS_REACHED"
 
 # IPv6 is honestly conditional: a container with no global IPv6 cannot exercise
 # the drop, so it reports a skip marker rather than a false pass.
