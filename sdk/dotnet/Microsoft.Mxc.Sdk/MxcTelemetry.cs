@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,7 +10,7 @@ using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
 
-/// <summary>The user's recorded telemetry consent decision.</summary>
+/// <summary>A stored or effective telemetry consent state.</summary>
 public enum TelemetryConsentState
 {
     Granted,
@@ -109,10 +110,12 @@ public static class MxcTelemetry
     private sealed class PresenterContext
     {
         public required Func<TelemetryConsentPrompt, TelemetryConsentDecision> Presenter { get; init; }
+        public CancellationToken CancellationToken { get; init; }
     }
 
     /// <summary>
-    /// Return the user's recorded consent state.
+    /// Return the consent state currently effective for telemetry authorization.
+    /// Use <see cref="GetConsentStatus"/> to read the persisted decision.
     /// Fail-closed native-load failures return <see cref="TelemetryConsentState.Undetermined"/>.
     /// </summary>
     public static TelemetryConsentState GetConsent()
@@ -182,10 +185,22 @@ public static class MxcTelemetry
         string? locale = null)
     {
         ArgumentNullException.ThrowIfNull(presenter);
+        return RequestConsentCore(presenter, locale, CancellationToken.None);
+    }
+
+    private static TelemetryConsentOutcome RequestConsentCore(
+        Func<TelemetryConsentPrompt, TelemetryConsentDecision> presenter,
+        string? locale,
+        CancellationToken cancellationToken)
+    {
         EnsureNativeInitialized();
 
         var localeBuf = locale is null ? null : ToNullTerminatedUtf8(locale);
-        var presenterContext = GCHandle.Alloc(new PresenterContext { Presenter = presenter });
+        var presenterContext = GCHandle.Alloc(new PresenterContext
+        {
+            Presenter = presenter,
+            CancellationToken = cancellationToken,
+        });
         try
         {
             unsafe
@@ -223,6 +238,8 @@ public static class MxcTelemetry
     /// Asynchronous wrapper over <see cref="RequestConsent(Func{TelemetryConsentPrompt, TelemetryConsentDecision}, string?)"/>.
     /// The native API is synchronous and blocking, so the native work runs on the thread pool while
     /// the presenter is dispatched to the caller's synchronization context when one is available.
+    /// Cancellation stops waiting for the presenter and prevents its decision from being accepted
+    /// when observed before native persistence. It does not cancel the presenter's underlying task.
     /// </summary>
     public static Task<TelemetryConsentOutcome> RequestConsentAsync(
         Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
@@ -232,12 +249,30 @@ public static class MxcTelemetry
         ArgumentNullException.ThrowIfNull(presenter);
         var synchronizationContext = SynchronizationContext.Current;
         return Task.Run(
-            () => RequestConsent(
-                prompt => InvokePresenterAsync(presenter, prompt, synchronizationContext)
-                    .GetAwaiter()
-                    .GetResult(),
-                locale),
+            () =>
+            {
+                var outcome = RequestConsentCore(
+                    prompt => InvokePresenterWithCancellation(
+                        presenter,
+                        prompt,
+                        synchronizationContext,
+                        cancellationToken),
+                    locale,
+                    cancellationToken);
+                return FinalizeAsyncOutcome(outcome, cancellationToken);
+            },
             cancellationToken);
+    }
+
+    internal static TelemetryConsentOutcome FinalizeAsyncOutcome(
+        TelemetryConsentOutcome outcome,
+        CancellationToken cancellationToken)
+    {
+        if (outcome.Result == TelemetryConsentResult.Dismissed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        return outcome;
     }
 
     /// <summary>Persist an idempotent telemetry-consent withdrawal.</summary>
@@ -331,7 +366,13 @@ public static class MxcTelemetry
             }
 
             var prompt = ParseConsentPrompt(ReadRequiredJson(promptJsonUtf8, "telemetry consent prompt"));
-            return presenterContext.Presenter(prompt) switch
+            var decision = presenterContext.Presenter(prompt);
+            if (presenterContext.CancellationToken.IsCancellationRequested)
+            {
+                return NativeConsentDecisionDismissed;
+            }
+
+            return decision switch
             {
                 TelemetryConsentDecision.Yes => NativeConsentDecisionYes,
                 TelemetryConsentDecision.No => NativeConsentDecisionNo,
@@ -343,6 +384,59 @@ public static class MxcTelemetry
         {
             return NativeConsentPresenterError;
         }
+    }
+
+    private static TelemetryConsentDecision InvokePresenterWithCancellation(
+        Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
+        TelemetryConsentPrompt prompt,
+        SynchronizationContext? synchronizationContext,
+        CancellationToken cancellationToken)
+    {
+        Task<TelemetryConsentDecision>? presenterTask = null;
+        try
+        {
+            presenterTask = InvokePresenterAsync(presenter, prompt, synchronizationContext);
+            return presenterTask
+                .WaitAsync(cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (presenterTask is not null)
+            {
+                ObserveAbandonedPresenterFailure(presenterTask);
+            }
+            return TelemetryConsentDecision.Dismissed;
+        }
+    }
+
+    private static void ObserveAbandonedPresenterFailure(
+        Task<TelemetryConsentDecision> presenterTask)
+    {
+        _ = presenterTask.ContinueWith(
+            static faulted =>
+            {
+                var exception = faulted.Exception;
+                if (exception is null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    Trace.TraceError(
+                        "MXC telemetry consent presenter faulted after cancellation: {0}",
+                        exception.GetBaseException());
+                }
+                catch
+                {
+                    // Diagnostic listeners must not fault an unobserved continuation.
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private static Task<TelemetryConsentDecision> InvokePresenterAsync(

@@ -220,7 +220,7 @@ impl ProcessContainerNetworkSpec {
 /// Parse a binding request and build the public Rust SDK request it describes.
 pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, Error> {
     let spec: RequestSpec<'_> = serde_json::from_str(request_json).map_err(malformed_request)?;
-    let (policy, telemetry_enabled) = crate::parse_policy_json(spec.policy.get())
+    let parsed = mxc_sdk::ffi_internals::parse_policy_json(spec.policy.get())
         .map_err(|error| Error::new(ErrorCode::MalformedRequest, error))?;
     let policy_value: Value = serde_json::from_str(spec.policy.get()).map_err(malformed_request)?;
     if policy_value.get("captureDenials").is_some() {
@@ -233,15 +233,18 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
 
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&policy, &containment, spec.container_name.as_deref())?;
+    let mut request = build_request_with_containment(
+        &parsed.policy,
+        &containment,
+        spec.container_name.as_deref(),
+    )?;
     request.set_script(spec.command);
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
     request.set_env(spec.environment);
     request.set_experimental(spec.experimental);
-    if let Some(enabled) = telemetry_enabled {
+    if let Some(enabled) = parsed.telemetry_enabled {
         request.set_telemetry_enabled(enabled);
     }
     Ok(request)
@@ -269,9 +272,9 @@ mod tests {
             process_spec.environment.get("PARITY").map(String::as_str),
             Some("true")
         );
-        let process_policy = crate::parse_policy_json(process_spec.policy.get())
+        let process_policy = mxc_sdk::ffi_internals::parse_policy_json(process_spec.policy.get())
             .expect("process-container policy parses")
-            .0;
+            .policy;
         assert_eq!(process_policy.timeout_ms, Some(30_000));
         let filesystem = process_policy
             .filesystem
@@ -340,9 +343,9 @@ mod tests {
             network_spec.containment,
             RequestContainment::Process
         ));
-        let network_policy = crate::parse_policy_json(network_spec.policy.get())
+        let network_policy = mxc_sdk::ffi_internals::parse_policy_json(network_spec.policy.get())
             .expect("directional-network policy parses")
-            .0;
+            .policy;
         let network = network_policy
             .network
             .as_ref()
