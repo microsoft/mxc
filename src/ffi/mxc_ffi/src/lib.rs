@@ -361,11 +361,10 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
         }
     };
 
-    let mut request = match build_request(&policy, None) {
+    let request = match build_request(&policy, command, None) {
         Ok(r) => r,
         Err(e) => return MxcRunResult::from_sdk_error(&e),
     };
-    request.set_script(command);
 
     execute_request(request)
 }
@@ -538,6 +537,24 @@ mod tests {
         let mut out = run_with(r#"{"version":"0.7.0-alpha"}"#, None);
         assert_eq!(out.status, MXC_STATUS_NULL_ARGUMENT);
         assert!(!out.error.message_utf8.is_null());
+        unsafe { mxc_run_result_free(&mut out) };
+    }
+
+    #[test]
+    fn empty_command_reports_malformed_request() {
+        let mut out = run_with(r#"{"version":"0.7.0-alpha"}"#, Some(""));
+        assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(!out.error.message_utf8.is_null());
+        assert!(out.stdout_utf8.is_null());
+        assert!(out.stderr_utf8.is_null());
+
+        // SAFETY: `out` was filled by `mxc_run`.
+        let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "script parameter is required");
+
+        // SAFETY: `out` was filled by `mxc_run`.
         unsafe { mxc_run_result_free(&mut out) };
     }
 

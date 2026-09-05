@@ -147,7 +147,18 @@ wxc-exec.exe --config-base64 <base64-encoded-json>
 
 # Debug output
 wxc-exec.exe --debug config.json
+
+# Supply or replace process.commandLine from trailing arguments
+wxc-exec.exe config.json -- python --version
 ```
+
+For `wxc-exec.exe`, arguments after the required `--` separator are rendered
+for the selected backend and spliced into `process.commandLine` before the
+request is parsed. They may supply a missing command or replace the policy's
+command. This form is supported for one-shot requests and state-aware `exec`;
+other state-aware phases reject it. A policy that relies on trailing arguments
+is a CLI template rather than a complete request that can be executed
+independently.
 
 On Linux: `./lxc-exec config.json`
 On macOS: `./mxc-exec-mac --experimental config.json`

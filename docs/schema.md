@@ -80,6 +80,13 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+Every complete request that carries a process requires a non-empty
+`process.commandLine`. The Windows native CLI may accept a template without
+that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
+replaces `process.commandLine` before schema and typed request validation. That
+entry-point transform does not make the unmodified template a complete request
+that can be executed independently.
+
 ### Full Schema
 
 ```json

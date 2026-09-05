@@ -235,9 +235,12 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     let spec: RequestSpec = serde_json::from_value(value).map_err(malformed_request)?;
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&spec.policy, &containment, spec.container_name.as_deref())?;
-    request.set_script(spec.command);
+    let mut request = build_request_with_containment(
+        &spec.policy,
+        &containment,
+        &spec.command,
+        spec.container_name.as_deref(),
+    )?;
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
