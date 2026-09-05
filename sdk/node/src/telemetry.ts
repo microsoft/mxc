@@ -70,7 +70,7 @@ interface TelemetryConsentProtocolResponse
   extends Omit<TelemetryConsentOutcome, 'action' | 'result'> {
   action: ConsentAction;
   result: TelemetryConsentProtocolResult;
-  reason?: ConsentStatusReason | null;
+  reason: ConsentStatusReason | null;
   prompt?: TelemetryConsentPrompt | null;
   challenge?: string | null;
 }
@@ -508,9 +508,9 @@ function parseMaintenanceResponse(
     || value.action !== expectedAction
     || !isResultForAction(expectedAction, value.result)
     || typeof value.needsPrompt !== 'boolean'
+    || !Object.hasOwn(value, 'reason')
     || (
-      value.reason !== undefined
-      && value.reason !== null
+      value.reason !== null
       && !isStatusReason(value.reason)
     )
   ) {

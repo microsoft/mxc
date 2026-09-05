@@ -37,6 +37,7 @@ function status(
     effectiveState,
     needsPrompt,
     policy,
+    reason: null,
   });
 }
 
@@ -143,11 +144,29 @@ describe('telemetry consent', () => {
       effectiveState: 'granted',
       needsPrompt: false,
       policy: 'allowed',
+      reason: null,
     })));
     const asyncQuery = await queryTelemetryConsentAsync();
     assert.strictEqual(asyncQuery.effectiveState, 'undetermined');
     assert.strictEqual(asyncQuery.policy, 'blocked');
     assert.strictEqual(asyncQuery.needsPrompt, false);
+  });
+
+  it('fails status queries closed when the native response omits reason', async () => {
+    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
+      action: 'status',
+      result: 'status',
+      storedState: 'granted',
+      effectiveState: 'granted',
+      needsPrompt: false,
+      policy: 'allowed',
+    })));
+    const query = await queryTelemetryConsentAsync();
+    assert.strictEqual(query.state, 'undetermined');
+    assert.strictEqual(query.storedState, 'undetermined');
+    assert.strictEqual(query.effectiveState, 'undetermined');
+    assert.strictEqual(query.policy, 'blocked');
+    assert.strictEqual(query.needsPrompt, false);
   });
 
   it('binds a synchronous presenter decision to the canonical prompt', async () => {
@@ -203,6 +222,7 @@ describe('telemetry consent', () => {
           effectiveState: 'denied',
           needsPrompt: false,
           policy: 'unrestricted',
+          reason: null,
         }));
     });
 
@@ -219,6 +239,22 @@ describe('telemetry consent', () => {
       effectiveState: 'denied',
       needsPrompt: false,
       policy: 'blocked',
+      reason: null,
+    })));
+    await assert.rejects(
+      withdrawTelemetryConsentAsync(),
+      /unrecognised telemetry consent output/,
+    );
+  });
+
+  it('rejects withdrawal responses that omit reason', async () => {
+    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
+      action: 'withdraw',
+      result: 'withdrawn',
+      storedState: 'denied',
+      effectiveState: 'denied',
+      needsPrompt: false,
+      policy: 'unrestricted',
     })));
     await assert.rejects(
       withdrawTelemetryConsentAsync(),

@@ -112,6 +112,7 @@ function presentationLine(challenge = 'request-a'): string {
     effectiveState: 'undetermined',
     needsPrompt: true,
     policy: 'unrestricted',
+    reason: null,
   })}\n`;
 }
 
@@ -123,6 +124,7 @@ function grantedLine(): string {
     effectiveState: 'granted',
     needsPrompt: false,
     policy: 'unrestricted',
+    reason: null,
   })}\n`;
 }
 
@@ -227,6 +229,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       effectiveState: 'undetermined',
       needsPrompt: true,
       policy: 'unrestricted',
+      reason: null,
     })}\n`);
     child.emitClose(0);
     assert.strictEqual((await promise).result, 'dismissed');
@@ -406,6 +409,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       effectiveState: 'granted',
       needsPrompt: false,
       policy: 'allowed',
+      reason: null,
     })}\n`);
 
     await waitFor(() => child.killed);
@@ -625,6 +629,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       effectiveState: 'undetermined',
       needsPrompt: true,
       policy: 'unrestricted',
+      reason: null,
     })}\n`);
     await waitFor(() => child.killed);
     child.emitClose(1);
@@ -647,6 +652,27 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
       effectiveState: 'undetermined',
       needsPrompt: true,
       policy: 'unrestricted',
+      reason: null,
+    })}\n`);
+    await waitFor(() => child.killed);
+    child.emitClose(1);
+    await rejection;
+  });
+
+  it('kills the child when a response omits its required reason field', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    const rejection = assert.rejects(promise, /unrecognised telemetry consent output/);
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(`${JSON.stringify({
+      action: 'request',
+      result: 'policyBlocked',
+      storedState: 'undetermined',
+      effectiveState: 'undetermined',
+      needsPrompt: false,
+      policy: 'blocked',
     })}\n`);
     await waitFor(() => child.killed);
     child.emitClose(1);
