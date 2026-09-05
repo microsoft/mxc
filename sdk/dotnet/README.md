@@ -503,7 +503,10 @@ An IT administrator can still block MXC telemetry device-wide via MXC's own
 registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
 for the stable registry contract and interaction rules. Read-only queries fail
-closed rather than upgrading an unreadable device state into collection.
+closed rather than upgrading an unreadable device state into collection. When
+that fallback hides a native or parsing failure, the SDK reports the failure
+once through `System.Diagnostics.Trace` without including exception messages or
+stack traces.
 
 ## Projects
 

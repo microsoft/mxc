@@ -46,23 +46,30 @@ public sealed class MxcTelemetryTests
     [Fact]
     public void FailClosedDiagnostics_AreDeduplicatedAndDoNotExposeExceptionText()
     {
-        var messages = new List<string>();
-        using var _ = MxcTelemetry.OverrideFailClosedDiagnosticSinkForTesting(messages.Add);
+        var operation = $"TestGetPolicy{Guid.NewGuid():N}";
+        using var output = new StringWriter();
+        using var listener = new TextWriterTraceListener(output);
         var failure = new InvalidOperationException("sensitive\r\n\u001b[31mmessage");
+        Trace.Listeners.Add(listener);
+        try
+        {
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
+            MxcTelemetry.ReportFailClosed(operation, "false", ErrorCode.BackendError);
+            Trace.Flush();
 
-        MxcTelemetry.ReportFailClosed("GetPolicy", "Blocked", failure);
-        MxcTelemetry.ReportFailClosed("GetPolicy", "Blocked", failure);
-        MxcTelemetry.ReportFailClosed(
-            "NeedsConsentPrompt",
-            "false",
-            ErrorCode.BackendError);
-
-        Assert.Equal(2, messages.Count);
-        Assert.Contains(typeof(InvalidOperationException).FullName!, messages[0]);
-        Assert.Contains("HRESULT 0x", messages[0]);
-        Assert.DoesNotContain("sensitive", messages[0]);
-        Assert.DoesNotContain('\u001b', messages[0]);
-        Assert.Contains("BackendError", messages[1]);
+            var message = output.ToString();
+            Assert.Equal(2, message.Split(operation).Length - 1);
+            Assert.Contains(typeof(InvalidOperationException).FullName!, message);
+            Assert.Contains("HRESULT 0x", message);
+            Assert.DoesNotContain("sensitive", message);
+            Assert.DoesNotContain('\u001b', message);
+            Assert.Contains("BackendError", message);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
     }
 
     [Fact]

@@ -107,9 +107,13 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
     private const int MaxReportedFailureCategories = 64;
-    private static readonly HashSet<string> ReportedFailureCategories = new(StringComparer.Ordinal);
-    private static Action<string> failClosedDiagnosticSink =
-        static message => Console.Error.WriteLine(message);
+    private static readonly HashSet<FailureCategory> ReportedFailureCategories = [];
+
+    private readonly record struct FailureCategory(
+        string Operation,
+        string SafeResult,
+        string Kind,
+        int Code);
 
     private sealed class PresenterContext
     {
@@ -368,35 +372,26 @@ public static class MxcTelemetry
         }
     }
 
-    internal static void ReportFailClosed(string operation, string safeResult, object detail)
+    internal static void ReportFailClosed(
+        string operation,
+        string safeResult,
+        Exception exception)
     {
         try
         {
-            var category = detail switch
+            var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
+            if (!TryBeginFailureReport(
+                    new FailureCategory(operation, safeResult, exceptionType, exception.HResult)))
             {
-                Exception ex => $"{operation}:{safeResult}:{ex.GetType().FullName}:{ex.HResult:X8}",
-                ErrorCode code => $"{operation}:{safeResult}:ErrorCode:{(int)code}",
-                _ => $"{operation}:{safeResult}:{detail.GetType().FullName}",
-            };
-            Action<string> sink;
-            lock (ReportedFailureCategories)
-            {
-                if (ReportedFailureCategories.Contains(category) ||
-                    ReportedFailureCategories.Count >= MaxReportedFailureCategories)
-                {
-                    return;
-                }
-                ReportedFailureCategories.Add(category);
-                sink = failClosedDiagnosticSink;
+                return;
             }
 
-            var description = detail switch
-            {
-                Exception ex => $"{ex.GetType().FullName} (HRESULT 0x{ex.HResult:X8})",
-                ErrorCode code => $"{code} ({(int)code})",
-                _ => detail.GetType().FullName ?? "unknown failure",
-            };
-            sink($"mxc: {operation} failed and is reporting '{safeResult}' to stay fail-closed: {description}");
+            Trace.TraceError(
+                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2} (HRESULT 0x{3:X8})",
+                operation,
+                safeResult,
+                exceptionType,
+                exception.HResult);
         }
         catch
         {
@@ -404,34 +399,43 @@ public static class MxcTelemetry
         }
     }
 
-    internal static IDisposable OverrideFailClosedDiagnosticSinkForTesting(Action<string> sink)
+    internal static void ReportFailClosed(
+        string operation,
+        string safeResult,
+        ErrorCode errorCode)
     {
-        ArgumentNullException.ThrowIfNull(sink);
-        lock (ReportedFailureCategories)
+        try
         {
-            var previous = failClosedDiagnosticSink;
-            failClosedDiagnosticSink = sink;
-            ReportedFailureCategories.Clear();
-            return new FailClosedDiagnosticScope(previous);
+            if (!TryBeginFailureReport(
+                    new FailureCategory(operation, safeResult, nameof(ErrorCode), (int)errorCode)))
+            {
+                return;
+            }
+
+            Trace.TraceError(
+                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2} ({3})",
+                operation,
+                safeResult,
+                errorCode,
+                (int)errorCode);
+        }
+        catch
+        {
+            // Diagnostics must not affect the fail-closed result.
         }
     }
 
-    private sealed class FailClosedDiagnosticScope(Action<string> previous) : IDisposable
+    private static bool TryBeginFailureReport(FailureCategory category)
     {
-        private bool disposed;
-
-        public void Dispose()
+        lock (ReportedFailureCategories)
         {
-            lock (ReportedFailureCategories)
+            if (ReportedFailureCategories.Contains(category) ||
+                ReportedFailureCategories.Count >= MaxReportedFailureCategories)
             {
-                if (disposed)
-                {
-                    return;
-                }
-                disposed = true;
-                failClosedDiagnosticSink = previous;
-                ReportedFailureCategories.Clear();
+                return false;
             }
+            ReportedFailureCategories.Add(category);
+            return true;
         }
     }
 
