@@ -2104,6 +2104,7 @@ mod tests {
         network_mode_specified: bool,
         runtime_network_proxy_specified: bool,
         ui_specified: bool,
+        requested_sandbox_kind: Option<&'static str>,
     }
 
     impl From<&ExecutionRequest> for ExecutionSnapshot {
@@ -2124,7 +2125,33 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
+                requested_sandbox_kind: request
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
             }
+        }
+    }
+
+    #[test]
+    fn execution_snapshot_detects_requested_sandbox_kind_drift() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "process",
+            "process": {"commandLine": "echo hello"},
+            "telemetry": {"enabled": true}
+        }"#;
+        let MxcRequest::OneShot(mut request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected a one-shot request");
+        };
+        let original = ExecutionSnapshot::from(&request);
+        assert_eq!(original.requested_sandbox_kind, Some("process"));
+
+        for requested_kind in [Some("processcontainer"), None] {
+            request.telemetry.as_mut().unwrap().requested_sandbox_kind = requested_kind;
+            let changed = ExecutionSnapshot::from(&request);
+            assert_eq!(original.serialized, changed.serialized);
+            assert_ne!(original, changed);
         }
     }
 
