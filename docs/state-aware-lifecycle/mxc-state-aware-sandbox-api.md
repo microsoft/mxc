@@ -254,6 +254,8 @@ directly on the per-(backend, phase) Configs introduced below.
 ### 6.1 Type definitions
 
 ```typescript
+import type { StateAwareSchemaVersion } from '@microsoft/mxc-sdk';
+
 type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
@@ -277,7 +279,7 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 // example in §7.4 and the config-typing example in §10.2.
 
 interface IsolationSessionProvisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   // IsolationSession cannot filter or deny the container network, so provision
   // requires the canonical unrestricted-network acknowledgment — the only accepted
   // value. filesystem policy is rejected by this backend (§10.3).
@@ -285,20 +287,20 @@ interface IsolationSessionProvisionConfig {
 }
 
 interface IsolationSessionStartConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 interface IsolationSessionExecConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   process: ProcessConfig;
 }
 
 interface IsolationSessionStopConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 interface IsolationSessionDeprovisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 interface IsolationSessionProvisionMetadata {
@@ -312,25 +314,25 @@ interface IsolationSessionProvisionMetadata {
 // provision and is immutable thereafter (see §10.3).
 
 interface WindowsSandboxProvisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   filesystem?: FilesystemConfig;
 }
 
 interface WindowsSandboxStartConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 interface WindowsSandboxExecConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   process: ProcessConfig;
 }
 
 interface WindowsSandboxStopConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 interface WindowsSandboxDeprovisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
 }
 
 // WindowsSandbox returns no metadata for any phase.
@@ -433,11 +435,12 @@ Phases with no backend-specific or cross-cutting fields declare a Config carryin
 change: extend `StateAwareContainmentBackend`, define five new `*Config` interfaces, and
 add an arm to `ConfigsForBackend`.
 
-Each Config carries an optional `version?: string`. When omitted, the SDK fills in its
-own `SUPPORTED_VERSION`; an explicit value is range-validated against the SDK's
-`MIN_VERSION` and `SUPPORTED_VERSION` (same convention as today's
-`validatePolicyVersion`). The override exists so consumers can target a specific wire
-version when debugging or testing version negotiation.
+Each Config carries an optional `version?: StateAwareSchemaVersion`, using the
+existing SDK type for the exact state-aware contract, currently `0.9.0-alpha`.
+When omitted, the SDK supplies `STATE_AWARE_VERSION` (`0.9.0-alpha`); an explicit
+value must name that same registered state-aware contract. Other spellings are
+rejected, not range-validated or negotiated. The emitted JSON envelope always
+contains the required `version` declaration.
 
 ### 6.2 Method signatures
 
@@ -601,7 +604,7 @@ single call — `phase` fully discriminates which interpretation applies.
 ```typescript
 interface OneShotRequest {
   phase?: never;                                  // discriminator: absent
-  version?: string;
+  version: string;
   containment: ContainmentType | ContainmentBackend;
   containerId?: string;
   process: ProcessConfig;
@@ -616,7 +619,7 @@ interface OneShotRequest {
 
 interface ProvisionStateAwareRequest {
   phase: 'provision';                             // discriminator
-  version?: string;
+  version: StateAwareSchemaVersion;
   containment: StateAwareContainmentBackend;
   filesystem?: FilesystemConfig;                  // backend declares per-phase honor
   network?: NetworkConfig;                        // backend declares per-phase honor
@@ -626,7 +629,7 @@ interface ProvisionStateAwareRequest {
 
 interface NonProvisionStateAwareRequest {
   phase: 'start' | 'exec' | 'stop' | 'deprovision';  // discriminator
-  version?: string;
+  version: StateAwareSchemaVersion;
   sandboxId: SandboxId<StateAwareContainmentBackend>;  // backend resolved from prefix
   process?: ProcessConfig;                            // exec only
   filesystem?: FilesystemConfig;                      // backend declares per-phase honor
@@ -648,7 +651,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | No | Schema version (semver). |
+| `version` | string | Yes | Exact registered schema version; state-aware requests declare `0.9.0-alpha`. The SDK fills this field when the consumer Config omits it. |
 | `experimental` | object | No | Backend-specific config block. Shape depends on `phase` (§7.2). |
 
 Backend-routing fields:
@@ -1661,7 +1664,7 @@ with serde renames to camelCase and represent the wire-shape sub-portion that li
 under `experimental.<BACKEND_KEY>.<phase>` — backend-specific fields only. The
 TypeScript type exported from the SDK package is the consumer-facing per-(backend,
 phase) Config from §6.1; it is a strict superset of the wire shape, adding
-`version?` (for explicit version overrides) and the cross-cutting `filesystem` /
+`version?` (for an optional exact schema declaration) and the cross-cutting `filesystem` /
 `network` / `ui` fields in phases where the backend's policy honor matrix marks them
 as `applied` (§10.3).
 
@@ -1675,7 +1678,7 @@ pub struct IsolationSessionProvisionConfig {
 
 ```typescript
 interface IsolationSessionProvisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   appId?: string;
   network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
@@ -1807,12 +1810,12 @@ carrying only `version?`. Example shape (mirroring §6.1):
 
 ```typescript
 interface MyBackendProvisionConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   // cross-cutting fields for phases where MyBackend's matrix marks `applied`
 }
 
 interface MyBackendStartConfig {
-  version?: string;
+  version?: StateAwareSchemaVersion;
   // backend-specific start fields
 }
 
