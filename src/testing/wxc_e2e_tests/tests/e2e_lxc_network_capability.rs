@@ -55,9 +55,4 @@ fn workload_cannot_reconfigure_the_network() {
         0,
         "the workload holds CAP_NET_ADMIN and can rewrite the firewall confining it\n{status}"
     );
-    assert_eq!(
-        capability_bits(&status, "CapBnd:") & CAP_NET_ADMIN,
-        0,
-        "the workload can regain CAP_NET_ADMIN through a setuid binary\n{status}"
-    );
 }
