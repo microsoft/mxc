@@ -504,11 +504,11 @@ registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
 for the stable registry contract and interaction rules. Read-only queries fail
 closed rather than upgrading an unreadable device state into collection. When
-that fallback hides a native or parsing failure, the SDK reports the failure
-once per distinct failure signature through `System.Diagnostics.Trace`. If a
-listener rejects a report, a future occurrence of the same signature may try
-again. Reports include the exception type and HRESULT or native error code, but
-exclude exception messages and stack traces.
+that fallback hides a native or parsing failure, the SDK reports a bounded set
+of distinct failure signatures through `System.Diagnostics.Trace`. Each
+signature is reported once; if a listener rejects it, a future occurrence may
+try again. Reports include the exception type and HRESULT or native error code,
+but exclude exception messages and stack traces.
 
 ## Projects
 
