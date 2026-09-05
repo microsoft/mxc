@@ -114,6 +114,7 @@ Adding a feature may touch these files:
 |------|----------------|
 | `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model while it remains the current parser input |
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the closed exact mutable development contract |
+| `src/core/mxc_engine/src/policy/exact/v0_9.rs` | If the Rust SDK exposes the field, keep the test-only exact development builder in parity |
 | `schemas/dev/mxc-config.schema.0.9.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
 | `schemas/dev/mxc-config.schema.0.9.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |

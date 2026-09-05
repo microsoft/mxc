@@ -87,7 +87,7 @@
 //! };
 //!
 //! # let policy = SandboxPolicy {
-//! #     version: "0.7.0-alpha".to_string(),
+//! #     version: "0.9.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).

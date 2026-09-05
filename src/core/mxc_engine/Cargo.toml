@@ -60,5 +60,6 @@ isolation_session = [
 tier2_bfs = ["appcontainer_common/tier2_bfs"]
 
 [dev-dependencies]
+mxc_config_contract.workspace = true
 wxc_common = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

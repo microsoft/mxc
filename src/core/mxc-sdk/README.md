@@ -37,10 +37,10 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
 [`build_request`] resolves the host's default containment backend (see
-[Supported backends](#supported-backends)), builds the wire config, and runs it
-through the shared parser. The command is supplied to [`build_request`], so the
-returned [`SandboxRequest`] is complete; optionally adjust its working directory
-or environment before spawning.
+[Supported backends](#supported-backends)), builds the rolling wire config, and
+runs it through the shared production parser. The command is supplied to
+[`build_request`], so the returned [`SandboxRequest`] is complete; optionally
+adjust its working directory or environment before spawning.
 
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
@@ -408,8 +408,9 @@ opt-in on two axes: build this crate with its **`wslc` feature**, and call
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
 memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
-go through the same parser the executor uses — so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at build time, not at spawn.
+go through the same production parser as the executor, so a rejected value
+(e.g. a port mapping with a zero or duplicated host port) fails at build time,
+not at spawn.
 
 ```rust,no_run
 use mxc_sdk::{
@@ -417,7 +418,7 @@ use mxc_sdk::{
 };
 
 # let policy = SandboxPolicy {
-#     version: "0.7.0-alpha".to_string(),
+#     version: "0.9.0-alpha".to_string(),
 #     filesystem: None, network: None, ui: None, timeout_ms: None,
 # };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };

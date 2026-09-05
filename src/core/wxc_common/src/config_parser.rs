@@ -21,6 +21,7 @@ use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::state_aware_wire::StateAwareWireInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
+use mxc_config_contract::{probe_version, ContractVersion, VersionProbeError};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use std::{borrow::Cow, fs};
@@ -236,6 +237,203 @@ pub fn load_request_from_value(
     log_one_shot_error(logger, &result);
     result
 }
+
+/// Workspace-internal exact one-shot contract selected by a trusted typed
+/// producer.
+///
+/// This is not a stable external API.
+#[doc(hidden)]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ExactOneShotContract {
+    V0_6(Box<mxc_config_contract::published::v0_6_0_alpha::Request>),
+    V0_7(Box<mxc_config_contract::published::v0_7_0_alpha::Request>),
+    V0_8(Box<mxc_config_contract::published::v0_8_0_alpha::Request>),
+    Dev(Box<mxc_config_contract::dev::OneShotRequest>),
+}
+
+/// Convert a typed exact one-shot contract through its existing adapter and
+/// shared semantic validation.
+///
+/// This workspace-internal bridge exists for `mxc_engine` policy builders.
+#[doc(hidden)]
+pub fn load_one_shot_request_from_contract(
+    request: ExactOneShotContract,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError> {
+    let config = match request {
+        ExactOneShotContract::V0_6(request) => {
+            crate::config_contract_adapters::v0_6::into_wire(*request)
+        }
+        ExactOneShotContract::V0_7(request) => {
+            crate::config_contract_adapters::v0_7::into_wire(*request)
+        }
+        ExactOneShotContract::V0_8(request) => {
+            crate::config_contract_adapters::v0_8::into_wire(*request)
+        }
+        ExactOneShotContract::Dev(request) => {
+            crate::config_contract_adapters::dev::one_shot_into_wire(*request)
+        }
+    };
+
+    let result = convert_wire_config(config, logger, true, false);
+    log_one_shot_error(logger, &result);
+    result
+}
+
+fn exact_version_error(error: VersionProbeError) -> ParseError {
+    let message = match error {
+        VersionProbeError::InvalidDeclaration(source) => {
+            format!("Invalid version declaration: {source}")
+        }
+        VersionProbeError::UnsupportedVersion(_) => "Unsupported version".to_string(),
+    };
+    ParseError::Decode(WxcError::ConfigParse(message))
+}
+
+fn parse_exact_published_one_shot<T>(
+    json: &str,
+    logger: &mut Logger,
+    adapt: fn(T) -> wire::MxcConfig,
+) -> Result<MxcRequest, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let request = config_deserialize::from_str(json)
+        .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+    convert_wire_config(adapt(request), logger, true, false)
+        .map(MxcRequest::OneShot)
+        .map_err(ParseError::OneShot)
+}
+
+fn exact_phase_error(error: mxc_config_contract::dev::PhaseProbeError) -> ParseError {
+    let message = match error {
+        mxc_config_contract::dev::PhaseProbeError::InvalidDeclaration(source) => {
+            format!("Invalid phase declaration: {source}")
+        }
+        mxc_config_contract::dev::PhaseProbeError::UnsupportedPhase(_) => {
+            "Unsupported phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn exact_containment_error(error: mxc_config_contract::dev::ContainmentProbeError) -> ParseError {
+    let message = match error {
+        mxc_config_contract::dev::ContainmentProbeError::InvalidDeclaration(source) => {
+            format!("Invalid provision containment declaration: {source}")
+        }
+        mxc_config_contract::dev::ContainmentProbeError::UnsupportedContainment(_) => {
+            "Unsupported containment for provision phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn deserialize_development_root<T>(
+    json: &str,
+    contract: &'static str,
+    state_aware: bool,
+) -> Result<T, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    config_deserialize::from_str(json).map_err(|error| {
+        let message = format!("Invalid {contract} request: {error}");
+        if state_aware {
+            ParseError::StateAware(MxcError::malformed_request(message))
+        } else {
+            ParseError::OneShot(WxcError::ConfigParse(message))
+        }
+    })
+}
+
+fn deserialize_development_request(
+    json: &str,
+    phase: Option<mxc_config_contract::dev::Phase>,
+) -> Result<mxc_config_contract::dev::Request, ParseError> {
+    use mxc_config_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
+
+    match phase {
+        None => deserialize_development_root(json, "one-shot", false)
+            .map(Box::new)
+            .map(Request::OneShot),
+        Some(Phase::Provision) => {
+            let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
+                Containment::WindowsSandbox => {
+                    deserialize_development_root(json, "Windows Sandbox provision", true)
+                        .map(ProvisionRequest::WindowsSandbox)
+                }
+                Containment::IsolationSession => {
+                    deserialize_development_root(json, "IsolationSession provision", true)
+                        .map(ProvisionRequest::IsolationSession)
+                }
+                Containment::Wslc => deserialize_development_root(json, "WSLC provision", true)
+                    .map(ProvisionRequest::Wslc),
+            }?;
+            Ok(Request::Provision(request))
+        }
+        Some(Phase::Start) => deserialize_development_root(json, "start", true).map(Request::Start),
+        Some(Phase::Exec) => deserialize_development_root(json, "exec", true).map(Request::Exec),
+        Some(Phase::Stop) => deserialize_development_root(json, "stop", true).map(Request::Stop),
+        Some(Phase::Deprovision) => {
+            deserialize_development_root(json, "deprovision", true).map(Request::Deprovision)
+        }
+    }
+}
+
+fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
+    let state_aware = phase.is_some();
+    let request = deserialize_development_request(json, phase)?;
+    let adapted =
+        crate::config_contract_adapters::dev::adapt_request(request, json).map_err(|error| {
+            let message = format!("Failed to adapt exact request: {error}");
+            if state_aware {
+                ParseError::StateAware(MxcError::malformed_request(message))
+            } else {
+                ParseError::OneShot(WxcError::ConfigParse(message))
+            }
+        })?;
+
+    match adapted {
+        crate::config_contract_adapters::dev::AdaptedWireRequest::OneShot(config) => {
+            convert_wire_config(config, logger, true, false)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
+        crate::config_contract_adapters::dev::AdaptedWireRequest::StateAware(input) => {
+            normalize_state_aware(input, logger)
+                .map(MxcRequest::StateAware)
+                .map_err(|error| {
+                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+                })
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    match probe_version(json).map_err(exact_version_error)? {
+        ContractVersion::V0_6_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_6::into_wire,
+        ),
+        ContractVersion::V0_7_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_7::into_wire,
+        ),
+        ContractVersion::V0_8_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_8::into_wire,
+        ),
+        ContractVersion::V0_9_0Alpha => parse_exact_development(json, logger),
+    }
+}
+
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
 /// failures).
@@ -1864,6 +2062,511 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    fn assert_exact_contract_bridge(request: ExactOneShotContract, expected_version: &str) {
+        let mut logger = test_logger();
+        let execution = load_one_shot_request_from_contract(request, &mut logger).unwrap();
+
+        assert_eq!(execution.schema_version, expected_version);
+        assert_eq!(execution.script_code, "echo hello");
+    }
+
+    #[test]
+    fn private_exact_parser_path_compiles_and_accepts_a_published_request() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+
+        let parsed = parse_exact_mxc_request_json(json, &mut test_logger()).unwrap();
+        assert!(matches!(parsed, MxcRequest::OneShot(_)));
+    }
+
+    fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
+        parse_exact_mxc_request_json(json, &mut test_logger())
+    }
+
+    #[test]
+    fn exact_parser_accepts_every_published_one_shot_version() {
+        for (version, command) in [
+            ("0.6.0-alpha", "echo v06"),
+            ("0.7.0-alpha", "echo v07"),
+            ("0.8.0-alpha", "echo v08"),
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "process": {{"commandLine": "{command}"}}
+                }}"#
+            );
+
+            match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::OneShot(request) => {
+                    assert_eq!(request.schema_version, version);
+                    assert_eq!(request.script_code, command);
+                }
+                MxcRequest::StateAware(_) => {
+                    panic!("{version}: expected one-shot request")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_parser_accepts_the_development_one_shot_contract() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "process": {"commandLine": "echo dev"}
+        }"#;
+
+        match parse_exact_for_test(json).unwrap() {
+            MxcRequest::OneShot(request) => {
+                assert_eq!(request.schema_version, "0.9.0-alpha");
+                assert_eq!(request.script_code, "echo dev");
+            }
+            MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+        }
+    }
+
+    #[test]
+    fn exact_parser_accepts_every_development_state_aware_root() {
+        for (
+            case,
+            json,
+            expected_phase,
+            expected_declared_containment,
+            expected_runtime_containment,
+            expected_sandbox_id,
+            expected_script,
+        ) in [
+            (
+                "Windows Sandbox provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::WindowsSandbox),
+                ContainmentBackend::WindowsSandbox,
+                None,
+                "",
+            ),
+            (
+                "IsolationSession provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::IsolationSession),
+                ContainmentBackend::IsolationSession,
+                None,
+                "",
+            ),
+            (
+                "WSLC provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+                Phase::Provision,
+                Some(ContainmentBackend::Wslc),
+                ContainmentBackend::Wslc,
+                None,
+                "",
+            ),
+            (
+                "start",
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                Phase::Start,
+                None,
+                ContainmentBackend::WindowsSandbox,
+                Some("wsb:abcd1234"),
+                "",
+            ),
+            (
+                "exec",
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo exact"}}"#,
+                Phase::Exec,
+                None,
+                ContainmentBackend::Wslc,
+                Some("wslc:abcd1234"),
+                "echo exact",
+            ),
+            (
+                "stop",
+                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                Phase::Stop,
+                None,
+                ContainmentBackend::IsolationSession,
+                Some("iso:abcd1234"),
+                "",
+            ),
+            (
+                "deprovision",
+                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                Phase::Deprovision,
+                None,
+                ContainmentBackend::Wslc,
+                Some("wslc:abcd1234"),
+                "",
+            ),
+        ] {
+            let parsed = match parse_exact_for_test(json).unwrap() {
+                MxcRequest::StateAware(parsed) => parsed,
+                MxcRequest::OneShot(_) => panic!("{case}: expected state-aware request"),
+            };
+
+            assert_eq!(parsed.phase, expected_phase, "{case}");
+            assert_eq!(
+                parsed.containment, expected_declared_containment,
+                "{case}: declared containment"
+            );
+            assert_eq!(
+                parsed.request.containment, expected_runtime_containment,
+                "{case}: runtime containment"
+            );
+            assert_eq!(
+                parsed.sandbox_id.as_deref(),
+                expected_sandbox_id,
+                "{case}: sandbox id"
+            );
+            assert_eq!(parsed.request.script_code, expected_script, "{case}");
+            assert_eq!(parsed.source_text.as_deref(), Some(json), "{case}");
+        }
+    }
+
+    #[test]
+    fn exact_parser_preserves_development_raw_experimental_and_telemetry() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "telemetry": {"enabled": false},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
+            "experimental": {
+                "isolation_session": {
+                    "provision": {"appId": "Contoso.App"}
+                }
+            }
+        }"#;
+
+        let parsed = match parse_exact_for_test(json).unwrap() {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        };
+
+        assert_eq!(
+            parsed.experimental_raw,
+            Some(serde_json::json!({
+                "isolation_session": {
+                    "provision": {"appId": "Contoso.App"}
+                }
+            }))
+        );
+        assert_eq!(
+            parsed
+                .request
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(false)
+        );
+        assert_eq!(parsed.source_text.as_deref(), Some(json));
+    }
+
+    #[test]
+    fn exact_parser_routes_version_declaration_failures_as_decode_errors() {
+        for (case, json) in [
+            ("missing", r#"{"process":{"commandLine":"echo hello"}}"#),
+            (
+                "null",
+                r#"{"version":null,"process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "duplicate",
+                r#"{"version":"0.8.0-alpha","version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "unsupported",
+                r#"{"version":"99.99.99-secret","process":{"commandLine":"echo hello"}}"#,
+            ),
+        ] {
+            let error = parse_exact_for_test(json).unwrap_err();
+            assert!(
+                matches!(error, ParseError::Decode(_)),
+                "{case}: got {error:?}"
+            );
+            if case == "unsupported" {
+                assert!(
+                    !error.message().contains("99.99.99-secret"),
+                    "unsupported user input must not be rendered"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_parser_routes_contract_failures_by_request_kind() {
+        for (case, json, state_aware) in [
+            (
+                "published experimental field",
+                r#"{"version":"0.6.0-alpha","process":{"commandLine":"echo hello"},"experimental":{}}"#,
+                false,
+            ),
+            (
+                "v0.7 directional network field",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"echo hello"},"network":{"egress":{"default":"deny"}}}"#,
+                false,
+            ),
+            (
+                "published state-aware field",
+                r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
+                false,
+            ),
+            (
+                "development one-shot unknown field",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"},"unknown":true}"#,
+                false,
+            ),
+            (
+                "development state-aware unknown field",
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234","unknown":true}"#,
+                true,
+            ),
+            (
+                "development unknown phase",
+                r#"{"version":"0.9.0-alpha","phase":"teleport"}"#,
+                true,
+            ),
+        ] {
+            let error = parse_exact_for_test(json).unwrap_err();
+            assert_eq!(
+                matches!(error, ParseError::StateAware(_)),
+                state_aware,
+                "{case}: got {error:?}"
+            );
+            if !state_aware {
+                assert!(
+                    matches!(error, ParseError::OneShot(_)),
+                    "{case}: got {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_one_shot_parser_preserves_typed_error_path_and_location() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
+            let json = format!(
+                "{{\n  \"version\": \"{version}\",\n  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
+            );
+            assert_exact_typed_error(&json, "process.cwd", "42", false);
+        }
+    }
+
+    fn assert_exact_typed_error(json: &str, path: &str, invalid_value: &str, state_aware: bool) {
+        let error = parse_exact_for_test(json).unwrap_err();
+        assert_eq!(matches!(error, ParseError::StateAware(_)), state_aware);
+        if !state_aware {
+            assert!(matches!(error, ParseError::OneShot(_)));
+        }
+        let message = error.message();
+        assert!(
+            message.contains(&format!("Invalid configuration at `{path}`")),
+            "{message}"
+        );
+        let (line, source_line) = json
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(invalid_value))
+            .unwrap();
+        let column = source_line.find(invalid_value).unwrap() + invalid_value.len();
+        assert!(
+            message.contains(&format!("line {} column {column}", line + 1)),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn exact_development_parser_preserves_nested_diagnostics_for_every_root() {
+        for (root, json, state_aware) in [
+            (
+                "one-shot",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+                false,
+            ),
+            (
+                "Windows Sandbox provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                true,
+            ),
+            (
+                "IsolationSession provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                true,
+            ),
+            (
+                "WSLC provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+                true,
+            ),
+            (
+                "start",
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                true,
+            ),
+            (
+                "exec",
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
+                true,
+            ),
+            (
+                "stop",
+                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                true,
+            ),
+            (
+                "deprovision",
+                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                true,
+            ),
+        ] {
+            parse_exact_for_test(json).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["telemetry"] = serde_json::json!({"enabled": "invalid-telemetry-flag"});
+            let json = serde_json::to_string_pretty(&value).unwrap();
+            assert_exact_typed_error(
+                &json,
+                "telemetry.enabled",
+                "\"invalid-telemetry-flag\"",
+                state_aware,
+            );
+            assert!(
+                parse_exact_for_test(&json)
+                    .unwrap_err()
+                    .message()
+                    .contains(&format!("Invalid {root} request:")),
+                "{root}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_preserves_nested_backend_payload_paths() {
+        for (json, path) in [
+            (
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
+                "process.cwd",
+            ),
+            (
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","experimental":{"wslc":{"provision":{"image":42}}}}"#,
+                "experimental.wslc.provision.image",
+            ),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            let json = serde_json::to_string_pretty(&value).unwrap();
+            assert_exact_typed_error(&json, path, "42", true);
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_uses_shared_diagnostic_escaping_and_redaction() {
+        for json in [
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["telemetry"] =
+                serde_json::json!({"unexpected\n\u{1b}[31m\u{202e}": "do-not-log"});
+            let message = parse_exact_for_test(&serde_json::to_string(&value).unwrap())
+                .unwrap_err()
+                .message();
+            for character in ['\n', '\u{1b}', '\u{202e}'] {
+                assert!(!message.contains(character), "{message:?}");
+            }
+            for escaped in ["\\n", "\\u{1b}", "\\u{202e}"] {
+                assert!(message.contains(escaped), "{message}");
+            }
+
+            // No credential field is currently accepted here, but the shared
+            // renderer must still recognize a secret-bearing error path.
+            value["telemetry"] = serde_json::json!({"apiToken": "do-not-log"});
+            let message = parse_exact_for_test(&serde_json::to_string(&value).unwrap())
+                .unwrap_err()
+                .message();
+            assert!(message.contains("`telemetry.apiToken`"), "{message}");
+            assert!(message.contains("invalid secret value"), "{message}");
+            assert!(!message.contains("do-not-log"), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_contract_bridge_accepts_every_registered_one_shot_version() {
+        let v0_6 = serde_json::from_str::<mxc_config_contract::published::v0_6_0_alpha::Request>(
+            r#"{
+                    "version": "0.6.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_6(Box::new(v0_6)), "0.6.0-alpha");
+
+        let v0_7 = serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
+            r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_7(Box::new(v0_7)), "0.7.0-alpha");
+
+        let v0_8 = serde_json::from_str::<mxc_config_contract::published::v0_8_0_alpha::Request>(
+            r#"{
+                    "version": "0.8.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_8(Box::new(v0_8)), "0.8.0-alpha");
+
+        let dev = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#"{
+                "version": "0.9.0-alpha",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::Dev(Box::new(dev)), "0.9.0-alpha");
+    }
+
+    #[test]
+    fn exact_contract_bridge_runs_shared_semantic_validation() {
+        let request =
+            serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
+                r#"{
+                    "version": "0.7.0-alpha",
+                    "containment": "processcontainer",
+                    "process": {"commandLine": "echo hello"},
+                    "processContainer": {
+                        "capabilities": [
+                            "internetClient,privateNetworkClientServer"
+                        ]
+                    }
+                }"#,
+            )
+            .unwrap();
+        let mut logger = test_logger();
+
+        let error = load_one_shot_request_from_contract(
+            ExactOneShotContract::V0_7(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("must not contain a comma"),
+            "unexpected semantic error: {error}"
+        );
+        assert!(
+            logger.get_buffer().contains("must not contain a comma"),
+            "semantic failure should be logged"
+        );
     }
 
     fn neutral_state_aware_input(
