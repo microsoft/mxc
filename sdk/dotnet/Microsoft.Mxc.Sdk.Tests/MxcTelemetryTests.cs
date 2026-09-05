@@ -53,6 +53,8 @@ public sealed class MxcTelemetryTests
     public void FailClosedDiagnostics_AreDeduplicatedAndDoNotExposeExceptionText()
     {
         var operation = $"TestGetPolicy{Guid.NewGuid():N}";
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
         using var output = new StringWriter();
         using var listener = new TextWriterTraceListener(output);
         var failure = new InvalidOperationException("sensitive\r\n\u001b[31mmessage");
@@ -218,18 +220,44 @@ public sealed class MxcTelemetryTests
         using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
         using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
             new MxcTelemetry.FailureCategoryTracker(capacity: 64));
+        using var output = new StringWriter();
+        using var listener = new TextWriterTraceListener(output);
+        Trace.Listeners.Add(listener);
+        try
+        {
+            if (throwException)
+            {
+                Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+            }
+            else
+            {
+                var exception = Assert.Throws<MxcException>(() => MxcTelemetry.GetConsent());
+                Assert.Equal(ErrorCode.BackendError, exception.Code);
+            }
+            Assert.False(MxcTelemetry.NeedsConsentPrompt());
+            Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+            Trace.Flush();
 
-        if (throwException)
-        {
-            Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+            var messages = output
+                .ToString()
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains("mxc:", StringComparison.Ordinal))
+                .ToArray();
+            Assert.Equal(throwException ? 3 : 2, messages.Length);
+            Assert.Contains(messages, line => line.Contains("NeedsConsentPrompt", StringComparison.Ordinal));
+            Assert.Contains(messages, line => line.Contains("GetPolicy", StringComparison.Ordinal));
+            Assert.All(
+                messages,
+                line => Assert.Contains(
+                    throwException
+                        ? typeof(InvalidOperationException).FullName!
+                        : nameof(ErrorCode.BackendError),
+                    line));
         }
-        else
+        finally
         {
-            var exception = Assert.Throws<MxcException>(() => MxcTelemetry.GetConsent());
-            Assert.Equal(ErrorCode.BackendError, exception.Code);
+            Trace.Listeners.Remove(listener);
         }
-        Assert.False(MxcTelemetry.NeedsConsentPrompt());
-        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
     }
 
     [Fact]
