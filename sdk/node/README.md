@@ -441,7 +441,8 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); state-aware and development-only requests require `0.9.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

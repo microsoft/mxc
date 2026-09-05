@@ -13,6 +13,7 @@ use crate::models::{
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
+#[cfg(test)]
 use crate::network_parser::{directional_network_version_error, supports_directional_network};
 use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -71,6 +72,8 @@ impl ParseError {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(expecting = "a configuration object")]
 struct RequestDiscriminator<'a> {
+    // Exact dispatch uses the contract's phase probe instead.
+    #[cfg(test)]
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
@@ -163,11 +166,8 @@ pub fn load_request(
     result
 }
 
-/// Parse a one-shot request from a **raw JSON string** (already decoded — not
-/// a file path or base64). For executors that decode the request once and
-/// thread the JSON string through both the maintenance-probe check and this
-/// loader, avoiding the double-read that would otherwise drain named pipes,
-/// `/dev/stdin`, and process-substitution paths.
+/// Rolling one-shot raw-JSON loader retained only for characterization tests.
+#[cfg(test)]
 pub fn load_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -182,9 +182,8 @@ pub fn load_request_from_json(
     )
 }
 
-/// Options-aware variant of [`load_request_from_json`]. It remains
-/// crate-private because the options are only needed by the executor's
-/// request-loading paths.
+/// Options-aware rolling loader retained only for characterization tests.
+#[cfg(test)]
 pub(crate) fn load_request_from_json_with_options(
     json_str: &str,
     logger: &mut Logger,
@@ -526,6 +525,13 @@ pub fn load_mxc_request_with_options(
 /// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
 /// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
 /// in-memory JSON string can be parsed directly.
+///
+/// This loader enforces exact registered contracts. The legacy rolling raw-JSON
+/// loader is not available in production builds:
+///
+/// ```compile_fail
+/// use wxc_common::config_parser::load_request_from_json;
+/// ```
 pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -703,11 +709,13 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
     }
 }
 
+#[cfg(test)]
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
     validate_telemetry_field_version(config)
 }
 
+#[cfg(test)]
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -735,6 +743,7 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());

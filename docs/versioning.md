@@ -55,12 +55,13 @@ reasons:
 | **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
-- **Schema version** is semver and is checked at the trust boundary: the parser
-  accepts the `0.6.x` floor line through the `0.9.x` dev-ceiling line (the
-  canonical min/max constants are currently `0.6.0-alpha` and `0.9.0-alpha` in
-  `schemas/schema-version.json`), and the SDK mirrors that range. Only
-  `major.minor` is compared — patch and pre-release labels are ignored — and both
-  back-dated and forward-dated versions are rejected.
+- **Schema version** selects an exact registered contract at the trust boundary:
+  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`.
+  Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
+  are not registered and are rejected. A missing declaration is rejected too.
+  The SDK enforces the same exact set, and state-aware requests require
+  `0.9.0-alpha`. The compatibility constants in `schemas/schema-version.json`
+  do not authorize other versions within their minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
@@ -70,8 +71,8 @@ reasons:
   The schema `version` does not select the Windows backend:
   ProcessContainer resolves to BaseContainer or AppContainer purely by host
   capability (see [Version Negotiation](#version-negotiation)). An identical
-  config runs the same way regardless of which (in-range) schema version it
-  declares.
+  policy that is expressible in multiple registered contracts retains the same
+  host-capability-driven backend selection.
 
 ## Schema Shipping Model
 
@@ -294,8 +295,9 @@ User writes SandboxPolicy (policy + environment, versioned)
 Config JSON (version: "0.6.0-alpha")
         │
         ▼
-MXC parses → Stage 1: validate schema version (range check)
-        │       → if --experimental, includes experimental section
+MXC parses → Stage 1: select and validate the exact registered contract
+        │       → published contracts exclude experimental fields
+        │       → development defines them; execution still requires --experimental
         │
         ▼
 Stage 2: resolve `containment` intent → concrete backend
@@ -392,12 +394,12 @@ Execution resolves a request in three ordered stages. The schema version gates
 only the first; it does **not** influence stages 2 or 3.
 
 ```
-Stage 1 — Schema-range check (the trust boundary, `config_parser`)
-  Is config.version within [floor, dev-ceiling]?  (major.minor; pre-release
-  labels ignored)
-    below floor   → error: "older than supported" (update your config)
-    above ceiling → error: "newer than supported" (upgrade wxc-exec)
-    in range / absent → continue
+Stage 1 — Exact contract selection (the trust boundary, `config_parser`)
+  Does config.version name an exact registered contract?
+    missing / malformed → declaration error
+    unregistered        → unsupported contract version error
+    registered          → deserialize that contract, then validate policy
+  Patch and prerelease spelling are significant; there is no range fallback.
 
 Stage 2 — Containment resolve (independent of schema version)
   Map the `containment` intent to a concrete backend:
@@ -475,9 +477,11 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   submitted value. After the root JSON value, only whitespace is accepted;
   trailing JSON values or other trailing content are rejected as malformed
   syntax.
-- **Schema-range failures** (Stage 1) carry a clear "older than supported" /
-  "newer than supported" message telling the caller whether to update the config
-  or upgrade `wxc-exec`.
+- **Contract-version failures** (Stage 1) identify a missing or malformed
+  declaration or an unsupported exact version. The SDK retains its
+  "older than supported" / "newer than supported" hints for versions outside
+  the supported lines, and rejects unregistered in-range spellings with
+  "not a registered schema contract". No loader silently chooses a version.
 - **Capability failures** (Stage 3) surface on the runner's `ScriptResponse`
   (and the SDK `spawn` path's `MxcError`) as a `BackendUnavailable` failure
   phase when the requested backend's API is absent (e.g. the BaseContainer OS

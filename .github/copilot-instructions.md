@@ -353,7 +353,7 @@ When changing behavior covered by existing documentation, update the relevant do
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.6.0-alpha` minimum, `0.9.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must name an exact registered contract: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. The SDK validates this in `sandbox.ts`; an unregistered spelling is rejected even inside the minimum/maximum range. State-aware lifecycle requests require `0.9.0-alpha`. The Rust contract registry owns exact dispatch; `schemas/schema-version.json` and `scripts/versioning/check-schema-versions.js` still synchronize compatibility constants, not runtime range acceptance. Keep the one-shot public `version` property a string with runtime exact validation; generated public registry metadata is separate work. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 

@@ -146,4 +146,4 @@ to the SDK.
 | 0.8.0-alpha | Stable (current) | ProcessContainer (capability-resolved) | Production |
 | 0.9.0-alpha | Dev | ProcessContainer (capability-resolved) | Experimental |
 
-The SDK and Rust parser accept `>=0.6, <=0.9`. The schema version does not select the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.
+The SDK and Rust parser accept only the exact registered versions `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, and `0.9.0-alpha`; an unregistered spelling such as `0.6.1-alpha` is rejected. The schema version does not select the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.
