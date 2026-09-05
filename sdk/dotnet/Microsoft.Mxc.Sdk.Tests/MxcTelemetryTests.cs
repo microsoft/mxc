@@ -58,18 +58,50 @@ public sealed class MxcTelemetryTests
             MxcTelemetry.ReportFailClosed(operation, "false", ErrorCode.BackendError);
             Trace.Flush();
 
-            var message = output.ToString();
-            Assert.Equal(2, message.Split(operation).Length - 1);
-            Assert.Contains(typeof(InvalidOperationException).FullName!, message);
-            Assert.Contains("HRESULT 0x", message);
-            Assert.DoesNotContain("sensitive", message);
-            Assert.DoesNotContain('\u001b', message);
-            Assert.Contains("BackendError", message);
+            var messages = output
+                .ToString()
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains(operation, StringComparison.Ordinal))
+                .ToArray();
+            Assert.Equal(2, messages.Length);
+            Assert.Contains(typeof(InvalidOperationException).FullName!, messages[0]);
+            Assert.Contains("HRESULT 0x", messages[0]);
+            Assert.DoesNotContain("sensitive", messages[0]);
+            Assert.DoesNotContain('\u001b', messages[0]);
+            Assert.Contains("BackendError", messages[1]);
         }
         finally
         {
             Trace.Listeners.Remove(listener);
         }
+    }
+
+    [Fact]
+    public void FailClosedDiagnosticTracker_DeduplicatesAndEnforcesCapacity()
+    {
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 2);
+
+        Assert.True(tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1));
+        Assert.False(tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1));
+        Assert.True(tracker.TryAdd("NeedsConsentPrompt", "false", "ErrorCode", 2));
+        Assert.False(tracker.TryAdd("GetConsent", "Undetermined", "ExceptionB", 3));
+    }
+
+    [Fact]
+    public void FailClosedDiagnosticTracker_DeduplicatesConcurrentReports()
+    {
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        var accepted = 0;
+
+        Parallel.For(0, 1_000, _ =>
+        {
+            if (tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1))
+            {
+                Interlocked.Increment(ref accepted);
+            }
+        });
+
+        Assert.Equal(1, accepted);
     }
 
     [Fact]

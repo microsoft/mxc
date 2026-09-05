@@ -106,14 +106,32 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionYes = 1;
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
-    private const int MaxReportedFailureCategories = 64;
-    private static readonly HashSet<FailureCategory> ReportedFailureCategories = [];
+    private static readonly FailureCategoryTracker ReportedFailures = new(capacity: 64);
 
-    private readonly record struct FailureCategory(
-        string Operation,
-        string SafeResult,
-        string Kind,
-        int Code);
+    internal sealed class FailureCategoryTracker(int capacity)
+    {
+        private readonly HashSet<FailureCategory> categories = [];
+
+        private readonly record struct FailureCategory(
+            string Operation,
+            string SafeResult,
+            string Kind,
+            int Code);
+
+        internal bool TryAdd(string operation, string safeResult, string kind, int code)
+        {
+            var category = new FailureCategory(operation, safeResult, kind, code);
+            lock (categories)
+            {
+                if (categories.Contains(category) || categories.Count >= capacity)
+                {
+                    return false;
+                }
+                categories.Add(category);
+                return true;
+            }
+        }
+    }
 
     private sealed class PresenterContext
     {
@@ -380,8 +398,11 @@ public static class MxcTelemetry
         try
         {
             var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
-            if (!TryBeginFailureReport(
-                    new FailureCategory(operation, safeResult, exceptionType, exception.HResult)))
+            if (!ReportedFailures.TryAdd(
+                    operation,
+                    safeResult,
+                    exceptionType,
+                    exception.HResult))
             {
                 return;
             }
@@ -406,8 +427,11 @@ public static class MxcTelemetry
     {
         try
         {
-            if (!TryBeginFailureReport(
-                    new FailureCategory(operation, safeResult, nameof(ErrorCode), (int)errorCode)))
+            if (!ReportedFailures.TryAdd(
+                    operation,
+                    safeResult,
+                    nameof(ErrorCode),
+                    (int)errorCode))
             {
                 return;
             }
@@ -422,20 +446,6 @@ public static class MxcTelemetry
         catch
         {
             // Diagnostics must not affect the fail-closed result.
-        }
-    }
-
-    private static bool TryBeginFailureReport(FailureCategory category)
-    {
-        lock (ReportedFailureCategories)
-        {
-            if (ReportedFailureCategories.Contains(category) ||
-                ReportedFailureCategories.Count >= MaxReportedFailureCategories)
-            {
-                return false;
-            }
-            ReportedFailureCategories.Add(category);
-            return true;
         }
     }
 
