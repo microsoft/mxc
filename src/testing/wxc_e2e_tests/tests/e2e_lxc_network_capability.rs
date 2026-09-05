@@ -37,17 +37,18 @@ fn workload_cannot_reconfigure_the_network() {
         "lxc-exec did not run the container\n--- stderr ---\n{}",
         result.stderr
     );
+
     // The kernel writes the effective capability set as a hex mask on its own line.
-    let cap_eff = status
+    let holds_net_admin = status
         .lines()
         .find(|line| line.starts_with("CapEff:"))
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|mask| u64::from_str_radix(mask, 16).ok())
+        .map(|mask| mask & CAP_NET_ADMIN != 0)
         .unwrap_or_else(|| panic!("the container reported no readable CapEff line\n{status}"));
 
-    assert_eq!(
-        cap_eff & CAP_NET_ADMIN,
-        0,
+    assert!(
+        !holds_net_admin,
         "the workload holds CAP_NET_ADMIN and can rewrite the firewall confining it\n{status}"
     );
 }
