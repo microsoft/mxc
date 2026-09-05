@@ -2,180 +2,144 @@
 // Licensed under the MIT License.
 
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
 
-/// <summary>A stored or effective telemetry consent state.</summary>
-public enum TelemetryConsentState
-{
-    Granted,
-    Denied,
-    Undetermined,
-    NotApplicable,
-}
-
-/// <summary>The administrative telemetry policy for this machine.</summary>
-public enum TelemetryPolicyState
-{
-    Unrestricted,
-    Allowed,
-    Blocked,
-    NotApplicable,
-}
-
-/// <summary>The presenter decision returned to MXC.</summary>
-public enum TelemetryConsentDecision
-{
-    No,
-    Yes,
-    Dismissed,
-}
-
-/// <summary>Why stored consent is not currently effective.</summary>
-public enum TelemetryConsentStatusReason
-{
-    NoRecord,
-    StoreUnreadable,
-    StoreMalformed,
-    ConsentSchemaUnsupported,
-    PromptVersionMissing,
-    PromptVersionUnsupported,
-    NotApplicable,
-}
-
-/// <summary>Result of a consent request or withdrawal.</summary>
-public enum TelemetryConsentResult
-{
-    Granted,
-    Denied,
-    Dismissed,
-    Withdrawn,
-    AlreadyGranted,
-    PolicyBlocked,
-    NotApplicable,
-}
-
-/// <summary>One canonical consent message.</summary>
-public sealed class TelemetryConsentMessage
-{
-    public string Id { get; init; } = string.Empty;
-    public string Text { get; init; } = string.Empty;
-}
-
-/// <summary>The canonical consent prompt resource passed to a host presenter.</summary>
-public sealed class TelemetryConsentPrompt
-{
-    public uint ResourceVersion { get; init; }
-    public string Locale { get; init; } = string.Empty;
-    public TelemetryConsentMessage Title { get; init; } = new();
-    public TelemetryConsentMessage Body { get; init; } = new();
-    public TelemetryConsentMessage AffirmativeLabel { get; init; } = new();
-    public TelemetryConsentMessage NegativeLabel { get; init; } = new();
-    public TelemetryConsentMessage LearnMoreLabel { get; init; } = new();
-    public string LearnMoreUrl { get; init; } = string.Empty;
-}
-
-/// <summary>Stored and effective consent plus the current administrative policy.</summary>
-public sealed class TelemetryConsentStatus
-{
-    public TelemetryConsentState StoredState { get; init; }
-    public TelemetryConsentState EffectiveState { get; init; }
-    public TelemetryConsentStatusReason? Reason { get; init; }
-    public TelemetryPolicyState Policy { get; init; }
-}
-
-/// <summary>Telemetry consent action result with the resulting status snapshot.</summary>
-public sealed class TelemetryConsentOutcome
-{
-    public TelemetryConsentResult Result { get; init; }
-    public TelemetryConsentState StoredState { get; init; }
-    public TelemetryConsentState EffectiveState { get; init; }
-    public TelemetryConsentStatusReason? Reason { get; init; }
-    public TelemetryPolicyState Policy { get; init; }
-}
-
-/// <summary>Telemetry consent helpers over the native <c>mxc_ffi</c> surface.</summary>
+/// <summary>
+/// Administers MXC telemetry consent. See
+/// docs/telemetry/telemetry-consent-design.md for the contract.
+/// </summary>
 public static class MxcTelemetry
 {
-    private const int NativeConsentDecisionNo = 0;
-    private const int NativeConsentDecisionYes = 1;
-    private const int NativeConsentDecisionDismissed = 2;
-    private const int NativeConsentPresenterError = -1;
-    private static readonly FailureCategoryTracker DefaultFailureCategoryTracker = new(capacity: 64);
-    private static readonly ITelemetryReadApi DefaultTelemetryReadApi = new PInvokeTelemetryReadApi();
-    private static FailureCategoryTracker reportedFailures = DefaultFailureCategoryTracker;
-    private static ITelemetryReadApi telemetryReadApi = DefaultTelemetryReadApi;
-
     internal readonly record struct NativePayloadResult(int Status, string? Payload);
     internal readonly record struct NativeBooleanResult(int Status, bool Value);
 
-    // The public wrappers interpret these native status results according to
-    // their individual throw-or-fail-closed contracts.
-    internal interface ITelemetryReadApi
+    internal interface ITelemetryNativeApi
     {
         NativePayloadResult GetConsent();
         NativeBooleanResult NeedsConsentPrompt();
         NativePayloadResult GetPolicy();
+        NativePayloadResult GetConsentStatus();
+        NativePayloadResult WithdrawConsent();
+        NativePayloadResult RequestConsent(string? locale, Func<string, int> presenter);
     }
 
-    private sealed class PInvokeTelemetryReadApi : ITelemetryReadApi
+    private sealed class PInvokeTelemetryNativeApi : ITelemetryNativeApi
     {
         public unsafe NativePayloadResult GetConsent()
         {
             byte* value = null;
             var status = NativeMethods.mxc_telemetry_get_consent(&value);
-            try
-            {
-                return new(status, ReadNativeUtf8(value));
-            }
-            finally
-            {
-                FreeNativeString(value);
-            }
+            return Payload(status, value);
         }
 
         public unsafe NativeBooleanResult NeedsConsentPrompt()
         {
-            int needsPrompt = 0;
-            var status = NativeMethods.mxc_telemetry_needs_consent_prompt(&needsPrompt);
-            return new(status, needsPrompt != 0);
+            int value = 0;
+            var status = NativeMethods.mxc_telemetry_needs_consent_prompt(&value);
+            return new(status, value != 0);
         }
 
         public unsafe NativePayloadResult GetPolicy()
         {
             byte* value = null;
             var status = NativeMethods.mxc_telemetry_get_policy(&value);
+            return Payload(status, value);
+        }
+
+        public unsafe NativePayloadResult GetConsentStatus()
+        {
+            byte* value = null;
+            var status = NativeMethods.mxc_telemetry_get_consent_status(&value);
+            return Payload(status, value);
+        }
+
+        public unsafe NativePayloadResult WithdrawConsent()
+        {
+            byte* value = null;
+            var status = NativeMethods.mxc_telemetry_withdraw_consent(&value);
+            return Payload(status, value);
+        }
+
+        public unsafe NativePayloadResult RequestConsent(string? locale, Func<string, int> presenter)
+        {
+            var localeBuffer = locale is null ? null : ToNullTerminatedUtf8(locale);
+            using var callback = new PresenterCallback(presenter);
+            fixed (byte* localePtr = localeBuffer)
+            {
+                byte* value = null;
+                var status = NativeMethods.mxc_telemetry_request_consent(
+                    localePtr,
+                    &PresentConsent,
+                    (void*)GCHandle.ToIntPtr(callback.Handle),
+                    &value);
+                return Payload(status, value);
+            }
+        }
+
+        private static unsafe NativePayloadResult Payload(int status, byte* value)
+        {
             try
             {
-                return new(status, ReadNativeUtf8(value));
+                return new(status, value is null ? null : Marshal.PtrToStringUTF8((IntPtr)value));
             }
             finally
             {
-                FreeNativeString(value);
+                if (value is not null)
+                {
+                    NativeMethods.mxc_string_free(value);
+                }
             }
         }
     }
 
-    internal static IDisposable OverrideTelemetryReadApiForTesting(
-        ITelemetryReadApi replacement)
+    private sealed class PresenterCallback : IDisposable
+    {
+        private readonly Func<string, int> presenter;
+        internal GCHandle Handle { get; }
+
+        internal PresenterCallback(Func<string, int> presenter)
+        {
+            this.presenter = presenter;
+            Handle = GCHandle.Alloc(this);
+        }
+
+        internal int Invoke(string prompt)
+        {
+            try
+            {
+                return presenter(prompt);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        public void Dispose() => Handle.Free();
+    }
+
+    private static readonly ITelemetryNativeApi DefaultNativeApi = new PInvokeTelemetryNativeApi();
+    private static readonly FailureCategoryTracker DefaultFailureCategoryTracker = new(capacity: 64);
+    private static ITelemetryNativeApi nativeApi = DefaultNativeApi;
+    private static FailureCategoryTracker reportedFailures = DefaultFailureCategoryTracker;
+    private static bool? windowsHostOverride;
+
+    internal static IDisposable OverrideNativeApiForTesting(ITelemetryNativeApi replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
         if (!ReferenceEquals(
-                Interlocked.CompareExchange(
-                    ref telemetryReadApi,
-                    replacement,
-                    DefaultTelemetryReadApi),
-                DefaultTelemetryReadApi))
+                Interlocked.CompareExchange(ref nativeApi, replacement, DefaultNativeApi),
+                DefaultNativeApi))
         {
             throw new InvalidOperationException(
-                "A telemetry read API test override is already active.");
+                "A telemetry native API test override is already active.");
         }
-        return new TelemetryReadApiScope(replacement);
+        return new NativeApiScope(replacement);
     }
 
     internal static IDisposable OverrideFailureCategoryTrackerForTesting(
@@ -195,7 +159,16 @@ public static class MxcTelemetry
         return new FailureCategoryTrackerScope(replacement);
     }
 
-    private sealed class TelemetryReadApiScope(ITelemetryReadApi replacement) : IDisposable
+    internal static IDisposable OverrideWindowsHostForTesting(bool isWindows)
+    {
+        var previous = windowsHostOverride;
+        windowsHostOverride = isWindows;
+        return new Scope(() => windowsHostOverride = previous);
+    }
+
+    private static bool IsWindowsHost => windowsHostOverride ?? OperatingSystem.IsWindows();
+
+    private sealed class NativeApiScope(ITelemetryNativeApi replacement) : IDisposable
     {
         private int disposed;
 
@@ -205,10 +178,7 @@ public static class MxcTelemetry
             {
                 return;
             }
-            Interlocked.CompareExchange(
-                ref telemetryReadApi,
-                DefaultTelemetryReadApi,
-                replacement);
+            Interlocked.CompareExchange(ref nativeApi, DefaultNativeApi, replacement);
         }
     }
 
@@ -229,6 +199,58 @@ public static class MxcTelemetry
                 replacement);
         }
     }
+
+    private sealed class Scope(Action release) : IDisposable
+    {
+        private bool released;
+        public void Dispose()
+        {
+            if (!released)
+            {
+                released = true;
+                release();
+            }
+        }
+    }
+
+    static MxcTelemetry()
+    {
+        NativeLibraryResolver.Initialize();
+    }
+
+    /// <summary>
+    /// Read effective telemetry consent. Returns <see cref="TelemetryConsentState.NotApplicable"/>
+    /// off Windows and <see cref="TelemetryConsentState.Undetermined"/> when consent cannot be
+    /// determined.
+    /// </summary>
+    public static TelemetryConsentState GetConsent()
+    {
+        if (!IsWindowsHost)
+        {
+            return TelemetryConsentState.NotApplicable;
+        }
+
+        try
+        {
+            var result = nativeApi.GetConsent();
+            EnsureSuccess(result.Status, "failed to read telemetry consent state");
+            return ParseConsentState(result.Payload, "GetConsent");
+        }
+        catch (Exception ex)
+        {
+            ReportFailClosed("GetConsent", "Undetermined", ex);
+            return TelemetryConsentState.Undetermined;
+        }
+    }
+
+    /// <summary>
+    /// Whether an exception indicates that the native library is unavailable.
+    /// </summary>
+    internal static bool IsNativeLoadFailure(Exception ex) =>
+        ex is DllNotFoundException
+            or EntryPointNotFoundException
+            or TypeInitializationException
+            or BadImageFormatException;
 
     internal sealed class FailureCategoryTracker(int capacity)
     {
@@ -263,242 +285,6 @@ public static class MxcTelemetry
         }
     }
 
-    private sealed class PresenterContext
-    {
-        public required Func<TelemetryConsentPrompt, TelemetryConsentDecision> Presenter { get; init; }
-        public CancellationToken CancellationToken { get; init; }
-    }
-
-    /// <summary>
-    /// Return the consent state currently effective for telemetry authorization.
-    /// Use <see cref="GetConsentStatus"/> to read the persisted decision.
-    /// Fail-closed native-load failures return <see cref="TelemetryConsentState.Undetermined"/>.
-    /// </summary>
-    public static TelemetryConsentState GetConsent()
-    {
-        try
-        {
-            EnsureNativeInitialized();
-            var result = telemetryReadApi.GetConsent();
-            if (result.Status != (int)ErrorCode.Success)
-            {
-                throw new MxcException(
-                    (ErrorCode)result.Status,
-                    "retrieving telemetry consent failed");
-            }
-
-            return ParseConsentState(result.Payload ?? "undetermined");
-        }
-        catch (MxcException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            ReportFailClosed("GetConsent", "Undetermined", ex);
-            return TelemetryConsentState.Undetermined;
-        }
-    }
-
-    /// <summary>
-    /// Read stored and effective consent, plus the current administrative policy.
-    /// </summary>
-    public static TelemetryConsentStatus GetConsentStatus()
-    {
-        EnsureNativeInitialized();
-        unsafe
-        {
-            byte* value = null;
-            var status = NativeMethods.mxc_telemetry_get_consent_status(&value);
-            try
-            {
-                EnsureSuccess(
-                    status,
-                    "retrieving telemetry consent status failed",
-                    ReadNativeUtf8(value));
-                return ParseConsentStatus(ReadRequiredJson(value, "telemetry consent status"));
-            }
-            finally
-            {
-                FreeNativeString(value);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Invoke a host presenter, then persist its decision.
-    /// </summary>
-    public static TelemetryConsentOutcome RequestConsent(
-        Func<TelemetryConsentPrompt, TelemetryConsentDecision> presenter,
-        string? locale = null)
-    {
-        ArgumentNullException.ThrowIfNull(presenter);
-        return RequestConsentCore(presenter, locale, CancellationToken.None);
-    }
-
-    private static TelemetryConsentOutcome RequestConsentCore(
-        Func<TelemetryConsentPrompt, TelemetryConsentDecision> presenter,
-        string? locale,
-        CancellationToken cancellationToken)
-    {
-        EnsureNativeInitialized();
-
-        var localeBuf = locale is null ? null : ToNullTerminatedUtf8(locale);
-        var presenterContext = GCHandle.Alloc(new PresenterContext
-        {
-            Presenter = presenter,
-            CancellationToken = cancellationToken,
-        });
-        try
-        {
-            unsafe
-            {
-                fixed (byte* localePtr = localeBuf)
-                {
-                    byte* value = null;
-                    var status = NativeMethods.mxc_telemetry_request_consent(
-                        localePtr,
-                        &PresentConsentBridge,
-                        (void*)GCHandle.ToIntPtr(presenterContext),
-                        &value);
-                    try
-                    {
-                        EnsureSuccess(
-                            status,
-                            "requesting telemetry consent failed",
-                            ReadNativeUtf8(value));
-                        return ParseConsentOutcome(ReadRequiredJson(value, "telemetry consent outcome"));
-                    }
-                    finally
-                    {
-                        FreeNativeString(value);
-                    }
-                }
-            }
-        }
-        finally
-        {
-            presenterContext.Free();
-        }
-    }
-
-    /// <summary>
-    /// Asynchronous wrapper over <see cref="RequestConsent(Func{TelemetryConsentPrompt, TelemetryConsentDecision}, string?)"/>.
-    /// The native API is synchronous and blocking, so the native work runs on the thread pool while
-    /// the presenter is dispatched to the caller's synchronization context when one is available.
-    /// Cancellation stops waiting for the presenter and prevents its decision from being accepted
-    /// when observed before native persistence. It does not cancel the presenter's underlying task.
-    /// </summary>
-    public static Task<TelemetryConsentOutcome> RequestConsentAsync(
-        Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
-        string? locale = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(presenter);
-        var synchronizationContext = SynchronizationContext.Current;
-        return Task.Run(
-            () =>
-            {
-                var outcome = RequestConsentCore(
-                    prompt => InvokePresenterWithCancellation(
-                        presenter,
-                        prompt,
-                        synchronizationContext,
-                        cancellationToken),
-                    locale,
-                    cancellationToken);
-                return FinalizeAsyncOutcome(outcome, cancellationToken);
-            },
-            cancellationToken);
-    }
-
-    internal static TelemetryConsentOutcome FinalizeAsyncOutcome(
-        TelemetryConsentOutcome outcome,
-        CancellationToken cancellationToken)
-    {
-        if (outcome.Result == TelemetryConsentResult.Dismissed)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-        }
-        return outcome;
-    }
-
-    /// <summary>Persist an idempotent telemetry-consent withdrawal.</summary>
-    public static TelemetryConsentOutcome WithdrawConsent()
-    {
-        EnsureNativeInitialized();
-        unsafe
-        {
-            byte* value = null;
-            var status = NativeMethods.mxc_telemetry_withdraw_consent(&value);
-            try
-            {
-                EnsureSuccess(
-                    status,
-                    "withdrawing telemetry consent failed",
-                    ReadNativeUtf8(value));
-                return ParseConsentOutcome(ReadRequiredJson(value, "telemetry consent outcome"));
-            }
-            finally
-            {
-                FreeNativeString(value);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Whether a host should show its first-run consent prompt.
-    /// Fails closed to <see langword="false"/> and never throws.
-    /// </summary>
-    public static bool NeedsConsentPrompt()
-    {
-        try
-        {
-            EnsureNativeInitialized();
-            var result = telemetryReadApi.NeedsConsentPrompt();
-            if (result.Status != (int)ErrorCode.Success)
-            {
-                ReportFailClosed(
-                    "NeedsConsentPrompt",
-                    "false",
-                    (ErrorCode)result.Status);
-                return false;
-            }
-
-            return result.Value;
-        }
-        catch (Exception ex)
-        {
-            ReportFailClosed("NeedsConsentPrompt", "false", ex);
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Read the administrative telemetry policy.
-    /// Fails closed to <see cref="TelemetryPolicyState.Blocked"/> and never throws.
-    /// </summary>
-    public static TelemetryPolicyState GetPolicy()
-    {
-        try
-        {
-            EnsureNativeInitialized();
-            var result = telemetryReadApi.GetPolicy();
-            if (result.Status != (int)ErrorCode.Success)
-            {
-                ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)result.Status);
-                return TelemetryPolicyState.Blocked;
-            }
-
-            return ParsePolicyState(result.Payload ?? "blocked");
-        }
-        catch (Exception ex)
-        {
-            ReportFailClosed("GetPolicy", "Blocked", ex);
-            return TelemetryPolicyState.Blocked;
-        }
-    }
-
     internal static void ReportFailClosed(
         string operation,
         string safeResult,
@@ -510,7 +296,8 @@ public static class MxcTelemetry
             safeResult,
             exceptionType,
             exception.HResult,
-            errorCode: null);
+            errorCode: null,
+            safeDescription: null);
     }
 
     internal static void ReportFailClosed(
@@ -523,7 +310,22 @@ public static class MxcTelemetry
             safeResult,
             nameof(ErrorCode),
             (int)errorCode,
-            errorCode);
+            errorCode,
+            safeDescription: null);
+    }
+
+    private static void ReportFailClosedCategory(
+        string operation,
+        string safeResult,
+        string category)
+    {
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            category,
+            code: 0,
+            errorCode: null,
+            safeDescription: category);
     }
 
     private static void ReportFailClosedCore(
@@ -531,24 +333,21 @@ public static class MxcTelemetry
         string safeResult,
         string kind,
         int code,
-        ErrorCode? errorCode)
+        ErrorCode? errorCode,
+        string? safeDescription)
     {
         var registered = false;
         try
         {
-            if (!reportedFailures.TryAdd(
-                    operation,
-                    safeResult,
-                    kind,
-                    code))
+            if (!reportedFailures.TryAdd(operation, safeResult, kind, code))
             {
                 return;
             }
             registered = true;
 
-            var description = errorCode is { } nativeError
+            var description = safeDescription ?? (errorCode is { } nativeError
                 ? $"{nativeError} ({code})"
-                : $"{kind} (HRESULT 0x{code:X8})";
+                : $"{kind} (HRESULT 0x{code:X8})");
             Trace.TraceError(
                 "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2}",
                 operation,
@@ -559,50 +358,278 @@ public static class MxcTelemetry
         {
             if (registered)
             {
-                reportedFailures.Remove(
-                    operation,
-                    safeResult,
-                    kind,
-                    code);
+                reportedFailures.Remove(operation, safeResult, kind, code);
             }
             // Diagnostics must not affect the fail-closed result.
         }
     }
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static unsafe int PresentConsentBridge(byte* promptJsonUtf8, void* context)
+    /// <summary>
+    /// Whether the host should show the first-run consent prompt.
+    ///
+    /// Returns <see langword="false"/> on non-Windows hosts or any failure.
+    /// </summary>
+    public static bool NeedsConsentPrompt()
+    {
+        if (!IsWindowsHost)
+        {
+            return false;
+        }
+
+        try
+        {
+            var result = nativeApi.NeedsConsentPrompt();
+            if (result.Status != (int)ErrorCode.Success)
+            {
+                ReportFailClosed("NeedsConsentPrompt", "false", (ErrorCode)result.Status);
+                return false;
+            }
+            return result.Value;
+        }
+        catch (Exception ex)
+        {
+            ReportFailClosed("NeedsConsentPrompt", "false", ex);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Read the administrative telemetry policy. Failures return
+    /// <see cref="TelemetryPolicyState.Blocked"/>.
+    /// </summary>
+    public static TelemetryPolicyState GetPolicy()
+    {
+        if (!IsWindowsHost)
+        {
+            return TelemetryPolicyState.NotApplicable;
+        }
+
+        try
+        {
+            var result = nativeApi.GetPolicy();
+            if (result.Status != (int)ErrorCode.Success)
+            {
+                ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)result.Status);
+                return TelemetryPolicyState.Blocked;
+            }
+            return ParsePolicyState(result.Payload, "GetPolicy");
+        }
+        catch (Exception ex)
+        {
+            ReportFailClosed("GetPolicy", "Blocked", ex);
+            return TelemetryPolicyState.Blocked;
+        }
+    }
+
+    private sealed class PresenterContext
+    {
+        internal required Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> Presenter { get; init; }
+        internal required CancellationToken CancellationToken { get; init; }
+        internal SynchronizationContext? SynchronizationContext { get; init; }
+        internal Exception? Error;
+    }
+
+    /// <summary>Request consent through a synchronous host presenter.</summary>
+    public static TelemetryConsentOutcome RequestConsent(
+        Func<TelemetryConsentPrompt, TelemetryConsentDecision> presenter,
+        string? locale = null)
+    {
+        ArgumentNullException.ThrowIfNull(presenter);
+        if (!IsWindowsHost)
+        {
+            return NotApplicableOutcome();
+        }
+        return RequestConsentCore(
+            prompt => ValueTask.FromResult(presenter(prompt)),
+            locale,
+            CancellationToken.None,
+            synchronizationContext: null);
+    }
+
+    /// <summary>
+    /// Request consent through an asynchronous host presenter.
+    /// </summary>
+    /// <remarks>
+    /// The native request runs on a worker thread. Await this method rather than
+    /// blocking a UI thread that the presenter needs to resume on. Cancellation
+    /// stops waiting for the presenter and prevents its decision from being
+    /// accepted when observed before native persistence. It does not cancel the
+    /// presenter's underlying operation.
+    /// </remarks>
+    public static Task<TelemetryConsentOutcome> RequestConsentAsync(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        string? locale = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(presenter);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled<TelemetryConsentOutcome>(cancellationToken);
+        }
+        if (!IsWindowsHost)
+        {
+            return Task.FromResult(NotApplicableOutcome());
+        }
+        var synchronizationContext = SynchronizationContext.Current;
+        return Task.Factory.StartNew(
+            () =>
+            {
+                var outcome = RequestConsentCore(
+                    presenter,
+                    locale,
+                    cancellationToken,
+                    synchronizationContext);
+                return FinalizeAsyncOutcome(outcome, cancellationToken);
+            },
+            cancellationToken,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+    }
+
+    internal static TelemetryConsentOutcome FinalizeAsyncOutcome(
+        TelemetryConsentOutcome outcome,
+        CancellationToken cancellationToken)
+    {
+        if (outcome.Result == TelemetryConsentActionResult.Dismissed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        return outcome;
+    }
+
+    /// <summary>Read stored/effective consent and the administrative ceiling.</summary>
+    public static TelemetryConsentStatus GetConsentStatus()
+    {
+        if (!IsWindowsHost)
+        {
+            return new(
+                TelemetryConsentState.NotApplicable,
+                TelemetryConsentState.NotApplicable,
+                TelemetryPolicyState.NotApplicable);
+        }
+
+        try
+        {
+            var result = nativeApi.GetConsentStatus();
+            EnsureSuccess(result.Status, "failed to read telemetry consent status");
+            return ParseConsentStatus(result.Payload);
+        }
+        catch (Exception ex) when (
+            ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            ReportFailClosed("GetConsentStatus", "Undetermined/Blocked", ex);
+            return new(
+                TelemetryConsentState.Undetermined,
+                TelemetryConsentState.Undetermined,
+                TelemetryPolicyState.Blocked);
+        }
+        catch (MxcException ex)
+        {
+            ReportFailClosed("GetConsentStatus", "Undetermined/Blocked", ex);
+            return new(
+                TelemetryConsentState.Undetermined,
+                TelemetryConsentState.Undetermined,
+                TelemetryPolicyState.Blocked);
+        }
+        catch (Exception ex)
+        {
+            ReportFailClosed("GetConsentStatus", "Undetermined/Blocked", ex);
+            return new(
+                TelemetryConsentState.Undetermined,
+                TelemetryConsentState.Undetermined,
+                TelemetryPolicyState.Blocked);
+        }
+    }
+
+    /// <summary>Idempotently withdraw telemetry consent.</summary>
+    public static TelemetryConsentOutcome WithdrawConsent()
+    {
+        if (!IsWindowsHost)
+        {
+            return NotApplicableOutcome();
+        }
+        try
+        {
+            var result = nativeApi.WithdrawConsent();
+            EnsureSuccess(result.Status, "failed to withdraw telemetry consent");
+            return ParseConsentOutcome(result.Payload, ConsentOutcomeOperation.Withdraw);
+        }
+        catch (Exception ex) when (ex is not MxcException)
+        {
+            throw new MxcException(
+                ErrorCode.BackendError,
+                "failed to withdraw telemetry consent",
+                ex);
+        }
+    }
+
+    private static TelemetryConsentOutcome RequestConsentCore(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        string? locale,
+        CancellationToken cancellationToken,
+        SynchronizationContext? synchronizationContext)
     {
         try
         {
-            var handle = GCHandle.FromIntPtr((IntPtr)context);
-            if (handle.Target is not PresenterContext presenterContext)
+            cancellationToken.ThrowIfCancellationRequested();
+            var context = new PresenterContext
             {
-                return NativeConsentPresenterError;
-            }
-
-            var prompt = ParseConsentPrompt(ReadRequiredJson(promptJsonUtf8, "telemetry consent prompt"));
-            var decision = presenterContext.Presenter(prompt);
-            if (presenterContext.CancellationToken.IsCancellationRequested)
-            {
-                return NativeConsentDecisionDismissed;
-            }
-
-            return decision switch
-            {
-                TelemetryConsentDecision.Yes => NativeConsentDecisionYes,
-                TelemetryConsentDecision.No => NativeConsentDecisionNo,
-                TelemetryConsentDecision.Dismissed => NativeConsentDecisionDismissed,
-                _ => NativeConsentPresenterError,
+                Presenter = presenter,
+                CancellationToken = cancellationToken,
+                SynchronizationContext = synchronizationContext,
             };
+            var result = nativeApi.RequestConsent(
+                locale,
+                promptJson =>
+                {
+                    try
+                    {
+                        var prompt = ParseConsentPrompt(promptJson);
+                        return InvokePresenterWithCancellation(
+                            context.Presenter,
+                            prompt,
+                            context.SynchronizationContext,
+                            context.CancellationToken) switch
+                        {
+                            TelemetryConsentDecision.No => 0,
+                            TelemetryConsentDecision.Yes => 1,
+                            TelemetryConsentDecision.Dismissed => 2,
+                            _ => -1,
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.CompareExchange(ref context.Error, ex, null);
+                        return -1;
+                    }
+                });
+            if (context.Error is OperationCanceledException &&
+                cancellationToken.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            if (context.Error is not null)
+            {
+                throw new MxcException(
+                    ErrorCode.BackendError,
+                    "telemetry consent presenter failed",
+                    context.Error);
+            }
+            EnsureSuccess(result.Status, "failed to request telemetry consent");
+            return ParseConsentOutcome(result.Payload, ConsentOutcomeOperation.Request);
         }
-        catch
+        catch (Exception ex) when (
+            ex is not MxcException and not OperationCanceledException)
         {
-            return NativeConsentPresenterError;
+            throw new MxcException(
+                ErrorCode.BackendError,
+                "telemetry consent request failed",
+                ex);
         }
     }
 
     private static TelemetryConsentDecision InvokePresenterWithCancellation(
-        Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
         TelemetryConsentPrompt prompt,
         SynchronizationContext? synchronizationContext,
         CancellationToken cancellationToken)
@@ -610,7 +637,11 @@ public static class MxcTelemetry
         Task<TelemetryConsentDecision>? presenterTask = null;
         try
         {
-            presenterTask = InvokePresenterAsync(presenter, prompt, synchronizationContext);
+            presenterTask = InvokePresenterAsync(
+                presenter,
+                prompt,
+                synchronizationContext,
+                cancellationToken);
             return presenterTask
                 .WaitAsync(cancellationToken)
                 .GetAwaiter()
@@ -655,13 +686,15 @@ public static class MxcTelemetry
     }
 
     private static Task<TelemetryConsentDecision> InvokePresenterAsync(
-        Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
         TelemetryConsentPrompt prompt,
-        SynchronizationContext? synchronizationContext)
+        SynchronizationContext? synchronizationContext,
+        CancellationToken cancellationToken)
     {
         if (synchronizationContext is null)
         {
-            return presenter(prompt);
+            cancellationToken.ThrowIfCancellationRequested();
+            return presenter(prompt).AsTask();
         }
 
         var completion = new TaskCompletionSource<TelemetryConsentDecision>(
@@ -671,6 +704,11 @@ public static class MxcTelemetry
             synchronizationContext.Post(
                 async _ =>
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        completion.TrySetCanceled(cancellationToken);
+                        return;
+                    }
                     try
                     {
                         completion.SetResult(await presenter(prompt));
@@ -690,136 +728,293 @@ public static class MxcTelemetry
         return completion.Task;
     }
 
-    private static void EnsureNativeInitialized() => NativeLibraryResolver.Initialize();
-
-    private static void EnsureSuccess(int status, string fallbackMessage, string? nativeMessage)
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static unsafe int PresentConsent(byte* promptJsonUtf8, void* contextPointer)
     {
-        if (status == (int)ErrorCode.Success)
+        try
         {
-            return;
+            var callback = (PresenterCallback)GCHandle.FromIntPtr((IntPtr)contextPointer).Target!;
+            return callback.Invoke(Marshal.PtrToStringUTF8((IntPtr)promptJsonUtf8) ?? string.Empty);
         }
-
-        throw new MxcException(
-            (ErrorCode)status,
-            string.IsNullOrWhiteSpace(nativeMessage) ? fallbackMessage : nativeMessage);
-    }
-
-    private static unsafe string ReadRequiredJson(byte* value, string description) =>
-        ReadNativeUtf8(value) ?? throw new MxcException(ErrorCode.BackendError, $"{description} was missing");
-
-    private static unsafe string? ReadNativeUtf8(byte* value) =>
-        value is null ? null : Marshal.PtrToStringUTF8((IntPtr)value);
-
-    private static unsafe void FreeNativeString(byte* value)
-    {
-        if (value is not null)
+        catch
         {
-            NativeMethods.mxc_string_free(value);
+            return -1;
         }
     }
 
-    private static byte[] ToNullTerminatedUtf8(string value)
+    private static void EnsureSuccess(int status, string message)
     {
-        var byteCount = Encoding.UTF8.GetByteCount(value);
-        var buffer = new byte[byteCount + 1];
-        Encoding.UTF8.GetBytes(value, 0, value.Length, buffer, 0);
-        buffer[byteCount] = 0;
-        return buffer;
+        if (status != (int)ErrorCode.Success)
+        {
+            throw new MxcException((ErrorCode)status, message);
+        }
     }
 
-    private static TelemetryConsentPrompt ParseConsentPrompt(string json)
+    private static TelemetryConsentOutcome NotApplicableOutcome() =>
+        new(
+            TelemetryConsentActionResult.NotApplicable,
+            TelemetryConsentState.NotApplicable,
+            TelemetryConsentState.NotApplicable,
+            TelemetryPolicyState.NotApplicable);
+
+    private static TelemetryConsentPrompt ParseConsentPrompt(string? json)
     {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        return new TelemetryConsentPrompt
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent prompt"));
+        var root = document.RootElement;
+        return new(
+            root.GetProperty("resourceVersion").GetUInt32(),
+            root.GetProperty("locale").GetString() ?? throw new JsonException("missing locale"),
+            ParseConsentMessage(root.GetProperty("title")),
+            ParseConsentMessage(root.GetProperty("body")),
+            ParseConsentMessage(root.GetProperty("affirmativeLabel")),
+            ParseConsentMessage(root.GetProperty("negativeLabel")),
+            ParseConsentMessage(root.GetProperty("learnMoreLabel")),
+            root.GetProperty("learnMoreUrl").GetString() ?? throw new JsonException("missing learn-more URL"));
+    }
+
+    private static TelemetryConsentMessage ParseConsentMessage(JsonElement value) =>
+        new(
+            value.GetProperty("id").GetString() ?? throw new JsonException("missing message id"),
+            value.GetProperty("text").GetString() ?? throw new JsonException("missing message text"));
+
+    private static TelemetryConsentStatus ParseConsentStatus(string? json)
+    {
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent status"));
+        var root = document.RootElement;
+        if (!IsKnownConsentStatusReason(root.GetProperty("reason"), "GetConsentStatus"))
         {
-            ResourceVersion = root.GetProperty("resourceVersion").GetUInt32(),
-            Locale = root.GetProperty("locale").GetString() ?? string.Empty,
-            Title = ParseConsentMessage(root.GetProperty("title")),
-            Body = ParseConsentMessage(root.GetProperty("body")),
-            AffirmativeLabel = ParseConsentMessage(root.GetProperty("affirmativeLabel")),
-            NegativeLabel = ParseConsentMessage(root.GetProperty("negativeLabel")),
-            LearnMoreLabel = ParseConsentMessage(root.GetProperty("learnMoreLabel")),
-            LearnMoreUrl = root.GetProperty("learnMoreUrl").GetString() ?? string.Empty,
+            return FailClosedStatus();
+        }
+        if (!TryParseConsentFields(
+                root,
+                "GetConsentStatus",
+                out var storedState,
+                out var effectiveState,
+                out var policy))
+        {
+            return FailClosedStatus();
+        }
+        return new(storedState, effectiveState, policy);
+    }
+
+    private enum ConsentOutcomeOperation
+    {
+        Request,
+        Withdraw,
+    }
+
+    private static TelemetryConsentOutcome ParseConsentOutcome(
+        string? json,
+        ConsentOutcomeOperation operation)
+    {
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent outcome"));
+        var root = document.RootElement;
+        var result = ParseConsentActionResult(root.GetProperty("result").GetString());
+        var operationName = $"{operation}Consent";
+        if (!IsResultForOperation(result, operation) ||
+            !IsKnownConsentStatusReason(root.GetProperty("reason"), operationName))
+        {
+            return FailClosedOutcome();
+        }
+        if (!TryParseConsentFields(
+                root,
+                operationName,
+                out var storedState,
+                out var effectiveState,
+                out var policy))
+        {
+            return FailClosedOutcome();
+        }
+        return new(result, storedState, effectiveState, policy);
+    }
+
+    private static bool IsResultForOperation(
+        TelemetryConsentActionResult result,
+        ConsentOutcomeOperation operation)
+    {
+        var valid = operation switch
+        {
+            ConsentOutcomeOperation.Request =>
+                result is TelemetryConsentActionResult.Granted
+                    or TelemetryConsentActionResult.Denied
+                    or TelemetryConsentActionResult.Dismissed
+                    or TelemetryConsentActionResult.AlreadyGranted
+                    or TelemetryConsentActionResult.PolicyBlocked
+                    or TelemetryConsentActionResult.PresentationUnavailable
+                    or TelemetryConsentActionResult.NotApplicable,
+            ConsentOutcomeOperation.Withdraw =>
+                result is TelemetryConsentActionResult.Withdrawn
+                    or TelemetryConsentActionResult.NotApplicable,
+            _ => false,
+        };
+        if (!valid && result != TelemetryConsentActionResult.Unknown)
+        {
+            ReportFailClosedCategory(
+                $"{operation}Consent",
+                "Unknown",
+                "native returned an invalid consent result");
+        }
+        return valid;
+    }
+
+    private static TelemetryConsentStatus FailClosedStatus() =>
+        new(
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Blocked);
+
+    private static TelemetryConsentOutcome FailClosedOutcome() =>
+        new(
+            TelemetryConsentActionResult.Unknown,
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Blocked);
+
+    private static bool TryParseConsentFields(
+        JsonElement root,
+        string operation,
+        out TelemetryConsentState storedState,
+        out TelemetryConsentState effectiveState,
+        out TelemetryPolicyState policy)
+    {
+        storedState = TelemetryConsentState.Undetermined;
+        effectiveState = TelemetryConsentState.Undetermined;
+        policy = TelemetryPolicyState.Blocked;
+
+        var storedValue = root.GetProperty("storedState").GetString();
+        var parsedStoredState = ParseKnownConsentState(storedValue);
+        if (parsedStoredState is null)
+        {
+            _ = UnrecognizedConsentState(storedValue, operation);
+            return false;
+        }
+
+        var effectiveValue = root.GetProperty("effectiveState").GetString();
+        var parsedEffectiveState = ParseKnownConsentState(effectiveValue);
+        if (parsedEffectiveState is null)
+        {
+            _ = UnrecognizedConsentState(effectiveValue, operation);
+            return false;
+        }
+
+        var policyValue = root.GetProperty("policy").GetString();
+        var parsedPolicy = ParseKnownPolicyState(policyValue);
+        if (parsedPolicy is null)
+        {
+            _ = UnrecognizedPolicyState(policyValue, operation);
+            return false;
+        }
+
+        storedState = parsedStoredState.Value;
+        effectiveState = parsedEffectiveState.Value;
+        policy = parsedPolicy.Value;
+        return true;
+    }
+
+    private static TelemetryConsentActionResult ParseConsentActionResult(string? value) => value switch
+    {
+        "granted" => TelemetryConsentActionResult.Granted,
+        "denied" => TelemetryConsentActionResult.Denied,
+        "dismissed" => TelemetryConsentActionResult.Dismissed,
+        "withdrawn" => TelemetryConsentActionResult.Withdrawn,
+        "alreadyGranted" => TelemetryConsentActionResult.AlreadyGranted,
+        "policyBlocked" => TelemetryConsentActionResult.PolicyBlocked,
+        "presentationUnavailable" => TelemetryConsentActionResult.PresentationUnavailable,
+        "notApplicable" => TelemetryConsentActionResult.NotApplicable,
+        _ => UnrecognizedConsentActionResult(value),
+    };
+
+    private static TelemetryConsentActionResult UnrecognizedConsentActionResult(string? value)
+    {
+        ReportFailClosedCategory(
+            "ConsentOutcome",
+            "Unknown",
+            "native returned an unrecognized consent action result");
+        return TelemetryConsentActionResult.Unknown;
+    }
+
+    private static bool IsKnownConsentStatusReason(
+        JsonElement value,
+        string operation)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            return true;
+        }
+
+        return value.GetString() switch
+        {
+            "no-record" or
+            "store-unreadable" or
+            "store-malformed" or
+            "consent-schema-unsupported" or
+            "prompt-version-missing" or
+            "prompt-version-unsupported" or
+            "policy-blocked" or
+            "presentation-unavailable" or
+            "not-applicable" => true,
+            var reason => ReportUnrecognizedConsentStatusReason(reason, operation),
         };
     }
 
-    private static TelemetryConsentMessage ParseConsentMessage(JsonElement value) => new()
+    private static bool ReportUnrecognizedConsentStatusReason(
+        string? value,
+        string operation)
     {
-        Id = value.GetProperty("id").GetString() ?? string.Empty,
-        Text = value.GetProperty("text").GetString() ?? string.Empty,
-    };
-
-    private static TelemetryConsentStatus ParseConsentStatus(string json)
-    {
-        using var doc = JsonDocument.Parse(json);
-        return ParseConsentStatus(doc.RootElement);
+        ReportFailClosedCategory(
+            operation,
+            "Unknown",
+            "native returned an unrecognized consent status reason");
+        return false;
     }
 
-    private static TelemetryConsentStatus ParseConsentStatus(JsonElement root) => new()
-    {
-        StoredState = ParseConsentState(root.GetProperty("storedState").GetString() ?? string.Empty),
-        EffectiveState = ParseConsentState(root.GetProperty("effectiveState").GetString() ?? string.Empty),
-        Reason = root.TryGetProperty("reason", out var reason) && reason.ValueKind != JsonValueKind.Null
-            ? ParseConsentStatusReason(reason.GetString() ?? string.Empty)
-            : null,
-        Policy = ParsePolicyState(root.GetProperty("policy").GetString() ?? string.Empty),
-    };
-
-    private static TelemetryConsentOutcome ParseConsentOutcome(string json)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        var status = ParseConsentStatus(root);
-        return new TelemetryConsentOutcome
-        {
-            Result = ParseConsentResult(root.GetProperty("result").GetString() ?? string.Empty),
-            StoredState = status.StoredState,
-            EffectiveState = status.EffectiveState,
-            Reason = status.Reason,
-            Policy = status.Policy,
-        };
-    }
-
-    private static TelemetryConsentState ParseConsentState(string value) => value switch
+    /// <summary>
+    /// Map the native consent string, failing closed for unknown values.
+    /// </summary>
+    private static TelemetryConsentState? ParseKnownConsentState(string? value) => value switch
     {
         "granted" => TelemetryConsentState.Granted,
         "denied" => TelemetryConsentState.Denied,
         "undetermined" => TelemetryConsentState.Undetermined,
         "not-applicable" => TelemetryConsentState.NotApplicable,
-        _ => throw new JsonException($"unknown telemetry consent state '{value}'"),
+        _ => null,
     };
 
-    private static TelemetryPolicyState ParsePolicyState(string value) => value switch
+    private static TelemetryConsentState ParseConsentState(string? value, string operation) =>
+        ParseKnownConsentState(value) ?? UnrecognizedConsentState(value, operation);
+
+    private static TelemetryConsentState UnrecognizedConsentState(string? value, string operation)
+    {
+        ReportFailClosedCategory(
+            operation,
+            "Undetermined",
+            "native returned an unrecognized consent state");
+        return TelemetryConsentState.Undetermined;
+    }
+
+    /// <summary>
+    /// Map the native policy string, failing closed for unknown values.
+    /// </summary>
+    private static TelemetryPolicyState? ParseKnownPolicyState(string? value) => value switch
     {
         "unrestricted" => TelemetryPolicyState.Unrestricted,
         "allowed" => TelemetryPolicyState.Allowed,
         "blocked" => TelemetryPolicyState.Blocked,
         "not-applicable" => TelemetryPolicyState.NotApplicable,
-        _ => throw new JsonException($"unknown telemetry policy state '{value}'"),
+        _ => null,
     };
 
-    private static TelemetryConsentStatusReason ParseConsentStatusReason(string value) => value switch
-    {
-        "no-record" => TelemetryConsentStatusReason.NoRecord,
-        "store-unreadable" => TelemetryConsentStatusReason.StoreUnreadable,
-        "store-malformed" => TelemetryConsentStatusReason.StoreMalformed,
-        "consent-schema-unsupported" => TelemetryConsentStatusReason.ConsentSchemaUnsupported,
-        "prompt-version-missing" => TelemetryConsentStatusReason.PromptVersionMissing,
-        "prompt-version-unsupported" => TelemetryConsentStatusReason.PromptVersionUnsupported,
-        "not-applicable" => TelemetryConsentStatusReason.NotApplicable,
-        _ => throw new JsonException($"unknown telemetry consent status reason '{value}'"),
-    };
+    private static TelemetryPolicyState ParsePolicyState(string? value, string operation) =>
+        ParseKnownPolicyState(value) ?? UnrecognizedPolicyState(value, operation);
 
-    private static TelemetryConsentResult ParseConsentResult(string value) => value switch
+    private static TelemetryPolicyState UnrecognizedPolicyState(string? value, string operation)
     {
-        "granted" => TelemetryConsentResult.Granted,
-        "denied" => TelemetryConsentResult.Denied,
-        "dismissed" => TelemetryConsentResult.Dismissed,
-        "withdrawn" => TelemetryConsentResult.Withdrawn,
-        "alreadyGranted" => TelemetryConsentResult.AlreadyGranted,
-        "policyBlocked" => TelemetryConsentResult.PolicyBlocked,
-        "notApplicable" => TelemetryConsentResult.NotApplicable,
-        _ => throw new JsonException($"unknown telemetry consent result '{value}'"),
-    };
+        ReportFailClosedCategory(
+            operation,
+            "Blocked",
+            "native returned an unrecognized policy state");
+        return TelemetryPolicyState.Blocked;
+    }
+
+    private static byte[] ToNullTerminatedUtf8(string value) => System.Text.Encoding.UTF8.GetBytes(value + "\0");
 }

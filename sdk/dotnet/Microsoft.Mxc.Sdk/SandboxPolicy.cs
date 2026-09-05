@@ -58,8 +58,7 @@ public sealed class SandboxPolicy
     public uint? TimeoutMs { get; set; }
 
     /// <summary>
-    /// Canonical per-invocation telemetry settings serialized as
-    /// <c>{"telemetry":{"enabled":...}}</c>.
+    /// Stable per-invocation telemetry settings.
     /// </summary>
     [JsonPropertyName("telemetry")]
     public TelemetrySettings? Telemetry { get; set; }
@@ -68,7 +67,10 @@ public sealed class SandboxPolicy
 /// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>
 public sealed class TelemetrySettings
 {
-    /// <summary>Whether this invocation opts telemetry on, subject to consent and policy.</summary>
+    /// <summary>
+    /// Opt this invocation into telemetry, subject to persisted user consent
+    /// and administrative policy.
+    /// </summary>
     [JsonPropertyName("enabled")]
     public bool Enabled { get; set; }
 }

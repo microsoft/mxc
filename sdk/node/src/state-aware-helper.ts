@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 
 import { spawn } from 'child_process';
-import { parse as semverParse } from 'semver';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import { diagLog } from './diagnostic.js';
 import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
+import { TelemetryConfig } from './types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
@@ -96,23 +96,21 @@ export interface BuildEnvelopeArgs {
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
-  const { phase, backendKey, containment, sandboxId, config } = args;
+  const {
+    phase,
+    backendKey,
+    containment,
+    sandboxId,
+    config,
+  } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
-  const hasTelemetry = backendSpecific.telemetry !== undefined;
+  const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
+  const hasTelemetry = telemetry !== undefined;
   const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
-  if (hasTelemetry && suppliedVersion) {
-    const parsed = semverParse(suppliedVersion);
-    if (parsed && parsed.major === 0 && parsed.minor < 9) {
-      throw mxcErrorFromCode(
-        'malformed_request',
-        `telemetry requires schema version ${TELEMETRY_STATE_AWARE_VERSION} or later; got ${suppliedVersion}`,
-      );
-    }
-  }
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };
@@ -121,6 +119,10 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
+  }
+  if (telemetry !== undefined) {
+    envelope.telemetry = telemetry;
+    delete backendSpecific.telemetry;
   }
 
   for (const field of CROSS_CUTTING_FIELDS) {

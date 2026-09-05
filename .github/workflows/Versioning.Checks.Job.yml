@@ -59,6 +59,9 @@ jobs:
       - name: Check exact contract generated artifacts and fixtures
         run: node scripts/versioning/check-contract-codegen.js
 
+      - name: Check telemetry policy binding parity
+        run: node scripts/check-telemetry-policy-parity.js
+
       - name: Check C# bindings codegen (regenerates and asserts entry points)
         run: node scripts/check-dotnet-bindings-codegen.js
 

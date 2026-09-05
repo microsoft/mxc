@@ -36,6 +36,8 @@ const bwrapProbeScriptDirectory = fs.existsSync(
   ? __dirname
   : path.join(getSdkPackageRoot(), 'dist');
 let windowsSandboxAvailableCache: boolean | undefined;
+let wxcExecutableCache: { binDir: string | undefined; executable: string } | undefined;
+let wxcExecutableVerifier = verifyWxcExecutable;
 
 /**
  * Check if Windows Sandbox feature is enabled via DISM.
@@ -736,10 +738,25 @@ function getDarwinRustTargetTriple(): string {
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
+  const binDir = process.env.MXC_BIN_DIR;
+  const overridePath = binDir
+    ? path.join(binDir, getSdkArch(), 'wxc-exec.exe')
+    : undefined;
+  const cached = wxcExecutableCache;
+  if (
+    cached !== undefined
+    && cached.binDir === binDir
+    && (overridePath === undefined || cached.executable === overridePath)
+    && wxcExecutableVerifier(cached.executable)
+  ) {
+    return cached.executable;
+  }
+  wxcExecutableCache = undefined;
+
   // Allow override for bundled deployments (debugging/testing)
-  if (process.env.MXC_BIN_DIR) {
-    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'wxc-exec.exe');
-    if (verifyWxcExecutable(overridePath)) {
+  if (overridePath !== undefined) {
+    if (wxcExecutableVerifier(overridePath)) {
+      wxcExecutableCache = { binDir, executable: overridePath };
       return overridePath;
     }
   }
@@ -762,12 +779,25 @@ export function findWxcExecutable(): string | null {
   ];
 
   for (const wxcPath of possiblePaths) {
-    if (verifyWxcExecutable(wxcPath)) {
+    if (wxcExecutableVerifier(wxcPath)) {
+      wxcExecutableCache = { binDir, executable: wxcPath };
       return wxcPath;
     }
   }
 
   return null;
+}
+
+/** @internal Test-only: clear the resolved executable path. */
+export function _resetWxcExecutableCache(): void {
+  wxcExecutableCache = undefined;
+}
+
+/** @internal Test-only: override executable verification. */
+export function _setWxcExecutableVerifier(
+  verifier: ((execPath: string) => boolean) | null,
+): void {
+  wxcExecutableVerifier = verifier ?? verifyWxcExecutable;
 }
 
 /**

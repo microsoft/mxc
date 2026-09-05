@@ -158,7 +158,7 @@ the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 | Field | Type | Description |
 |-------|------|-------------|
 | `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
-| `mxc.backend` | string | Containment backend name |
+| `mxc.backend` | string | Backend identifier; ProcessContainer reports `processcontainer`, not its runtime-selected tier |
 | `mxc.exit_code` | int32 | Process exit code |
 | `mxc.outcome` | string | `"success"` or `"failure"` |
 | `mxc.duration_ms` | uint64 | Total execution time |
@@ -173,7 +173,7 @@ Emitted on execution errors.
 | Field | Type | Description |
 |-------|------|-------------|
 | `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
-| `mxc.backend` | string | Containment backend name |
+| `mxc.backend` | string | Backend identifier; ProcessContainer reports `processcontainer`, not its runtime-selected tier |
 | `mxc.error_type` | string | Error category (`config_error`, `policy_error`, `process_error`, `timeout`, `init_error`, `internal_error`, `cancelled`, `unknown`) |
 | `mxc.exit_code` | int32 | Process exit code |
 | `mxc.phase` | string | State-aware lifecycle phase; empty for one-shot executions |

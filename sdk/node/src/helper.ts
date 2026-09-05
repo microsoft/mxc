@@ -10,6 +10,7 @@ import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBack
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
+import { mxcErrorFromCode } from './errors.js';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -208,6 +209,11 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  if (config.experimental && 'telemetry' in config.experimental) {
+    throw new Error(
+      "'experimental.telemetry' is no longer accepted; use top-level 'telemetry' instead.",
+    );
+  }
   if (!config.process?.commandLine) {
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }

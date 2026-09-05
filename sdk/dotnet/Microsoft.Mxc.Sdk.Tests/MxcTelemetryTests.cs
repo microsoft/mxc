@@ -4,10 +4,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Runtime.Versioning;
-using Microsoft.Win32;
+using Microsoft.Mxc.Sdk;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -18,14 +15,68 @@ public sealed class MxcTelemetryCollectionDefinition
 {
 }
 
+/// <summary>
+/// Redirects the debug-build-only <c>MXC_TEST_LOCALAPPDATA_OVERRIDE</c>
+/// environment variable (read by <c>wxc_common::telemetry::consent</c> in
+/// place of the real <c>LOCALAPPDATA</c> — see that module for the security
+/// rationale; a release-profile native build compiles this override out
+/// entirely and always resolves the real per-user known-folder path) to a
+/// fresh temp directory for the lifetime of the fixture, so these tests
+/// never touch the real developer/CI-machine telemetry consent file, and
+/// restores the original value on dispose. xUnit runs the [Fact]s within a
+/// single class sequentially, while the <c>MxcTelemetry</c> collection keeps
+/// this class and <c>MxcTelemetryTestsReleaseSafe</c> from running in parallel.
+/// The constructor <em>verifies</em> the redirect took effect and fails
+/// the fixture loudly if it did not (see <c>AssertStoreIsRedirected</c>),
+/// rather than silently operating on the real per-user store when the native
+/// library under test happens to be a release build.
+/// </summary>
 [Collection("MxcTelemetry")]
-public sealed class MxcTelemetryTests
+public sealed class MxcTelemetryTests : IDisposable
 {
-    private static readonly JsonSerializerOptions PolicyJsonOptions = new()
+    private const string OverrideEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE";
+    private const string OverrideOwnerEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID";
+    private const string PolicyOverrideEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE";
+    private const string PolicyOverrideOwnerEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID";
+    private readonly string? _originalOverride;
+    private readonly string? _originalOverrideOwner;
+    private readonly string? _originalPolicyOverride;
+    private readonly string? _originalPolicyOverrideOwner;
+    private readonly string _tempDir;
+    private readonly string _policySubkey;
+
+    public MxcTelemetryTests()
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-    };
+        _originalOverride = Environment.GetEnvironmentVariable(OverrideEnvVar);
+        _originalOverrideOwner = Environment.GetEnvironmentVariable(OverrideOwnerEnvVar);
+        _tempDir = Path.Combine(Path.GetTempPath(), $"mxc_dotnet_consent_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_tempDir);
+        Environment.SetEnvironmentVariable(OverrideEnvVar, _tempDir);
+        if (OperatingSystem.IsWindows())
+        {
+            Environment.SetEnvironmentVariable(
+                OverrideOwnerEnvVar,
+                GetParentProcessId().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        // Redirect the administrative policy read to a throwaway HKCU key too,
+        // so these tests are unaffected by a real MXC telemetry policy on the
+        // build machine and can exercise the policy path without elevation.
+        _originalPolicyOverride = Environment.GetEnvironmentVariable(PolicyOverrideEnvVar);
+        _originalPolicyOverrideOwner = Environment.GetEnvironmentVariable(PolicyOverrideOwnerEnvVar);
+        _policySubkey = $@"Software\MxcTelemetryPolicyDotnetTest\{Guid.NewGuid():N}";
+        if (OperatingSystem.IsWindows())
+        {
+            Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)?.Dispose();
+        }
+        Environment.SetEnvironmentVariable(PolicyOverrideEnvVar, _policySubkey);
+        Environment.SetEnvironmentVariable(
+            PolicyOverrideOwnerEnvVar,
+            Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        AssertStoreIsRedirected();
+        AssertPolicyKeyIsRedirected();
+    }
 
     [Fact]
     public void SandboxPolicy_TelemetrySerializesCanonically()
@@ -36,311 +87,392 @@ public sealed class MxcTelemetryTests
             Telemetry = new TelemetrySettings { Enabled = true },
         };
 
-        var json = JsonSerializer.Serialize(policy, PolicyJsonOptions);
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
+        var json = System.Text.Json.JsonSerializer.Serialize(policy);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
 
-        Assert.True(root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+        Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
     }
 
-    [Fact]
-    public void GetPolicy_NeverThrowsAndFailsClosed()
+    /// <summary>
+    /// The policy counterpart to <see cref="AssertStoreIsRedirected"/>: prove
+    /// the native library honours <c>MXC_TEST_POLICY_KEY_OVERRIDE</c> before
+    /// any policy test runs. A release-profile <c>mxc_ffi</c> compiles the
+    /// override out and would silently read the machine's real
+    /// <c>HKLM\SOFTWARE\Policies\Mxc</c> key instead, making every
+    /// policy assertion below meaningless — passing or failing on the build
+    /// agent's administrative state rather than on the code under test.
+    ///
+    /// Two probes are used for the same reason as the consent check: a single
+    /// one could coincidentally match the real machine policy, but the real
+    /// policy cannot be both Blocked and Allowed.
+    /// </summary>
+    private void AssertPolicyKeyIsRedirected()
     {
-        var policy = MxcTelemetry.GetPolicy();
-        Assert.True(Enum.IsDefined(policy));
-    }
-
-    [Fact]
-    public void FailClosedDiagnostics_AreDeduplicatedAndDoNotExposeExceptionText()
-    {
-        var operation = $"TestGetPolicy{Guid.NewGuid():N}";
-        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
-            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
-        using var output = new StringWriter();
-        using var listener = new TextWriterTraceListener(output);
-        var failure = new InvalidOperationException("sensitive\r\n\u001b[31mmessage");
-        Trace.Listeners.Add(listener);
-        try
+        if (!OperatingSystem.IsWindows())
         {
-            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
-            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
-            MxcTelemetry.ReportFailClosed(operation, "false", ErrorCode.BackendError);
-            Trace.Flush();
-
-            var messages = output
-                .ToString()
-                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-                .Where(line => line.Contains(operation, StringComparison.Ordinal))
-                .ToArray();
-            Assert.Equal(2, messages.Length);
-            Assert.Contains(typeof(InvalidOperationException).FullName!, messages[0]);
-            Assert.Contains("HRESULT 0x", messages[0]);
-            Assert.DoesNotContain("sensitive", messages[0]);
-            Assert.DoesNotContain('\u001b', messages[0]);
-            Assert.Contains("BackendError", messages[1]);
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-    }
-
-    [Fact]
-    public void FailClosedDiagnosticTracker_DeduplicatesAndEnforcesCapacity()
-    {
-        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 2);
-
-        Assert.True(tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1));
-        Assert.False(tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1));
-        Assert.True(tracker.TryAdd("NeedsConsentPrompt", "false", "ErrorCode", 2));
-        Assert.False(tracker.TryAdd("GetConsent", "Undetermined", "ExceptionB", 3));
-    }
-
-    [Fact]
-    public void FailClosedDiagnosticTracker_DeduplicatesConcurrentReports()
-    {
-        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
-        var accepted = 0;
-
-        Parallel.For(0, 1_000, _ =>
-        {
-            if (tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1))
-            {
-                Interlocked.Increment(ref accepted);
-            }
-        });
-
-        Assert.Equal(1, accepted);
-    }
-
-    [Fact]
-    public void FailClosedDiagnosticTracker_EnforcesCapacityUnderConcurrentLoad()
-    {
-        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
-        var accepted = 0;
-
-        Parallel.For(0, 1_000, index =>
-        {
-            if (tracker.TryAdd("GetPolicy", "Blocked", "Exception", index))
-            {
-                Interlocked.Increment(ref accepted);
-            }
-        });
-
-        Assert.Equal(64, accepted);
-    }
-
-    [Fact]
-    public void FailClosedDiagnostics_DoNotPropagateTraceListenerFailures()
-    {
-        var operation = $"ThrowingTrace{Guid.NewGuid():N}";
-        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
-            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
-        using var listener = new ThrowingTraceListener();
-        Trace.Listeners.Add(listener);
-        try
-        {
-            var exception = Record.Exception(() =>
-                MxcTelemetry.ReportFailClosed(
-                    operation,
-                    "Blocked",
-                    ErrorCode.BackendError));
-            Assert.Null(exception);
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-
-        using var output = new StringWriter();
-        using var capture = new TextWriterTraceListener(output);
-        Trace.Listeners.Add(capture);
-        try
-        {
-            MxcTelemetry.ReportFailClosed(operation, "Blocked", ErrorCode.BackendError);
-            Trace.Flush();
-            Assert.Contains(operation, output.ToString());
-        }
-        finally
-        {
-            Trace.Listeners.Remove(capture);
-        }
-    }
-
-    [Fact]
-    public void ReadOnlyQueryFailures_ReportAndReturnFailClosedValues()
-    {
-        var native = new FakeTelemetryQueryApi
-        {
-            GetConsentImpl = () => throw new DllNotFoundException("sensitive path"),
-            NeedsConsentPromptImpl = () => new((int)ErrorCode.BackendError, true),
-            GetPolicyImpl = () => throw new InvalidOperationException("sensitive policy"),
-        };
-        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
-        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
-            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
-        using var output = new StringWriter();
-        using var listener = new TextWriterTraceListener(output);
-        Trace.Listeners.Add(listener);
-        try
-        {
-            Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
-            Assert.False(MxcTelemetry.NeedsConsentPrompt());
-            Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
-            Trace.Flush();
-
-            var message = output.ToString();
-            Assert.Contains("GetConsent", message);
-            Assert.Contains("NeedsConsentPrompt", message);
-            Assert.Contains("GetPolicy", message);
-            Assert.DoesNotContain("sensitive", message);
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void ReadOnlyQueryFailures_CoverStatusAndExceptionPaths(bool throwException)
-    {
-        var native = new FakeTelemetryQueryApi
-        {
-            GetConsentImpl = () => throwException
-                ? throw new InvalidOperationException("consent")
-                : new((int)ErrorCode.BackendError, null),
-            NeedsConsentPromptImpl = () => throwException
-                ? throw new InvalidOperationException("prompt")
-                : new((int)ErrorCode.BackendError, true),
-            GetPolicyImpl = () => throwException
-                ? throw new InvalidOperationException("policy")
-                : new((int)ErrorCode.BackendError, null),
-        };
-        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
-        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
-            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
-        using var output = new StringWriter();
-        using var listener = new TextWriterTraceListener(output);
-        Trace.Listeners.Add(listener);
-        try
-        {
-            if (throwException)
-            {
-                Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
-            }
-            else
-            {
-                var exception = Assert.Throws<MxcException>(() => MxcTelemetry.GetConsent());
-                Assert.Equal(ErrorCode.BackendError, exception.Code);
-            }
-            Assert.False(MxcTelemetry.NeedsConsentPrompt());
-            Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
-            Trace.Flush();
-
-            var messages = output
-                .ToString()
-                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-                .Where(line => line.Contains("mxc:", StringComparison.Ordinal))
-                .ToArray();
-            Assert.Equal(throwException ? 3 : 2, messages.Length);
-            Assert.Contains(messages, line => line.Contains("NeedsConsentPrompt", StringComparison.Ordinal));
-            Assert.Contains(messages, line => line.Contains("GetPolicy", StringComparison.Ordinal));
-            Assert.All(
-                messages,
-                line => Assert.Contains(
-                    throwException
-                        ? typeof(InvalidOperationException).FullName!
-                        : nameof(ErrorCode.BackendError),
-                    line));
-        }
-        finally
-        {
-            Trace.Listeners.Remove(listener);
-        }
-    }
-
-    [Fact]
-    public void TelemetryQueryApiOverride_AllowsConcurrentDispose()
-    {
-        var calls = 0;
-        var native = new FakeTelemetryQueryApi
-        {
-            GetConsentImpl = () => new((int)ErrorCode.Success, "undetermined"),
-            NeedsConsentPromptImpl = () => new((int)ErrorCode.Success, false),
-            GetPolicyImpl = () =>
-            {
-                Interlocked.Increment(ref calls);
-                return new((int)ErrorCode.Success, "blocked");
-            },
-        };
-        var scope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
-
-        Parallel.Invoke(scope.Dispose, scope.Dispose);
-
-        _ = MxcTelemetry.GetPolicy();
-        Assert.Equal(0, calls);
-    }
-
-    [Fact]
-    public void TestOverrides_RejectOverlapAndRestoreAfterConcurrentDispose()
-    {
-        var native = new FakeTelemetryQueryApi
-        {
-            GetConsentImpl = () => new((int)ErrorCode.Success, "undetermined"),
-            NeedsConsentPromptImpl = () => new((int)ErrorCode.Success, false),
-            GetPolicyImpl = () => new((int)ErrorCode.Success, "blocked"),
-        };
-        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
-        Assert.Throws<InvalidOperationException>(
-            () => MxcTelemetry.OverrideTelemetryReadApiForTesting(native));
-        Parallel.Invoke(nativeScope.Dispose, nativeScope.Dispose);
-
-        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
-        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
-        Assert.Throws<InvalidOperationException>(
-            () => MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker));
-        Parallel.Invoke(trackerScope.Dispose, trackerScope.Dispose);
-
-        using var restoredNativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
-        using var restoredTrackerScope =
-            MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
-    }
-
-    [Fact]
-    public void RequestConsent_IsNotApplicableWithoutInvokingPresenter_OffWindows()
-    {
-        if (OperatingSystem.IsWindows())
-        {
+            // Off Windows GetPolicy short-circuits to NotApplicable without
+            // reading any registry, so there is nothing to redirect.
             return;
         }
 
-        var called = false;
-        var outcome = MxcTelemetry.RequestConsent(_ =>
+        foreach (var (value, expected) in new[]
+                 {
+                     (0, TelemetryPolicyState.Blocked),
+                     (3, TelemetryPolicyState.Allowed),
+                 })
         {
-            called = true;
-            return TelemetryConsentDecision.Yes;
-        });
+            SetPolicyValue(value);
+            var observed = MxcTelemetry.GetPolicy();
+            if (observed != expected)
+            {
+                throw new InvalidOperationException(
+                    $"telemetry policy key is NOT redirected to 'HKCU\\{_policySubkey}': wrote " +
+                    $"AllowTelemetry={value} there but GetPolicy() returned {observed}. These tests " +
+                    "refuse to run against the real machine policy. The native mxc_ffi library under " +
+                    "test is most likely a release build, which compiles out the " +
+                    PolicyOverrideEnvVar + " override. Rebuild it with " +
+                    "`cargo build -p mxc_ffi --features dotnetsdk,test-support` (debug) and re-run.");
+            }
+        }
 
-        Assert.False(called);
-        Assert.Equal(TelemetryConsentResult.NotApplicable, outcome.Result);
-        Assert.Equal(TelemetryPolicyState.NotApplicable, outcome.Policy);
+        // Leave the fixture in the unmanaged default state.
+        SetPolicyValue(null);
     }
 
-#if DEBUG
-    [Fact]
-    public void RequestConsent_PresenterExceptionReturnsBackendError_OnWindows()
+    /// <summary>
+    /// Writes the administrative <c>AllowTelemetry</c> policy value into the
+    /// redirected key, or removes it when <paramref name="value"/> is null.
+    /// </summary>
+    private void SetPolicyValue(int? value)
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
-        var ex = Assert.Throws<MxcException>(() =>
-            MxcTelemetry.RequestConsent(_ => throw new InvalidOperationException("boom")));
-        Assert.Equal(ErrorCode.BackendError, ex.Code);
+        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)!;
+        if (value is null)
+        {
+            key.DeleteValue("AllowTelemetry", throwOnMissingValue: false);
+        }
+        else
+        {
+            key.SetValue("AllowTelemetry", value.Value, Microsoft.Win32.RegistryValueKind.DWord);
+        }
+    }
+
+    /// <summary>
+    /// Writes <c>AllowTelemetry</c> as a <c>REG_SZ</c> rather than a
+    /// <c>REG_DWORD</c> — the mistake an administrator makes by typing the
+    /// value in by hand.
+    /// </summary>
+    private void SetPolicyStringValue(string value)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)!;
+        key.SetValue("AllowTelemetry", value, Microsoft.Win32.RegistryValueKind.String);
+    }
+
+    /// <summary>
+    /// Prove — without writing anything through the SDK — that the native
+    /// library under test actually honours <c>MXC_TEST_LOCALAPPDATA_OVERRIDE</c>.
+    /// A release-profile <c>mxc_ffi</c> compiles the override out, in which
+    /// case every test below would silently read and (worse) overwrite the
+    /// real per-user consent file. Two probes are used because a single one
+    /// could coincidentally match the real store's state; the real store
+    /// cannot be both granted and denied, so two matching reads prove the
+    /// redirect. The test seeds records directly and exercises only the SDK
+    /// read path.
+    /// </summary>
+    private void AssertStoreIsRedirected()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            // Off Windows GetConsent short-circuits to NotApplicable without
+            // touching any store, so there is nothing to redirect.
+            return;
+        }
+
+        foreach (var (value, expected) in new[]
+                 {
+                     ("granted", TelemetryConsentState.Granted),
+                     ("denied", TelemetryConsentState.Denied),
+                 })
+        {
+            WriteConsentRecord(value);
+            var observed = MxcTelemetry.GetConsent();
+            if (observed != expected)
+            {
+                throw new InvalidOperationException(
+                    $"telemetry consent store is NOT redirected to '{_tempDir}': wrote '{value}' " +
+                    $"there but GetConsent() returned {observed}. These tests refuse to run against " +
+                    "the real per-user consent file. The native mxc_ffi library under test is most " +
+                    "likely a release build, which compiles out the " + OverrideEnvVar + " override. " +
+                    "Rebuild it with `cargo build -p mxc_ffi --features dotnetsdk,test-support` (debug) and re-run.");
+            }
+        }
+
+        File.Delete(ConsentFilePath());
+    }
+
+    private string ConsentFilePath() => Path.Combine(_tempDir, "mxc", "telemetry-consent.json");
+
+    private void WriteConsentRecord(string consent)
+    {
+        var path = ConsentFilePath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(
+            path,
+            $$"""{"schemaVersion":2,"consent":"{{consent}}","source":"test","promptedMxcVersion":"0.0.0","promptResourceVersion":1,"promptLocale":"en-US","updatedAtEpoch":0}""");
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable(OverrideEnvVar, _originalOverride);
+        Environment.SetEnvironmentVariable(OverrideOwnerEnvVar, _originalOverrideOwner);
+        Environment.SetEnvironmentVariable(PolicyOverrideEnvVar, _originalPolicyOverride);
+        Environment.SetEnvironmentVariable(PolicyOverrideOwnerEnvVar, _originalPolicyOverrideOwner);
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(_policySubkey, throwOnMissingSubKey: false);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Best-effort cleanup; not worth failing the test run over.
+            }
+        }
+        try
+        {
+            Directory.Delete(_tempDir, recursive: true);
+        }
+        catch (IOException)
+        {
+            // Best-effort cleanup; not worth failing the test run over.
+        }
+    }
+
+    [Fact]
+    public void GetConsent_FreshStore_ReportsUndeterminedOnWindowsOrNotApplicableElsewhere()
+    {
+        var state = MxcTelemetry.GetConsent();
+        var expected = OperatingSystem.IsWindows()
+            ? TelemetryConsentState.Undetermined
+            : TelemetryConsentState.NotApplicable;
+        Assert.Equal(expected, state);
+    }
+
+    [Fact]
+    public void RequestConsent_ThenWithdraw_RoundTrips_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var outcome = MxcTelemetry.RequestConsent(prompt =>
+        {
+            Assert.Equal(1u, prompt.ResourceVersion);
+            Assert.Equal("en-US", prompt.Locale);
+            Assert.Equal("Help improve Microsoft eXecution Container (MXC)", prompt.Title.Text);
+            Assert.Equal(
+                """
+                Help improve MXC by sharing optional diagnostic data with Microsoft.
+                If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+                You can change your choice at any time.
+                """.ReplaceLineEndings("\n"),
+                prompt.Body.Text);
+            Assert.Equal("Yes", prompt.AffirmativeLabel.Text);
+            Assert.Equal("No", prompt.NegativeLabel.Text);
+            Assert.Equal("Privacy Statement", prompt.LearnMoreLabel.Text);
+            Assert.Equal("https://go.microsoft.com/fwlink/?linkid=521839", prompt.LearnMoreUrl);
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
+
+        var withdrawal = MxcTelemetry.WithdrawConsent();
+        Assert.Equal(TelemetryConsentActionResult.Withdrawn, withdrawal.Result);
+        Assert.Equal(TelemetryConsentState.Denied, MxcTelemetry.GetConsent());
+    }
+
+    [Fact]
+    public void NeedsConsentPrompt_FreshStore_IsTrueOnWindowsAndFalseElsewhere()
+    {
+        // Off Windows MXC collects nothing, so a host must never be told to
+        // ask — prompting there would be a privacy defect, not just noise.
+        Assert.Equal(OperatingSystem.IsWindows(), MxcTelemetry.NeedsConsentPrompt());
+    }
+
+    [Fact]
+    public void NeedsConsentPrompt_AfterAnyDecision_IsFalse_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var denied = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.No);
+        Assert.Equal(TelemetryConsentActionResult.Denied, denied.Result);
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+
+        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+        Assert.Equal(TelemetryConsentActionResult.Granted, granted.Result);
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+    }
+
+    [Fact]
+    public void RequestConsent_NonWindows_IsNotApplicableAndDoesNotPresent()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var presented = false;
+        var outcome = MxcTelemetry.RequestConsent(_ =>
+        {
+            presented = true;
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.False(presented);
+        Assert.Equal(TelemetryConsentActionResult.NotApplicable, outcome.Result);
+    }
+
+    [Fact]
+    public void GetPolicy_NoPolicyConfigured_IsUnrestrictedOnWindowsAndNotApplicableElsewhere()
+    {
+        SetPolicyValue(null);
+        var expected = OperatingSystem.IsWindows()
+            ? TelemetryPolicyState.Unrestricted
+            : TelemetryPolicyState.NotApplicable;
+        Assert.Equal(expected, MxcTelemetry.GetPolicy());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(42)]
+    [InlineData(-1)]
+    public void GetPolicy_AnyValueOtherThanOptional_IsBlocked_OnWindows(int value)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // MXC's data is product-and-service-usage (optional) diagnostic data,
+        // so only level 3 permits it. Unrecognised values fail closed rather
+        // than being treated as "no policy".
+        SetPolicyValue(value);
+        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+    }
+
+    [Fact]
+    public void GetPolicy_Optional_IsAllowed_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        SetPolicyValue(3);
+        Assert.Equal(TelemetryPolicyState.Allowed, MxcTelemetry.GetPolicy());
+    }
+
+    /// <summary>
+    /// An administrator who sets <c>AllowTelemetry</c> as a string instead of a
+    /// DWORD has still expressed an intent to manage this machine. The value
+    /// cannot be evaluated, so it must fail closed to Blocked — never be read
+    /// as an unmanaged machine, which would let a prior consent grant
+    /// re-enable the collection the administrator meant to stop.
+    /// </summary>
+    [Theory]
+    [InlineData("0")]
+    [InlineData("3")]
+    [InlineData("")]
+    [InlineData("not-a-number")]
+    public void GetPolicy_WrongValueType_IsBlockedNotUnrestricted_OnWindows(string value)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        SetPolicyStringValue(value);
+        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+    }
+
+    [Fact]
+    public void GetPolicy_IsNeverAGrant_ConsentIsStillRequired_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // An administrator permitting telemetry must not stand in for the
+        // user's own decision: the prompt is still owed.
+        SetPolicyValue(3);
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+        Assert.True(MxcTelemetry.NeedsConsentPrompt());
+    }
+
+    [Fact]
+    public void GetPolicy_BlockedSuppressesTheConsentPrompt_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // There is no point asking a user for permission an administrator has
+        // already refused, but the recorded consent state is left untouched so
+        // relaxing the policy later restores the user's real choice.
+        SetPolicyValue(0);
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+
+        var presented = false;
+        var blocked = MxcTelemetry.RequestConsent(_ =>
+        {
+            presented = true;
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.False(presented);
+        Assert.Equal(TelemetryConsentActionResult.PolicyBlocked, blocked.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+
+        SetPolicyValue(null);
+        Assert.Equal(TelemetryPolicyState.Unrestricted, MxcTelemetry.GetPolicy());
+        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+        Assert.Equal(TelemetryConsentActionResult.Granted, granted.Result);
+        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
+    }
+
+    [Fact]
+    public async Task RequestConsentAsync_PersistsPresenterDecision_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var outcome = await MxcTelemetry.RequestConsentAsync(
+            prompt => ValueTask.FromResult(
+                prompt.Locale == "en-US"
+                    ? TelemetryConsentDecision.Yes
+                    : TelemetryConsentDecision.Dismissed),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
     }
 
     [Fact]
@@ -351,7 +483,6 @@ public sealed class MxcTelemetryTests
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
         using var context = new PumpSynchronizationContext();
         var previousContext = SynchronizationContext.Current;
         SynchronizationContext.SetSynchronizationContext(context);
@@ -369,7 +500,7 @@ public sealed class MxcTelemetryTests
             }, cancellationToken: TestContext.Current.CancellationToken);
 
             context.RunUntilCompleted(request);
-            Assert.Equal(TelemetryConsentResult.Granted, (await request).Result);
+            Assert.Equal(TelemetryConsentActionResult.Granted, (await request).Result);
         }
         finally
         {
@@ -385,7 +516,6 @@ public sealed class MxcTelemetryTests
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
         using var cancellation = new CancellationTokenSource();
         var presenterStarted = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -395,7 +525,7 @@ public sealed class MxcTelemetryTests
         var request = MxcTelemetry.RequestConsentAsync(_ =>
         {
             presenterStarted.SetResult();
-            return stalledPresenter.Task;
+            return new ValueTask<TelemetryConsentDecision>(stalledPresenter.Task);
         }, cancellationToken: cancellation.Token);
 
         await presenterStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
@@ -406,6 +536,7 @@ public sealed class MxcTelemetryTests
             Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         Assert.Same(request, finished);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+        Assert.True(request.IsCanceled);
         Assert.Equal(
             TelemetryConsentState.Undetermined,
             MxcTelemetry.GetConsentStatus().StoredState);
@@ -419,7 +550,6 @@ public sealed class MxcTelemetryTests
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
         using var cancellation = new CancellationTokenSource();
         using var listener = new CapturingTraceListener(
             "MXC telemetry consent presenter faulted after cancellation");
@@ -434,12 +564,13 @@ public sealed class MxcTelemetryTests
             var request = MxcTelemetry.RequestConsentAsync(_ =>
             {
                 presenterStarted.SetResult();
-                return presenter.Task;
+                return new ValueTask<TelemetryConsentDecision>(presenter.Task);
             }, cancellationToken: cancellation.Token);
 
             await presenterStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            Assert.True(request.IsCanceled);
 
             presenter.SetException(new InvalidOperationException("late presenter failure"));
             var diagnostic = await listener.Message.WaitAsync(TestContext.Current.CancellationToken);
@@ -462,12 +593,11 @@ public sealed class MxcTelemetryTests
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
         var outcome = await MxcTelemetry.RequestConsentAsync(
-            _ => Task.FromResult(TelemetryConsentDecision.Dismissed),
+            _ => ValueTask.FromResult(TelemetryConsentDecision.Dismissed),
             cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.Equal(TelemetryConsentResult.Dismissed, outcome.Result);
+        Assert.Equal(TelemetryConsentActionResult.Dismissed, outcome.Result);
         Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
     }
 
@@ -479,7 +609,6 @@ public sealed class MxcTelemetryTests
             return;
         }
 
-        using var _ = new TelemetryTestEnv();
         using var cancellation = new CancellationTokenSource();
         var previousContext = SynchronizationContext.Current;
         SynchronizationContext.SetSynchronizationContext(null);
@@ -489,10 +618,11 @@ public sealed class MxcTelemetryTests
             {
                 cancellation.Cancel();
                 cancellation.Token.ThrowIfCancellationRequested();
-                return Task.FromResult(TelemetryConsentDecision.Yes);
+                return ValueTask.FromResult(TelemetryConsentDecision.Yes);
             }, cancellationToken: cancellation.Token);
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            Assert.True(request.IsCanceled);
             Assert.Equal(
                 TelemetryConsentState.Undetermined,
                 MxcTelemetry.GetConsentStatus().StoredState);
@@ -508,12 +638,11 @@ public sealed class MxcTelemetryTests
     {
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
-        var outcome = new TelemetryConsentOutcome
-        {
-            Result = TelemetryConsentResult.Granted,
-            StoredState = TelemetryConsentState.Granted,
-            EffectiveState = TelemetryConsentState.Granted,
-        };
+        var outcome = new TelemetryConsentOutcome(
+            TelemetryConsentActionResult.Granted,
+            TelemetryConsentState.Granted,
+            TelemetryConsentState.Granted,
+            TelemetryPolicyState.Unrestricted);
 
         Assert.Same(outcome, MxcTelemetry.FinalizeAsyncOutcome(outcome, cancellation.Token));
     }
@@ -523,155 +652,108 @@ public sealed class MxcTelemetryTests
     {
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
-        var outcome = new TelemetryConsentOutcome
-        {
-            Result = TelemetryConsentResult.Dismissed,
-            StoredState = TelemetryConsentState.Undetermined,
-            EffectiveState = TelemetryConsentState.Undetermined,
-        };
+        var outcome = new TelemetryConsentOutcome(
+            TelemetryConsentActionResult.Dismissed,
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Unrestricted);
 
         Assert.ThrowsAny<OperationCanceledException>(
             () => MxcTelemetry.FinalizeAsyncOutcome(outcome, cancellation.Token));
     }
 
-    [Fact]
-    public void ConsentLifecycle_RoundTripsThroughNativeApi_OnWindows()
+    [Theory]
+    [InlineData(typeof(DllNotFoundException))]
+    [InlineData(typeof(EntryPointNotFoundException))]
+    [InlineData(typeof(TypeInitializationException))]
+    [InlineData(typeof(BadImageFormatException))]
+    public void NativeLoadFailures_AreTreatedAsFailClosed(Type exceptionType)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        using var _ = new TelemetryTestEnv();
-        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
-        Assert.True(MxcTelemetry.NeedsConsentPrompt());
-
-        var dismissed = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Dismissed);
-        Assert.Equal(TelemetryConsentResult.Dismissed, dismissed.Result);
-        Assert.Equal(TelemetryConsentState.Undetermined, dismissed.StoredState);
-
-        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
-        Assert.Equal(TelemetryConsentResult.Granted, granted.Result);
-        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
-        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsentStatus().EffectiveState);
-        Assert.False(MxcTelemetry.NeedsConsentPrompt());
-
-        var withdrawn = MxcTelemetry.WithdrawConsent();
-        Assert.Equal(TelemetryConsentResult.Withdrawn, withdrawn.Result);
-        Assert.Equal(TelemetryConsentState.Denied, MxcTelemetry.GetConsent());
-        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+        // These are the failures GetConsent must swallow into Undetermined
+        // rather than throwing out of a read-only status query.
+        // EntryPointNotFoundException in particular covers an mxc_ffi that
+        // loads but predates the consent entry points.
+        var ex = exceptionType == typeof(TypeInitializationException)
+            ? new TypeInitializationException("Microsoft.Mxc.Sdk.Native.NativeMethods", null)
+            : (Exception)Activator.CreateInstance(exceptionType)!;
+        Assert.True(MxcTelemetry.IsNativeLoadFailure(ex));
     }
 
-    [SupportedOSPlatform("windows")]
-    private sealed class TelemetryTestEnv : IDisposable
+    [Fact]
+    public void GenuineNativeFailures_AreNotSwallowed()
     {
-        private static readonly SemaphoreSlim Gate = new(1, 1);
+        // A real failure reported by the native layer must not be
+        // misclassified as "library missing" and silently downgraded.
+        Assert.False(MxcTelemetry.IsNativeLoadFailure(
+            new MxcException(ErrorCode.ConsentWriteFailed, "boom")));
+        Assert.False(MxcTelemetry.IsNativeLoadFailure(new InvalidOperationException()));
+    }
 
-        private readonly string? _originalLocalAppData;
-        private readonly string? _originalLocalAppDataOwnerPid;
-        private readonly string? _originalPolicyKey;
-        private readonly string? _originalPolicyOwnerPid;
-        private readonly string _storeDir;
-        private readonly string _policySubkey;
+    [Fact]
+    public void ReadOnlyQueries_NeverThrow()
+    {
+        // Read-only status queries must fail closed without throwing.
+        var prompt = Record.Exception(() => MxcTelemetry.NeedsConsentPrompt());
+        Assert.Null(prompt);
 
-        public TelemetryTestEnv()
+        var policy = Record.Exception(() => MxcTelemetry.GetPolicy());
+        Assert.Null(policy);
+
+        var status = Record.Exception(() => MxcTelemetry.GetConsentStatus());
+        Assert.Null(status);
+    }
+
+    [Fact]
+    public void MxcException_PreservesTheUnderlyingCause()
+    {
+        // The read/write paths convert unexpected exceptions to MxcException so
+        // a raw type cannot escape a documented contract; that conversion must
+        // not lose the original, which is the only thing that explains why a
+        // broken install failed.
+        var cause = new DllNotFoundException("mxc_ffi not found");
+        var ex = new MxcException(ErrorCode.ConsentWriteFailed, "could not persist", cause);
+
+        Assert.Same(cause, ex.InnerException);
+        Assert.Equal(ErrorCode.ConsentWriteFailed, ex.Code);
+        Assert.Contains("could not persist", ex.ToString(), StringComparison.Ordinal);
+        Assert.Contains("mxc_ffi not found", ex.ToString(), StringComparison.Ordinal);
+    }
+
+    private static int GetParentProcessId()
+    {
+        using var process = Process.GetCurrentProcess();
+        var status = NtQueryInformationProcess(
+            process.Handle,
+            processInformationClass: 0,
+            out var processInformation,
+            Marshal.SizeOf<ProcessBasicInformation>(),
+            out _);
+        if (status != 0)
         {
-            Gate.Wait();
-            try
-            {
-                _originalLocalAppData = Environment.GetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE");
-                _originalLocalAppDataOwnerPid = Environment.GetEnvironmentVariable(
-                    "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID");
-                _originalPolicyKey = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE");
-                _originalPolicyOwnerPid = Environment.GetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID");
-
-                _storeDir = Directory.CreateTempSubdirectory("mxc-dotnet-telemetry-").FullName;
-                _policySubkey = $@"Software\MxcTelemetryDotNetTests\{Guid.NewGuid():N}";
-
-                Registry.CurrentUser.CreateSubKey(_policySubkey)?.Dispose();
-                Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _storeDir);
-                Environment.SetEnvironmentVariable(
-                    "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
-                    GetParentProcessId().ToString());
-                Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _policySubkey);
-                Environment.SetEnvironmentVariable(
-                    "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID",
-                    Environment.ProcessId.ToString());
-            }
-            catch
-            {
-                Gate.Release();
-                throw;
-            }
+            throw new InvalidOperationException(
+                $"NtQueryInformationProcess failed with NTSTATUS 0x{status:X8}");
         }
 
-        public void Dispose()
-        {
-            Environment.SetEnvironmentVariable("MXC_TEST_LOCALAPPDATA_OVERRIDE", _originalLocalAppData);
-            Environment.SetEnvironmentVariable(
-                "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
-                _originalLocalAppDataOwnerPid);
-            Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE", _originalPolicyKey);
-            Environment.SetEnvironmentVariable("MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID", _originalPolicyOwnerPid);
+        return checked((int)processInformation.InheritedFromUniqueProcessId);
+    }
 
-            try
-            {
-                if (Directory.Exists(_storeDir))
-                {
-                    Directory.Delete(_storeDir, recursive: true);
-                }
-            }
-            catch
-            {
-            }
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtQueryInformationProcess(
+        IntPtr processHandle,
+        int processInformationClass,
+        out ProcessBasicInformation processInformation,
+        int processInformationLength,
+        out int returnLength);
 
-            try
-            {
-                Registry.CurrentUser.DeleteSubKeyTree(_policySubkey, throwOnMissingSubKey: false);
-            }
-            catch
-            {
-            }
-
-            Gate.Release();
-        }
-
-        private static int GetParentProcessId()
-        {
-            using var process = Process.GetCurrentProcess();
-            var status = NtQueryInformationProcess(
-                process.Handle,
-                processInformationClass: 0,
-                out var processInformation,
-                Marshal.SizeOf<ProcessBasicInformation>(),
-                out _);
-            if (status != 0)
-            {
-                throw new InvalidOperationException(
-                    $"NtQueryInformationProcess failed with NTSTATUS 0x{status:X8}");
-            }
-
-            return checked((int)processInformation.InheritedFromUniqueProcessId);
-        }
-
-        [DllImport("ntdll.dll", ExactSpelling = true)]
-        private static extern int NtQueryInformationProcess(
-            IntPtr processHandle,
-            int processInformationClass,
-            out ProcessBasicInformation processInformation,
-            int processInformationLength,
-            out int returnLength);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ProcessBasicInformation
-        {
-            internal IntPtr Reserved1;
-            internal IntPtr PebBaseAddress;
-            internal IntPtr Reserved2_0;
-            internal IntPtr Reserved2_1;
-            internal IntPtr UniqueProcessId;
-            internal IntPtr InheritedFromUniqueProcessId;
-        }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformation
+    {
+        internal IntPtr Reserved1;
+        internal IntPtr PebBaseAddress;
+        internal IntPtr Reserved2_0;
+        internal IntPtr Reserved2_1;
+        internal IntPtr UniqueProcessId;
+        internal IntPtr InheritedFromUniqueProcessId;
     }
 
     private sealed class PumpSynchronizationContext : SynchronizationContext, IDisposable
@@ -730,17 +812,7 @@ public sealed class MxcTelemetryTests
         {
             Capture(
                 eventType,
-                args is null || args.Length == 0
-                    ? format
-                    : string.Format(format ?? string.Empty, args));
-        }
-
-        public override void Write(string? message)
-        {
-        }
-
-        public override void WriteLine(string? message)
-        {
+                args is null ? format : string.Format(format ?? string.Empty, args));
         }
 
         private void Capture(TraceEventType eventType, string? message)
@@ -751,38 +823,13 @@ public sealed class MxcTelemetryTests
                 _message.TrySetResult(message);
             }
         }
-    }
-#endif
 
-    private sealed class FakeTelemetryQueryApi : MxcTelemetry.ITelemetryReadApi
-    {
-        internal required Func<MxcTelemetry.NativePayloadResult> GetConsentImpl { get; init; }
-        internal required Func<MxcTelemetry.NativeBooleanResult> NeedsConsentPromptImpl { get; init; }
-        internal required Func<MxcTelemetry.NativePayloadResult> GetPolicyImpl { get; init; }
+        public override void Write(string? message)
+        {
+        }
 
-        public MxcTelemetry.NativePayloadResult GetConsent() => GetConsentImpl();
-
-        public MxcTelemetry.NativeBooleanResult NeedsConsentPrompt() =>
-            NeedsConsentPromptImpl();
-
-        public MxcTelemetry.NativePayloadResult GetPolicy() => GetPolicyImpl();
-    }
-
-    private sealed class ThrowingTraceListener : TraceListener
-    {
-        public override void TraceEvent(
-            TraceEventCache? eventCache,
-            string? source,
-            TraceEventType eventType,
-            int id,
-            string? format,
-            params object?[]? args) =>
-            throw new InvalidOperationException("listener failure");
-
-        public override void Write(string? message) =>
-            throw new InvalidOperationException("listener failure");
-
-        public override void WriteLine(string? message) =>
-            throw new InvalidOperationException("listener failure");
+        public override void WriteLine(string? message)
+        {
+        }
     }
 }

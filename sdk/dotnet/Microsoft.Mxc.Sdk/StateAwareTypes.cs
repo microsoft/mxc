@@ -71,6 +71,12 @@ public abstract class StateAwareProvisionOptions
 {
     /// <summary>Overrides the backend's default state-aware schema version.</summary>
     public string? Version { get; set; }
+
+    /// <summary>
+    /// Optional per-phase telemetry request. Emission is still gated by the
+    /// MXC-owned user consent and administrative policy.
+    /// </summary>
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>IsolationSession provision options.</summary>
@@ -160,6 +166,12 @@ public class StateAwarePhaseOptions
 {
     /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
     public string? Version { get; set; }
+
+    /// <summary>
+    /// Optional per-phase telemetry request. Emission is still gated by the
+    /// MXC-owned user consent and administrative policy.
+    /// </summary>
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
