@@ -1567,6 +1567,8 @@ dependencies = [
  "mxc-sdk",
  "serde",
  "serde_json",
+ "tempfile",
+ "wxc_common",
 ]
 
 [[package]]

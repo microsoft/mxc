@@ -320,6 +320,7 @@ public static class MxcSandbox
             Network = policy.Network,
             Ui = policy.Ui,
             TimeoutMs = policy.TimeoutMs,
+            Telemetry = policy.Telemetry,
         };
 
     private static bool CaptureDenialsEqual(

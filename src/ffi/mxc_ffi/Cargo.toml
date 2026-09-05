@@ -13,8 +13,8 @@ name = "mxc_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-mxc-sdk = { workspace = true }
-serde = { workspace = true }
+mxc-sdk = { workspace = true, features = ["ffi-internals"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [features]
@@ -32,6 +32,15 @@ isolation_session = ["mxc-sdk/isolation_session"]
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+# Exposes the debug-only telemetry test seams to language-binding tests.
+test-support = ["mxc-sdk/test-support"]
+
+[dev-dependencies]
+# Gives the FFI tests the policy-key redirector, so they can assert the exact
+# string this layer marshals for each administrative policy state rather than
+# accepting whatever the host machine's real policy happens to produce.
+wxc_common = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 
 [[example]]
 name = "attached_console_ffi"

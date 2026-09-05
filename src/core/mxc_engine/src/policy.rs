@@ -710,6 +710,14 @@ impl SandboxRequest {
         });
         self
     }
+
+    /// Return the explicit per-request telemetry switch for this invocation.
+    pub fn telemetry_enabled(&self) -> Option<bool> {
+        self.inner
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.enabled)
+    }
 }
 
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
@@ -1636,14 +1644,7 @@ mod tests {
         assert!(!request.inner.experimental_enabled);
 
         request.set_telemetry_enabled(true);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
+        assert_eq!(request.telemetry_enabled(), Some(true));
         assert_eq!(
             request
                 .inner
@@ -1658,14 +1659,7 @@ mod tests {
         );
 
         request.set_telemetry_enabled(false);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(false)
-        );
+        assert_eq!(request.telemetry_enabled(), Some(false));
         assert!(!request.inner.experimental_enabled);
     }
 

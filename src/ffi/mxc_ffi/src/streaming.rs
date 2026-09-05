@@ -56,12 +56,12 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, StreamCloser, WaitOutcome};
+use mxc_sdk::{spawn_sandbox, Sandbox, StreamCloser, WaitOutcome};
 
 use crate::{
-    alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,
-    MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST,
-    MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
+    alloc_cstring, build_spawn_request, cstr_to_str, request, status_from_error_code,
+    MxcErrorDetail, MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT,
+    MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
 // ---------------------------------------------------------------------------
@@ -161,7 +161,8 @@ pub unsafe extern "C" fn mxc_spawn(
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         spawn_inner(policy_json_utf8, command_utf8)
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_spawn", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -305,15 +306,7 @@ fn spawn_inner(
         }
     };
 
-    let policy: SandboxPolicy = serde_json::from_str(policy_json).map_err(|e| {
-        (
-            MXC_STATUS_MALFORMED_REQUEST,
-            MxcErrorDetail::from_message(format!("failed to parse policy JSON: {e}")),
-        )
-    })?;
-
-    let mut request = build_request(&policy, None).map_err(sdk_error_detail)?;
-    request.set_script(command);
+    let request = build_spawn_request(policy_json, command)?;
 
     spawn_sandbox(request).map_err(sdk_error_detail)
 }
@@ -406,7 +399,12 @@ fn take_stream(
         let sandbox = unsafe { &mut *handle };
         take(sandbox).map(|s| Box::into_raw(Box::new(s)))
     }));
-    result.unwrap_or(None).unwrap_or(ptr::null_mut())
+    result
+        .unwrap_or_else(|panic| {
+            crate::report_panic("mxc_sandbox_take_stdin", &*panic);
+            None
+        })
+        .unwrap_or(ptr::null_mut())
 }
 
 fn take_read_stream(
@@ -421,7 +419,12 @@ fn take_read_stream(
         let sandbox = unsafe { &mut *handle };
         take(sandbox).map(|inner| Box::into_raw(Box::new(MxcReadStream { inner })))
     }));
-    result.unwrap_or(None).unwrap_or(ptr::null_mut())
+    result
+        .unwrap_or_else(|panic| {
+            crate::report_panic("mxc_sandbox_take_stdout_or_stderr", &*panic);
+            None
+        })
+        .unwrap_or(ptr::null_mut())
 }
 
 fn take_closer(
@@ -436,7 +439,12 @@ fn take_closer(
         let sandbox = unsafe { &*handle };
         take(sandbox).map(|inner| Box::into_raw(Box::new(MxcStreamCloser { inner })))
     }));
-    result.unwrap_or(None).unwrap_or(ptr::null_mut())
+    result
+        .unwrap_or_else(|panic| {
+            crate::report_panic("mxc_sandbox_take_stdout_or_stderr_closer", &*panic);
+            None
+        })
+        .unwrap_or(ptr::null_mut())
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +472,10 @@ pub unsafe extern "C" fn mxc_stream_read(
     if stream.is_null() || buf.is_null() || out_read.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
+    // SAFETY: `out_read` is non-null and caller-guaranteed writable. Zero it
+    // before any fallible work so a caught panic or I/O error never leaves the
+    // caller's prior value behind.
+    unsafe { *out_read = 0 };
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: `stream` non-null live handle; `buf`/`cap` describe a valid
         // writable region per the caller contract.
@@ -478,7 +490,10 @@ pub unsafe extern "C" fn mxc_stream_read(
             Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_stream_read", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Write up to `len` bytes from `buf` to `stream`, writing the number of bytes
@@ -501,6 +516,10 @@ pub unsafe extern "C" fn mxc_stream_write(
     if stream.is_null() || buf.is_null() || out_written.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
+    // SAFETY: `out_written` is non-null and caller-guaranteed writable. Zero
+    // it before any fallible work so a caught panic or I/O error never leaves
+    // the caller's prior value behind.
+    unsafe { *out_written = 0 };
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: `stream` non-null live handle; `buf`/`len` describe a valid
         // readable region per the caller contract.
@@ -515,7 +534,10 @@ pub unsafe extern "C" fn mxc_stream_write(
             Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_stream_write", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Flush any buffered bytes on a stdin stream.
@@ -535,7 +557,10 @@ pub unsafe extern "C" fn mxc_stream_flush(stream: *mut MxcWriteStream) -> i32 {
             Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_stream_flush", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Close a stdout/stderr reader through its independent closer.
@@ -559,7 +584,10 @@ pub unsafe extern "C" fn mxc_stream_closer_close(closer: *mut MxcStreamCloser) -
         unsafe { &*closer }.inner.close();
         MXC_STATUS_SUCCESS
     }))
-    .unwrap_or(MXC_STATUS_PANIC)
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_stream_closer_close", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +608,10 @@ pub unsafe extern "C" fn mxc_sandbox_id(handle: *mut MxcSandbox) -> u32 {
         let sandbox = unsafe { &*handle };
         sandbox.inner.id()
     }))
-    .unwrap_or(0)
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_id", &*panic);
+        0
+    })
 }
 
 /// Return structured output metadata as owned JSON. A successful call leaves
@@ -620,7 +651,10 @@ pub unsafe extern "C" fn mxc_sandbox_output_metadata_json(
         unsafe { *out_json_utf8 = alloc_cstring(&json) };
         MXC_STATUS_SUCCESS
     }))
-    .unwrap_or(MXC_STATUS_PANIC)
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_output_metadata_json", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Return the sandbox's security warnings as owned JSON.
@@ -659,7 +693,10 @@ pub unsafe extern "C" fn mxc_sandbox_warnings_json(
         unsafe { *out_json_utf8 = alloc_cstring(&json) };
         MXC_STATUS_SUCCESS
     }))
-    .unwrap_or(MXC_STATUS_PANIC)
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_warnings_json", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Non-blocking completion check. On return, `*out_running` is `1` if the child
@@ -684,6 +721,14 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
     if handle.is_null() || out_exit.is_null() || out_running.is_null() || out_timed_out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
+    // SAFETY: out-params are non-null and caller-guaranteed writable. Zero
+    // them before any fallible work so a caught panic or backend error never
+    // leaks the caller's previous values back out.
+    unsafe {
+        *out_exit = 0;
+        *out_running = 0;
+        *out_timed_out = 0;
+    }
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
@@ -700,7 +745,10 @@ pub unsafe extern "C" fn mxc_sandbox_try_wait(
             Err(status) => status,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_try_wait", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 fn try_wait_result_to_abi(result: std::io::Result<Option<i32>>) -> Result<(i32, i32, i32), i32> {
@@ -732,6 +780,13 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
     if handle.is_null() || out_exit.is_null() || out_timed_out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
+    // SAFETY: out-params are non-null and caller-guaranteed writable. Zero
+    // them before any fallible work so a caught panic or backend error never
+    // leaks the caller's previous values back out.
+    unsafe {
+        *out_exit = 0;
+        *out_timed_out = 0;
+    }
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
@@ -755,7 +810,10 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
             Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_wait", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 /// Kill the child and its whole process tree. Reaping happens in a subsequent
@@ -776,7 +834,10 @@ pub unsafe extern "C" fn mxc_sandbox_kill(handle: *mut MxcSandbox) -> i32 {
             Err(_) => MXC_STATUS_BACKEND_ERROR,
         }
     }));
-    status.unwrap_or(MXC_STATUS_PANIC)
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_kill", &*panic);
+        MXC_STATUS_PANIC
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -794,11 +855,13 @@ pub unsafe extern "C" fn mxc_sandbox_free(handle: *mut MxcSandbox) {
     if handle.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null handle produced by `Box::into_raw` in `mxc_spawn`,
         // not yet freed; reconstructing the Box drops it (and its child).
         drop(unsafe { Box::from_raw(handle) });
-    }));
+    })) {
+        crate::report_panic("mxc_sandbox_free", &*panic);
+    }
 }
 
 /// Free a readable stream handle. Safe to call with null (no-op). Must be
@@ -812,10 +875,12 @@ pub unsafe extern "C" fn mxc_read_stream_free(stream: *mut MxcReadStream) {
     if stream.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null handle produced by `Box::into_raw`, not yet freed.
         drop(unsafe { Box::from_raw(stream) });
-    }));
+    })) {
+        crate::report_panic("mxc_read_stream_free", &*panic);
+    }
 }
 
 /// Free a writable (stdin) stream handle, closing stdin and sending EOF to the
@@ -829,10 +894,12 @@ pub unsafe extern "C" fn mxc_write_stream_free(stream: *mut MxcWriteStream) {
     if stream.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null handle produced by `Box::into_raw`, not yet freed.
         drop(unsafe { Box::from_raw(stream) });
-    }));
+    })) {
+        crate::report_panic("mxc_write_stream_free", &*panic);
+    }
 }
 
 /// Free a stream-closer handle. Safe to call with null (no-op). Must be called
@@ -846,10 +913,12 @@ pub unsafe extern "C" fn mxc_stream_closer_free(closer: *mut MxcStreamCloser) {
     if closer.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null handle produced by Box::into_raw, not yet freed.
         drop(unsafe { Box::from_raw(closer) });
-    }));
+    })) {
+        crate::report_panic("mxc_stream_closer_free", &*panic);
+    }
 }
 
 #[cfg(test)]
@@ -874,6 +943,40 @@ mod tests {
     }
     use std::ffi::CString;
 
+    use crate::MXC_STATUS_MALFORMED_REQUEST;
+
+    struct PanicReader;
+
+    impl Read for PanicReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!("forced panic in test reader");
+        }
+    }
+
+    struct PanicWriter;
+
+    impl Write for PanicWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            panic!("forced panic in test writer");
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PanicFlushWriter;
+
+    impl Write for PanicFlushWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("forced panic in test flush");
+        }
+    }
+
     #[test]
     fn spawn_null_out_handle_is_null_argument() {
         let policy = CString::new(r#"{"version":"0.7.0-alpha"}"#).unwrap();
@@ -888,6 +991,29 @@ mod tests {
             )
         };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+    }
+
+    #[test]
+    fn build_spawn_request_propagates_telemetry_enablement() {
+        for (policy_json, expected) in [
+            (r#"{"version":"0.8.0-alpha"}"#, None),
+            (
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":true}}"#,
+                Some(true),
+            ),
+            (
+                r#"{"version":"0.9.0-alpha","telemetry":{"enabled":false}}"#,
+                Some(false),
+            ),
+        ] {
+            let request = build_spawn_request(policy_json, "echo hi")
+                .unwrap_or_else(|_| panic!("build_spawn_request failed for {policy_json}"));
+            assert_eq!(
+                request.telemetry_enabled(),
+                expected,
+                "policy: {policy_json}"
+            );
+        }
     }
 
     #[test]
@@ -1004,6 +1130,44 @@ mod tests {
             mxc_write_stream_free(ptr::null_mut());
             mxc_stream_closer_free(ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn stream_read_panic_zeroes_out_read_before_returning_panic() {
+        let mut stream = MxcReadStream {
+            inner: Box::new(PanicReader),
+        };
+        let mut buf = [0u8; 8];
+        let mut out_read = usize::MAX;
+        // SAFETY: `stream`, `buf`, and `out_read` are valid for this call.
+        let status =
+            unsafe { mxc_stream_read(&mut stream, buf.as_mut_ptr(), buf.len(), &mut out_read) };
+        assert_eq!(status, MXC_STATUS_PANIC);
+        assert_eq!(out_read, 0);
+    }
+
+    #[test]
+    fn stream_write_panic_zeroes_out_written_before_returning_panic() {
+        let mut stream = MxcWriteStream {
+            inner: Box::new(PanicWriter),
+        };
+        let buf = *b"panic";
+        let mut out_written = usize::MAX;
+        // SAFETY: `stream`, `buf`, and `out_written` are valid for this call.
+        let status =
+            unsafe { mxc_stream_write(&mut stream, buf.as_ptr(), buf.len(), &mut out_written) };
+        assert_eq!(status, MXC_STATUS_PANIC);
+        assert_eq!(out_written, 0);
+    }
+
+    #[test]
+    fn stream_flush_panic_returns_panic_status() {
+        let mut stream = MxcWriteStream {
+            inner: Box::new(PanicFlushWriter),
+        };
+        // SAFETY: `stream` is a valid live stream handle.
+        let status = unsafe { mxc_stream_flush(&mut stream) };
+        assert_eq!(status, MXC_STATUS_PANIC);
     }
 
     /// Full streaming round-trip against a real sandbox: spawn `echo`, drain
@@ -1144,13 +1308,14 @@ mod tests {
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
 
         // Child should still be running.
-        let mut exit = 0;
-        let mut running = 0;
+        let mut exit = i32::MIN;
+        let mut running = -1;
         // SAFETY: live handle + out pointers.
         let mut timed_out = -1;
         let rc = unsafe { mxc_sandbox_try_wait(handle, &mut exit, &mut running, &mut timed_out) };
         assert_eq!(rc, MXC_STATUS_SUCCESS);
         assert_eq!(running, 1, "blocked child should still be running");
+        assert_eq!(exit, 0, "running poll should leave the zero sentinel");
         assert_eq!(timed_out, 0);
 
         // SAFETY: live handle.

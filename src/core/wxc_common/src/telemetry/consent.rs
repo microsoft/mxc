@@ -173,10 +173,10 @@ impl ConsentState {
 
     /// Whether this consent state represents an absent user decision.
     ///
-    /// This is deliberately private and policy-blind. Host applications must
-    /// use [`needs_consent_prompt`], which also suppresses the prompt under an
-    /// administrative block.
-    fn needs_prompt(&self) -> bool {
+    /// Policy-blind: this only reflects the stored consent state. Host
+    /// applications must use [`needs_consent_prompt`], which also suppresses
+    /// the prompt under an administrative block.
+    pub fn needs_prompt(&self) -> bool {
         matches!(self, ConsentState::Undetermined)
     }
 }

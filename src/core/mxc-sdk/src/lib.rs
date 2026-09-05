@@ -144,6 +144,14 @@
 
 mod sandbox;
 
+pub mod telemetry;
+
+#[cfg(feature = "ffi-internals")]
+#[doc(hidden)]
+pub mod ffi_internals {
+    pub use mxc_engine::binding::{parse_policy_json, ParsedPolicy};
+}
+
 pub use mxc_engine::configs;
 pub use mxc_engine::policy;
 pub use mxc_engine::{

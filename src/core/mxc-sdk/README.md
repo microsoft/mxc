@@ -13,9 +13,10 @@ sandboxed process over ordinary pipes, with no pty. The state-aware
 ## Usage
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 
-// Describe what to restrict, turn it into a request, fill in the command.
+fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
     filesystem: None,
@@ -24,13 +25,13 @@ let policy = SandboxPolicy {
     timeout_ms: Some(10_000),
 };
 let mut request = build_request(&policy, None)?;
-request.set_script("echo hello");
+request.set_script("echo hello").set_telemetry_enabled(true);
 
-// Run to completion and capture the output.
 let output = run(request)?;
 assert_eq!(output.outcome, WaitOutcome::Exited(0));
 assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
-# Ok::<(), Box<dyn std::error::Error>>(())
+Ok(())
+}
 ```
 
 [`run`] is the run-to-completion convenience (spawn + `wait_with_output`); use
@@ -42,6 +43,10 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 through the shared parser. The returned [`SandboxRequest`] has an empty command
 line — set the command with [`SandboxRequest::set_script`] (and any working
 directory / env) before spawning.
+
+Telemetry remains off unless `SandboxRequest::set_telemetry_enabled(true)` is
+called. Enabling that per-invocation switch still requires persisted user
+consent and a permitting administrative policy.
 
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
@@ -225,9 +230,11 @@ while it runs — persistent bidirectional stdio plus termination. No pty is
 allocated; the streams are ordinary pipes.
 
 ```rust,no_run
+use std::error::Error;
 use std::io::{Read, Write};
 use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
+fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
     filesystem: None,
@@ -249,7 +256,8 @@ stdout.read_to_string(&mut out)?; // "hello\n"
 
 let outcome = proc.wait()?;       // any untaken stream is drained and discarded
 assert_eq!(outcome, WaitOutcome::Exited(0));
-# Ok::<(), Box<dyn std::error::Error>>(())
+Ok(())
+}
 ```
 
 The handle is modelled on [`std::process::Child`]:
@@ -334,8 +342,10 @@ The example needs this crate's `isolation_session` feature and a host running th
 OS-side service.
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
+fn main() -> Result<(), Box<dyn Error>> {
 // Provision. IsolationSession accepts only the canonical unrestricted-network
 // acknowledgment; an absent policy defaults to `block`, which it refuses.
 let provisioned = run_state_aware_json(
@@ -358,7 +368,10 @@ let outcome = exec_attached(
     r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+let _ = outcome;
+let _ = provisioned;
+Ok(())
+}
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
@@ -413,25 +426,103 @@ go through the same parser the executor uses — so a rejected value (e.g. a por
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{
     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
 };
 
-# let policy = SandboxPolicy {
-#     version: "0.7.0-alpha".to_string(),
-#     filesystem: None, network: None, ui: None, timeout_ms: None,
-# };
+fn main() -> Result<(), Box<dyn Error>> {
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None, network: None, ui: None, timeout_ms: None,
+};
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 request.set_script("python3 -c 'print(42)'").set_experimental(true);
 let output = run(request)?;
-# Ok::<(), mxc_sdk::Error>(())
+let _ = output;
+Ok(())
+}
 ```
 
 Two WSLC-specific limits follow from the SDK's surface: the container has no
 stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
 process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
 [`platform_support`] reports `"wslc"` only on a host that can actually run it.
+
+## Telemetry consent
+
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](../../../docs/telemetry/telemetry-consent-design.md)
+for the full design.
+
+The crate is UI-agnostic: it does not render a prompt. A host may call
+`request_consent()` or `request_consent_async()` and render every field of the
+canonical prompt supplied to its presenter callback verbatim. MXC persists a
+grant only from the typed decision returned by that callback. If the host
+never requests consent, telemetry remains off. See the normative
+[SDK presenter requirements](../../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, learn-more handling, status, and
+withdrawal.
+
+Telemetry is also off per invocation unless the request explicitly enables it
+with `SandboxRequest::set_telemetry_enabled(true)`. This stable switch does not
+require `set_experimental(true)` and cannot bypass consent or administrative
+policy. The same configured `SandboxRequest` can be passed to either
+run-to-completion (`run`) or streaming (`spawn_sandbox`).
+
+```rust,no_run
+use std::error::Error;
+use mxc_sdk::telemetry;
+
+fn main() -> Result<(), Box<dyn Error>> {
+let outcome = telemetry::request_consent(Some("en-US"), |prompt| {
+    assert_eq!(prompt.locale, "en-US");
+    Ok(telemetry::ConsentDecision::Yes)
+})?;
+
+let status = telemetry::get_consent_status();
+let withdrawal = telemetry::withdraw_consent()?;
+let _ = (outcome, status, withdrawal);
+Ok(())
+}
+```
+
+Off Windows `get_consent()` always returns `ConsentState::NotApplicable`,
+`needs_consent_prompt()` is always `false`, and consent requests return
+`ConsentActionResult::NotApplicable` — MXC neither collects nor offers consent
+for telemetry there, so a host can call these unconditionally without
+special-casing the platform.
+
+### Administrative policy
+
+An IT administrator can block MXC telemetry device-wide via MXC's own
+registry policy setting. `telemetry::get_policy()` reports the result:
+
+```rust,no_run
+use mxc_sdk::telemetry::{self, PolicyState};
+
+if telemetry::get_policy() == PolicyState::Blocked {
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+Two things worth designing around:
+
+- The policy is a **ceiling, never a grant**. `PolicyState::Allowed` does not
+  mean telemetry is on — the user must still consent. Only
+  `ConsentState::Granted` *and* a non-blocking policy result in collection.
+- When the policy blocks, `needs_consent_prompt()` is `false`, because asking
+  for permission an administrator has already refused is a meaningless
+  question. Word any UI as "telemetry is unavailable on this device" rather
+  than blaming the user's own choice.
+
+It never fails: any unreadable or unrecognized value reads back as
+`PolicyState::Blocked`. Off Windows it is always `PolicyState::NotApplicable`.
+`telemetry::is_blocked_by_policy()` is the convenience predicate. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## Pty allocation
 
