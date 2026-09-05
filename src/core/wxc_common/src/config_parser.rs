@@ -2188,6 +2188,7 @@ mod tests {
     enum ErrorRoute {
         Decode,
         OneShot,
+        OneShotMalformed,
         StateAware,
     }
 
@@ -2221,7 +2222,8 @@ mod tests {
         fn from(error: &ParseError) -> Self {
             let route = match error {
                 ParseError::Decode(_) => ErrorRoute::Decode,
-                ParseError::OneShot(_) | ParseError::OneShotMalformed(_) => ErrorRoute::OneShot,
+                ParseError::OneShot(_) => ErrorRoute::OneShot,
+                ParseError::OneShotMalformed(_) => ErrorRoute::OneShotMalformed,
                 ParseError::StateAware(_) => ErrorRoute::StateAware,
             };
             let message = error.message();
@@ -2250,6 +2252,19 @@ mod tests {
                 message,
             }
         }
+    }
+
+    #[test]
+    fn differential_snapshot_preserves_one_shot_malformed_variant() {
+        let error = || WxcError::ConfigParse("same diagnostic".to_string());
+        let one_shot = DiagnosticSnapshot::from(&ParseError::OneShot(error()));
+        let malformed = DiagnosticSnapshot::from(&ParseError::OneShotMalformed(error()));
+
+        assert_eq!(one_shot.message, malformed.message);
+        assert_eq!(one_shot.category, malformed.category);
+        assert_eq!(one_shot.route, ErrorRoute::OneShot);
+        assert_eq!(malformed.route, ErrorRoute::OneShotMalformed);
+        assert_ne!(one_shot, malformed);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2311,8 +2326,10 @@ mod tests {
         name: &'static str,
         input: &'static str,
         direction: DivergenceDirection,
-        rolling_message: Option<&'static str>,
-        exact_message: &'static str,
+        rolling_diagnostic: Option<DiagnosticExpectation>,
+        exact_diagnostic: DiagnosticExpectation,
+        rolling_logger: LoggerExpectation,
+        exact_logger: LoggerExpectation,
         reason: &'static str,
     }
 
@@ -2970,6 +2987,13 @@ mod tests {
         message_contains: &'static [&'static str],
     }
 
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LoggerExpectation {
+        // One stable fragment per message; channel, order, and counts are exact.
+        primary_lines: &'static [&'static str],
+        warnings: &'static [&'static str],
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct CorpusDiagnosticDivergence {
         rolling: DiagnosticExpectation,
@@ -3114,6 +3138,45 @@ mod tests {
         mismatches
     }
 
+    fn logger_expectation_mismatches(
+        expected: LoggerExpectation,
+        actual: &LoggerSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        for (channel, messages, fragments) in [
+            (
+                "primary_buffer",
+                actual.primary_buffer.lines().collect::<Vec<_>>(),
+                expected.primary_lines,
+            ),
+            (
+                "warnings",
+                actual
+                    .warnings
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected.warnings,
+            ),
+        ] {
+            if messages.len() != fragments.len() {
+                mismatches.push(format!(
+                    "{channel}: expected {} messages, observed {}",
+                    fragments.len(),
+                    messages.len()
+                ));
+            }
+            for (index, (message, fragment)) in messages.iter().zip(fragments).enumerate() {
+                if !message.contains(fragment) {
+                    mismatches.push(format!(
+                        "{channel}[{index}]: message does not contain {fragment:?}"
+                    ));
+                }
+            }
+        }
+        mismatches
+    }
+
     fn corpus_divergence_counts(
         divergences: impl Iterator<Item = CorpusDivergenceKind>,
     ) -> std::collections::BTreeMap<CorpusDivergenceKind, usize> {
@@ -3245,65 +3308,80 @@ mod tests {
         }
     }
 
-    fn assert_classified_divergence(case: &DivergenceCase) {
-        assert!(!case.reason.is_empty(), "{}: missing reason", case.name);
-        let (rolling, exact) = parse_both(case.input);
-        match case.direction {
-            DivergenceDirection::ExactStricter => {
-                assert!(
-                    matches!(rolling, ParserSnapshot::Accepted(_)),
-                    "{}: rolling behavior must be acceptance; got {rolling:?}",
-                    case.name
-                );
-                let ParserSnapshot::Rejected(exact) = exact else {
-                    panic!(
-                        "{}: exact behavior must be rejection; got {exact:?}",
-                        case.name
+    fn classified_divergence_mismatches(
+        case: &DivergenceCase,
+        rolling: &ParserSnapshot,
+        exact: &ParserSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if case.reason.is_empty() {
+            mismatches.push("missing classification reason".to_string());
+        }
+        if case.rolling_diagnostic.is_some()
+            != (case.direction == DivergenceDirection::DiagnosticOnly)
+        {
+            mismatches.push("rolling expectation contradicts the divergence direction".to_string());
+        }
+        for (side, actual, diagnostic, logger) in [
+            (
+                "rolling",
+                rolling,
+                case.rolling_diagnostic,
+                case.rolling_logger,
+            ),
+            (
+                "exact",
+                exact,
+                Some(case.exact_diagnostic),
+                case.exact_logger,
+            ),
+        ] {
+            let actual_logger = match (actual, diagnostic) {
+                (ParserSnapshot::Accepted(actual), None) => &actual.logger,
+                (ParserSnapshot::Rejected(actual), Some(expected)) => {
+                    mismatches.extend(
+                        diagnostic_expectation_mismatches(expected, &actual.diagnostic)
+                            .into_iter()
+                            .map(|message| format!("{side}: {message}")),
                     );
-                };
-                assert!(
-                    exact.message.contains(case.exact_message),
-                    "{}: exact behavior did not contain {:?}: {}",
-                    case.name,
-                    case.exact_message,
-                    exact.message
-                );
-            }
-            DivergenceDirection::DiagnosticOnly => {
-                let ParserSnapshot::Rejected(rolling) = rolling else {
-                    panic!(
-                        "{}: rolling behavior must be rejection; got {rolling:?}",
-                        case.name
-                    );
-                };
-                let ParserSnapshot::Rejected(exact) = exact else {
-                    panic!(
-                        "{}: exact behavior must be rejection; got {exact:?}",
-                        case.name
-                    );
-                };
-                let rolling_message = case.rolling_message.unwrap();
-                assert!(
-                    rolling.message.contains(rolling_message),
-                    "{}: rolling behavior did not contain {:?}: {}",
-                    case.name,
-                    rolling_message,
-                    rolling.message
-                );
-                assert!(
-                    exact.message.contains(case.exact_message),
-                    "{}: exact behavior did not contain {:?}: {}",
-                    case.name,
-                    case.exact_message,
-                    exact.message
-                );
-                assert_ne!(
-                    rolling.message, exact.message,
-                    "{}: classified diagnostic unexpectedly converged",
-                    case.name
-                );
+                    &actual.logger
+                }
+                (ParserSnapshot::Accepted(actual), Some(_)) => {
+                    mismatches.push(format!("{side}: expected rejection, observed acceptance"));
+                    &actual.logger
+                }
+                (ParserSnapshot::Rejected(actual), None) => {
+                    mismatches.push(format!("{side}: expected acceptance, observed rejection"));
+                    &actual.logger
+                }
+            };
+            mismatches.extend(
+                logger_expectation_mismatches(logger, actual_logger)
+                    .into_iter()
+                    .map(|message| format!("{side}: logger.{message}")),
+            );
+        }
+        if case.direction == DivergenceDirection::DiagnosticOnly {
+            if let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            {
+                if rolling.message == exact.message {
+                    mismatches.push("classified diagnostic unexpectedly converged".to_string());
+                }
             }
         }
+        mismatches
+    }
+
+    fn assert_classified_divergence(case: &DivergenceCase) {
+        let (rolling, exact) = parse_both(case.input);
+        let mismatches = classified_divergence_mismatches(case, &rolling, &exact);
+        assert!(
+            mismatches.is_empty(),
+            "{}: {}\nrolling={rolling:?}\nexact={exact:?}",
+            case.name,
+            mismatches.join("\n")
+        );
     }
 
     #[test]
@@ -3486,19 +3564,36 @@ mod tests {
 
     #[test]
     fn differential_source_aware_diagnostics_converge_when_contracts_share_the_shape() {
-        let json = "{\n  \"version\": \"0.8.0-alpha\",\n  \"process\": {\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }\n}";
-        let (rolling, exact) = parse_both(json);
-        let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) = (rolling, exact)
-        else {
-            panic!("both parsers must reject the typed cwd error");
-        };
+        for (version, route) in [
+            ("0.6.0-alpha", ErrorRoute::OneShot),
+            ("0.7.0-alpha", ErrorRoute::OneShot),
+            ("0.8.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::StateAware),
+        ] {
+            let phase_fields = if route == ErrorRoute::StateAware {
+                "  \"phase\": \"exec\",\n  \"sandboxId\": \"wslc:abcd1234\",\n"
+            } else {
+                ""
+            };
+            let json = format!(
+                "{{\n  \"version\": \"{version}\",\n{phase_fields}  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
+            );
+            let (rolling, exact) = parse_both(&json);
+            let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            else {
+                panic!("{version} {route:?}: both parsers must reject the typed cwd error");
+            };
 
-        assert_eq!(rolling.route, exact.route);
-        assert_eq!(rolling.category, exact.category);
-        assert_eq!(rolling.path.as_deref(), Some("process.cwd"));
-        assert_eq!(rolling.path, exact.path);
-        assert_eq!(rolling.line, exact.line);
-        assert_eq!(rolling.column, exact.column);
+            assert_eq!(rolling.route, route);
+            assert_eq!(rolling.route, exact.route);
+            assert_eq!(rolling.category, exact.category);
+            assert_eq!(rolling.path.as_deref(), Some("process.cwd"));
+            assert_eq!(rolling.path, exact.path);
+            assert_eq!(rolling.line, exact.line);
+            assert_eq!(rolling.column, exact.column);
+        }
 
         let malformed = "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":";
         let (rolling, exact) = parse_both(malformed);
@@ -3618,9 +3713,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn differential_exact_stricter_and_diagnostic_divergences_are_explicit() {
-        let cases = [
+    fn classified_divergence_cases() -> [DivergenceCase; 14] {
+        [
             DivergenceCase {
                 name: "published-v06-experimental",
                 input: r#"{
@@ -3629,8 +3723,17 @@ mod tests {
                     "experimental":{"test":{"message":"rolling-only"}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `experimental`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental"),
+                    line: Some(4),
+                    column: Some(34),
+                    message_contains: &["unknown field `experimental`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Published 0.6 is closed; rolling compatibility still accepts experimental.",
             },
             DivergenceCase {
@@ -3641,8 +3744,17 @@ mod tests {
                     "process":{"commandLine":"echo x"}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "invalid type: null",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("containerId"),
+                    line: Some(3),
+                    column: Some(38),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "OptionalField distinguishes omission from explicit null.",
             },
             DivergenceCase {
@@ -3655,8 +3767,17 @@ mod tests {
                     "experimental":{"isolation_session":{"provision":{"appId":null}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "invalid type: null",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.appId"),
+                    line: Some(6),
+                    column: Some(82),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "The exact OptionalField rejects null while the temporary backend payload treats it as absent.",
             },
             DivergenceCase {
@@ -3669,8 +3790,17 @@ mod tests {
                     "experimental":{"isolation_session":{"provision":{"futureField":true}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `futureField`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.futureField"),
+                    line: Some(6),
+                    column: Some(83),
+                    message_contains: &["unknown field `futureField`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Exact backend payloads are closed while the temporary runtime payload type ignores unknown fields.",
             },
             DivergenceCase {
@@ -3682,8 +3812,17 @@ mod tests {
                     "sandboxId":"wsb:abcd1234"
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `sandboxId`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("sandboxId"),
+                    line: Some(5),
+                    column: Some(31),
+                    message_contains: &["unknown field `sandboxId`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Provision roots do not carry an already-created sandbox identifier.",
             },
             DivergenceCase {
@@ -3695,8 +3834,17 @@ mod tests {
                     "network":{"defaultPolicy":"allow"}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `network`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Network posture is fixed at provision; only exec has a runtime network surface.",
             },
             DivergenceCase {
@@ -3708,8 +3856,17 @@ mod tests {
                     "network":{"defaultPolicy":"allow"}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `network`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Network posture is fixed at provision and cannot be changed while stopping.",
             },
             DivergenceCase {
@@ -3721,8 +3878,17 @@ mod tests {
                     "network":{"defaultPolicy":"allow"}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `network`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Network posture is fixed at provision and cannot be changed while deprovisioning.",
             },
             DivergenceCase {
@@ -3733,30 +3899,72 @@ mod tests {
                     "process":{"commandLine":"echo x"}
                 }"#,
                 direction: DivergenceDirection::DiagnosticOnly,
-                rolling_message: Some("Missing required field: phase"),
-                exact_message: "Invalid phase declaration",
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["Missing required field: phase"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    line: Some(3),
+                    column: Some(32),
+                    message_contains: &["Invalid phase declaration", "invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "The exact phase probe rejects null structurally before rolling normalization reports a missing phase.",
             },
             DivergenceCase {
                 name: "malformed-json-version-probe-diagnostic",
                 input: "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":",
                 direction: DivergenceDirection::DiagnosticOnly,
-                rolling_message: Some("Invalid JSON syntax"),
-                exact_message: "Invalid version declaration",
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Syntax,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid JSON syntax"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid version declaration"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "The exact path first probes the version declaration, so malformed trailing JSON is attributed to that probe.",
             },
             DivergenceCase {
                 name: "isolation-session-filesystem-curated-vs-structural",
+                // An existing path avoids host-dependent existence warnings.
                 input: r#"{
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "filesystem":{"readwritePaths":["C:\\work"]},
+                    "filesystem":{"readwritePaths":["."]},
                     "network":{"defaultPolicy":"allow","allowLocalNetwork":true}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `filesystem`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    line: Some(5),
+                    column: Some(32),
+                    message_contains: &["unknown field `filesystem`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
             },
             DivergenceCase {
@@ -3769,8 +3977,17 @@ mod tests {
                     "ui":{"disable":true}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
-                rolling_message: None,
-                exact_message: "unknown field `ui`",
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("ui"),
+                    line: Some(6),
+                    column: Some(24),
+                    message_contains: &["unknown field `ui`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
                 reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
             },
             DivergenceCase {
@@ -3782,8 +3999,27 @@ mod tests {
                     "processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}
                 }"#,
                 direction: DivergenceDirection::DiagnosticOnly,
-                rolling_message: Some("processContainer.capabilities entry"),
-                exact_message: "capability must not contain a comma",
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["processContainer.capabilities entry"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(100),
+                    message_contains: &["capability must not contain a comma"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["processContainer.capabilities entry"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
                 reason: "Published v0.8 validates capability names in its newtype; rolling validation occurs during model conversion.",
             },
             DivergenceCase {
@@ -3795,14 +4031,198 @@ mod tests {
                     "processContainer":{"capabilities":["LearningModeLogging"]}
                 }"#,
                 direction: DivergenceDirection::DiagnosticOnly,
-                rolling_message: Some("reserved learning-mode capability"),
-                exact_message: "learningModeLogging and permissiveLearningMode are reserved",
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["reserved learning-mode capability"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(78),
+                    message_contains: &["learningModeLogging and permissiveLearningMode are reserved"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["reserved learning-mode capability"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
                 reason: "Development validates capability names in its newtype; rolling validation occurs during model conversion.",
             },
+        ]
+    }
+
+    #[test]
+    fn differential_exact_stricter_and_diagnostic_divergences_are_explicit() {
+        for case in classified_divergence_cases() {
+            assert_classified_divergence(&case);
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_detect_diagnostic_and_logger_drift() {
+        type DiagnosticMutation = fn(&mut DiagnosticSnapshot);
+        let mutations: [(&str, DiagnosticMutation); 6] = [
+            ("route", |value| {
+                value.route = match value.route {
+                    ErrorRoute::Decode => ErrorRoute::StateAware,
+                    ErrorRoute::OneShot => ErrorRoute::OneShotMalformed,
+                    ErrorRoute::OneShotMalformed => ErrorRoute::OneShot,
+                    ErrorRoute::StateAware => ErrorRoute::Decode,
+                };
+            }),
+            ("category", |value| {
+                value.category = if value.category == ErrorCategory::Semantic {
+                    ErrorCategory::Syntax
+                } else {
+                    ErrorCategory::Semantic
+                };
+            }),
+            ("path", |value| {
+                value.path = if value.path.is_some() {
+                    None
+                } else {
+                    Some("unexpected.path".to_string())
+                };
+            }),
+            ("line", |value| {
+                value.line = Some(value.line.unwrap_or(0) + 1)
+            }),
+            ("column", |value| {
+                value.column = Some(value.column.unwrap_or(0) + 1)
+            }),
+            ("message", |value| value.message.clear()),
         ];
 
-        for case in cases {
-            assert_classified_divergence(&case);
+        for case in classified_divergence_cases() {
+            let (rolling, exact) = parse_both(case.input);
+            let baseline = [rolling, exact];
+            assert!(
+                classified_divergence_mismatches(&case, &baseline[0], &baseline[1]).is_empty(),
+                "{}: baseline must match before injecting drift",
+                case.name
+            );
+            for (side, name) in ["rolling", "exact"].into_iter().enumerate() {
+                if matches!(&baseline[side], ParserSnapshot::Rejected(_)) {
+                    for (field, mutate) in mutations {
+                        let mut changed = baseline.clone();
+                        let ParserSnapshot::Rejected(rejected) = &mut changed[side] else {
+                            panic!("cloning a rejection must preserve its outcome");
+                        };
+                        mutate(&mut rejected.diagnostic);
+                        let mismatches =
+                            classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                        assert!(
+                            mismatches.iter().any(|mismatch| {
+                                mismatch.starts_with(&format!("{name}: {field}"))
+                            }),
+                            "{}: {name} {field} drift was not detected: {mismatches:?}",
+                            case.name
+                        );
+                    }
+                }
+                for channel in ["primary_buffer", "warnings"] {
+                    let mut changed = baseline.clone();
+                    let logger = match &mut changed[side] {
+                        ParserSnapshot::Accepted(value) => &mut value.logger,
+                        ParserSnapshot::Rejected(value) => &mut value.logger,
+                    };
+                    if channel == "primary_buffer" {
+                        logger.primary_buffer.push_str("unexpected caller output\n");
+                    } else {
+                        logger
+                            .warnings
+                            .push("unexpected caller warning".to_string());
+                    }
+                    let mismatches =
+                        classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                    assert!(
+                        mismatches.iter().any(|mismatch| {
+                            mismatch.starts_with(&format!("{name}: logger.{channel}"))
+                        }),
+                        "{}: {name} {channel} drift was not detected: {mismatches:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_allow_nonessential_message_wording() {
+        for case in classified_divergence_cases() {
+            let (mut rolling, mut exact) = parse_both(case.input);
+            for snapshot in [&mut rolling, &mut exact] {
+                let logger = match snapshot {
+                    ParserSnapshot::Accepted(value) => &mut value.logger,
+                    ParserSnapshot::Rejected(value) => {
+                        value.diagnostic.message.push_str(" (additional context)");
+                        &mut value.logger
+                    }
+                };
+                logger.primary_buffer = logger
+                    .primary_buffer
+                    .lines()
+                    .map(|line| format!("{line} (additional context)\n"))
+                    .collect();
+                for warning in &mut logger.warnings {
+                    warning.push_str(" (additional context)");
+                }
+            }
+            let mismatches = classified_divergence_mismatches(&case, &rolling, &exact);
+            assert!(
+                mismatches.is_empty(),
+                "{}: wording outside required fragments is not frozen: {mismatches:?}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn differential_logger_expectations_pin_channels_order_and_counts() {
+        let expected = LoggerExpectation {
+            primary_lines: &["first primary", "second primary"],
+            warnings: &["first warning", "second warning"],
+        };
+        let baseline = LoggerSnapshot {
+            primary_buffer: "first primary detail\nsecond primary detail\n".to_string(),
+            warnings: vec![
+                "first warning detail".to_string(),
+                "second warning detail".to_string(),
+            ],
+        };
+        assert!(logger_expectation_mismatches(expected, &baseline).is_empty());
+
+        type LoggerMutation = fn(&mut LoggerSnapshot);
+        let mutations: [(&str, LoggerMutation); 6] = [
+            ("primary_buffer", |value| {
+                value.primary_buffer = "second primary detail\nfirst primary detail\n".to_string();
+            }),
+            ("primary_buffer", |value| value.primary_buffer.clear()),
+            ("primary_buffer", |value| {
+                value.primary_buffer = "unexpected primary\nsecond primary detail\n".to_string();
+            }),
+            ("warnings", |value| value.warnings.swap(0, 1)),
+            ("warnings", |value| value.warnings.clear()),
+            ("warnings", |value| {
+                value.warnings[0] = "unexpected warning".to_string()
+            }),
+        ];
+        for (channel, mutate) in mutations {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            let mismatches = logger_expectation_mismatches(expected, &changed);
+            assert!(
+                mismatches
+                    .iter()
+                    .any(|mismatch| mismatch.starts_with(channel)),
+                "{channel} drift was not detected: {mismatches:?}"
+            );
         }
     }
 
