@@ -9,6 +9,7 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
+// These tests mutate process-global telemetry seams and Trace listeners.
 [CollectionDefinition("MxcTelemetry", DisableParallelization = true)]
 public sealed class MxcTelemetryCollectionDefinition
 {
@@ -507,6 +508,160 @@ public sealed class MxcTelemetryTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task RequestConsentAsync_CancellationAfterPresentationStartsDoesNotPersistDecision_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var presenterStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stalledPresenter = new TaskCompletionSource<TelemetryConsentDecision>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var request = MxcTelemetry.RequestConsentAsync(_ =>
+        {
+            presenterStarted.SetResult();
+            return new ValueTask<TelemetryConsentDecision>(stalledPresenter.Task);
+        }, cancellationToken: cancellation.Token);
+
+        await presenterStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        var finished = await Task.WhenAny(
+            request,
+            Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.Same(request, finished);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+        Assert.True(request.IsCanceled);
+        Assert.Equal(
+            TelemetryConsentState.Undetermined,
+            MxcTelemetry.GetConsentStatus().StoredState);
+    }
+
+    [Fact]
+    public async Task RequestConsentAsync_ReportsPresenterFailureAfterCancellation_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        using var listener = new CapturingTraceListener(
+            "MXC telemetry consent presenter faulted after cancellation");
+        Trace.Listeners.Add(listener);
+        try
+        {
+            var presenterStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var presenter = new TaskCompletionSource<TelemetryConsentDecision>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var request = MxcTelemetry.RequestConsentAsync(_ =>
+            {
+                presenterStarted.SetResult();
+                return new ValueTask<TelemetryConsentDecision>(presenter.Task);
+            }, cancellationToken: cancellation.Token);
+
+            await presenterStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            Assert.True(request.IsCanceled);
+
+            presenter.SetException(new InvalidOperationException("late presenter failure"));
+            var diagnostic = await listener.Message.WaitAsync(TestContext.Current.CancellationToken);
+            Assert.Contains("late presenter failure", diagnostic);
+            Assert.Equal(
+                TelemetryConsentState.Undetermined,
+                MxcTelemetry.GetConsentStatus().StoredState);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
+    }
+
+    [Fact]
+    public async Task RequestConsentAsync_ExplicitDismissalCompletesWithoutCancellation_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var outcome = await MxcTelemetry.RequestConsentAsync(
+            _ => ValueTask.FromResult(TelemetryConsentDecision.Dismissed),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(TelemetryConsentActionResult.Dismissed, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+    }
+
+    [Fact]
+    public async Task RequestConsentAsync_SynchronousPresenterCancellationDoesNotPersistDecision_OnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            var request = MxcTelemetry.RequestConsentAsync(_ =>
+            {
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
+                return ValueTask.FromResult(TelemetryConsentDecision.Yes);
+            }, cancellationToken: cancellation.Token);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+            Assert.True(request.IsCanceled);
+            Assert.Equal(
+                TelemetryConsentState.Undetermined,
+                MxcTelemetry.GetConsentStatus().StoredState);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
+    public void FinalizeAsyncOutcome_PersistedDecisionWinsLateCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var outcome = new TelemetryConsentOutcome(
+            TelemetryConsentActionResult.Granted,
+            TelemetryConsentState.Granted,
+            TelemetryConsentState.Granted,
+            TelemetryPolicyState.Unrestricted);
+
+        Assert.Same(outcome, MxcTelemetry.FinalizeAsyncOutcome(outcome, cancellation.Token));
+    }
+
+    [Fact]
+    public void FinalizeAsyncOutcome_CanceledDismissalThrows()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var outcome = new TelemetryConsentOutcome(
+            TelemetryConsentActionResult.Dismissed,
+            TelemetryConsentState.Undetermined,
+            TelemetryConsentState.Undetermined,
+            TelemetryPolicyState.Unrestricted);
+
+        Assert.ThrowsAny<OperationCanceledException>(
+            () => MxcTelemetry.FinalizeAsyncOutcome(outcome, cancellation.Token));
+    }
+
     [Theory]
     [InlineData(typeof(DllNotFoundException))]
     [InlineData(typeof(EntryPointNotFoundException))]
@@ -628,5 +783,53 @@ public sealed class MxcTelemetryTests : IDisposable
         }
 
         public void Dispose() => _workAvailable.Dispose();
+    }
+
+    private sealed class CapturingTraceListener(string messagePrefix) : TraceListener
+    {
+        private readonly TaskCompletionSource<string> _message = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<string> Message => _message.Task;
+
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string? source,
+            TraceEventType eventType,
+            int id,
+            string? message)
+        {
+            Capture(eventType, message);
+        }
+
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string? source,
+            TraceEventType eventType,
+            int id,
+            string? format,
+            params object?[]? args)
+        {
+            Capture(
+                eventType,
+                args is null ? format : string.Format(format ?? string.Empty, args));
+        }
+
+        private void Capture(TraceEventType eventType, string? message)
+        {
+            if (eventType == TraceEventType.Error &&
+                message?.StartsWith(messagePrefix, StringComparison.Ordinal) == true)
+            {
+                _message.TrySetResult(message);
+            }
+        }
+
+        public override void Write(string? message)
+        {
+        }
+
+        public override void WriteLine(string? message)
+        {
+        }
     }
 }

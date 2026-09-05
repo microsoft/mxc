@@ -32,7 +32,7 @@ use std::fmt;
 use wxc_common::telemetry::consent as inner_consent;
 use wxc_common::telemetry::policy as inner_policy;
 
-/// The user's recorded telemetry consent decision.
+/// A stored or effective telemetry consent state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsentState {
     /// The user has explicitly agreed to telemetry collection.
@@ -342,7 +342,9 @@ impl From<inner_policy::PolicyState> for PolicyState {
     }
 }
 
-/// Return the user's recorded consent decision.
+/// Return the consent state currently effective for telemetry authorization.
+///
+/// Use [`get_consent_status`] when the persisted decision is required.
 pub fn get_consent() -> ConsentState {
     inner_consent::get_consent().into()
 }

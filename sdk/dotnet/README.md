@@ -543,7 +543,12 @@ if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
 
 `Allowed` does not grant user consent, while `Blocked` disables collection and
 the consent prompt. Failures return a fail-closed state and never grant
-consent; non-Windows hosts return `NotApplicable`. See
+consent; non-Windows hosts return `NotApplicable`. When a read-only fallback
+hides a native or parsing failure, the SDK reports a bounded set of distinct
+failure signatures through `System.Diagnostics.Trace`. Each signature is
+reported once; if a listener rejects it, a future occurrence may try again.
+Reports include the exception type and HRESULT or native error code, but exclude
+exception messages and stack traces. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## Projects

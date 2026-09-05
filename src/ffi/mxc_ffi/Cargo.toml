@@ -13,7 +13,7 @@ name = "mxc_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-mxc-sdk = { workspace = true }
+mxc-sdk = { workspace = true, features = ["ffi-internals"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

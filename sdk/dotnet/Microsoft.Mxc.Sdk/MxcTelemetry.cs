@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -122,15 +123,40 @@ public static class MxcTelemetry
         public void Dispose() => Handle.Free();
     }
 
-    private static ITelemetryNativeApi nativeApi = new PInvokeTelemetryNativeApi();
+    private static readonly ITelemetryNativeApi DefaultNativeApi = new PInvokeTelemetryNativeApi();
+    private static readonly FailureCategoryTracker DefaultFailureCategoryTracker = new(capacity: 64);
+    private static ITelemetryNativeApi nativeApi = DefaultNativeApi;
+    private static FailureCategoryTracker reportedFailures = DefaultFailureCategoryTracker;
     private static bool? windowsHostOverride;
 
     internal static IDisposable OverrideNativeApiForTesting(ITelemetryNativeApi replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
-        var previous = nativeApi;
-        nativeApi = replacement;
-        return new Scope(() => nativeApi = previous);
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(ref nativeApi, replacement, DefaultNativeApi),
+                DefaultNativeApi))
+        {
+            throw new InvalidOperationException(
+                "A telemetry native API test override is already active.");
+        }
+        return new NativeApiScope(replacement);
+    }
+
+    internal static IDisposable OverrideFailureCategoryTrackerForTesting(
+        FailureCategoryTracker replacement)
+    {
+        ArgumentNullException.ThrowIfNull(replacement);
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(
+                    ref reportedFailures,
+                    replacement,
+                    DefaultFailureCategoryTracker),
+                DefaultFailureCategoryTracker))
+        {
+            throw new InvalidOperationException(
+                "A failure category tracker test override is already active.");
+        }
+        return new FailureCategoryTrackerScope(replacement);
     }
 
     internal static IDisposable OverrideWindowsHostForTesting(bool isWindows)
@@ -141,6 +167,38 @@ public static class MxcTelemetry
     }
 
     private static bool IsWindowsHost => windowsHostOverride ?? OperatingSystem.IsWindows();
+
+    private sealed class NativeApiScope(ITelemetryNativeApi replacement) : IDisposable
+    {
+        private int disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+            Interlocked.CompareExchange(ref nativeApi, DefaultNativeApi, replacement);
+        }
+    }
+
+    private sealed class FailureCategoryTrackerScope(
+        FailureCategoryTracker replacement) : IDisposable
+    {
+        private int disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+            Interlocked.CompareExchange(
+                ref reportedFailures,
+                DefaultFailureCategoryTracker,
+                replacement);
+        }
+    }
 
     private sealed class Scope(Action release) : IDisposable
     {
@@ -194,31 +252,114 @@ public static class MxcTelemetry
             or TypeInitializationException
             or BadImageFormatException;
 
-    private static readonly HashSet<string> ReportedFailureCategories = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Report a swallowed fail-closed result once per process.
-    /// </summary>
-    private static void ReportFailClosed(string operation, string safeResult, object detail)
+    internal sealed class FailureCategoryTracker(int capacity)
     {
+        private readonly HashSet<FailureCategory> categories = [];
+
+        private readonly record struct FailureCategory(
+            string Operation,
+            string SafeResult,
+            string Kind,
+            int Code);
+
+        internal bool TryAdd(string operation, string safeResult, string kind, int code)
+        {
+            var category = new FailureCategory(operation, safeResult, kind, code);
+            lock (categories)
+            {
+                if (categories.Contains(category) || categories.Count >= capacity)
+                {
+                    return false;
+                }
+                categories.Add(category);
+                return true;
+            }
+        }
+
+        internal void Remove(string operation, string safeResult, string kind, int code)
+        {
+            lock (categories)
+            {
+                categories.Remove(new FailureCategory(operation, safeResult, kind, code));
+            }
+        }
+    }
+
+    internal static void ReportFailClosed(
+        string operation,
+        string safeResult,
+        Exception exception)
+    {
+        var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            exceptionType,
+            exception.HResult,
+            errorCode: null,
+            safeDescription: null);
+    }
+
+    internal static void ReportFailClosed(
+        string operation,
+        string safeResult,
+        ErrorCode errorCode)
+    {
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            nameof(ErrorCode),
+            (int)errorCode,
+            errorCode,
+            safeDescription: null);
+    }
+
+    private static void ReportFailClosedCategory(
+        string operation,
+        string safeResult,
+        string category)
+    {
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            category,
+            code: 0,
+            errorCode: null,
+            safeDescription: category);
+    }
+
+    private static void ReportFailClosedCore(
+        string operation,
+        string safeResult,
+        string kind,
+        int code,
+        ErrorCode? errorCode,
+        string? safeDescription)
+    {
+        var registered = false;
         try
         {
-            var category = $"{operation}:{safeResult}:{detail}";
-
-            lock (ReportedFailureCategories)
+            if (!reportedFailures.TryAdd(operation, safeResult, kind, code))
             {
-                if (!ReportedFailureCategories.Add(category))
-                {
-                    return;
-                }
+                return;
             }
+            registered = true;
 
-            var message =
-                $"mxc: {operation} failed and is reporting '{safeResult}' to stay fail-closed: {detail}";
-            Console.Error.WriteLine(message);
+            var description = safeDescription ?? (errorCode is { } nativeError
+                ? $"{nativeError} ({code})"
+                : $"{kind} (HRESULT 0x{code:X8})");
+            Trace.TraceError(
+                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2}",
+                operation,
+                safeResult,
+                description);
         }
         catch
         {
+            if (registered)
+            {
+                reportedFailures.Remove(operation, safeResult, kind, code);
+            }
             // Diagnostics must not affect the fail-closed result.
         }
     }
@@ -311,7 +452,9 @@ public static class MxcTelemetry
     /// <remarks>
     /// The native request runs on a worker thread. Await this method rather than
     /// blocking a UI thread that the presenter needs to resume on. Cancellation
-    /// is observed before the native call and while awaiting the presenter.
+    /// stops waiting for the presenter and prevents its decision from being
+    /// accepted when observed before native persistence. It does not cancel the
+    /// presenter's underlying operation.
     /// </remarks>
     public static Task<TelemetryConsentOutcome> RequestConsentAsync(
         Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
@@ -329,14 +472,29 @@ public static class MxcTelemetry
         }
         var synchronizationContext = SynchronizationContext.Current;
         return Task.Factory.StartNew(
-            () => RequestConsentCore(
-                presenter,
-                locale,
-                cancellationToken,
-                synchronizationContext),
-            CancellationToken.None,
+            () =>
+            {
+                var outcome = RequestConsentCore(
+                    presenter,
+                    locale,
+                    cancellationToken,
+                    synchronizationContext);
+                return FinalizeAsyncOutcome(outcome, cancellationToken);
+            },
+            cancellationToken,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
+    }
+
+    internal static TelemetryConsentOutcome FinalizeAsyncOutcome(
+        TelemetryConsentOutcome outcome,
+        CancellationToken cancellationToken)
+    {
+        if (outcome.Result == TelemetryConsentActionResult.Dismissed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        return outcome;
     }
 
     /// <summary>Read stored/effective consent and the administrative ceiling.</summary>
@@ -427,14 +585,11 @@ public static class MxcTelemetry
                     try
                     {
                         var prompt = ParseConsentPrompt(promptJson);
-                        return InvokePresenterAsync(
-                                context.Presenter,
-                                prompt,
-                                context.SynchronizationContext,
-                                context.CancellationToken)
-                            .WaitAsync(context.CancellationToken)
-                            .GetAwaiter()
-                            .GetResult() switch
+                        return InvokePresenterWithCancellation(
+                            context.Presenter,
+                            prompt,
+                            context.SynchronizationContext,
+                            context.CancellationToken) switch
                         {
                             TelemetryConsentDecision.No => 0,
                             TelemetryConsentDecision.Yes => 1,
@@ -471,6 +626,63 @@ public static class MxcTelemetry
                 "telemetry consent request failed",
                 ex);
         }
+    }
+
+    private static TelemetryConsentDecision InvokePresenterWithCancellation(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        TelemetryConsentPrompt prompt,
+        SynchronizationContext? synchronizationContext,
+        CancellationToken cancellationToken)
+    {
+        Task<TelemetryConsentDecision>? presenterTask = null;
+        try
+        {
+            presenterTask = InvokePresenterAsync(
+                presenter,
+                prompt,
+                synchronizationContext,
+                cancellationToken);
+            return presenterTask
+                .WaitAsync(cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (presenterTask is not null)
+            {
+                ObserveAbandonedPresenterFailure(presenterTask);
+            }
+            return TelemetryConsentDecision.Dismissed;
+        }
+    }
+
+    private static void ObserveAbandonedPresenterFailure(
+        Task<TelemetryConsentDecision> presenterTask)
+    {
+        _ = presenterTask.ContinueWith(
+            static faulted =>
+            {
+                var exception = faulted.Exception;
+                if (exception is null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    Trace.TraceError(
+                        "MXC telemetry consent presenter faulted after cancellation: {0}",
+                        exception.GetBaseException());
+                }
+                catch
+                {
+                    // Diagnostic listeners must not fault an unobserved continuation.
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private static Task<TelemetryConsentDecision> InvokePresenterAsync(
@@ -637,10 +849,10 @@ public static class MxcTelemetry
         };
         if (!valid && result != TelemetryConsentActionResult.Unknown)
         {
-            ReportFailClosed(
+            ReportFailClosedCategory(
                 $"{operation}Consent",
                 "Unknown",
-                $"native returned impossible result '{result}'");
+                "native returned an invalid consent result");
         }
         return valid;
     }
@@ -714,10 +926,10 @@ public static class MxcTelemetry
 
     private static TelemetryConsentActionResult UnrecognizedConsentActionResult(string? value)
     {
-        ReportFailClosed(
+        ReportFailClosedCategory(
             "ConsentOutcome",
             "Unknown",
-            $"unrecognized consent action result '{value ?? "<null>"}'");
+            "native returned an unrecognized consent action result");
         return TelemetryConsentActionResult.Unknown;
     }
 
@@ -749,10 +961,10 @@ public static class MxcTelemetry
         string? value,
         string operation)
     {
-        ReportFailClosed(
+        ReportFailClosedCategory(
             operation,
             "Unknown",
-            $"unrecognized consent status reason '{value ?? "<null>"}'");
+            "native returned an unrecognized consent status reason");
         return false;
     }
 
@@ -773,7 +985,10 @@ public static class MxcTelemetry
 
     private static TelemetryConsentState UnrecognizedConsentState(string? value, string operation)
     {
-        ReportFailClosed(operation, "Undetermined", $"unrecognized native consent state '{value ?? "<null>"}'");
+        ReportFailClosedCategory(
+            operation,
+            "Undetermined",
+            "native returned an unrecognized consent state");
         return TelemetryConsentState.Undetermined;
     }
 
@@ -794,7 +1009,10 @@ public static class MxcTelemetry
 
     private static TelemetryPolicyState UnrecognizedPolicyState(string? value, string operation)
     {
-        ReportFailClosed(operation, "Blocked", $"unrecognized native policy state '{value ?? "<null>"}'");
+        ReportFailClosedCategory(
+            operation,
+            "Blocked",
+            "native returned an unrecognized policy state");
         return TelemetryPolicyState.Blocked;
     }
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -89,6 +90,189 @@ public sealed class MxcTelemetryTestsReleaseSafe
     }
 
     [Fact]
+    public void FailClosedDiagnostics_AreDeduplicatedAndRedacted()
+    {
+        var operation = $"TestGetPolicy{Guid.NewGuid():N}";
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
+        using var output = new StringWriter();
+        using var listener = new TextWriterTraceListener(output);
+        var failure = new InvalidOperationException("sensitive\r\n\u001b[31mmessage");
+        Trace.Listeners.Add(listener);
+        try
+        {
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", failure);
+            MxcTelemetry.ReportFailClosed(operation, "false", ErrorCode.BackendError);
+            Trace.Flush();
+
+            var messages = output
+                .ToString()
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains(operation, StringComparison.Ordinal))
+                .ToArray();
+            Assert.Equal(2, messages.Length);
+            Assert.Contains(typeof(InvalidOperationException).FullName!, messages[0]);
+            Assert.Contains("HRESULT 0x", messages[0]);
+            Assert.DoesNotContain("sensitive", messages[0]);
+            Assert.DoesNotContain('\u001b', messages[0]);
+            Assert.Contains("BackendError", messages[1]);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
+    }
+
+    [Fact]
+    public void FailClosedDiagnosticTracker_IsBoundedAndConcurrent()
+    {
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        var duplicateAccepted = 0;
+        Parallel.For(0, 1_000, _ =>
+        {
+            if (tracker.TryAdd("GetPolicy", "Blocked", "ExceptionA", 1))
+            {
+                Interlocked.Increment(ref duplicateAccepted);
+            }
+        });
+        Assert.Equal(1, duplicateAccepted);
+
+        var capacityTracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        var capacityAccepted = 0;
+        Parallel.For(0, 1_000, index =>
+        {
+            if (capacityTracker.TryAdd("GetPolicy", "Blocked", "Exception", index))
+            {
+                Interlocked.Increment(ref capacityAccepted);
+            }
+        });
+        Assert.Equal(64, capacityAccepted);
+    }
+
+    [Fact]
+    public void FailClosedDiagnostics_RetryAfterTraceListenerFailure()
+    {
+        var operation = $"ThrowingTrace{Guid.NewGuid():N}";
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
+        using var throwingListener = new ThrowingTraceListener();
+        Trace.Listeners.Add(throwingListener);
+        try
+        {
+            var exception = Record.Exception(() =>
+                MxcTelemetry.ReportFailClosed(
+                    operation,
+                    "Blocked",
+                    ErrorCode.BackendError));
+            Assert.Null(exception);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(throwingListener);
+        }
+
+        using var output = new StringWriter();
+        using var capture = new TextWriterTraceListener(output);
+        Trace.Listeners.Add(capture);
+        try
+        {
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", ErrorCode.BackendError);
+            Trace.Flush();
+            Assert.Contains(operation, output.ToString());
+        }
+        finally
+        {
+            Trace.Listeners.Remove(capture);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReadOnlyQueryFailures_ReportDistinctFailureKinds(bool throwException)
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            GetConsentImpl = () => throwException
+                ? throw new InvalidOperationException("consent")
+                : new((int)ErrorCode.BackendError, null),
+            NeedsConsentPromptImpl = () => throwException
+                ? throw new InvalidOperationException("prompt")
+                : new((int)ErrorCode.BackendError, true),
+            GetPolicyImpl = () => throwException
+                ? throw new InvalidOperationException("policy")
+                : new((int)ErrorCode.BackendError, null),
+        };
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
+        using var output = new StringWriter();
+        using var listener = new TextWriterTraceListener(output);
+        Trace.Listeners.Add(listener);
+        try
+        {
+            Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+            Assert.False(MxcTelemetry.NeedsConsentPrompt());
+            Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+            Trace.Flush();
+
+            var messages = output
+                .ToString()
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains("mxc:", StringComparison.Ordinal))
+                .ToArray();
+            Assert.Equal(3, messages.Length);
+            Assert.Contains(messages, line => line.Contains("GetConsent", StringComparison.Ordinal));
+            Assert.Contains(messages, line => line.Contains("NeedsConsentPrompt", StringComparison.Ordinal));
+            Assert.Contains(messages, line => line.Contains("GetPolicy", StringComparison.Ordinal));
+            if (throwException)
+            {
+                Assert.All(
+                    messages,
+                    line => Assert.Contains(
+                        typeof(InvalidOperationException).FullName!,
+                        line));
+            }
+            else
+            {
+                Assert.Contains(
+                    messages,
+                    line => line.Contains(typeof(MxcException).FullName!, StringComparison.Ordinal));
+                Assert.Equal(
+                    2,
+                    messages.Count(line =>
+                        line.Contains(nameof(ErrorCode.BackendError), StringComparison.Ordinal)));
+            }
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
+    }
+
+    [Fact]
+    public void TestOverrides_RejectOverlapAndRestoreAfterConcurrentDispose()
+    {
+        var native = new FakeTelemetryNativeApi();
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        Assert.Throws<InvalidOperationException>(
+            () => MxcTelemetry.OverrideNativeApiForTesting(native));
+        Parallel.Invoke(nativeScope.Dispose, nativeScope.Dispose);
+
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
+        Assert.Throws<InvalidOperationException>(
+            () => MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker));
+        Parallel.Invoke(trackerScope.Dispose, trackerScope.Dispose);
+
+        using var restoredNativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var restoredTrackerScope =
+            MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
+    }
+
+    [Fact]
     public void GetConsent_UnexpectedReadFailureFailsClosed()
     {
         var native = new FakeTelemetryNativeApi
@@ -150,8 +334,10 @@ public sealed class MxcTelemetryTestsReleaseSafe
         {
             RequestConsentImpl = (_locale, presenter) =>
             {
-                Assert.Equal(-1, presenter(ConsentPromptJson()));
-                return new((int)ErrorCode.BackendError, null);
+                Assert.Equal(2, presenter(ConsentPromptJson()));
+                return new(
+                    (int)ErrorCode.Success,
+                    ConsentOutcomeJson("dismissed", "undetermined", "undetermined", "unrestricted"));
             },
         };
 
@@ -170,6 +356,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+        Assert.True(request.IsCanceled);
     }
 
     [Fact]
@@ -181,8 +368,10 @@ public sealed class MxcTelemetryTestsReleaseSafe
         {
             RequestConsentImpl = (_locale, presenter) =>
             {
-                Assert.Equal(-1, presenter(ConsentPromptJson()));
-                return new((int)ErrorCode.BackendError, null);
+                Assert.Equal(2, presenter(ConsentPromptJson()));
+                return new(
+                    (int)ErrorCode.Success,
+                    ConsentOutcomeJson("dismissed", "undetermined", "undetermined", "unrestricted"));
             },
         };
 
@@ -211,6 +400,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
         await synchronizationContext.WaitForPostAsync(TestContext.Current.CancellationToken);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => request);
+        Assert.True(request.IsCanceled);
 
         synchronizationContext.RunAll();
         Assert.Equal(0, presenterCalls);
@@ -661,6 +851,24 @@ public sealed class MxcTelemetryTestsReleaseSafe
 
         public MxcTelemetry.NativePayloadResult RequestConsent(string? locale, Func<string, int> presenter) =>
             RequestConsentImpl(locale, presenter);
+    }
+
+    private sealed class ThrowingTraceListener : TraceListener
+    {
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string? source,
+            TraceEventType eventType,
+            int id,
+            string? format,
+            params object?[]? args) =>
+            throw new InvalidOperationException("listener failure");
+
+        public override void Write(string? message) =>
+            throw new InvalidOperationException("listener failure");
+
+        public override void WriteLine(string? message) =>
+            throw new InvalidOperationException("listener failure");
     }
 
     private sealed class QueuedSynchronizationContext : SynchronizationContext
