@@ -198,6 +198,40 @@ public sealed class MxcTelemetryTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReadOnlyQueryFailures_CoverStatusAndExceptionPaths(bool throwException)
+    {
+        var native = new FakeTelemetryQueryApi
+        {
+            GetConsentImpl = () => throwException
+                ? throw new InvalidOperationException("consent")
+                : new((int)ErrorCode.BackendError, null),
+            NeedsConsentPromptImpl = () => throwException
+                ? throw new InvalidOperationException("prompt")
+                : new((int)ErrorCode.BackendError, true),
+            GetPolicyImpl = () => throwException
+                ? throw new InvalidOperationException("policy")
+                : new((int)ErrorCode.BackendError, null),
+        };
+        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
+
+        if (throwException)
+        {
+            Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+        }
+        else
+        {
+            var exception = Assert.Throws<MxcException>(() => MxcTelemetry.GetConsent());
+            Assert.Equal(ErrorCode.BackendError, exception.Code);
+        }
+        Assert.False(MxcTelemetry.NeedsConsentPrompt());
+        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+    }
+
     [Fact]
     public void TelemetryQueryApiOverride_AllowsConcurrentDispose()
     {
@@ -218,6 +252,31 @@ public sealed class MxcTelemetryTests
 
         _ = MxcTelemetry.GetPolicy();
         Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public void TestOverrides_RejectOverlapAndRestoreAfterConcurrentDispose()
+    {
+        var native = new FakeTelemetryQueryApi
+        {
+            GetConsentImpl = () => new((int)ErrorCode.Success, "undetermined"),
+            NeedsConsentPromptImpl = () => new((int)ErrorCode.Success, false),
+            GetPolicyImpl = () => new((int)ErrorCode.Success, "blocked"),
+        };
+        var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
+        Assert.Throws<InvalidOperationException>(
+            () => MxcTelemetry.OverrideTelemetryReadApiForTesting(native));
+        Parallel.Invoke(nativeScope.Dispose, nativeScope.Dispose);
+
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
+        Assert.Throws<InvalidOperationException>(
+            () => MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker));
+        Parallel.Invoke(trackerScope.Dispose, trackerScope.Dispose);
+
+        using var restoredNativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
+        using var restoredTrackerScope =
+            MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
     }
 
     [Fact]

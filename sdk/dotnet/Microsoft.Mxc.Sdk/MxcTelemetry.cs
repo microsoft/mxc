@@ -106,14 +106,16 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionYes = 1;
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
-    private static FailureCategoryTracker reportedFailures = new(capacity: 64);
-    private static ITelemetryReadApi telemetryReadApi = new PInvokeTelemetryReadApi();
+    private static readonly FailureCategoryTracker DefaultFailureCategoryTracker = new(capacity: 64);
+    private static readonly ITelemetryReadApi DefaultTelemetryReadApi = new PInvokeTelemetryReadApi();
+    private static FailureCategoryTracker reportedFailures = DefaultFailureCategoryTracker;
+    private static ITelemetryReadApi telemetryReadApi = DefaultTelemetryReadApi;
 
     internal readonly record struct NativePayloadResult(int Status, string? Payload);
     internal readonly record struct NativeBooleanResult(int Status, bool Value);
 
-    // Read methods share native ownership plumbing, but preserve their public
-    // status contracts: GetConsent may throw while the other reads fail closed.
+    // The public wrappers interpret these native status results according to
+    // their individual throw-or-fail-closed contracts.
     internal interface ITelemetryReadApi
     {
         NativePayloadResult GetConsent();
@@ -163,19 +165,37 @@ public static class MxcTelemetry
         ITelemetryReadApi replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
-        var previous = Interlocked.Exchange(ref telemetryReadApi, replacement);
-        return new TelemetryReadApiScope(previous);
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(
+                    ref telemetryReadApi,
+                    replacement,
+                    DefaultTelemetryReadApi),
+                DefaultTelemetryReadApi))
+        {
+            throw new InvalidOperationException(
+                "A telemetry read API test override is already active.");
+        }
+        return new TelemetryReadApiScope(replacement);
     }
 
     internal static IDisposable OverrideFailureCategoryTrackerForTesting(
         FailureCategoryTracker replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
-        var previous = Interlocked.Exchange(ref reportedFailures, replacement);
-        return new FailureCategoryTrackerScope(previous);
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(
+                    ref reportedFailures,
+                    replacement,
+                    DefaultFailureCategoryTracker),
+                DefaultFailureCategoryTracker))
+        {
+            throw new InvalidOperationException(
+                "A failure category tracker test override is already active.");
+        }
+        return new FailureCategoryTrackerScope(replacement);
     }
 
-    private sealed class TelemetryReadApiScope(ITelemetryReadApi previous) : IDisposable
+    private sealed class TelemetryReadApiScope(ITelemetryReadApi replacement) : IDisposable
     {
         private int disposed;
 
@@ -185,12 +205,15 @@ public static class MxcTelemetry
             {
                 return;
             }
-            Interlocked.Exchange(ref telemetryReadApi, previous);
+            Interlocked.CompareExchange(
+                ref telemetryReadApi,
+                DefaultTelemetryReadApi,
+                replacement);
         }
     }
 
     private sealed class FailureCategoryTrackerScope(
-        FailureCategoryTracker previous) : IDisposable
+        FailureCategoryTracker replacement) : IDisposable
     {
         private int disposed;
 
@@ -200,7 +223,10 @@ public static class MxcTelemetry
             {
                 return;
             }
-            Interlocked.Exchange(ref reportedFailures, previous);
+            Interlocked.CompareExchange(
+                ref reportedFailures,
+                DefaultFailureCategoryTracker,
+                replacement);
         }
     }
 

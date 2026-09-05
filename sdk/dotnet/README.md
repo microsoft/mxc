@@ -505,8 +505,10 @@ registry policy setting. See
 for the stable registry contract and interaction rules. Read-only queries fail
 closed rather than upgrading an unreadable device state into collection. When
 that fallback hides a native or parsing failure, the SDK reports the failure
-once through `System.Diagnostics.Trace`. Reports include the exception type and
-HRESULT or native error code, but exclude exception messages and stack traces.
+once per distinct failure signature through `System.Diagnostics.Trace`. If a
+listener rejects a report, the SDK permits a later retry. Reports include the
+exception type and HRESULT or native error code, but exclude exception messages
+and stack traces.
 
 ## Projects
 
