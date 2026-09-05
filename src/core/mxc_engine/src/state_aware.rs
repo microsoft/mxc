@@ -742,7 +742,7 @@ mod tests {
         // The gate and phase checks pass, so the refusal can only come from the
         // single-flight claim. The exec goes no further: `wsb:` resolves to a
         // backend needing a live host, and the claim is taken before that.
-        let json = r#"{"phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let held = claim_attached_exec().expect("the claim must be available");
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn attached_exec_requires_a_terminal() {
-        let json = r#"{"phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let err = exec_state_aware_attached_with(json, true, || false)
@@ -777,7 +777,7 @@ mod tests {
     fn attached_exec_checks_the_phase_before_the_terminal() {
         // A non-exec phase must be reported as such even from a non-terminal
         // host, so the caller learns the actionable problem first.
-        let provision = r#"{"phase":"provision","containment":"isolation_session",
+        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
             "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
 
         let err = exec_state_aware_attached_with(provision, true, || false)
@@ -957,8 +957,12 @@ mod tests {
 
         // Provision without containment — the dispatcher rejects it as
         // `MalformedRequest` before ever reaching a backend.
-        let error =
-            super::run_state_aware_json(r#"{"phase":"provision"}"#, false, false).unwrap_err();
+        let error = super::run_state_aware_json(
+            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest);
         assert_eq!(
             telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
@@ -969,7 +973,7 @@ mod tests {
         // `BackendUnavailable` → `InitError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
         let error = super::run_state_aware_json(
-            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             false,
         )
@@ -998,7 +1002,7 @@ mod tests {
         use crate::error::ErrorCode;
         for _ in 0..3 {
             let error = super::run_state_aware_json(
-                r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 false,
                 false,
             )

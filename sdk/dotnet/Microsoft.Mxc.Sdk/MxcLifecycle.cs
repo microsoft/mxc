@@ -99,7 +99,7 @@ public static class MxcLifecycle
         var backend = ContainmentKey(containment);
         var envelope = NewEnvelope(
             "provision",
-            options?.Version ?? DefaultVersion(containment));
+            ResolveVersion(containment, options?.Version));
         envelope["containment"] = backend;
 
         switch (options)
@@ -370,7 +370,7 @@ public static class MxcLifecycle
         var containment = ContainmentForId(id);
         var envelope = NewEnvelope(
             phase,
-            version ?? DefaultVersion(containment));
+            ResolveVersion(containment, version));
         envelope["sandboxId"] = id.Value;
         return envelope;
     }
@@ -395,6 +395,23 @@ public static class MxcLifecycle
         containment == StateAwareContainment.Wslc
             ? WslcStateAwareVersion
             : StateAwareVersion;
+
+    private static string ResolveVersion(
+        StateAwareContainment containment,
+        string? requestedVersion)
+    {
+        var expectedVersion = DefaultVersion(containment);
+        if (requestedVersion is not null
+            && !string.Equals(requestedVersion, expectedVersion, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"State-aware {containment} requests require schema version "
+                    + $"'{expectedVersion}', got '{requestedVersion}'.",
+                nameof(requestedVersion));
+        }
+
+        return expectedVersion;
+    }
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,

@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "x = 42\ny = 58\nprint('Hello from NanVix/KVM on Linux! sum=%d' % (x + y))",
         "timeout": 30000

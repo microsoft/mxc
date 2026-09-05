@@ -76,9 +76,10 @@ impl Drop for Teardown {
         eprintln!("\n[driver] tearing down…");
         // Best-effort: a failed stop must not prevent the deprovision that
         // releases the account.
-        let stop = format!(r#"{{"phase":"stop","sandboxId":"{id}"}}"#);
+        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
         let _ = std::panic::catch_unwind(move || phase(&stop));
-        let deprovision = format!(r#"{{"phase":"deprovision","sandboxId":"{id}"}}"#);
+        let deprovision =
+            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
         match std::panic::catch_unwind(move || phase(&deprovision)) {
             Ok(_) => eprintln!("[driver] deprovisioned."),
             Err(_) => eprintln!("[driver] WARNING: deprovision failed, account may leak"),
@@ -94,7 +95,7 @@ fn run() -> i32 {
         .unwrap_or_else(|| "powershell.exe -NoLogo".into());
 
     let provisioned = phase(
-        r#"{"phase":"provision","containment":"isolation_session",
+        r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
             "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
     );
     // The sandbox id is opaque by contract — carried verbatim, never parsed.
@@ -113,14 +114,14 @@ fn run() -> i32 {
     eprintln!("[driver] provisioned.");
 
     phase(&format!(
-        r#"{{"phase":"start","sandboxId":"{sandbox_id}"}}"#
+        r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#
     ));
     eprintln!("[driver] started. Running: {command}");
     eprintln!("[driver] everything below runs inside the isolation session.\n");
 
     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
     let exec = CString::new(format!(
-        r#"{{"phase":"exec","sandboxId":"{sandbox_id}",
+        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
             "process":{{"commandLine":"{escaped}","timeout":3600000}}}}"#
     ))
     .expect("request holds no interior NUL");

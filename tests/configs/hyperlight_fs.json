@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "_comment": "End-to-end filesystem test. readwritePaths are exposed to the guest under /host/<basename>. Before running, create /tmp/hyperlight-fs-demo/ and drop a file in it (or let the script create one). After the run, /tmp/hyperlight-fs-demo/written.txt will exist with guest-written content.",
 
     "process": {

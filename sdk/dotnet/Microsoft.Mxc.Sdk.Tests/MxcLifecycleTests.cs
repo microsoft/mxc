@@ -297,7 +297,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("provision", root.GetProperty("phase").GetString());
         Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
 
@@ -392,7 +392,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("windows_sandbox", root.GetProperty("containment").GetString());
         Assert.Equal(
             @"C:\input",
@@ -401,7 +401,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_WslcUsesV08AndNestsImageOptions()
+    public void BuildProvisionEnvelope_WslcUsesV09AndNestsImageOptions()
     {
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
@@ -419,7 +419,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
@@ -479,7 +479,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
@@ -514,7 +514,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("start", root.GetProperty("phase").GetString());
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
@@ -522,7 +522,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void IdPhases_InferBackendVersionAndHonorOverrides()
+    public void IdPhases_InferBackendVersionAndAcceptRegisteredExplicitVersion()
     {
         var wslcStart = MxcLifecycle.BuildStartEnvelope(
             new SandboxId("wslc:0123456789abcdef0123456789abcdef"));
@@ -531,9 +531,20 @@ public class MxcLifecycleTests
             new SandboxId("iso:abc"),
             new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
 
-        Assert.Equal("0.8.0-alpha", wslcStart["version"]!.GetValue<string>());
-        Assert.Equal("0.6.0-alpha", wsbStop["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wsbStop["version"]!.GetValue<string>());
         Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void IdPhases_RejectUnregisteredVersionOverrides()
+    {
+        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]

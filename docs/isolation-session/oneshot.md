@@ -121,7 +121,7 @@ invocations, without changing the manager's interface. See
 
 ```json
 {
-    "version": "0.6.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "MyIsolationSessionRun",
     "containment": "isolation_session",
     "process": {
@@ -387,7 +387,7 @@ wxc-exec.exe --experimental hello.json
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "Hello",
   "containment": "isolation_session",
   "process": {
