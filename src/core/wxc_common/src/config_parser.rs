@@ -2055,6 +2055,7 @@ mod tests {
     use crate::logger::Mode;
     use crate::models::{ClipboardPolicy, NetworkAction, ProxyAddress};
     use crate::mxc_error::MxcErrorCode;
+    use std::path::{Path, PathBuf};
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -2085,6 +2086,2364 @@ mod tests {
 
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
         parse_exact_mxc_request_json(json, &mut test_logger())
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct ProxySnapshot {
+        address: Option<String>,
+        port: Option<u16>,
+        original_url: Option<String>,
+        builtin_test_server: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct ExecutionSnapshot {
+        serialized: serde_json::Value,
+        network_proxy: ProxySnapshot,
+        network_specified: bool,
+        network_mode_specified: bool,
+        runtime_network_proxy_specified: bool,
+        ui_specified: bool,
+        requested_sandbox_kind: Option<&'static str>,
+    }
+
+    impl From<&ExecutionRequest> for ExecutionSnapshot {
+        fn from(request: &ExecutionRequest) -> Self {
+            let proxy = request.policy.network_proxy.address.as_ref();
+            Self {
+                serialized: serde_json::to_value(request).unwrap(),
+                network_proxy: ProxySnapshot {
+                    address: proxy.map(|address| address.address.clone()),
+                    port: proxy.map(|address| address.port),
+                    original_url: proxy.and_then(|address| address.original_url.clone()),
+                    builtin_test_server: request.policy.network_proxy.builtin_test_server,
+                },
+                // These are the complete set of ExecutionRequest model fields hidden by
+                // `#[serde(skip)]`; compare them explicitly so serialization cannot mask
+                // parser drift.
+                network_specified: request.policy.network_specified,
+                network_mode_specified: request.policy.network_mode_specified,
+                runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
+                ui_specified: request.policy.ui_specified,
+                requested_sandbox_kind: request
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            }
+        }
+    }
+
+    #[test]
+    fn execution_snapshot_detects_requested_sandbox_kind_drift() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "process",
+            "process": {"commandLine": "echo hello"},
+            "telemetry": {"enabled": true}
+        }"#;
+        let MxcRequest::OneShot(mut request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected a one-shot request");
+        };
+        let original = ExecutionSnapshot::from(&request);
+        assert_eq!(original.requested_sandbox_kind, Some("process"));
+
+        for requested_kind in [Some("processcontainer"), None] {
+            request.telemetry.as_mut().unwrap().requested_sandbox_kind = requested_kind;
+            let changed = ExecutionSnapshot::from(&request);
+            assert_eq!(original.serialized, changed.serialized);
+            assert_ne!(original, changed);
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum RequestSnapshot {
+        OneShot(ExecutionSnapshot),
+        StateAware {
+            request: ExecutionSnapshot,
+            phase: Phase,
+            containment: Option<ContainmentBackend>,
+            sandbox_id: Option<String>,
+            experimental_raw: Option<serde_json::Value>,
+            source_text: Option<String>,
+        },
+    }
+
+    impl From<&MxcRequest> for RequestSnapshot {
+        fn from(request: &MxcRequest) -> Self {
+            match request {
+                MxcRequest::OneShot(request) => Self::OneShot(request.into()),
+                MxcRequest::StateAware(request) => Self::StateAware {
+                    request: (&request.request).into(),
+                    phase: request.phase,
+                    containment: request.containment.clone(),
+                    sandbox_id: request.sandbox_id.clone(),
+                    experimental_raw: request.experimental_raw.clone(),
+                    source_text: request.source_text.as_deref().map(str::to_string),
+                },
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorRoute {
+        Decode,
+        OneShot,
+        OneShotMalformed,
+        StateAware,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorCategory {
+        Syntax,
+        TypedStructure,
+        Semantic,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DiagnosticSnapshot {
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<String>,
+        line: Option<usize>,
+        column: Option<usize>,
+        message: String,
+    }
+
+    fn number_after(message: &str, marker: &str) -> Option<usize> {
+        let suffix = message.split_once(marker)?.1;
+        suffix
+            .split(|character: char| !character.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    impl From<&ParseError> for DiagnosticSnapshot {
+        fn from(error: &ParseError) -> Self {
+            let route = match error {
+                ParseError::Decode(_) => ErrorRoute::Decode,
+                ParseError::OneShot(_) => ErrorRoute::OneShot,
+                ParseError::OneShotMalformed(_) => ErrorRoute::OneShotMalformed,
+                ParseError::StateAware(_) => ErrorRoute::StateAware,
+            };
+            let message = error.message();
+            let category = if message.contains("Invalid JSON syntax") {
+                ErrorCategory::Syntax
+            } else if message.contains("Invalid configuration at `")
+                || message.contains("unknown field")
+                || message.contains("missing field")
+                || message.contains("invalid type")
+            {
+                ErrorCategory::TypedStructure
+            } else {
+                ErrorCategory::Semantic
+            };
+            let path = message
+                .split_once("Invalid configuration at `")
+                .and_then(|(_, suffix)| suffix.split_once('`'))
+                .map(|(path, _)| path.to_string());
+
+            Self {
+                route,
+                category,
+                path,
+                line: number_after(&message, "line "),
+                column: number_after(&message, "column "),
+                message,
+            }
+        }
+    }
+
+    #[test]
+    fn differential_snapshot_preserves_one_shot_malformed_variant() {
+        let error = || WxcError::ConfigParse("same diagnostic".to_string());
+        let one_shot = DiagnosticSnapshot::from(&ParseError::OneShot(error()));
+        let malformed = DiagnosticSnapshot::from(&ParseError::OneShotMalformed(error()));
+
+        assert_eq!(one_shot.message, malformed.message);
+        assert_eq!(one_shot.category, malformed.category);
+        assert_eq!(one_shot.route, ErrorRoute::OneShot);
+        assert_eq!(malformed.route, ErrorRoute::OneShotMalformed);
+        assert_ne!(one_shot, malformed);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LoggerSnapshot {
+        primary_buffer: String,
+        warnings: Vec<String>,
+    }
+
+    impl From<&Logger> for LoggerSnapshot {
+        fn from(logger: &Logger) -> Self {
+            Self {
+                primary_buffer: logger.get_buffer().to_string(),
+                warnings: logger.warnings().to_vec(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct AcceptedSnapshot {
+        request: RequestSnapshot,
+        logger: LoggerSnapshot,
+    }
+
+    impl std::ops::Deref for AcceptedSnapshot {
+        type Target = RequestSnapshot;
+
+        fn deref(&self) -> &Self::Target {
+            &self.request
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct RejectedSnapshot {
+        diagnostic: DiagnosticSnapshot,
+        logger: LoggerSnapshot,
+    }
+
+    impl std::ops::Deref for RejectedSnapshot {
+        type Target = DiagnosticSnapshot;
+
+        fn deref(&self) -> &Self::Target {
+            &self.diagnostic
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum ParserSnapshot {
+        Accepted(AcceptedSnapshot),
+        Rejected(RejectedSnapshot),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DivergenceDirection {
+        ExactStricter,
+        DiagnosticOnly,
+    }
+
+    struct DivergenceCase {
+        name: &'static str,
+        input: &'static str,
+        direction: DivergenceDirection,
+        rolling_diagnostic: Option<DiagnosticExpectation>,
+        exact_diagnostic: DiagnosticExpectation,
+        rolling_logger: LoggerExpectation,
+        exact_logger: LoggerExpectation,
+        reason: &'static str,
+    }
+
+    fn snapshot(result: Result<MxcRequest, ParseError>, logger: &Logger) -> ParserSnapshot {
+        let logger = logger.into();
+        match result {
+            Ok(request) => ParserSnapshot::Accepted(AcceptedSnapshot {
+                request: (&request).into(),
+                logger,
+            }),
+            Err(error) => ParserSnapshot::Rejected(RejectedSnapshot {
+                diagnostic: (&error).into(),
+                logger,
+            }),
+        }
+    }
+
+    fn parse_both(json: &str) -> (ParserSnapshot, ParserSnapshot) {
+        let mut rolling_logger = test_logger();
+        let rolling_result = parse_mxc_request_json(json, &mut rolling_logger);
+        let rolling = snapshot(rolling_result, &rolling_logger);
+
+        let mut exact_logger = test_logger();
+        let exact_result = parse_exact_mxc_request_json(json, &mut exact_logger);
+        let exact = snapshot(exact_result, &exact_logger);
+        (rolling, exact)
+    }
+
+    #[test]
+    fn differential_snapshot_retains_caller_visible_logger_channels() {
+        let mut logger = test_logger();
+        logger.log_line("primary diagnostic");
+        logger.warning_line("caller warning");
+
+        assert_eq!(
+            LoggerSnapshot::from(&logger),
+            LoggerSnapshot {
+                primary_buffer: "primary diagnostic\n".to_string(),
+                warnings: vec!["caller warning".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn differential_success_compares_logger_output() {
+        let existing_path = repository_root().to_string_lossy().replace('\\', "\\\\");
+        let json = format!(
+            r#"{{
+                "version":"0.9.0-alpha",
+                "process":{{"commandLine":"echo logger parity"}},
+                "filesystem":{{
+                    "readwritePaths":["{existing_path}"],
+                    "readonlyPaths":["{existing_path}"]
+                }}
+            }}"#
+        );
+
+        let (rolling, exact) = parse_both(&json);
+        let (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) =
+            (&rolling, &exact)
+        else {
+            panic!("both parsers must accept the logger parity fixture");
+        };
+
+        assert_eq!(rolling, exact);
+        assert!(rolling
+            .logger
+            .primary_buffer
+            .contains("applying most-restrictive intent (readonly)"));
+        assert!(rolling.logger.warnings.is_empty());
+    }
+
+    fn assert_accepted_models_converge(case: &str, json: &str) {
+        let (rolling, exact) = parse_both(json);
+        match (&rolling, &exact) {
+            (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
+                assert_eq!(rolling, exact, "{case}: runtime models diverged");
+            }
+            _ => panic!(
+                "{case}: expected both parsers to accept; rolling={rolling:?}, exact={exact:?}"
+            ),
+        }
+    }
+
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn collect_json_files(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_json_files(&path, files);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                files.push(path);
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum CorpusDivergenceKind {
+        MissingVersion,
+        PublishedComment,
+        PublishedDevelopmentContainment,
+        PublishedExperimental,
+        PublishedStateAware,
+    }
+
+    impl CorpusDivergenceKind {
+        fn reason(self) -> &'static str {
+            match self {
+                Self::MissingVersion => {
+                    "The rolling parser supports legacy omitted versions; exact contracts require a registered declaration."
+                }
+                Self::PublishedComment => {
+                    "The rolling parser accepts the comment extension, but this published contract rejects it before later fields."
+                }
+                Self::PublishedDevelopmentContainment => {
+                    "The rolling parser exposes development backends under an older declaration; the published contract freezes its original containment enum."
+                }
+                Self::PublishedExperimental => {
+                    "Published one-shot contracts are closed and do not contain the rolling experimental extension."
+                }
+                Self::PublishedStateAware => {
+                    "Published 0.6-0.8 contracts are one-shot only; state-aware roots exist in the development contract."
+                }
+            }
+        }
+    }
+
+    fn expected_corpus_divergences(
+    ) -> std::collections::BTreeMap<&'static str, CorpusDivergenceKind> {
+        let entries = [
+            (
+                "tests/configs/basic_windows_sandbox.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/experimental_hello_lxc.json",
+                CorpusDivergenceKind::PublishedExperimental,
+            ),
+            (
+                "tests/configs/experimental_hello_processcontainer.json",
+                CorpusDivergenceKind::PublishedExperimental,
+            ),
+            (
+                "tests/configs/hyperlight_exit_code.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_fs.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_hello.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_networking.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_networking_blocked.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_pandas.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/hyperlight_timeout.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_concurrent_A.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_concurrent_B.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_concurrent_C.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_concurrent_D.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_configid_ignored.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_exit42.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_hello.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_lifecycle_rejected.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_network_rejected.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_network_rejected_hosts.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_network_rejected_no_local.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_stray_config_ignored.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_ui_rejected.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_powershell_interactive.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_deprovision.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_basic.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_cwd.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_env_absent.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_env_initial.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_env_modified.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_exit_0.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_exit_1.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_exit_2.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_read_marker.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_read_persist.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_setx_initial.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_setx_modified.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_exec_write_marker.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_appid.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_appid_control.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_appid_empty.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_appid_too_long.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_denied.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_network.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_ui.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_with_filesystem.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_start.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_stop.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/isolation_session_stderr.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_stdout_stderr_interleaved.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_streaming_smoke.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/isolation_session_timeout.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/microvm_error.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_error_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_exit_code.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_exit_code_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_hello.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_hello_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_large_output.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_large_output_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_multiline.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_multiline_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_network.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_network_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_stdlib.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_stdlib_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_timeout.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/microvm_timeout_linux.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_custom_timeout.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/windows_sandbox_echo.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_exit_code.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_powershell.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_powershell_env.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_stderr.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/windows_sandbox_timeout.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/configs/wslc_custom_registry.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_custom_registry_ghcr.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_custom_registry_quay.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_denied_dotdot_alias.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_denied_masking.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_destroy_on_exit_false_rejected.json",
+                CorpusDivergenceKind::PublishedComment,
+            ),
+            (
+                "tests/configs/wslc_destroy_on_exit_true.json",
+                CorpusDivergenceKind::PublishedComment,
+            ),
+            (
+                "tests/configs/wslc_env_vars.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_exit_code.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_filesystem.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_filesystem_object.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_large_output.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_most_specific_denied_parent.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_network_isolated.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_network_proxy.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_port_mapping_multiple.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_port_mapping_tcp.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_python_hello.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_python_stdlib.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_readonly_mount.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_state_aware_deprovision.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_basic.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_drip.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_env.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_exit_0.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_exit_1.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_exit_7.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_proxy.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_read_marker.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_write_marker.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_bridged.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_denied.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_hosts.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_with_filesystem.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_start.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_state_aware_stop.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/configs/wslc_stderr.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_tar_import_docker_save.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_tar_import_rootfs.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/configs/wslc_timeout.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/examples/09_windows_sandbox_hello_world.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/examples/10_windows_sandbox_network_isolated.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/examples/28_telemetry_enabled.json",
+                CorpusDivergenceKind::MissingVersion,
+            ),
+            (
+                "tests/examples/wslc_hello_world.json",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "tests/policy/state-aware-wslc-exec.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "tests/policy/state-aware-wslc-provision.json",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+        ];
+        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
+        assert_eq!(
+            divergences.len(),
+            entries.len(),
+            "expected corpus divergence paths must be unique"
+        );
+        divergences
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct DiagnosticExpectation {
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<&'static str>,
+        line: Option<usize>,
+        column: Option<usize>,
+        message_contains: &'static [&'static str],
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LoggerExpectation {
+        // One stable fragment per message; channel, order, and counts are exact.
+        primary_lines: &'static [&'static str],
+        warnings: &'static [&'static str],
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct CorpusDiagnosticDivergence {
+        rolling: DiagnosticExpectation,
+        exact: DiagnosticExpectation,
+        reason: &'static str,
+    }
+
+    fn policy_document_diagnostic_divergence(exact_line: usize) -> CorpusDiagnosticDivergence {
+        CorpusDiagnosticDivergence {
+            rolling: DiagnosticExpectation {
+                route: ErrorRoute::OneShot,
+                category: ErrorCategory::TypedStructure,
+                path: Some("policy"),
+                line: Some(2),
+                column: Some(10),
+                message_contains: &["unknown field `policy`"],
+            },
+            exact: DiagnosticExpectation {
+                route: ErrorRoute::Decode,
+                category: ErrorCategory::TypedStructure,
+                path: None,
+                line: Some(exact_line),
+                column: Some(1),
+                message_contains: &["Invalid version declaration", "missing field `version`"],
+            },
+            reason: "These policy documents are not executor requests: rolling decoding reaches the wrapper field, while exact routing first requires a version declaration.",
+        }
+    }
+
+    fn expected_corpus_diagnostic_divergences(
+    ) -> std::collections::BTreeMap<&'static str, CorpusDiagnosticDivergence> {
+        let entries = [
+            (
+                "tests/configs/bubblewrap_network_directional_pre08_rejected.json",
+                CorpusDiagnosticDivergence {
+                    rolling: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &[
+                            "network.egress",
+                            "require schema version 0.8 or later",
+                        ],
+                    },
+                    exact: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::TypedStructure,
+                        path: Some("network.egress"),
+                        line: Some(9),
+                        column: Some(12),
+                        message_contains: &["unknown field `egress`"],
+                    },
+                    reason: "The published pre-0.8 contract rejects the directional field structurally before the rolling semantic version gate.",
+                },
+            ),
+            (
+                "tests/configs/rejected_version_too_old.json",
+                CorpusDiagnosticDivergence {
+                    rolling: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &["older than supported"],
+                    },
+                    exact: DiagnosticExpectation {
+                        route: ErrorRoute::Decode,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &["Unsupported version"],
+                    },
+                    reason: "Exact routing rejects an unregistered declaration before the rolling parser formats its supported-range diagnostic.",
+                },
+            ),
+            (
+                "tests/policy/request-directional-network.json",
+                policy_document_diagnostic_divergence(41),
+            ),
+            (
+                "tests/policy/request-process-container.json",
+                policy_document_diagnostic_divergence(60),
+            ),
+            (
+                "tests/policy/request-wslc.json",
+                policy_document_diagnostic_divergence(24),
+            ),
+        ];
+        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
+        assert_eq!(
+            divergences.len(),
+            entries.len(),
+            "expected corpus diagnostic divergence paths must be unique"
+        );
+        divergences
+    }
+
+    fn diagnostic_expectation_mismatches(
+        expected: DiagnosticExpectation,
+        actual: &DiagnosticSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if actual.route != expected.route {
+            mismatches.push(format!(
+                "route: expected {:?}, observed {:?}",
+                expected.route, actual.route
+            ));
+        }
+        if actual.category != expected.category {
+            mismatches.push(format!(
+                "category: expected {:?}, observed {:?}",
+                expected.category, actual.category
+            ));
+        }
+        if actual.path.as_deref() != expected.path {
+            mismatches.push(format!(
+                "path: expected {:?}, observed {:?}",
+                expected.path, actual.path
+            ));
+        }
+        if actual.line != expected.line {
+            mismatches.push(format!(
+                "line: expected {:?}, observed {:?}",
+                expected.line, actual.line
+            ));
+        }
+        if actual.column != expected.column {
+            mismatches.push(format!(
+                "column: expected {:?}, observed {:?}",
+                expected.column, actual.column
+            ));
+        }
+        for fragment in expected.message_contains {
+            if !actual.message.contains(fragment) {
+                mismatches.push(format!("message does not contain {fragment:?}"));
+            }
+        }
+        mismatches
+    }
+
+    fn logger_expectation_mismatches(
+        expected: LoggerExpectation,
+        actual: &LoggerSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        for (channel, messages, fragments) in [
+            (
+                "primary_buffer",
+                actual.primary_buffer.lines().collect::<Vec<_>>(),
+                expected.primary_lines,
+            ),
+            (
+                "warnings",
+                actual
+                    .warnings
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected.warnings,
+            ),
+        ] {
+            if messages.len() != fragments.len() {
+                mismatches.push(format!(
+                    "{channel}: expected {} messages, observed {}",
+                    fragments.len(),
+                    messages.len()
+                ));
+            }
+            for (index, (message, fragment)) in messages.iter().zip(fragments).enumerate() {
+                if !message.contains(fragment) {
+                    mismatches.push(format!(
+                        "{channel}[{index}]: message does not contain {fragment:?}"
+                    ));
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn corpus_divergence_counts(
+        divergences: impl Iterator<Item = CorpusDivergenceKind>,
+    ) -> std::collections::BTreeMap<CorpusDivergenceKind, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for kind in divergences {
+            *counts.entry(kind).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn classify_corpus_exact_stricter(
+        root: &serde_json::Value,
+        exact: &DiagnosticSnapshot,
+    ) -> Option<CorpusDivergenceKind> {
+        let object = root.as_object()?;
+        if !object.contains_key("version")
+            && exact.route == ErrorRoute::Decode
+            && exact.category == ErrorCategory::TypedStructure
+            && exact.path.is_none()
+            && exact
+                .message
+                .contains("Invalid version declaration: missing field `version`")
+        {
+            return Some(CorpusDivergenceKind::MissingVersion);
+        }
+
+        let version = object.get("version")?.as_str()?;
+        if !matches!(version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
+            || exact.route != ErrorRoute::OneShot
+            || exact.category != ErrorCategory::TypedStructure
+        {
+            return None;
+        }
+
+        match exact.path.as_deref() {
+            Some("_comment")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `_comment`: unknown field `_comment`") =>
+            {
+                Some(CorpusDivergenceKind::PublishedComment)
+            }
+            Some("phase")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `phase`: unknown field `phase`") =>
+            {
+                Some(CorpusDivergenceKind::PublishedStateAware)
+            }
+            Some("containment")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `containment`: unknown variant") =>
+            {
+                Some(CorpusDivergenceKind::PublishedDevelopmentContainment)
+            }
+            Some("experimental")
+                if exact.message.contains(
+                    "Invalid configuration at `experimental`: unknown field `experimental`",
+                ) =>
+            {
+                Some(CorpusDivergenceKind::PublishedExperimental)
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn corpus_divergence_classification_requires_exact_diagnostic() {
+        let diagnostic = |route, path: Option<&str>, message: &str| DiagnosticSnapshot {
+            route,
+            category: ErrorCategory::TypedStructure,
+            path: path.map(str::to_string),
+            line: None,
+            column: None,
+            message: message.to_string(),
+        };
+        let missing_version = diagnostic(
+            ErrorRoute::Decode,
+            None,
+            "Invalid version declaration: missing field `version`",
+        );
+        assert_eq!(
+            classify_corpus_exact_stricter(&serde_json::json!({}), &missing_version),
+            Some(CorpusDivergenceKind::MissingVersion)
+        );
+        assert_eq!(
+            classify_corpus_exact_stricter(&serde_json::json!({"version": 8}), &missing_version),
+            None,
+            "a present non-string version is not a missing version"
+        );
+
+        let published = serde_json::json!({"version": "0.8.0-alpha"});
+        for (path, message, kind) in [
+            (
+                "_comment",
+                "Invalid configuration at `_comment`: unknown field `_comment`",
+                CorpusDivergenceKind::PublishedComment,
+            ),
+            (
+                "phase",
+                "Invalid configuration at `phase`: unknown field `phase`",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "containment",
+                "Invalid configuration at `containment`: unknown variant `wslc`",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "experimental",
+                "Invalid configuration at `experimental`: unknown field `experimental`",
+                CorpusDivergenceKind::PublishedExperimental,
+            ),
+        ] {
+            let exact = diagnostic(ErrorRoute::OneShot, Some(path), message);
+            assert_eq!(
+                classify_corpus_exact_stricter(&published, &exact),
+                Some(kind),
+                "{path}"
+            );
+
+            let wrong_route = diagnostic(ErrorRoute::StateAware, Some(path), message);
+            assert_eq!(
+                classify_corpus_exact_stricter(&published, &wrong_route),
+                None,
+                "{path}: the exact diagnostic route is part of the classification"
+            );
+        }
+    }
+
+    fn classified_divergence_mismatches(
+        case: &DivergenceCase,
+        rolling: &ParserSnapshot,
+        exact: &ParserSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if case.reason.is_empty() {
+            mismatches.push("missing classification reason".to_string());
+        }
+        if case.rolling_diagnostic.is_some()
+            != (case.direction == DivergenceDirection::DiagnosticOnly)
+        {
+            mismatches.push("rolling expectation contradicts the divergence direction".to_string());
+        }
+        for (side, actual, diagnostic, logger) in [
+            (
+                "rolling",
+                rolling,
+                case.rolling_diagnostic,
+                case.rolling_logger,
+            ),
+            (
+                "exact",
+                exact,
+                Some(case.exact_diagnostic),
+                case.exact_logger,
+            ),
+        ] {
+            let actual_logger = match (actual, diagnostic) {
+                (ParserSnapshot::Accepted(actual), None) => &actual.logger,
+                (ParserSnapshot::Rejected(actual), Some(expected)) => {
+                    mismatches.extend(
+                        diagnostic_expectation_mismatches(expected, &actual.diagnostic)
+                            .into_iter()
+                            .map(|message| format!("{side}: {message}")),
+                    );
+                    &actual.logger
+                }
+                (ParserSnapshot::Accepted(actual), Some(_)) => {
+                    mismatches.push(format!("{side}: expected rejection, observed acceptance"));
+                    &actual.logger
+                }
+                (ParserSnapshot::Rejected(actual), None) => {
+                    mismatches.push(format!("{side}: expected acceptance, observed rejection"));
+                    &actual.logger
+                }
+            };
+            mismatches.extend(
+                logger_expectation_mismatches(logger, actual_logger)
+                    .into_iter()
+                    .map(|message| format!("{side}: logger.{message}")),
+            );
+        }
+        if case.direction == DivergenceDirection::DiagnosticOnly {
+            if let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            {
+                if rolling.message == exact.message {
+                    mismatches.push("classified diagnostic unexpectedly converged".to_string());
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn assert_classified_divergence(case: &DivergenceCase) {
+        let (rolling, exact) = parse_both(case.input);
+        let mismatches = classified_divergence_mismatches(case, &rolling, &exact);
+        assert!(
+            mismatches.is_empty(),
+            "{}: {}\nrolling={rolling:?}\nexact={exact:?}",
+            case.name,
+            mismatches.join("\n")
+        );
+    }
+
+    #[test]
+    fn differential_one_shot_matrix_converges_across_registered_versions() {
+        for (case, json) in [
+            (
+                "v0.6 stable policy",
+                r#"{
+                    "version":"0.6.0-alpha",
+                    "containerId":"differential-v06",
+                    "containment":"processcontainer",
+                    "process":{
+                        "commandLine":"echo v06",
+                        "cwd":"C:\\work",
+                        "env":["A=1"],
+                        "timeout":1234
+                    },
+                    "filesystem":{
+                        "readwritePaths":["C:\\work"],
+                        "readonlyPaths":["C:\\input"],
+                        "deniedPaths":["C:\\secret"]
+                    },
+                    "network":{
+                        "defaultPolicy":"block",
+                        "enforcementMode":"capabilities",
+                        "allowedHosts":["example.com"],
+                        "allowLocalNetwork":false
+                    },
+                    "ui":{"disable":false,"clipboard":"read","injection":true},
+                    "processContainer":{
+                        "leastPrivilege":true,
+                        "capabilities":["internetClient"],
+                        "ui":{"isolation":"desktop","ime":true}
+                    }
+                }"#,
+            ),
+            (
+                "v0.7 stable policy",
+                r#"{
+                    "$schema":"https://example.invalid/v07",
+                    "_comment":{"purpose":"differential"},
+                    "version":"0.7.0-alpha",
+                    "containerId":"differential-v07",
+                    "containment":"processcontainer",
+                    "lifecycle":{"destroyOnExit":false,"preservePolicy":true},
+                    "process":{"commandLine":"echo v07","env":["B=2"]},
+                    "filesystem":{"readonlyPaths":["C:\\input"]},
+                    "fallback":{"allowDaclMutation":false},
+                    "network":{
+                        "defaultPolicy":"allow",
+                        "enforcementMode":"capabilities",
+                        "blockedHosts":["blocked.example"],
+                        "allowLocalNetwork":true
+                    },
+                    "ui":{"disable":true,"clipboard":"write","injection":false},
+                    "processContainer":{"capabilities":["internetClient"]}
+                }"#,
+            ),
+            (
+                "v0.8 directional policy",
+                r#"{
+                    "version":"0.8.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo v08"},
+                    "filesystem":{"readwritePaths":["C:\\work"]},
+                    "network":{
+                        "egress":{"default":"deny","allow":[{"to":[{"cidr":"203.0.113.0/24"}]}]},
+                        "ingress":{"default":"deny","hostLoopback":"deny"}
+                    },
+                    "ui":{"disable":false,"clipboard":"all","injection":true},
+                    "processContainer":{"capabilities":["internetClient"]}
+                }"#,
+            ),
+            (
+                "v0.9 development policy",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo v09","timeout":5678},
+                    "filesystem":{"deniedPaths":["C:\\secret"]},
+                    "network":{
+                        "egress":{"default":"deny"},
+                        "ingress":{"default":"deny","hostLoopback":"deny"}
+                    },
+                    "ui":{"disable":true,"clipboard":"none","injection":false},
+                    "processContainer":{
+                        "capabilities":["internetClient"],
+                        "captureDenials":{"mode":"block","retainEtl":true}
+                    },
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+        ] {
+            assert_accepted_models_converge(case, json);
+        }
+    }
+
+    #[test]
+    fn differential_state_aware_matrix_converges_for_every_phase_and_backend() {
+        for (case, json) in [
+            (
+                "Windows Sandbox provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"windows_sandbox",
+                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "IsolationSession provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "telemetry":{"enabled":false},
+                    "experimental":{
+                        "isolation_session":{"provision":{"appId":"Contoso.App"}}
+                    }
+                }"#,
+            ),
+            (
+                "WSLC provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"wslc",
+                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
+                    "network":{"defaultPolicy":"allow"},
+                    "telemetry":{"enabled":true},
+                    "experimental":{
+                        "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
+                    }
+                }"#,
+            ),
+            (
+                "start",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"start",
+                    "sandboxId":"wsb:abcd1234",
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "exec with immutable network presence",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"exec",
+                    "sandboxId":"wslc:abcd1234",
+                    "process":{"commandLine":"echo exec","cwd":"/work","env":["C=3"],"timeout":42},
+                    "network":{"proxy":{"url":"http://proxy.example.com:8080"}},
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+            (
+                "stop",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"stop",
+                    "sandboxId":"iso:abcd1234",
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "deprovision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"deprovision",
+                    "sandboxId":"wslc:abcd1234",
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+        ] {
+            assert_accepted_models_converge(case, json);
+        }
+    }
+
+    #[test]
+    fn differential_source_aware_diagnostics_converge_when_contracts_share_the_shape() {
+        for (version, route) in [
+            ("0.6.0-alpha", ErrorRoute::OneShot),
+            ("0.7.0-alpha", ErrorRoute::OneShot),
+            ("0.8.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::StateAware),
+        ] {
+            let phase_fields = if route == ErrorRoute::StateAware {
+                "  \"phase\": \"exec\",\n  \"sandboxId\": \"wslc:abcd1234\",\n"
+            } else {
+                ""
+            };
+            let json = format!(
+                "{{\n  \"version\": \"{version}\",\n{phase_fields}  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
+            );
+            let (rolling, exact) = parse_both(&json);
+            let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            else {
+                panic!("{version} {route:?}: both parsers must reject the typed cwd error");
+            };
+
+            assert_eq!(rolling.route, route);
+            assert_eq!(rolling.route, exact.route);
+            assert_eq!(rolling.category, exact.category);
+            assert_eq!(rolling.path.as_deref(), Some("process.cwd"));
+            assert_eq!(rolling.path, exact.path);
+            assert_eq!(rolling.line, exact.line);
+            assert_eq!(rolling.column, exact.column);
+        }
+
+        let malformed = "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":";
+        let (rolling, exact) = parse_both(malformed);
+        let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) = (rolling, exact)
+        else {
+            panic!("both parsers must reject invalid JSON syntax");
+        };
+        assert_eq!(rolling.route, ErrorRoute::Decode);
+        assert_eq!(exact.route, ErrorRoute::Decode);
+        assert_eq!(rolling.category, ErrorCategory::Syntax);
+        assert_eq!(exact.category, ErrorCategory::Semantic);
+        assert_eq!(rolling.path, None);
+        assert_eq!(exact.path, None);
+        assert_eq!(rolling.line, exact.line);
+        assert_eq!(rolling.column, exact.column);
+    }
+
+    #[test]
+    fn differential_effective_document_covers_loader_modes_and_command_splice() {
+        let root = repository_root();
+        let path = root
+            .join("tests")
+            .join("examples")
+            .join("01_hello_world.json");
+        let json = fs::read_to_string(&path).unwrap();
+
+        let file_loaded = load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let encoded = base64_encode(json.as_bytes());
+        let base64_loaded = load_mxc_request(&encoded, &mut test_logger(), true)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let raw_loaded = load_mxc_request_from_json(&json, &mut test_logger())
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let exact = parse_exact_for_test(&json)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        assert_eq!(file_loaded, base64_loaded);
+        assert_eq!(file_loaded, raw_loaded);
+        assert_eq!(file_loaded, exact);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rolling_value = load_request_from_value(value.clone(), &mut test_logger()).unwrap();
+        let serialized_value = serde_json::to_string(&value).unwrap();
+        let exact_value = parse_exact_for_test(&serialized_value).unwrap();
+        assert_eq!(
+            ExecutionSnapshot::from(&rolling_value),
+            match RequestSnapshot::from(&exact_value) {
+                RequestSnapshot::OneShot(request) => request,
+                RequestSnapshot::StateAware { .. } => panic!("value was one-shot"),
+            }
+        );
+
+        let wrong_type = r#"{
+            "version":"0.9.0-alpha",
+            "containment":"processcontainer",
+            "process":{"commandLine":42}
+        }"#;
+        assert!(parse_mxc_request_json(wrong_type, &mut test_logger()).is_err());
+        assert!(parse_exact_for_test(wrong_type).is_err());
+
+        let command = argv(&["echo", "from splice"]);
+        let (effective, _) = apply_cli_command(wrong_type, &command).unwrap();
+        assert_eq!(
+            effective, wrong_type,
+            "command splicing deliberately leaves invalid existing commandLine types for typed parsing"
+        );
+        let (rolling, exact) = parse_both(&effective);
+        assert!(matches!(rolling, ParserSnapshot::Rejected(_)));
+        assert!(matches!(exact, ParserSnapshot::Rejected(_)));
+
+        let null_command = wrong_type.replace("42", "null");
+        let (effective, _) = apply_cli_command(&null_command, &command).unwrap();
+        assert_ne!(effective, null_command);
+        assert_accepted_models_converge("command-spliced effective one-shot", &effective);
+
+        let state_aware = r#"{
+            "version":"0.9.0-alpha",
+            "phase":"exec",
+            "sandboxId":"wslc:abcd1234",
+            "process":{"commandLine":"old"}
+        }"#;
+        let (effective, override_log) = apply_cli_command(state_aware, &command).unwrap();
+        assert!(override_log.is_some());
+        assert_accepted_models_converge("command-spliced effective state-aware exec", &effective);
+
+        let one_shot = parse_both(r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"}}"#);
+        let state_aware =
+            parse_both(r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#);
+        assert!(matches!(
+            one_shot,
+            (
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::OneShot(_),
+                    ..
+                }),
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::OneShot(_),
+                    ..
+                })
+            )
+        ));
+        assert!(matches!(
+            state_aware,
+            (
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::StateAware { .. },
+                    ..
+                }),
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::StateAware { .. },
+                    ..
+                })
+            )
+        ));
+    }
+
+    fn classified_divergence_cases() -> [DivergenceCase; 14] {
+        [
+            DivergenceCase {
+                name: "published-v06-experimental",
+                input: r#"{
+                    "version":"0.6.0-alpha",
+                    "process":{"commandLine":"echo x"},
+                    "experimental":{"test":{"message":"rolling-only"}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental"),
+                    line: Some(4),
+                    column: Some(34),
+                    message_contains: &["unknown field `experimental`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Published 0.6 is closed; rolling compatibility still accepts experimental.",
+            },
+            DivergenceCase {
+                name: "explicit-null-optional-container-id",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "containerId":null,
+                    "process":{"commandLine":"echo x"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("containerId"),
+                    line: Some(3),
+                    column: Some(38),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "OptionalField distinguishes omission from explicit null.",
+            },
+            DivergenceCase {
+                name: "isolation-session-app-id-null",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "experimental":{"isolation_session":{"provision":{"appId":null}}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.appId"),
+                    line: Some(6),
+                    column: Some(82),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact OptionalField rejects null while the temporary backend payload treats it as absent.",
+            },
+            DivergenceCase {
+                name: "unknown-isolation-session-payload-field",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "experimental":{"isolation_session":{"provision":{"futureField":true}}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.futureField"),
+                    line: Some(6),
+                    column: Some(83),
+                    message_contains: &["unknown field `futureField`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Exact backend payloads are closed while the temporary runtime payload type ignores unknown fields.",
+            },
+            DivergenceCase {
+                name: "stray-provision-sandbox-id",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"windows_sandbox",
+                    "sandboxId":"wsb:abcd1234"
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("sandboxId"),
+                    line: Some(5),
+                    column: Some(31),
+                    message_contains: &["unknown field `sandboxId`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Provision roots do not carry an already-created sandbox identifier.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-start",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"start",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision; only exec has a runtime network surface.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-stop",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"stop",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision and cannot be changed while stopping.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-deprovision",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"deprovision",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision and cannot be changed while deprovisioning.",
+            },
+            DivergenceCase {
+                name: "null-phase-declaration",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":null,
+                    "process":{"commandLine":"echo x"}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["Missing required field: phase"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    line: Some(3),
+                    column: Some(32),
+                    message_contains: &["Invalid phase declaration", "invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact phase probe rejects null structurally before rolling normalization reports a missing phase.",
+            },
+            DivergenceCase {
+                name: "malformed-json-version-probe-diagnostic",
+                input: "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":",
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Syntax,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid JSON syntax"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid version declaration"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact path first probes the version declaration, so malformed trailing JSON is attributed to that probe.",
+            },
+            DivergenceCase {
+                name: "isolation-session-filesystem-curated-vs-structural",
+                // An existing path avoids host-dependent existence warnings.
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "filesystem":{"readwritePaths":["."]},
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    line: Some(5),
+                    column: Some(32),
+                    message_contains: &["unknown field `filesystem`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
+            },
+            DivergenceCase {
+                name: "isolation-session-ui-curated-vs-structural",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "ui":{"disable":true}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("ui"),
+                    line: Some(6),
+                    column: Some(24),
+                    message_contains: &["unknown field `ui`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
+            },
+            DivergenceCase {
+                name: "v0.8-comma-capability-structural-vs-semantic",
+                input: r#"{
+                    "version":"0.8.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo x"},
+                    "processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["processContainer.capabilities entry"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(100),
+                    message_contains: &["capability must not contain a comma"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["processContainer.capabilities entry"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
+                reason: "Published v0.8 validates capability names in its newtype; rolling validation occurs during model conversion.",
+            },
+            DivergenceCase {
+                name: "v0.9-reserved-capability-structural-vs-semantic",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo x"},
+                    "processContainer":{"capabilities":["LearningModeLogging"]}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["reserved learning-mode capability"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(78),
+                    message_contains: &["learningModeLogging and permissiveLearningMode are reserved"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["reserved learning-mode capability"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
+                reason: "Development validates capability names in its newtype; rolling validation occurs during model conversion.",
+            },
+        ]
+    }
+
+    #[test]
+    fn differential_exact_stricter_and_diagnostic_divergences_are_explicit() {
+        for case in classified_divergence_cases() {
+            assert_classified_divergence(&case);
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_detect_diagnostic_and_logger_drift() {
+        type DiagnosticMutation = fn(&mut DiagnosticSnapshot);
+        let mutations: [(&str, DiagnosticMutation); 6] = [
+            ("route", |value| {
+                value.route = match value.route {
+                    ErrorRoute::Decode => ErrorRoute::StateAware,
+                    ErrorRoute::OneShot => ErrorRoute::OneShotMalformed,
+                    ErrorRoute::OneShotMalformed => ErrorRoute::OneShot,
+                    ErrorRoute::StateAware => ErrorRoute::Decode,
+                };
+            }),
+            ("category", |value| {
+                value.category = if value.category == ErrorCategory::Semantic {
+                    ErrorCategory::Syntax
+                } else {
+                    ErrorCategory::Semantic
+                };
+            }),
+            ("path", |value| {
+                value.path = if value.path.is_some() {
+                    None
+                } else {
+                    Some("unexpected.path".to_string())
+                };
+            }),
+            ("line", |value| {
+                value.line = Some(value.line.unwrap_or(0) + 1)
+            }),
+            ("column", |value| {
+                value.column = Some(value.column.unwrap_or(0) + 1)
+            }),
+            ("message", |value| value.message.clear()),
+        ];
+
+        for case in classified_divergence_cases() {
+            let (rolling, exact) = parse_both(case.input);
+            let baseline = [rolling, exact];
+            assert!(
+                classified_divergence_mismatches(&case, &baseline[0], &baseline[1]).is_empty(),
+                "{}: baseline must match before injecting drift",
+                case.name
+            );
+            for (side, name) in ["rolling", "exact"].into_iter().enumerate() {
+                if matches!(&baseline[side], ParserSnapshot::Rejected(_)) {
+                    for (field, mutate) in mutations {
+                        let mut changed = baseline.clone();
+                        let ParserSnapshot::Rejected(rejected) = &mut changed[side] else {
+                            panic!("cloning a rejection must preserve its outcome");
+                        };
+                        mutate(&mut rejected.diagnostic);
+                        let mismatches =
+                            classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                        assert!(
+                            mismatches.iter().any(|mismatch| {
+                                mismatch.starts_with(&format!("{name}: {field}"))
+                            }),
+                            "{}: {name} {field} drift was not detected: {mismatches:?}",
+                            case.name
+                        );
+                    }
+                }
+                for channel in ["primary_buffer", "warnings"] {
+                    let mut changed = baseline.clone();
+                    let logger = match &mut changed[side] {
+                        ParserSnapshot::Accepted(value) => &mut value.logger,
+                        ParserSnapshot::Rejected(value) => &mut value.logger,
+                    };
+                    if channel == "primary_buffer" {
+                        logger.primary_buffer.push_str("unexpected caller output\n");
+                    } else {
+                        logger
+                            .warnings
+                            .push("unexpected caller warning".to_string());
+                    }
+                    let mismatches =
+                        classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                    assert!(
+                        mismatches.iter().any(|mismatch| {
+                            mismatch.starts_with(&format!("{name}: logger.{channel}"))
+                        }),
+                        "{}: {name} {channel} drift was not detected: {mismatches:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_allow_nonessential_message_wording() {
+        for case in classified_divergence_cases() {
+            let (mut rolling, mut exact) = parse_both(case.input);
+            for snapshot in [&mut rolling, &mut exact] {
+                let logger = match snapshot {
+                    ParserSnapshot::Accepted(value) => &mut value.logger,
+                    ParserSnapshot::Rejected(value) => {
+                        value.diagnostic.message.push_str(" (additional context)");
+                        &mut value.logger
+                    }
+                };
+                logger.primary_buffer = logger
+                    .primary_buffer
+                    .lines()
+                    .map(|line| format!("{line} (additional context)\n"))
+                    .collect();
+                for warning in &mut logger.warnings {
+                    warning.push_str(" (additional context)");
+                }
+            }
+            let mismatches = classified_divergence_mismatches(&case, &rolling, &exact);
+            assert!(
+                mismatches.is_empty(),
+                "{}: wording outside required fragments is not frozen: {mismatches:?}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn differential_logger_expectations_pin_channels_order_and_counts() {
+        let expected = LoggerExpectation {
+            primary_lines: &["first primary", "second primary"],
+            warnings: &["first warning", "second warning"],
+        };
+        let baseline = LoggerSnapshot {
+            primary_buffer: "first primary detail\nsecond primary detail\n".to_string(),
+            warnings: vec![
+                "first warning detail".to_string(),
+                "second warning detail".to_string(),
+            ],
+        };
+        assert!(logger_expectation_mismatches(expected, &baseline).is_empty());
+
+        type LoggerMutation = fn(&mut LoggerSnapshot);
+        let mutations: [(&str, LoggerMutation); 6] = [
+            ("primary_buffer", |value| {
+                value.primary_buffer = "second primary detail\nfirst primary detail\n".to_string();
+            }),
+            ("primary_buffer", |value| value.primary_buffer.clear()),
+            ("primary_buffer", |value| {
+                value.primary_buffer = "unexpected primary\nsecond primary detail\n".to_string();
+            }),
+            ("warnings", |value| value.warnings.swap(0, 1)),
+            ("warnings", |value| value.warnings.clear()),
+            ("warnings", |value| {
+                value.warnings[0] = "unexpected warning".to_string()
+            }),
+        ];
+        for (channel, mutate) in mutations {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            let mismatches = logger_expectation_mismatches(expected, &changed);
+            assert!(
+                mismatches
+                    .iter()
+                    .any(|mismatch| mismatch.starts_with(channel)),
+                "{channel} drift was not detected: {mismatches:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn differential_exact_path_preserves_all_rolling_value_rule_rejections() {
+        for (case, json) in [
+            (
+                "v0.6 comma capability",
+                r#"{"version":"0.6.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
+            ),
+            (
+                "v0.7 reserved capability",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["PERMISSIVElearningMODE"]}}"#,
+            ),
+            (
+                "v0.8 comma capability",
+                r#"{"version":"0.8.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
+            ),
+            (
+                "v0.9 reserved capability",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["LearningModeLogging"]}}"#,
+            ),
+            (
+                "empty filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readwritePaths":[" "]}}"#,
+            ),
+            (
+                "quoted filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readonlyPaths":["C:\\bad\"path"]}}"#,
+            ),
+            (
+                "embedded NUL filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"deniedPaths":["C:\\bad\u0000path"]}}"#,
+            ),
+            (
+                "proxy with capabilities enforcement",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#,
+            ),
+            (
+                "foreign backend section",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"processContainer":{"leastPrivilege":true}}"#,
+            ),
+            (
+                "relative captureDenials output",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"captureDenials":{"outputPath":"relative.json"}}}"#,
+            ),
+        ] {
+            let (rolling, exact) = parse_both(json);
+            assert!(
+                matches!(rolling, ParserSnapshot::Rejected(_)),
+                "{case}: rolling value rule unexpectedly accepted: {rolling:?}"
+            );
+            assert!(
+                matches!(exact, ParserSnapshot::Rejected(_)),
+                "{case}: exact path is looser than rolling: {exact:?}"
+            );
+
+            if case.starts_with("v0.6") || case.starts_with("v0.7") {
+                assert_eq!(
+                    rolling, exact,
+                    "{case}: published contracts without capability newtypes should retain the shared semantic diagnostic"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn differential_repository_corpus_has_no_unclassified_or_exact_looser_results() {
+        let root = repository_root();
+        let mut files = Vec::new();
+        collect_json_files(&root.join("tests").join("configs"), &mut files);
+        collect_json_files(&root.join("tests").join("examples"), &mut files);
+        collect_json_files(&root.join("tests").join("policy"), &mut files);
+        files.sort();
+
+        let expected = expected_corpus_divergences();
+        let expected_diagnostics = expected_corpus_diagnostic_divergences();
+        let expected_counts = corpus_divergence_counts(expected.values().copied());
+        let mut observed = std::collections::BTreeMap::new();
+        let mut observed_diagnostics = std::collections::BTreeSet::new();
+        let mut seen_files = std::collections::BTreeSet::new();
+        let mut classified = Vec::new();
+        let mut blockers = Vec::new();
+
+        for path in &files {
+            let relative = path
+                .strip_prefix(&root)
+                .unwrap()
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            seen_files.insert(relative.clone());
+            let json = fs::read_to_string(path).unwrap();
+            let root_value: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or_else(|error| {
+                    panic!("{relative}: corpus JSON must be syntactically valid: {error}")
+                });
+
+            let (rolling, exact) = parse_both(&json);
+            match (&rolling, &exact) {
+                (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
+                    if let Some(kind) = expected.get(relative.as_str()) {
+                        blockers.push(format!(
+                            "{relative}: expected {kind:?} exact-stricter divergence, but both parsers accepted"
+                        ));
+                    }
+                    if rolling != exact {
+                        blockers.push(format!(
+                            "{relative}: both accepted but runtime models differ\nrolling={rolling:?}\nexact={exact:?}"
+                        ));
+                    }
+                }
+                (
+                    ParserSnapshot::Rejected(rolling_diagnostic),
+                    ParserSnapshot::Rejected(exact_diagnostic),
+                ) => {
+                    if let Some(kind) = expected.get(relative.as_str()) {
+                        blockers.push(format!(
+                            "{relative}: expected {kind:?} exact-stricter divergence, but both parsers rejected"
+                        ));
+                    }
+                    match expected_diagnostics.get(relative.as_str()) {
+                        Some(expected) => {
+                            observed_diagnostics.insert(relative.clone());
+                            if rolling_diagnostic == exact_diagnostic {
+                                blockers.push(format!(
+                                    "{relative}: expected a diagnostic-only divergence, but both parsers produced the same rejection"
+                                ));
+                                continue;
+                            }
+
+                            let rolling_mismatches = diagnostic_expectation_mismatches(
+                                expected.rolling,
+                                rolling_diagnostic,
+                            );
+                            let exact_mismatches =
+                                diagnostic_expectation_mismatches(expected.exact, exact_diagnostic);
+                            if !rolling_mismatches.is_empty() || !exact_mismatches.is_empty() {
+                                blockers.push(format!(
+                                    "{relative}: classified diagnostic-only divergence changed\nreason={}\nrolling mismatches={rolling_mismatches:?}\nexact mismatches={exact_mismatches:?}\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}",
+                                    expected.reason
+                                ));
+                            }
+                        }
+                        None if rolling_diagnostic != exact_diagnostic => {
+                            blockers.push(format!(
+                                "{relative}: unclassified shared-rejection diagnostic difference\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}"
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                (ParserSnapshot::Accepted(_), ParserSnapshot::Rejected(exact_diagnostic)) => {
+                    if let Some(kind) =
+                        classify_corpus_exact_stricter(&root_value, exact_diagnostic)
+                    {
+                        classified.push(format!(
+                            "{relative}: rolling=accepted; exact=rejected ({}) at {:?}; \
+                             direction=exact-stricter; reason={}",
+                            exact_diagnostic.message,
+                            exact_diagnostic.path,
+                            kind.reason()
+                        ));
+                        match expected.get(relative.as_str()) {
+                            Some(expected_kind) if *expected_kind == kind => {
+                                observed.insert(relative.clone(), kind);
+                            }
+                            Some(expected_kind) => blockers.push(format!(
+                                "{relative}: expected {expected_kind:?}, observed {kind:?}\nexact={exact_diagnostic:?}"
+                            )),
+                            None => blockers.push(format!(
+                                "{relative}: newly divergent corpus file requires explicit classification as {kind:?}\nexact={exact_diagnostic:?}"
+                            )),
+                        }
+                    } else {
+                        blockers.push(format!(
+                            "{relative}: unclassified exact-stricter result\nexact={exact_diagnostic:?}"
+                        ));
+                    }
+                }
+                (ParserSnapshot::Rejected(rolling_diagnostic), ParserSnapshot::Accepted(_)) => {
+                    blockers.push(format!(
+                        "{relative}: exact is looser than rolling\nrolling={rolling_diagnostic:?}"
+                    ));
+                }
+            }
+        }
+
+        for (relative, kind) in &expected {
+            if !seen_files.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected {kind:?} divergence fixture is missing from the corpus"
+                ));
+            }
+        }
+        for relative in expected_diagnostics.keys() {
+            if !seen_files.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected diagnostic-divergence fixture is missing from the corpus"
+                ));
+            } else if !observed_diagnostics.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected diagnostic-only divergence was not observed"
+                ));
+            }
+        }
+
+        let observed_counts = corpus_divergence_counts(observed.values().copied());
+        assert!(
+            blockers.is_empty(),
+            "differential corpus blockers:\n{}\n\nexpected category counts: \
+             {expected_counts:?}\nobserved category counts: {observed_counts:?}\n\n\
+             classified exact-stricter inputs:\n{}",
+            blockers.join("\n\n"),
+            classified.join("\n")
+        );
+        assert_eq!(
+            observed_counts, expected_counts,
+            "explicit divergence inventory and observed category totals differ"
+        );
     }
 
     #[test]
