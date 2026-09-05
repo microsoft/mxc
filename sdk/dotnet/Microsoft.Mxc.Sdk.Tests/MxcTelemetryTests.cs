@@ -12,6 +12,12 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
+[CollectionDefinition("MxcTelemetry", DisableParallelization = true)]
+public sealed class MxcTelemetryCollectionDefinition
+{
+}
+
+[Collection("MxcTelemetry")]
 public sealed class MxcTelemetryTests
 {
     private static readonly JsonSerializerOptions PolicyJsonOptions = new()
@@ -102,6 +108,75 @@ public sealed class MxcTelemetryTests
         });
 
         Assert.Equal(1, accepted);
+    }
+
+    [Fact]
+    public void FailClosedDiagnosticTracker_EnforcesCapacityUnderConcurrentLoad()
+    {
+        var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
+        var accepted = 0;
+
+        Parallel.For(0, 1_000, index =>
+        {
+            if (tracker.TryAdd("GetPolicy", "Blocked", "Exception", index))
+            {
+                Interlocked.Increment(ref accepted);
+            }
+        });
+
+        Assert.Equal(64, accepted);
+    }
+
+    [Fact]
+    public void FailClosedDiagnostics_DoNotPropagateTraceListenerFailures()
+    {
+        using var listener = new ThrowingTraceListener();
+        Trace.Listeners.Add(listener);
+        try
+        {
+            var exception = Record.Exception(() =>
+                MxcTelemetry.ReportFailClosed(
+                    $"ThrowingTrace{Guid.NewGuid():N}",
+                    "Blocked",
+                    ErrorCode.BackendError));
+            Assert.Null(exception);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
+    }
+
+    [Fact]
+    public void ReadOnlyQueryFailures_ReportAndReturnFailClosedValues()
+    {
+        var native = new FakeTelemetryQueryApi
+        {
+            GetConsentImpl = () => throw new DllNotFoundException("sensitive path"),
+            NeedsConsentPromptImpl = () => new((int)ErrorCode.BackendError, true),
+            GetPolicyImpl = () => throw new InvalidOperationException("sensitive policy"),
+        };
+        using var nativeScope = MxcTelemetry.OverrideTelemetryQueryApiForTesting(native);
+        using var output = new StringWriter();
+        using var listener = new TextWriterTraceListener(output);
+        Trace.Listeners.Add(listener);
+        try
+        {
+            Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
+            Assert.False(MxcTelemetry.NeedsConsentPrompt());
+            Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
+            Trace.Flush();
+
+            var message = output.ToString();
+            Assert.Contains("GetConsent", message);
+            Assert.Contains("NeedsConsentPrompt", message);
+            Assert.Contains("GetPolicy", message);
+            Assert.DoesNotContain("sensitive", message);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(listener);
+        }
     }
 
     [Fact]
@@ -549,4 +624,36 @@ public sealed class MxcTelemetryTests
         }
     }
 #endif
+
+    private sealed class FakeTelemetryQueryApi : MxcTelemetry.ITelemetryQueryApi
+    {
+        internal required Func<MxcTelemetry.NativePayloadResult> GetConsentImpl { get; init; }
+        internal required Func<MxcTelemetry.NativeBooleanResult> NeedsConsentPromptImpl { get; init; }
+        internal required Func<MxcTelemetry.NativePayloadResult> GetPolicyImpl { get; init; }
+
+        public MxcTelemetry.NativePayloadResult GetConsent() => GetConsentImpl();
+
+        public MxcTelemetry.NativeBooleanResult NeedsConsentPrompt() =>
+            NeedsConsentPromptImpl();
+
+        public MxcTelemetry.NativePayloadResult GetPolicy() => GetPolicyImpl();
+    }
+
+    private sealed class ThrowingTraceListener : TraceListener
+    {
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string? source,
+            TraceEventType eventType,
+            int id,
+            string? format,
+            params object?[]? args) =>
+            throw new InvalidOperationException("listener failure");
+
+        public override void Write(string? message) =>
+            throw new InvalidOperationException("listener failure");
+
+        public override void WriteLine(string? message) =>
+            throw new InvalidOperationException("listener failure");
+    }
 }

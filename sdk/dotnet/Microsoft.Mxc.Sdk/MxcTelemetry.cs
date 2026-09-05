@@ -107,6 +107,79 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
     private static readonly FailureCategoryTracker ReportedFailures = new(capacity: 64);
+    private static ITelemetryQueryApi telemetryQueryApi = new PInvokeTelemetryQueryApi();
+
+    internal readonly record struct NativePayloadResult(int Status, string? Payload);
+    internal readonly record struct NativeBooleanResult(int Status, bool Value);
+
+    internal interface ITelemetryQueryApi
+    {
+        NativePayloadResult GetConsent();
+        NativeBooleanResult NeedsConsentPrompt();
+        NativePayloadResult GetPolicy();
+    }
+
+    private sealed class PInvokeTelemetryQueryApi : ITelemetryQueryApi
+    {
+        public unsafe NativePayloadResult GetConsent()
+        {
+            byte* value = null;
+            var status = NativeMethods.mxc_telemetry_get_consent(&value);
+            try
+            {
+                return new(status, ReadNativeUtf8(value));
+            }
+            finally
+            {
+                FreeNativeString(value);
+            }
+        }
+
+        public unsafe NativeBooleanResult NeedsConsentPrompt()
+        {
+            int needsPrompt = 0;
+            var status = NativeMethods.mxc_telemetry_needs_consent_prompt(&needsPrompt);
+            return new(status, needsPrompt != 0);
+        }
+
+        public unsafe NativePayloadResult GetPolicy()
+        {
+            byte* value = null;
+            var status = NativeMethods.mxc_telemetry_get_policy(&value);
+            try
+            {
+                return new(status, ReadNativeUtf8(value));
+            }
+            finally
+            {
+                FreeNativeString(value);
+            }
+        }
+    }
+
+    internal static IDisposable OverrideTelemetryQueryApiForTesting(
+        ITelemetryQueryApi replacement)
+    {
+        ArgumentNullException.ThrowIfNull(replacement);
+        var previous = telemetryQueryApi;
+        telemetryQueryApi = replacement;
+        return new TelemetryQueryApiScope(previous);
+    }
+
+    private sealed class TelemetryQueryApiScope(ITelemetryQueryApi previous) : IDisposable
+    {
+        private bool disposed;
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+            disposed = true;
+            telemetryQueryApi = previous;
+        }
+    }
 
     internal sealed class FailureCategoryTracker(int capacity)
     {
@@ -149,24 +222,15 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            unsafe
+            var result = telemetryQueryApi.GetConsent();
+            if (result.Status != (int)ErrorCode.Success)
             {
-                byte* value = null;
-                var status = NativeMethods.mxc_telemetry_get_consent(&value);
-                try
-                {
-                    if (status != (int)ErrorCode.Success)
-                    {
-                        throw new MxcException((ErrorCode)status, "retrieving telemetry consent failed");
-                    }
-
-                    return ParseConsentState(ReadNativeUtf8(value) ?? "undetermined");
-                }
-                finally
-                {
-                    FreeNativeString(value);
-                }
+                throw new MxcException(
+                    (ErrorCode)result.Status,
+                    "retrieving telemetry consent failed");
             }
+
+            return ParseConsentState(result.Payload ?? "undetermined");
         }
         catch (MxcException)
         {
@@ -334,18 +398,17 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            unsafe
+            var result = telemetryQueryApi.NeedsConsentPrompt();
+            if (result.Status != (int)ErrorCode.Success)
             {
-                int needsPrompt = 0;
-                var status = NativeMethods.mxc_telemetry_needs_consent_prompt(&needsPrompt);
-                if (status != (int)ErrorCode.Success)
-                {
-                    ReportFailClosed("NeedsConsentPrompt", "false", (ErrorCode)status);
-                    return false;
-                }
-
-                return needsPrompt != 0;
+                ReportFailClosed(
+                    "NeedsConsentPrompt",
+                    "false",
+                    (ErrorCode)result.Status);
+                return false;
             }
+
+            return result.Value;
         }
         catch (Exception ex)
         {
@@ -363,25 +426,14 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            unsafe
+            var result = telemetryQueryApi.GetPolicy();
+            if (result.Status != (int)ErrorCode.Success)
             {
-                byte* value = null;
-                var status = NativeMethods.mxc_telemetry_get_policy(&value);
-                try
-                {
-                    if (status != (int)ErrorCode.Success)
-                    {
-                        ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)status);
-                        return TelemetryPolicyState.Blocked;
-                    }
-
-                    return ParsePolicyState(ReadNativeUtf8(value) ?? "blocked");
-                }
-                finally
-                {
-                    FreeNativeString(value);
-                }
+                ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)result.Status);
+                return TelemetryPolicyState.Blocked;
             }
+
+            return ParsePolicyState(result.Payload ?? "blocked");
         }
         catch (Exception ex)
         {
