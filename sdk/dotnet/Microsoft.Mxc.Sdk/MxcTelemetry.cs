@@ -107,19 +107,22 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
     private static readonly FailureCategoryTracker ReportedFailures = new(capacity: 64);
-    private static ITelemetryQueryApi telemetryQueryApi = new PInvokeTelemetryQueryApi();
+    private static IFailClosedTelemetryQueryApi failClosedQueryApi =
+        new PInvokeFailClosedTelemetryQueryApi();
 
     internal readonly record struct NativePayloadResult(int Status, string? Payload);
     internal readonly record struct NativeBooleanResult(int Status, bool Value);
 
-    internal interface ITelemetryQueryApi
+    // Only soft-failing reads use this seam; other telemetry APIs retain their
+    // direct P/Invoke and throwing contracts.
+    internal interface IFailClosedTelemetryQueryApi
     {
         NativePayloadResult GetConsent();
         NativeBooleanResult NeedsConsentPrompt();
         NativePayloadResult GetPolicy();
     }
 
-    private sealed class PInvokeTelemetryQueryApi : ITelemetryQueryApi
+    private sealed class PInvokeFailClosedTelemetryQueryApi : IFailClosedTelemetryQueryApi
     {
         public unsafe NativePayloadResult GetConsent()
         {
@@ -157,27 +160,26 @@ public static class MxcTelemetry
         }
     }
 
-    internal static IDisposable OverrideTelemetryQueryApiForTesting(
-        ITelemetryQueryApi replacement)
+    internal static IDisposable OverrideFailClosedTelemetryQueryApiForTesting(
+        IFailClosedTelemetryQueryApi replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
-        var previous = telemetryQueryApi;
-        telemetryQueryApi = replacement;
-        return new TelemetryQueryApiScope(previous);
+        var previous = Interlocked.Exchange(ref failClosedQueryApi, replacement);
+        return new FailClosedTelemetryQueryApiScope(previous);
     }
 
-    private sealed class TelemetryQueryApiScope(ITelemetryQueryApi previous) : IDisposable
+    private sealed class FailClosedTelemetryQueryApiScope(
+        IFailClosedTelemetryQueryApi previous) : IDisposable
     {
-        private bool disposed;
+        private int disposed;
 
         public void Dispose()
         {
-            if (disposed)
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
             {
                 return;
             }
-            disposed = true;
-            telemetryQueryApi = previous;
+            Interlocked.Exchange(ref failClosedQueryApi, previous);
         }
     }
 
@@ -222,7 +224,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = telemetryQueryApi.GetConsent();
+            var result = failClosedQueryApi.GetConsent();
             if (result.Status != (int)ErrorCode.Success)
             {
                 throw new MxcException(
@@ -398,7 +400,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = telemetryQueryApi.NeedsConsentPrompt();
+            var result = failClosedQueryApi.NeedsConsentPrompt();
             if (result.Status != (int)ErrorCode.Success)
             {
                 ReportFailClosed(
@@ -426,7 +428,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = telemetryQueryApi.GetPolicy();
+            var result = failClosedQueryApi.GetPolicy();
             if (result.Status != (int)ErrorCode.Success)
             {
                 ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)result.Status);
