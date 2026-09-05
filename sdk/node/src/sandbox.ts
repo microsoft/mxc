@@ -11,8 +11,18 @@ import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
-const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
+const SUPPORTED_VERSION = '0.9.0-alpha';
+const REGISTERED_VERSION_VALUES = [
+    '0.6.0-alpha',
+    '0.7.0-alpha',
+    '0.8.0-alpha',
+    '0.9.0-alpha',
+];
+const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
+const REGISTERED_VERSION_ORDER = new Map(
+    REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
+);
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -56,6 +66,41 @@ function validatePolicyVersion(version: string): void {
             `Policy version '${version}' is newer than supported` +
             ` (max: ${supported!.major}.${supported!.minor}.x).` +
             ` Upgrade the SDK.`
+        );
+    }
+    if (!REGISTERED_VERSIONS.has(version)) {
+        throw new Error(
+            `Policy version '${version}' is not a registered schema contract. ` +
+            `Use one of: ${REGISTERED_VERSION_VALUES.join(', ')}.`
+        );
+    }
+}
+
+function validateContainmentVersion(
+    version: string,
+    containment: ContainmentType | ContainmentBackend,
+    platform: NodeJS.Platform,
+): void {
+    const effectiveContainment =
+        containment === 'process' && platform === 'darwin' ? 'seatbelt' : containment;
+    const minimumVersion =
+        effectiveContainment === 'seatbelt'
+            ? '0.7.0-alpha'
+            : effectiveContainment === 'vm' ||
+                effectiveContainment === 'microvm' ||
+                effectiveContainment === 'windows_sandbox' ||
+                effectiveContainment === 'wslc' ||
+                effectiveContainment === 'hyperlight' ||
+                effectiveContainment === 'isolation_session'
+              ? '0.9.0-alpha'
+              : '0.6.0-alpha';
+
+    const versionOrder = REGISTERED_VERSION_ORDER.get(version);
+    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
+    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
+        throw new Error(
+            `Schema ${version} does not support containment '${containment}'; ` +
+            `use schema ${minimumVersion} or later.`
         );
     }
 }
@@ -284,9 +329,10 @@ export function createConfigFromPolicy(
 ): ContainerConfig {
     diagLogVersion();
     validatePolicyVersion(policy.version);
+    const platform = os.platform();
+    validateContainmentVersion(policy.version, containment, platform);
     const directionalNetwork = selectDirectionalNetwork(policy);
 
-    const platform = os.platform();
     const containerId = containerName ?? generateRandomContainerName();
 
     const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;

@@ -309,31 +309,33 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
  * exercisable on a host with no IsolationSession runtime support — gating them
  * on the runtime probe would silently drop that coverage on every such host,
  * which is most of them. They are NOT exercisable against a binary built
- * without the feature: dispatch fails with `unsupported_phase` before reaching
- * those hooks, so the assertions would fail rather than skip.
+ * without the feature: dispatch fails with `unsupported_phase` or
+ * `backend_unavailable` before reaching those hooks, so the assertions would
+ * fail rather than skip.
  *
- * The probe provisions nothing. It sends the empty config the backend must
- * refuse (IsolationSession requires the unrestricted-network acknowledgment at
- * provision), so a feature-present binary answers `policy_validation` having
- * created no session. That refusal is IsolationSession-specific, so this probe
- * is too — there is no generic form to write here.
+ * The probe provisions nothing. It sends a structurally valid request with an
+ * oversized appId that the backend must refuse before touching the OS, so a
+ * feature-present binary answers `policy_validation` having created no
+ * session. That refusal is IsolationSession-specific, so this probe is too —
+ * there is no generic form to write here.
  */
 export async function probeIsolationSessionFeature(): Promise<string | undefined> {
-  // The typed signature makes `network` required at provision, which is exactly
-  // the refusal being provoked, so the config must be passed untyped.
-  type UntypedProvision = (
-    containment: 'isolation_session',
-    config: unknown,
-    options: unknown,
-  ) => Promise<{ sandboxId: SandboxId<'isolation_session'> }>;
-  const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
-
   let provisioned: SandboxId<'isolation_session'>;
   try {
-    const result = await provisionUntyped('isolation_session', {}, { experimental: true });
+    const result = await provisionSandbox(
+      'isolation_session',
+      {
+        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        appId: 'x'.repeat(257),
+      },
+      { experimental: true },
+    );
     provisioned = result.sandboxId;
   } catch (err) {
-    if (err instanceof MxcError && err.code === 'unsupported_phase') {
+    if (
+      err instanceof MxcError &&
+      (err.code === 'unsupported_phase' || err.code === 'backend_unavailable')
+    ) {
       return 'wxc-exec lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
     }
     if (err instanceof MxcError && err.code === 'policy_validation') {
@@ -342,8 +344,9 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
     throw err;
   }
 
-  // Reaching here means the empty config was ACCEPTED — the "respect or refuse"
-  // guarantee itself breaking, which is precisely what the gated tests assert.
+  // Reaching here means the invalid appId was ACCEPTED — the "respect or
+  // refuse" guarantee itself breaking, which is precisely what the gated tests
+  // assert.
   // Clean up the unexpected session and let them run so they report it.
   await safeDeprovision(provisioned);
   return undefined;

@@ -126,6 +126,36 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject an unregistered version within the supported range', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.6.1-alpha' }),
+          { message: /not a registered schema contract/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject a published version for a development-only containment', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'echo hi',
+            { version: '0.6.0-alpha' },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          { message: /does not support containment 'microvm'.*0\.9\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
     it('should reject a newer minor version within same major', () => {
       mockWindows();
       try {
@@ -1110,7 +1140,7 @@ describe('createConfigFromPolicy', () => {
       // real bridge) must get the identical wire config.
       mockLinux();
       try {
-        const policy = {
+        const policy: SandboxPolicy = {
           version: '0.8.0-alpha',
           network: {
             egress: { default: 'deny' as const },

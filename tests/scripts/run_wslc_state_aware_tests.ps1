@@ -502,14 +502,17 @@ try {
         } | Out-Null
     }
 
-    # A7: exec rejects filesystem policy (immutable post-provision).
+    # A7: the exact exec root rejects immutable filesystem policy
+    # structurally. Direct WSLc policy tests retain the backend validation.
     if ($execedOk) {
-        Run-StateAwareTest "A: exec (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "A: exec (filesystem policy rejected structurally)" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_rejected_filesystem.json' -SandboxId $script:sandboxId
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 

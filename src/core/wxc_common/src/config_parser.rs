@@ -13,18 +13,19 @@ use crate::models::{
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-use crate::network_parser::{
-    directional_network_version_error, host_is_any_loopback, parse_network_policy,
-    supports_directional_network, NetworkSections,
-};
+#[cfg(test)]
+use crate::network_parser::{directional_network_version_error, supports_directional_network};
+use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::state_aware_wire::StateAwareWireInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
-use mxc_config_contract::{probe_version, ContractVersion, VersionProbeError};
+use mxc_config_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::{borrow::Cow, fs};
+#[cfg(test)]
+use std::borrow::Cow;
+use std::fs;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -71,6 +72,8 @@ impl ParseError {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(expecting = "a configuration object")]
 struct RequestDiscriminator<'a> {
+    // Exact dispatch uses the contract's phase probe instead.
+    #[cfg(test)]
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
@@ -103,6 +106,7 @@ fn reject_legacy_telemetry_raw(experimental: Option<&str>) -> Result<(), WxcErro
     Ok(())
 }
 
+#[cfg(test)]
 fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcError> {
     if config
         .get("experimental")
@@ -138,6 +142,7 @@ pub struct LoadOptions<'a> {
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
 /// Otherwise `input` is treated as a file path.
+#[cfg(test)]
 pub fn load_request(
     input: &str,
     logger: &mut Logger,
@@ -161,11 +166,8 @@ pub fn load_request(
     result
 }
 
-/// Parse a one-shot request from a **raw JSON string** (already decoded — not
-/// a file path or base64). For executors that decode the request once and
-/// thread the JSON string through both the maintenance-probe check and this
-/// loader, avoiding the double-read that would otherwise drain named pipes,
-/// `/dev/stdin`, and process-substitution paths.
+/// Rolling one-shot raw-JSON loader retained only for characterization tests.
+#[cfg(test)]
 pub fn load_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -180,9 +182,8 @@ pub fn load_request_from_json(
     )
 }
 
-/// Options-aware variant of [`load_request_from_json`]. It remains
-/// crate-private because the options are only needed by the executor's
-/// request-loading paths.
+/// Options-aware rolling loader retained only for characterization tests.
+#[cfg(test)]
 pub(crate) fn load_request_from_json_with_options(
     json_str: &str,
     logger: &mut Logger,
@@ -221,6 +222,7 @@ pub(crate) fn load_request_from_json_with_options(
 /// serialise → base64 → decode → re-parse it.
 ///
 /// [`Value`]: serde_json::Value
+#[cfg(test)]
 pub fn load_request_from_value(
     config: serde_json::Value,
     logger: &mut Logger,
@@ -286,7 +288,17 @@ fn exact_version_error(error: VersionProbeError) -> ParseError {
         VersionProbeError::InvalidDeclaration(source) => {
             format!("Invalid version declaration: {source}")
         }
-        VersionProbeError::UnsupportedVersion(_) => "Unsupported version".to_string(),
+        VersionProbeError::UnsupportedVersion(_) => {
+            let supported = supported_versions()
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Unsupported contract version. \
+                 Registered versions are: {supported}"
+            )
+        }
     };
     ParseError::Decode(WxcError::ConfigParse(message))
 }
@@ -384,6 +396,15 @@ fn deserialize_development_request(
 
 fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
+    let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json)
+        .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
+    if let Err(error) = reject_legacy_telemetry_raw(discriminator.experimental.map(RawValue::get)) {
+        return Err(if phase.is_some() {
+            ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+        } else {
+            ParseError::OneShot(error)
+        });
+    }
     let state_aware = phase.is_some();
     let request = deserialize_development_request(json, phase)?;
     let adapted =
@@ -412,7 +433,6 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     match probe_version(json).map_err(exact_version_error)? {
         ContractVersion::V0_6_0Alpha => parse_exact_published_one_shot(
@@ -452,6 +472,34 @@ pub fn load_mxc_request(
     )
 }
 
+/// Loads an exact-versioned one-shot request from a file or base64 input.
+///
+/// State-aware lifecycle documents are rejected because this entry point is
+/// intended for executors that only support run-to-completion requests.
+pub fn load_one_shot_request(
+    input: &str,
+    logger: &mut Logger,
+    is_base64: bool,
+) -> Result<ExecutionRequest, WxcError> {
+    let result = (|| {
+        let json = decode_request_input(input, is_base64)?;
+        match parse_exact_mxc_request_json(&json, logger) {
+            Ok(MxcRequest::OneShot(request)) => Ok(request),
+            Ok(MxcRequest::StateAware(_)) => Err(WxcError::ConfigParse(
+                "expected a one-shot request, got a state-aware lifecycle request".to_string(),
+            )),
+            Err(
+                ParseError::Decode(error)
+                | ParseError::OneShot(error)
+                | ParseError::OneShotMalformed(error),
+            ) => Err(error),
+            Err(ParseError::StateAware(error)) => Err(WxcError::ConfigParse(error.to_string())),
+        }
+    })();
+    log_one_shot_error(logger, &result);
+    result
+}
+
 /// Options-aware variant of [`load_mxc_request`]. When
 /// `LoadOptions::cli_command` is non-empty, it is rendered for the request's
 /// backend and spliced into `process.commandLine` before parsing, so the
@@ -477,6 +525,13 @@ pub fn load_mxc_request_with_options(
 /// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
 /// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
 /// in-memory JSON string can be parsed directly.
+///
+/// This loader enforces exact registered contracts. The legacy rolling raw-JSON
+/// loader is not available in production builds:
+///
+/// ```compile_fail
+/// use wxc_common::config_parser::load_request_from_json;
+/// ```
 pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -518,11 +573,11 @@ fn parse_mxc_request_json_with_cli(
     cli_command: &[String],
 ) -> Result<MxcRequest, ParseError> {
     if cli_command.is_empty() {
-        return parse_mxc_request_json(json_str, logger);
+        return parse_exact_mxc_request_json(json_str, logger);
     }
 
     let (json_str, override_log) = apply_cli_command(json_str, cli_command)?;
-    let request = parse_mxc_request_json(&json_str, logger)?;
+    let request = parse_exact_mxc_request_json(&json_str, logger)?;
     if let Some(message) = override_log {
         logger.log_line(&message);
     }
@@ -537,18 +592,29 @@ fn parse_mxc_request_json_with_cli(
 /// text and output routing rather than inheriting a probe's stricter, and
 /// differently routed, diagnostic.
 ///
-/// Probing the phase first is load-bearing: it selects which [`ParseError`]
-/// variant a later failure uses, and that selects the stdout envelope versus
-/// the stderr diagnostic.
+/// The exact version is resolved before the lifecycle discriminator. Published
+/// contracts do not define `phase`, so a stray phase field must remain a
+/// published one-shot contract error even when a CLI command is supplied.
 ///
 /// [`load_mxc_request_with_options`] calls this only after confirming that
 /// `LoadOptions::cli_command` is non-empty. The explicit empty-command
 /// rejection remains defensive for direct internal callers and future call
 /// sites rather than relying solely on that upstream guard.
 fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<String>), ParseError> {
-    // An unreadable phase declaration is the parser's to report.
-    let Ok(phase) = probe_phase(json) else {
+    // An unreadable or unsupported version declaration is the parser's to
+    // report without the CLI path reclassifying the request.
+    let Ok(version) = probe_version(json) else {
         return Ok((json.to_string(), None));
+    };
+    let phase = if version == ContractVersion::V0_9_0Alpha {
+        // An unreadable phase declaration is likewise the exact parser's to
+        // report through the development contract.
+        let Ok(phase) = probe_phase(json) else {
+            return Ok((json.to_string(), None));
+        };
+        phase
+    } else {
+        None
     };
 
     let Some(command_source) = crate::splice::CommandSource::parse(json) else {
@@ -609,6 +675,7 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
 /// Borrows only the discriminator and the raw state-aware backend block, then
 /// deserialises the typed model directly from source text so policy errors
 /// retain line and column information (`serde_json::Value` would discard it).
+#[cfg(test)]
 fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
@@ -642,11 +709,13 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
     }
 }
 
+#[cfg(test)]
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
     validate_telemetry_field_version(config)
 }
 
+#[cfg(test)]
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -674,6 +743,7 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -1783,6 +1853,7 @@ fn convert_wire_config(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_rolling_state_aware_wire_input(
     json: &str,
     experimental: Option<&RawValue>,
@@ -1820,6 +1891,7 @@ pub(crate) fn parse_rolling_state_aware_wire_input(
     })
 }
 
+#[cfg(test)]
 fn convert_wire_state_aware(
     json: &str,
     experimental: Option<&RawValue>,
@@ -1979,6 +2051,7 @@ fn normalize_state_aware(
 /// checks below make that invariant explicit and fail closed if a future caller
 /// ever passes a `raw` not borrowed from `json` (unreachable on the normal
 /// parser path).
+#[cfg(test)]
 fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), WxcError> {
     let locate_err = || {
         WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
@@ -2005,6 +2078,7 @@ fn mask_state_aware_experimental<'a>(
     mask_state_aware_experimental_with_span(json, experimental, span)
 }
 
+#[cfg(test)]
 fn mask_state_aware_experimental_with_span<'a>(
     json: &'a str,
     experimental: Option<&str>,
@@ -2184,6 +2258,35 @@ mod tests {
         }
     }
 
+    fn assert_exact_published_requests_equivalent(
+        case: &str,
+        expected_version: &str,
+        canonical_json: &str,
+        alias_json: &str,
+    ) {
+        let canonical = parse_exact_for_test(canonical_json)
+            .unwrap_or_else(|error| panic!("{case}: canonical request failed: {error:?}"));
+        let alias = parse_exact_for_test(alias_json)
+            .unwrap_or_else(|error| panic!("{case}: alias request failed: {error:?}"));
+
+        for request in [&canonical, &alias] {
+            match request {
+                MxcRequest::OneShot(request) => {
+                    assert_eq!(request.schema_version, expected_version, "{case}");
+                }
+                MxcRequest::StateAware(_) => {
+                    panic!("{case}: expected one-shot request");
+                }
+            }
+        }
+
+        assert_eq!(
+            RequestSnapshot::from(&canonical),
+            RequestSnapshot::from(&alias),
+            "{case}: alias changed the runtime request"
+        );
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ErrorRoute {
         Decode,
@@ -2347,6 +2450,18 @@ mod tests {
         }
     }
 
+    fn same_parse_outcome(left: &ParserSnapshot, right: &ParserSnapshot) -> bool {
+        match (left, right) {
+            (ParserSnapshot::Accepted(left), ParserSnapshot::Accepted(right)) => {
+                left.request == right.request
+            }
+            (ParserSnapshot::Rejected(left), ParserSnapshot::Rejected(right)) => {
+                left.diagnostic == right.diagnostic
+            }
+            _ => false,
+        }
+    }
+
     fn parse_both(json: &str) -> (ParserSnapshot, ParserSnapshot) {
         let mut rolling_logger = test_logger();
         let rolling_result = parse_mxc_request_json(json, &mut rolling_logger);
@@ -2490,7 +2605,7 @@ mod tests {
     ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
         let entries = [
             (
-                "tests/configs/isolation_session_configid_ignored.json",
+                "tests/configs/isolation_session_configid_rejected.json",
                 ExpectedCorpusDivergence {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
@@ -2500,7 +2615,7 @@ mod tests {
                 },
             ),
             (
-                "tests/configs/isolation_session_one_shot_stray_config_ignored.json",
+                "tests/configs/isolation_session_one_shot_stray_config_rejected.json",
                 ExpectedCorpusDivergence {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
@@ -2660,7 +2775,7 @@ mod tests {
                         path: None,
                         line: None,
                         column: None,
-                        message_contains: &["Unsupported version"],
+                        message_contains: &["Unsupported contract version"],
                     },
                     reason: "Exact routing rejects an unregistered declaration before the rolling parser formats its supported-range diagnostic.",
                 },
@@ -3326,6 +3441,63 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn load_mxc_request_uses_exact_dispatch_for_file_and_base64_inputs() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hello"},
+            "experimental": {}
+        }"#;
+        assert!(
+            parse_mxc_request_json(json, &mut test_logger()).is_ok(),
+            "the route-proof input must remain valid under the rolling parser"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact-route-proof.json");
+        fs::write(&path, json).unwrap();
+
+        let file_error =
+            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err();
+        let encoded = base64_encode(json.as_bytes());
+        let base64_error = load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err();
+        let exact_error = parse_exact_for_test(json).unwrap_err();
+
+        let file_diagnostic = DiagnosticSnapshot::from(&file_error);
+        let base64_diagnostic = DiagnosticSnapshot::from(&base64_error);
+        let exact_diagnostic = DiagnosticSnapshot::from(&exact_error);
+
+        assert_eq!(file_diagnostic, exact_diagnostic);
+        assert_eq!(base64_diagnostic, exact_diagnostic);
+        assert_eq!(exact_diagnostic.route, ErrorRoute::OneShot);
+        assert!(exact_diagnostic
+            .message
+            .contains("unknown field `experimental`"));
+    }
+
+    #[test]
+    fn one_shot_loader_uses_exact_dispatch_and_rejects_lifecycle_requests() {
+        let one_shot = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let encoded = base64_encode(one_shot.as_bytes());
+        let request = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap();
+        assert_eq!(request.schema_version, "0.8.0-alpha");
+        assert_eq!(request.script_code, "echo hello");
+
+        let state_aware = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "start",
+            "sandboxId": "wsb:abcd1234"
+        }"#;
+        let encoded = base64_encode(state_aware.as_bytes());
+        let error = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("expected a one-shot request, got a state-aware lifecycle request"));
+    }
+
     fn classified_divergence_cases() -> [DivergenceCase; 14] {
         [
             DivergenceCase {
@@ -3939,6 +4111,16 @@ mod tests {
                 });
 
             let (rolling, exact) = parse_both(&json);
+            let mut public_logger = test_logger();
+            let public = snapshot(
+                load_mxc_request_from_json(&json, &mut public_logger),
+                &public_logger,
+            );
+            if !same_parse_outcome(&public, &exact) {
+                blockers.push(format!(
+                    "{relative}: public exact dispatch differs from the exact parser oracle\npublic={public:?}\nexact={exact:?}"
+                ));
+            }
             match (&rolling, &exact) {
                 (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
                     equivalent_accepts += 1;
@@ -4071,7 +4253,7 @@ mod tests {
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
             (282, 266, 9),
-            "the Phase 8 corpus inventory changed; regenerate the migration report and explain the delta"
+            "the migration corpus inventory changed; regenerate the migration report and explain the delta"
         );
     }
 
@@ -4098,6 +4280,223 @@ mod tests {
                     panic!("{version}: expected one-shot request")
                 }
             }
+        }
+    }
+
+    #[test]
+    fn exact_published_parser_preserves_compatibility_alias_equivalence() {
+        for (
+            case,
+            version,
+            canonical_containment,
+            canonical_fields,
+            alias_containment,
+            alias_fields,
+        ) in [
+            (
+                "v0.6 ProcessContainer containment",
+                "0.6.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.6 ProcessContainer section",
+                "0.6.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.7 ProcessContainer containment",
+                "0.7.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.7 ProcessContainer section",
+                "0.7.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.7 Seatbelt containment",
+                "0.7.0-alpha",
+                "seatbelt",
+                "",
+                "macos_sandbox",
+                "",
+            ),
+            (
+                "v0.7 Seatbelt section",
+                "0.7.0-alpha",
+                "seatbelt",
+                r#",
+                    "seatbelt": {
+                        "guiAccess": true
+                    }"#,
+                "seatbelt",
+                r#",
+                    "macos_sandbox": {
+                        "guiAccess": true
+                    }"#,
+            ),
+            (
+                "v0.8 ProcessContainer containment",
+                "0.8.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.8 ProcessContainer section",
+                "0.8.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.8 Seatbelt containment",
+                "0.8.0-alpha",
+                "seatbelt",
+                "",
+                "macos_sandbox",
+                "",
+            ),
+            (
+                "v0.8 Seatbelt section",
+                "0.8.0-alpha",
+                "seatbelt",
+                r#",
+                    "seatbelt": {
+                        "guiAccess": true
+                    }"#,
+                "seatbelt",
+                r#",
+                    "macos_sandbox": {
+                        "guiAccess": true
+                    }"#,
+            ),
+        ] {
+            let canonical_json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "containment": "{canonical_containment}",
+                    "process": {{"commandLine": "echo hello"}}{canonical_fields}
+                }}"#
+            );
+            let alias_json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "containment": "{alias_containment}",
+                    "process": {{"commandLine": "echo hello"}}{alias_fields}
+                }}"#
+            );
+
+            assert_exact_published_requests_equivalent(case, version, &canonical_json, &alias_json);
+        }
+    }
+
+    #[test]
+    fn exact_parser_rejects_unregistered_nearby_versions_without_fallback() {
+        for version in [
+            "0.6.0",
+            "0.6.1-alpha",
+            "0.8.0-dev",
+            "0.9.0",
+            "0.9.1-alpha",
+            "0.10.0-alpha",
+        ] {
+            let json = format!(
+                r#"{{
+                "version": "{version}",
+                "process": {{"commandLine": "echo hello"}}
+            }}"#
+            );
+
+            let error = parse_exact_for_test(&json).unwrap_err();
+            assert!(
+                matches!(error, ParseError::Decode(_)),
+                "{version}: got {error:?}"
+            );
+            assert!(
+                error.message().contains("Unsupported contract version"),
+                "{version}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_parser_does_not_fallback_to_later_contracts() {
+        for (case, json, expected_message) in [
+            (
+                "v0.6 rejects a v0.7 annotation",
+                r#"{
+                    "version": "0.6.0-alpha",
+                    "_comment": "introduced in v0.7",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+                "unknown field `_comment`",
+            ),
+            (
+                "v0.7 rejects v0.8 directional networking",
+                r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"},
+                    "network": {"egress": {"default": "deny"}}
+                }"#,
+                "unknown field `egress`",
+            ),
+            (
+                "v0.8 rejects the v0.9 experimental block",
+                r#"{
+                    "version": "0.8.0-alpha",
+                    "process": {"commandLine": "echo hello"},
+                    "experimental": {}
+                }"#,
+                "unknown field `experimental`",
+            ),
+        ] {
+            let error = parse_exact_for_test(json).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{case}: {error:?}");
+            assert!(
+                error.message().contains(expected_message),
+                "{case}: expected {expected_message:?}, got {}",
+                error.message()
+            );
         }
     }
 
@@ -4285,6 +4684,16 @@ mod tests {
                     !error.message().contains("99.99.99-secret"),
                     "unsupported user input must not be rendered"
                 );
+                for version in supported_versions() {
+                    assert!(
+                        error.message().contains(version.as_str()),
+                        "missing registered version {}: {}",
+                        version.as_str(),
+                        error.message()
+                    );
+                }
+                assert!(!error.message().contains("older than supported"));
+                assert!(!error.message().contains("newer than supported"));
             }
         }
     }
@@ -4485,6 +4894,23 @@ mod tests {
     }
 
     #[test]
+    fn exact_development_parser_preserves_typed_error_path_and_sanitizes_diagnostics() {
+        let json = "{\n  \"version\": \"0.9.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
+
+        let error = parse_exact_for_test(json).unwrap_err();
+        assert!(matches!(error, ParseError::StateAware(_)));
+        let message = error.message();
+        assert!(message.contains("network.defaultPolicy"), "{message}");
+        assert!(message.contains("line 5"), "{message}");
+
+        let spoofed =
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo"},"bad\u202ename":true}"#;
+        let error = parse_exact_for_test(spoofed).unwrap_err();
+        let message = error.message();
+        assert!(message.contains(r"bad\u{202e}name"), "{message}");
+    }
+
+    #[test]
     fn exact_contract_bridge_accepts_every_registered_one_shot_version() {
         let v0_6 = serde_json::from_str::<mxc_config_contract::published::v0_6_0_alpha::Request>(
             r#"{
@@ -4662,7 +5088,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_preserves_rolling_only_validation_diagnostics() {
+    fn rolling_parser_preserves_legacy_state_aware_validation_diagnostics() {
         for (case, json, expected) in [
             (
                 "containment on a non-provision phase",
@@ -4704,7 +5130,7 @@ mod tests {
                 "Multiple containment backends configured",
             ),
         ] {
-            let error = match load_mxc(json) {
+            let error = match parse_mxc_request_json(json, &mut test_logger()) {
                 Err(ParseError::StateAware(error)) => error,
                 other => panic!("{case}: expected state-aware error, got {other:?}"),
             };
@@ -4751,7 +5177,7 @@ mod tests {
     #[test]
     fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
             "process": {"commandLine": "echo hi"},
@@ -4796,7 +5222,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_characterizes_every_state_aware_phase_and_provision_backend() {
+    fn exact_loader_accepts_every_development_state_aware_root() {
         for (
             case,
             json,
@@ -4808,7 +5234,7 @@ mod tests {
         ) in [
             (
                 "windows sandbox provision",
-                r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 Phase::Provision,
                 Some(ContainmentBackend::WindowsSandbox),
                 ContainmentBackend::WindowsSandbox,
@@ -4817,7 +5243,7 @@ mod tests {
             ),
             (
                 "isolation session provision",
-                r#"{"phase":"provision","containment":"isolation_session"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
                 Phase::Provision,
                 Some(ContainmentBackend::IsolationSession),
                 ContainmentBackend::IsolationSession,
@@ -4826,7 +5252,7 @@ mod tests {
             ),
             (
                 "wslc provision",
-                r#"{"phase":"provision","containment":"wslc"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
                 Phase::Provision,
                 Some(ContainmentBackend::Wslc),
                 ContainmentBackend::Wslc,
@@ -4835,7 +5261,7 @@ mod tests {
             ),
             (
                 "start",
-                r#"{"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
                 Phase::Start,
                 None,
                 ContainmentBackend::WindowsSandbox,
@@ -4844,7 +5270,7 @@ mod tests {
             ),
             (
                 "exec",
-                r#"{"phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hi"}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hi"}}"#,
                 Phase::Exec,
                 None,
                 ContainmentBackend::Wslc,
@@ -4853,7 +5279,7 @@ mod tests {
             ),
             (
                 "stop",
-                r#"{"phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
                 Phase::Stop,
                 None,
                 ContainmentBackend::IsolationSession,
@@ -4862,7 +5288,7 @@ mod tests {
             ),
             (
                 "deprovision",
-                r#"{"phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
                 Phase::Deprovision,
                 None,
                 ContainmentBackend::Wslc,
@@ -4893,12 +5319,17 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_characterizes_raw_experimental_and_stable_telemetry() {
+    fn exact_loader_preserves_development_experimental_telemetry_and_source_text() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {
                 "enabled": true
+            },
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
             },
             "experimental": {
                 "isolation_session": {
@@ -4936,8 +5367,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_characterizes_post_provision_network_presence() {
-        let omitted = load_state_aware(r#"{"phase":"start","sandboxId":"wslc:abcd1234"}"#);
+    fn exact_loader_preserves_post_provision_network_presence() {
+        let omitted = load_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wslc:abcd1234"}"#,
+        );
         assert!(!omitted.request.policy.network_specified);
         assert!(!omitted.request.policy.network_mode_specified);
         assert!(omitted.request.policy.network_egress.is_none());
@@ -4946,6 +5379,7 @@ mod tests {
 
         let proxy_only = load_state_aware(
             r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
@@ -4958,6 +5392,7 @@ mod tests {
 
         let mode = load_state_aware(
             r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
@@ -4975,7 +5410,7 @@ mod tests {
 
     #[test]
     fn cli_command_supplies_a_missing_one_shot_command_line() {
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"cwd":"C:\\tmp"}}"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => {
                 assert_eq!(req.script_code, "app.exe --flag");
@@ -4987,7 +5422,7 @@ mod tests {
 
     #[test]
     fn cli_command_supplies_an_absent_one_shot_process_block() {
-        let json = r#"{"containment": "processcontainer"}"#;
+        let json = r#"{"version":"0.9.0-alpha","containment":"processcontainer"}"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => assert_eq!(req.script_code, "app.exe --flag"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -4997,6 +5432,7 @@ mod tests {
     #[test]
     fn cli_command_supplies_a_missing_state_aware_exec_command_line() {
         let json = r#"{
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "iso:abcd1234",
         "process": {"cwd": "C:\\tmp"}
@@ -5014,6 +5450,7 @@ mod tests {
     #[test]
     fn cli_command_replaces_a_state_aware_exec_command_line() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"commandLine": "policy.exe", "cwd": "C:\\tmp"}
@@ -5034,6 +5471,7 @@ mod tests {
             (
                 "process",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {"commandLine": "first.exe"},
@@ -5043,6 +5481,7 @@ mod tests {
             (
                 "commandLine",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {
@@ -5054,6 +5493,7 @@ mod tests {
             (
                 "_comment",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {"commandLine": "policy.exe"},
@@ -5083,6 +5523,7 @@ mod tests {
             (
                 "replacement",
                 r#"{
+                "version":"0.9.0-alpha",
                 "phase":"exec",
                 "sandboxId":"iso:abcd1234",
                 "process":{"commandLine":"x","cwd":42}
@@ -5092,6 +5533,7 @@ mod tests {
             (
                 "insertion",
                 r#"{
+                "version":"0.9.0-alpha",
                 "phase":"exec",
                 "sandboxId":"iso:abcd1234",
                 "process":{"cwd":42}
@@ -5154,7 +5596,8 @@ mod tests {
     #[test]
     fn cli_command_preserves_invalid_command_line_type_errors() {
         for value in ["42", "true", "[]", "{}"] {
-            let json = format!(r#"{{"process":{{"commandLine":{value}}}}}"#);
+            let json =
+                format!(r#"{{"version":"0.9.0-alpha","process":{{"commandLine":{value}}}}}"#);
 
             assert!(load_mxc(&json).is_err(), "sanity: commandLine={value}");
             assert!(
@@ -5169,15 +5612,19 @@ mod tests {
         for (case, json, command) in [
             (
                 "longer replacement",
-                r#"{"process":{"commandLine":"x","cwd":42}}"#,
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x","cwd":42}}"#,
                 argv(&["a-much-longer-command.exe"]),
             ),
             (
                 "shorter replacement",
-                r#"{"process":{"commandLine":"a-much-longer-policy-command.exe","cwd":42}}"#,
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"a-much-longer-policy-command.exe","cwd":42}}"#,
                 argv(&["x"]),
             ),
-            ("insertion", r#"{"process":{"cwd":42}}"#, argv(&["cli.exe"])),
+            (
+                "insertion",
+                r#"{"version":"0.9.0-alpha","process":{"cwd":42}}"#,
+                argv(&["cli.exe"]),
+            ),
         ] {
             let (effective_json, _) =
                 apply_cli_command(json, &command).expect("command preparation");
@@ -5194,7 +5641,7 @@ mod tests {
 
     #[test]
     fn cli_command_render_error_precedes_an_unrelated_one_shot_policy_error() {
-        let json = r#"{"process":{"commandLine":"policy.exe","cwd":42}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe","cwd":42}}"#;
         let error = load_mxc_with_cli(json, &argv(&["cli.exe", "hidden\0payload"]))
             .expect_err("command rendering should fail before typed policy validation");
 
@@ -5211,12 +5658,12 @@ mod tests {
         for (case, json, expected_code) in [
             (
                 "missing sandbox id",
-                r#"{"phase":"exec","process":{"commandLine":42}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"exec","process":{"commandLine":42}}"#,
                 MxcErrorCode::MalformedRequest,
             ),
             (
                 "unsupported sandbox id",
-                r#"{"phase":"exec","sandboxId":"zzz:abcd","process":{"commandLine":42}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"zzz:abcd","process":{"commandLine":42}}"#,
                 MxcErrorCode::UnsupportedContainment,
             ),
         ] {
@@ -5236,14 +5683,14 @@ mod tests {
     fn missing_command_line_is_rejected_without_a_cli_command() {
         // Sanity: without the flag, the legacy contract holds — missing
         // commandLine is a hard parse error.
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process": {"cwd": "C:\\tmp"}}"#;
         assert!(load_mxc_with_cli(json, &[]).is_err());
     }
 
     #[test]
     fn apply_cli_command_returns_override_log_for_a_one_shot_replacement() {
         let (out, override_log) = apply_cli_command(
-            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap();
@@ -5259,7 +5706,7 @@ mod tests {
     #[test]
     fn apply_cli_command_returns_no_override_log_when_the_policy_had_no_command() {
         let (out, override_log) = apply_cli_command(
-            r#"{"process":{"cwd":"/usr/tmp"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"cwd":"/usr/tmp"}}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap();
@@ -5272,6 +5719,7 @@ mod tests {
     #[test]
     fn cli_command_does_not_log_override_when_the_effective_policy_is_invalid() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy.exe",
                 "cwd": 42
@@ -5309,7 +5757,8 @@ mod tests {
             // wslc -> Wslc -> PosixShell
             ("wslc:abcd1234", "app.exe 'a&b'"),
         ] {
-            let json = format!(r#"{{"phase":"exec","sandboxId":"{sandbox_id}"}}"#);
+            let json =
+                format!(r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}"}}"#);
             let (out, override_log) = apply_cli_command(&json, &argv(&["app.exe", "a&b"])).unwrap();
 
             let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -5324,7 +5773,7 @@ mod tests {
     #[test]
     fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
         let err = apply_cli_command(
-            r#"{"phase":"start","sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
             &argv(&["echo", "hi"]),
         )
         .unwrap_err();
@@ -5332,9 +5781,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_command_does_not_reclassify_a_published_contract_as_state_aware() {
+        let json = r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#;
+
+        let without_cli = load_mxc(json).unwrap_err();
+        let with_cli = load_mxc_with_cli(json, &argv(&["echo", "hi"])).unwrap_err();
+
+        assert!(matches!(without_cli, ParseError::OneShot(_)));
+        assert!(matches!(with_cli, ParseError::OneShot(_)));
+        assert_eq!(with_cli.message(), without_cli.message());
+    }
+
+    #[test]
     fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
         let err = apply_cli_command(
-            r#"{"phase":"exec","sandboxId":"zzz:abcd"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"zzz:abcd"}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap_err();
@@ -5349,9 +5810,9 @@ mod tests {
         // ({"process":42}). Assert the output is byte-identical to the input.
 
         for json in [
-            r#"{"phase":null,"sandboxId":"iso:abcd1234"}"#,
-            r#"{"containment":"nope"}"#,
-            r#"{"process":42}"#,
+            r#"{"version":"0.9.0-alpha","phase":null,"sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","containment":"nope"}"#,
+            r#"{"version":"0.9.0-alpha","process":42}"#,
         ] {
             let (out, override_log) =
                 apply_cli_command(json, &argv(&["app.exe", "--flag"])).unwrap();
@@ -5362,8 +5823,11 @@ mod tests {
 
     #[test]
     fn apply_cli_command_rejects_an_empty_argv() {
-        let err =
-            apply_cli_command(r#"{"process":{"commandLine":"policy.exe"}}"#, &[]).unwrap_err();
+        let err = apply_cli_command(
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
+            &[],
+        )
+        .unwrap_err();
         assert!(matches!(err, ParseError::Decode(_)));
     }
 
@@ -5372,7 +5836,7 @@ mod tests {
         // A null byte fails argv rendering, which is an entry-point error
         // rather than a parse error: the document is never spliced.
         let err = apply_cli_command(
-            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
             &argv(&["app.exe", "hidden\0payload"]),
         )
         .unwrap_err();
@@ -5388,7 +5852,7 @@ mod tests {
     #[test]
     fn apply_cli_command_routes_an_unconvertible_state_aware_exec_command_to_an_envelope() {
         let err = apply_cli_command(
-            r#"{"phase":"exec","sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"iso:abcd1234"}"#,
             &argv(&["app.exe", "hidden\0payload"]),
         )
         .unwrap_err();
@@ -5403,7 +5867,7 @@ mod tests {
 
     #[test]
     fn one_shot_routes_via_load_mxc_request() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#;
         match load_mxc(json).unwrap() {
             MxcRequest::OneShot(req) => assert_eq!(req.script_code, "echo hello"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -5411,13 +5875,13 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_provision_request_routes_to_state_aware_arm() {
+    fn rolling_parser_routes_isolation_session_provision_to_state_aware_arm() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
             "filesystem": {"readwritePaths": ["C:\\workspace"]}
         }"#;
-        match load_mxc(json).unwrap() {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Provision);
                 assert_eq!(p.containment, Some(ContainmentBackend::IsolationSession));
@@ -5432,7 +5896,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_start_request_carries_sandbox_id_and_experimental() {
+    fn rolling_parser_preserves_state_aware_backend_payload() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
@@ -5440,7 +5904,7 @@ mod tests {
                 "isolation_session": {"start": {"opaqueFutureField": true}}
             }
         }"#;
-        match load_mxc(json).unwrap() {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Start);
                 assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
@@ -5468,6 +5932,10 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": true},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "experimental": {"isolation_session": {"provision": {}}}
         }"#;
         match load_mxc(json).unwrap() {
@@ -5482,7 +5950,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_telemetry_rejects_pre_09_schema_version() {
+    fn state_aware_request_rejects_published_contract_version() {
         let error = load_mxc(
             r#"{
                 "version": "0.8.0-alpha",
@@ -5492,22 +5960,17 @@ mod tests {
             }"#,
         )
         .unwrap_err();
-        assert!(
-            error
-                .message()
-                .contains("telemetry' requires config schema version 0.9.0-alpha"),
-            "got {error:?}"
-        );
+        assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
     }
 
     #[test]
-    fn state_aware_without_telemetry_leaves_typed_field_unset() {
+    fn rolling_parser_leaves_telemetry_unset_for_backend_only_payload() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
-        match load_mxc(json).unwrap() {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -5518,6 +5981,7 @@ mod tests {
         // A present-but-malformed telemetry block is a client error rejected at
         // parse time (surfaced as a state-aware envelope), not a silent disable.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": 42
@@ -5534,6 +5998,7 @@ mod tests {
         for phase in ["start", "exec", "stop", "deprovision"] {
             let json = format!(
                 r#"{{
+                    "version": "0.9.0-alpha",
                     "phase": "{phase}",
                     "sandboxId": "iso:abcd1234",
                     "containment": "wslc",
@@ -5564,18 +6029,21 @@ mod tests {
                     {extra}
                 }}"#
             );
-            assert!(matches!(load_mxc(&json), Err(ParseError::StateAware(_))));
+            assert!(matches!(
+                parse_mxc_request_json(&json, &mut test_logger()),
+                Err(ParseError::StateAware(_))
+            ));
         }
     }
 
     #[test]
-    fn state_aware_v08_omitted_network_remains_absent_after_parsing() {
+    fn rolling_state_aware_v08_omitted_network_remains_absent_after_parsing() {
         let json = r#"{
             "version": "0.8.0-alpha",
             "phase": "start",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
         }"#;
-        let parsed = match load_mxc(json).unwrap() {
+        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(parsed) => parsed,
             MxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
@@ -5587,7 +6055,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
+    fn rolling_state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
         let json = r#"{
             "version": "0.8.0-alpha",
             "phase": "exec",
@@ -5595,7 +6063,7 @@ mod tests {
             "runtimeConfig": {"networkProxy": "http://127.0.0.1:8888"},
             "process": {"commandLine": "echo hi"}
         }"#;
-        let parsed = match load_mxc(json).unwrap() {
+        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(parsed) => parsed,
             MxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
@@ -5606,22 +6074,23 @@ mod tests {
     }
 
     /// Parse a provision request and return the resolved cross-cutting policy.
-    fn provision_policy(network_json: &str) -> ContainerPolicy {
+    fn rolling_provision_policy(network_json: &str) -> ContainerPolicy {
         let json = format!(
             r#"{{
+                "version": "0.9.0-alpha",
                 "phase": "provision",
                 "containment": "processcontainer",
                 "network": {network_json}
             }}"#
         );
-        match load_mxc(&json).unwrap() {
+        match parse_mxc_request_json(&json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(p) => p.request.policy,
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
     #[test]
-    fn state_aware_network_mode_specified_true_for_each_mode_field() {
+    fn rolling_parser_sets_state_aware_network_mode_presence() {
         // Every network *mode* field (everything except `proxy`) must flip the
         // presence bit so post-provision phases can reject an immutable-posture
         // change by presence.
@@ -5632,7 +6101,7 @@ mod tests {
             r#"{"allowedHosts": ["example.com"]}"#,
             r#"{"blockedHosts": ["example.com"]}"#,
         ] {
-            let policy = provision_policy(net);
+            let policy = rolling_provision_policy(net);
             assert!(
                 policy.network_mode_specified,
                 "network {net} should set network_mode_specified"
@@ -5642,11 +6111,11 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_proxy_only_block_leaves_network_mode_unspecified() {
+    fn rolling_parser_keeps_proxy_only_network_mode_unspecified() {
         // A proxy-only block sets `network_specified` (the block is present) but
         // NOT `network_mode_specified`, so the cooperative proxy stays honourable
         // at exec while no immutable mode change is falsely detected.
-        let policy = provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
+        let policy = rolling_provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
         assert!(policy.network_specified);
         assert!(
             !policy.network_mode_specified,
@@ -5662,6 +6131,7 @@ mod tests {
         // `load_mxc_request` wrapper), never duplicated, and must never touch the
         // primary buffer/stdout that the state-aware JSON envelope owns.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": 42
@@ -5687,7 +6157,9 @@ mod tests {
 
         let logged = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(
-            logged.matches("telemetry").count(),
+            logged
+                .matches("invalid type: integer `42`, expected struct Telemetry")
+                .count(),
             1,
             "expected exactly one auxiliary diagnostic, got: {logged:?}"
         );
@@ -5696,6 +6168,7 @@ mod tests {
     #[test]
     fn state_aware_experimental_telemetry_reports_migration() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"telemetry": {"enabled": true}}
@@ -5712,7 +6185,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_non_object_experimental_is_rejected() {
+    fn rolling_parser_rejects_non_object_state_aware_experimental() {
         // A non-object `experimental` (here a bare number) is a hard parse error
         // on the one-shot path (typed `Option<Experimental>`); the state-aware
         // path peels `experimental` off before typed deserialize, so it must
@@ -5723,21 +6196,19 @@ mod tests {
             "sandboxId": "iso:abcd1234",
             "experimental": 42
         }"#;
-        let r = load_mxc(json);
+        let r = parse_mxc_request_json(json, &mut test_logger());
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
-    fn state_aware_null_experimental_is_accepted() {
-        // `null` maps to "absent" on both the one-shot and state-aware paths, so
-        // it is accepted (leaving telemetry unset), unlike a non-object value.
+    fn rolling_parser_treats_null_state_aware_experimental_as_absent() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": null
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            MxcRequest::StateAware(parsed) => assert!(parsed.request.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
@@ -5813,6 +6284,7 @@ mod tests {
     #[test]
     fn state_aware_exec_request_requires_command_line() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"commandLine": "echo hello"}
@@ -5829,35 +6301,39 @@ mod tests {
     #[test]
     fn state_aware_exec_without_process_is_rejected() {
         // Exec phase still requires the process.commandLine wire field.
-        let json = r#"{ "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234"
+        }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
-        let json = r#"{"phase": "teleport"}"#;
+        let json = r#"{"version":"0.9.0-alpha","phase":"teleport"}"#;
         let error = match load_mxc(json) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
-        assert!(error.message.contains("Invalid configuration at `phase`"));
-        assert!(error.message.contains("unknown variant `teleport`"));
+        assert!(error.message.contains("Unsupported phase"));
     }
 
     #[test]
     fn present_null_phase_is_still_discriminated_as_state_aware() {
-        let error = match load_mxc(r#"{"phase": null}"#) {
+        let error = match load_mxc(r#"{"version":"0.9.0-alpha","phase":null}"#) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
 
-        assert!(error.message.contains("Missing required field: phase"));
+        assert!(error.message.contains("Invalid phase declaration"));
     }
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "totally_made_up"
         }"#;
@@ -5868,12 +6344,10 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("Invalid configuration at `containment`"),
+                .contains("Unsupported containment for provision phase"),
             "got: {}",
             error.message
         );
-        assert!(error.message.contains("unknown variant `totally_made_up`"));
-        assert!(error.message.contains("line 3"));
     }
 
     #[test]
@@ -5887,7 +6361,7 @@ mod tests {
             },
             "process": {"timeout": "soon"}
         }"#;
-        let error = match load_mxc(json) {
+        let error = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
@@ -5984,13 +6458,13 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_non_object_experimental_block() {
+    fn rolling_parser_rejects_non_object_state_aware_experimental_block() {
         // `null` maps to "absent" and is accepted (see
         // `state_aware_null_experimental_is_accepted`); only non-null,
         // non-object values are rejected.
         for value in [r#""oops""#, "42", "[]"] {
             let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
-            let error = match load_mxc(&json) {
+            let error = match parse_mxc_request_json(&json, &mut test_logger()) {
                 Err(ParseError::StateAware(error)) => error,
                 other => panic!("expected state-aware error for {value}, got {other:?}"),
             };
@@ -6005,14 +6479,12 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_provision_works_with_no_containment() {
-        // Containment is optional at parse time; the dispatcher enforces it
-        // (provision needs containment, non-provision uses sandbox_id prefix).
-        let json = r#"{"phase": "provision"}"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Provision);
-                assert!(p.containment.is_none());
+    fn rolling_parser_allows_provision_without_containment() {
+        let json = r#"{"phase":"provision"}"#;
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            MxcRequest::StateAware(parsed) => {
+                assert_eq!(parsed.phase, Phase::Provision);
+                assert!(parsed.containment.is_none());
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -6229,7 +6701,7 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"teleport"}"#);
+        let encoded = base64_encode(br#"{"version":"0.9.0-alpha","phase":"teleport"}"#);
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -6240,8 +6712,7 @@ mod tests {
 
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
-        assert!(log.contains("Invalid configuration at `phase`"));
-        assert!(log.contains("unknown variant `teleport`"));
+        assert!(log.contains("Unsupported phase"));
     }
 
     #[test]
@@ -6408,7 +6879,9 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"provision","experimental":{"seatbelt":{}}}"#);
+        let encoded = base64_encode(
+            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true},"experimental":{"seatbelt":{}}}"#,
+        );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -6420,7 +6893,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("'experimental.seatbelt' has moved").count(),
+            log.matches("unknown field `seatbelt`").count(),
             1,
             "state-aware diagnostics should reach auxiliary sinks exactly once"
         );
@@ -7018,13 +7491,13 @@ mod tests {
     }
 
     #[test]
-    fn ui_specified_true_on_state_aware_requests() {
+    fn rolling_parser_preserves_state_aware_ui_presence() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
             "ui": {"disable": true}
         }"#;
-        match load_mxc(json).unwrap() {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
             other => panic!("expected state-aware request, got {other:?}"),
         }
@@ -8622,9 +9095,9 @@ mod tests {
     #[test]
     fn state_aware_request_rejects_correlation_vector_field() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "wsb:12345678",
-            "containment": "windows_sandbox",
             "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"
         }"#;
         let mut logger = test_logger();
@@ -8677,8 +9150,13 @@ mod tests {
     #[test]
     fn state_aware_unknown_top_level_field_rejected() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "bogusField": true
         }"#;
         let result = load_mxc(json);
@@ -8689,7 +9167,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_seatbelt_section() {
+    fn rolling_parser_rejects_one_shot_seatbelt_section_on_state_aware_request() {
         // A state-aware request carrying a one-shot-only `seatbelt` policy must
         // be rejected, not silently discarded (the caller might believe the
         // hardening is in effect).
@@ -8698,7 +9176,7 @@ mod tests {
             "containment": "seatbelt",
             "seatbelt": {"guiAccess": true}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -8711,28 +9189,30 @@ mod tests {
     #[test]
     fn state_aware_rejects_one_shot_lifecycle_section() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "lifecycle": {"destroyOnExit": false}
         }"#;
         let err = match load_mxc(json) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("lifecycle") && err.contains("do not accept"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `lifecycle`"), "got: {err}");
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_processcontainer_section() {
+    fn rolling_parser_rejects_one_shot_processcontainer_section_on_state_aware_request() {
         let json = r#"{
             "phase": "provision",
             "containment": "processcontainer",
             "processContainer": {"leastPrivilege": true}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -8743,13 +9223,13 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_lxc_section() {
+    fn rolling_parser_rejects_one_shot_lxc_section_on_state_aware_request() {
         let json = r#"{
             "phase": "provision",
             "containment": "lxc",
             "lxc": {"distribution": "alpine"}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -8765,43 +9245,52 @@ mod tests {
         // path must reject it with the migration message, not silently discard
         // it.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "experimental": {"seatbelt": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("has moved to the stable section"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `seatbelt`"), "got: {err}");
     }
 
     #[test]
     fn state_aware_rejects_experimental_macos_sandbox_alias() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "experimental": {"macos_sandbox": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("has moved to the stable section"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `macos_sandbox`"), "got: {err}");
     }
 
     #[test]
     fn state_aware_top_level_annotation_allowed() {
         let json = r#"{
-            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "$schema": "../schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+            "version": "0.9.0-alpha",
             "phase": "provision",
-            "containment": "isolation_session"
+            "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            }
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
@@ -8810,20 +9299,18 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_forwards_container_id() {
-        // `containerId` is a documented top-level field and must be preserved
-        // into the inner ExecutionRequest for state-aware requests, not dropped.
+    fn rolling_parser_forwards_state_aware_container_id() {
         let json = r#"{
             "phase": "provision",
             "containerId": "sa-container-1",
             "containment": "isolation_session"
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Provision);
-                assert_eq!(p.request.container_id, "sa-container-1");
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            MxcRequest::StateAware(parsed) => {
+                assert_eq!(parsed.phase, Phase::Provision);
+                assert_eq!(parsed.request.container_id, "sa-container-1");
             }
-            _ => panic!("expected state-aware request"),
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -9229,7 +9716,7 @@ mod tests {
                 other => panic!("expected one-shot rejection, got: {other:?}"),
             };
             assert!(error.contains(expected_path), "got: {error}");
-            assert!(error.contains("must contain at least one"), "got: {error}");
+            assert!(error.contains("array must not be empty"), "got: {error}");
         }
     }
 
@@ -9271,7 +9758,8 @@ mod tests {
             Err(ParseError::OneShot(error)) => error.to_string(),
             other => panic!("expected one-shot rejection, got: {other:?}"),
         };
-        assert!(error.contains("port must be between 1 and 65535"));
+        assert!(error.contains("network.egress.allow[0].ports[0].port"));
+        assert!(error.contains("expected a nonzero u16"));
     }
 
     #[test]
@@ -9279,7 +9767,7 @@ mod tests {
         for (port, expected) in [
             (
                 r#"{"protocol": "tcp", "port": 1, "endPort": 0}"#,
-                "between 1 and 65535",
+                "expected a nonzero u16",
             ),
             (r#"{"protocol": "tcp", "endPort": 443}"#, "requires port"),
         ] {
@@ -9408,11 +9896,15 @@ mod tests {
             "network": {"egress": {"default": "deny"}}
         }"#;
         let error = match load_mxc(json) {
-            Err(ParseError::OneShot(error)) => error.to_string(),
-            other => panic!("expected one-shot rejection, got: {other:?}"),
+            Err(ParseError::Decode(error)) => error.to_string(),
+            other => panic!("expected decode rejection, got: {other:?}"),
         };
 
-        assert!(error.contains("Invalid schema version"));
+        assert!(error.contains("Unsupported contract version"));
+        for version in supported_versions() {
+            assert!(error.contains(version.as_str()), "got: {error}");
+        }
+        assert!(!error.contains("0.8x"));
         assert!(!error.contains("require schema version 0.8"));
     }
 
@@ -10115,11 +10607,10 @@ mod tests {
         );
     }
 
-    // State-aware path: an `experimental` block whose backend key doesn't
-    // match the resolved `containment` is rejected the same way as in the
-    // one-shot path.
+    // Rolling state-aware normalization rejects an `experimental` backend key
+    // that does not match the resolved containment.
     #[test]
-    fn state_aware_foreign_experimental_backend_rejected() {
+    fn rolling_parser_rejects_foreign_state_aware_experimental_backend() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
@@ -10128,9 +10619,7 @@ mod tests {
                 "wslc": {"image": "alpine:latest"}
             }
         }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = load_mxc_request(&encoded, &mut logger, true)
+        let err = parse_mxc_request_json(json, &mut test_logger())
             .expect_err("state-aware config with foreign experimental backend should be rejected");
         let msg = format!("{err:?}");
         assert!(

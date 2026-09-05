@@ -325,16 +325,17 @@ Notes on the rows that are not a simple accept/reject:
   payloads generically is a cross-backend concern and is deliberately not solved
   here. Nest the config under the request's own phase; the SDK already does.
 
-Rejection of `policy.*` fields surfaces on the **state-aware** surface as
-`error.code = "policy_validation"`. On the **one-shot** surface the typed variant
-is discarded (`ScriptResponse::error`) and the envelope carries
-`error.code = "backend_error"` with the reason in the message; one-shot has no
-typed policy code today. A structurally invalid `appId` likewise surfaces as
-`policy_validation`.
+The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
+fields before backend validation. For example, supplied `ui`, noncanonical
+provision `network` shapes, and policy on phases that do not define it surface
+as `malformed_request`. Requests that pass the exact structural contract but
+violate a backend semantic invariant surface as `policy_validation`; a
+structurally valid but oversized `appId` is one such case.
 
-One exception: a supplied `network.proxy` is refused during config parsing,
-before any backend validation runs, so it surfaces as `malformed_request` on
-both surfaces.
+On the **one-shot** surface the backend's typed policy variant is discarded
+(`ScriptResponse::error`) and the envelope carries `error.code =
+"backend_error"` with the reason in the message. A supplied `network.proxy` is
+also structurally refused as `malformed_request`.
 
 ## Mode-specific fields
 
@@ -417,7 +418,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
+| `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
 | `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |

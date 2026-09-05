@@ -1,14 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Validates the repository's example and test config corpus against the dev
-// JSON schema, so the schema and the configs cannot silently drift apart.
-//
-// The dev schema version is read from the canonical schemas/schema-version.json
-// (devSchemaFile). Files known to be intentionally invalid (negative parser
-// tests, etc.) are listed in config-validation-exemptions.json and are required
-// to FAIL validation — if an exempt file starts passing, that is also flagged
-// so the exemption list cannot rot.
+// Validates the repository's example and test config corpus against the exact
+// registered schema named by each document's version field.
 //
 // Run from anywhere (paths are resolved relative to the repo root):
 //   node scripts/versioning/validate-configs.js
@@ -24,12 +18,26 @@ function readJson(...parts) {
 }
 
 const schemaVer = readJson("schemas", "schema-version.json");
-const devSchemaPath = join(
-  "schemas",
-  "dev",
-  `mxc-config.schema.${schemaVer.devSchemaFile}.json`
+const stableSchemaDir = join(repoRoot, "schemas", "stable");
+const stableVersions = readdirSync(stableSchemaDir)
+  .map((name) => /^mxc-config\.schema\.(.+)\.json$/.exec(name)?.[1])
+  .filter(Boolean)
+  .sort();
+const minimumIndex = stableVersions.indexOf(schemaVer.min);
+if (minimumIndex < 0) {
+  throw new Error(`Minimum registered schema not found: ${schemaVer.min}`);
+}
+
+const schemaPaths = new Map(
+  stableVersions.slice(minimumIndex).map((version) => [
+    version,
+    join("schemas", "stable", `mxc-config.schema.${version}.json`),
+  ])
 );
-const schema = readJson(devSchemaPath);
+schemaPaths.set(
+  schemaVer.stateAware,
+  join("schemas", "dev", `mxc-config.schema.${schemaVer.stateAware}.json`)
+);
 
 // Directories whose *.json files (recursively) are configs we expect to validate.
 const CONFIG_DIRS = [join("tests", "examples"), join("tests", "configs")];
@@ -41,7 +49,12 @@ const exemptions = existsSync(exemptionsPath)
   : new Set();
 
 const ajv = new Ajv({ allErrors: true, strict: false });
-const validate = ajv.compile(schema);
+const validators = new Map(
+  [...schemaPaths].map(([version, schemaPath]) => [
+    version,
+    ajv.compile(readJson(schemaPath)),
+  ])
+);
 const RESERVED_LEARNING_MODE_CAPABILITIES = [
   "learningModeLogging",
   "permissiveLearningMode",
@@ -99,7 +112,18 @@ for (const rel of files) {
     continue;
   }
 
-  const ok = validate(data);
+  const validate =
+    typeof data.version === "string" ? validators.get(data.version) : undefined;
+  const ok = validate ? validate(data) : false;
+  const errors = validate
+    ? validate.errors
+    : [{
+        instancePath: "/version",
+        message:
+          typeof data.version === "string"
+            ? `must name a registered schema (${[...validators.keys()].join(", ")})`
+            : "must be a string naming a registered schema",
+      }];
   if (ok && isExempt) {
     unexpectedValid++;
     unexpectedInvalidDetails.push(
@@ -107,7 +131,7 @@ for (const rel of files) {
     );
   } else if (!ok && !isExempt) {
     unexpectedInvalid++;
-    const msgs = (validate.errors || [])
+    const msgs = (errors || [])
       .map((e) => `      ${e.instancePath || "/"} ${e.message}`)
       .join("\n");
     unexpectedInvalidDetails.push(`${relNorm}:\n${msgs}`);
@@ -133,7 +157,7 @@ for (const rel of files) {
 }
 
 console.log(
-  `Validated ${files.length} config(s) against ${devSchemaPath.split("\\").join("/")} ` +
+  `Validated ${files.length} config(s) against ${validators.size} exact registered schemas ` +
     `(${exemptions.size} exempt as intentionally-invalid).`
 );
 

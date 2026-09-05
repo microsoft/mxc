@@ -3,7 +3,9 @@
 
 use std::fmt;
 
-use serde::{de::DeserializeOwned, Deserialize, Deserializer};
+#[cfg(test)]
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 use serde_json::{error::Category, Value};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
@@ -112,6 +114,7 @@ impl ConfigDeserializeError {
     }
 
     /// Whether serde classified this failure as malformed JSON syntax.
+    #[cfg(test)]
     pub(crate) fn is_syntax_error(&self) -> bool {
         matches!(self.source.classify(), Category::Syntax | Category::Eof)
     }
@@ -363,6 +366,7 @@ where
     Ok(value)
 }
 
+#[cfg(test)]
 pub(crate) fn from_value<T>(value: Value) -> Result<T, ConfigDeserializeError>
 where
     T: DeserializeOwned,

@@ -939,19 +939,20 @@ fn main() {
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
             match decoded {
-                Ok(json) => {
-                    match wxc_common::config_parser::load_request_from_json(json, &mut probe_logger)
-                    {
-                        Ok(r) => r.policy,
-                        Err(_) => {
-                            eprintln!("Error: failed to load probe config");
-                            eprint!("{}", probe_logger.get_buffer());
-                            process::exit(1);
-                        }
+                Ok(json) => match wxc_common::config_parser::load_mxc_request_from_json(
+                    json,
+                    &mut probe_logger,
+                ) {
+                    Ok(MxcRequest::OneShot(request)) => request.policy,
+                    Ok(MxcRequest::StateAware(_)) | Err(_) => {
+                        eprintln!("Error: failed to load probe config");
+                        eprint!("{}", probe_logger.get_buffer());
+                        process::exit(1);
                     }
-                }
+                },
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
+                    eprint!("{}", probe_logger.get_buffer());
                     process::exit(1);
                 }
             }
@@ -2210,6 +2211,7 @@ mod tests {
     #[test]
     fn cli_command_overrides_policy_command_line_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy-app.exe --from-policy",
                 "cwd": "C:\\workspace"
@@ -2235,6 +2237,7 @@ mod tests {
     #[test]
     fn cli_command_fills_absent_policy_command_line_without_override_log() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "cwd": "C:\\workspace"
             },
@@ -2260,6 +2263,7 @@ mod tests {
     fn policy_command_line_survives_without_cli_command() {
         let argv = &["wxc-exec", "policy.json"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy-app.exe --from-policy",
                 "cwd": "C:\\workspace"
@@ -2288,6 +2292,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_windows_create_process_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "processcontainer",
             "process": {}
         }"#;
@@ -2300,6 +2305,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;
@@ -2312,6 +2318,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_posix_shell_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "bubblewrap",
             "process": {}
         }"#;
@@ -2325,6 +2332,7 @@ mod tests {
     fn non_object_process_section_is_rejected() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": 42
         }"#;
 
@@ -2336,8 +2344,8 @@ mod tests {
             "one-shot failures use the stderr diagnostic convention"
         );
         assert!(
-            err.message.contains("process"),
-            "error should name the offending section: {}",
+            err.message.contains("invalid type") && err.message.contains("expected struct Process"),
+            "error should identify the process type mismatch: {}",
             err.message
         );
     }
@@ -2369,12 +2377,14 @@ mod tests {
         let mut policy_logger = test_logger();
         let mut cli_logger = test_logger();
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "cli-app.exe --message \"hello world\"",
                 "cwd": "C:\\workspace"
             }
         }"#;
         let cli_policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "cwd": "C:\\workspace"
             }

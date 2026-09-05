@@ -19,30 +19,48 @@ All migrated documents target the mutable exact development contract because eve
 
 Three versionless files under `tests/policy` are intentionally absent from this inventory: `request-directional-network.json`, `request-process-container.json`, and `request-wslc.json` are policy-builder inputs rather than complete request documents, and both parsers already reject them in the nine-document shared-rejection set.
 
-## Residual parser differences after migration
+## Post-migration disposition
 
-Version migration removes 118 of the 125 recorded divergences. Seven remain
-because the rolling and exact parsers intentionally enforce different
-boundaries:
+Version migration removed 118 of the 125 recorded divergences. The remaining
+seven now characterize only the test-scoped rolling parser; authoritative
+public loading rejects every document through its exact contract:
 
-- `isolation_session_configid_ignored.json` and
-  `isolation_session_one_shot_stray_config_ignored.json` exercise the rolling
-  parser's historical parse-and-ignore behavior for a one-shot experimental
-  IsolationSession object. The closed 0.9 contract rejects that object.
+- `isolation_session_configid_rejected.json` and
+  `isolation_session_one_shot_stray_config_rejected.json` retain the rolling
+  parser's historical parse-and-ignore behavior as a differential
+  characterization. The public one-shot surface now expects structural
+  rejection from the closed 0.9 contract.
 - Four IsolationSession provision rejection fixtures carry filesystem, UI, or
-  a non-canonical network posture. The rolling parser defers those policies to
-  backend validation; the request-specific 0.9 root rejects them structurally
-  or through its exact marker value.
+  a non-canonical network posture. Their E2E assertions now expect
+  `malformed_request` from the request-specific 0.9 root. Direct
+  `isolation_session_common::policy` tests preserve backend validation.
 - `wslc_state_aware_exec_rejected_filesystem.json` exercises immutable
-  post-provision policy validation. The rolling parser defers the filesystem
-  policy to normalization/backend validation; the 0.9 exec root excludes it.
+  post-provision policy. Its E2E assertion now expects structural rejection
+  from the 0.9 exec root, while `wslc_common::policy` retains direct backend
+  validation coverage.
 
-Rewriting these documents to make both parsers accept would remove the invalid
-policy each fixture exists to test. This inventory therefore records the seven
-exact-stricter results explicitly rather than weakening the exact contract or
-changing backend-test intent. The post-migration corpus result is 266
-equivalent accepts, nine shared rejections, seven classified exact-stricter
-rejections, no exact-looser acceptance, and no accepted-model mismatch.
+The differential harness continues to record the seven exact-stricter results
+so later contract changes cannot accidentally weaken the exact boundary. It
+also compares every corpus document through the public loader and the exact
+parser oracle. The retained rolling characterization remains 266 equivalent
+accepts, nine shared rejections, seven classified exact-stricter rejections, no
+exact-looser acceptance, and no accepted-model mismatch.
+
+## Validation
+
+Validated on 2026-09-04 after exact dispatch became authoritative:
+
+- Rust formatting, workspace check, and workspace clippy completed without
+  warnings.
+- The Rust workspace passed 4,148 tests with 23 ignored.
+- The Node SDK passed its build and 304 tests, with 19 skipped.
+- The .NET SDK passed 118 tests, with 24 skipped.
+- The config validator accepted 277 documents.
+- Schema-version, exact-contract codegen, SDK wire-type codegen, and package
+  version-sync gates passed.
+- The seven residual fixtures were exercised through the rebuilt
+  `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
+  expectations retained by the E2E scripts.
 
 ## Documents
 
@@ -62,14 +80,14 @@ rejections, no exact-looser acceptance, and no accepted-model mismatch.
 | `tests/configs/isolation_session_concurrent_B.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_concurrent_C.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_concurrent_D.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_configid_ignored.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
+| `tests/configs/isolation_session_configid_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_exit42.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_hello.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_lifecycle_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected_hosts.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected_no_local.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_one_shot_stray_config_ignored.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
+| `tests/configs/isolation_session_one_shot_stray_config_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_ui_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_powershell_interactive.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_deprovision.json` | state-aware deprovision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |

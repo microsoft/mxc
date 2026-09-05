@@ -3,7 +3,9 @@
 
 //! ProcessContainer-specific configuration types and wire mapping.
 
+#[cfg(test)]
 use crate::policy::network::{has_host_rules, NetworkFormat};
+#[cfg(test)]
 use crate::policy::{NetworkAction, SandboxPolicy};
 
 /// How denial capture handles ungranted access checks.
@@ -19,6 +21,7 @@ pub enum CaptureDenialsMode {
 }
 
 impl CaptureDenialsMode {
+    #[cfg(test)]
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Self::Block => "block",
@@ -130,6 +133,7 @@ pub enum ProcessContainerSystemSettings {
 }
 
 impl ProcessContainerSystemSettings {
+    #[cfg(test)]
     fn wire(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -152,6 +156,7 @@ pub enum ProcessContainerUiIsolation {
 }
 
 impl ProcessContainerUiIsolation {
+    #[cfg(test)]
     fn wire(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
@@ -162,6 +167,7 @@ impl ProcessContainerUiIsolation {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,

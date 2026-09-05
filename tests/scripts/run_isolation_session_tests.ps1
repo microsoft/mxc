@@ -316,11 +316,11 @@ $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
-# Same shape as hello.json with an unknown configurationId in the experimental block.
-# The backend should ignore that field and run normally.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_ignored.json" `
-    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
-    -OutputLineNotEqual @($HostWhoami)))
+# Exact one-shot contracts are recursively closed, so backend configuration
+# that the IsolationSession one-shot surface does not define is rejected.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("unknown field ``isolation_session``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -337,14 +337,11 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
 
-# One-shot takes no backend configuration at all, so any key under
-# `experimental.isolation_session` is just an unrecognised key in the
-# deliberately permissive `experimental` block and is ignored — the run
-# proceeds normally. Guarding it with an explicit rejection would be
-# scaffolding that graduation to the closed stable surface deletes anyway.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_ignored.json" `
-    -ExpectedExit 0 `
-    -OutputContains @("ONE_SHOT_STRAY_CONFIG_IGNORED")))
+# A nested unknown backend payload is rejected at the same closed exact
+# contract boundary, before the command can run.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("unknown field ``isolation_session``")))
 
 # One-shot network rejection: the isolation session container's network is
 # unrestricted and cannot be filtered or denied, so a non-canonical network
