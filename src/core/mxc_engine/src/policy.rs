@@ -11,6 +11,8 @@
 //!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
+#[cfg(test)]
+mod exact;
 pub(crate) mod network;
 
 use std::borrow::Cow;
@@ -733,7 +735,7 @@ pub fn build_request(
 /// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
-///     version: "0.7.0-alpha".to_string(),
+///     version: "0.9.0-alpha".to_string(),
 ///     filesystem: None,
 ///     network: None,
 ///     ui: None,
@@ -1017,6 +1019,314 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 mod tests {
     const TEST_COMMAND: &str = "echo hello";
 
+    #[test]
+    fn exact_contract_bridge_is_available_to_policy_builders() {
+        let request: mxc_config_contract::published::v0_7_0_alpha::Request = serde_json::from_str(
+            r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let execution = wxc_common::config_parser::load_one_shot_request_from_contract(
+            wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap();
+
+        assert_eq!(execution.schema_version, "0.7.0-alpha");
+        assert_eq!(execution.script_code, "echo hello");
+    }
+
+    fn assert_exact_builder_matches_wire_oracle(policy: &SandboxPolicy, containment: &Containment) {
+        let exact =
+            super::exact::build_request(policy, containment, TEST_COMMAND, Some("builder-test"))
+                .unwrap();
+        let config =
+            super::build_wire_config(policy, containment, TEST_COMMAND, Some("builder-test"))
+                .unwrap();
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+        let rolling =
+            wxc_common::config_parser::load_request_from_value(config, &mut logger).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&exact.inner).unwrap(),
+            serde_json::to_value(&rolling).unwrap(),
+            "{}",
+            policy.version
+        );
+
+        let exact_policy = &exact.inner.policy;
+        let rolling_policy = &rolling.policy;
+        assert_eq!(
+            exact_policy.network_specified, rolling_policy.network_specified,
+            "{}: network presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.network_mode_specified, rolling_policy.network_mode_specified,
+            "{}: network mode presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.runtime_network_proxy_specified,
+            rolling_policy.runtime_network_proxy_specified,
+            "{}: runtime proxy presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.ui_specified, rolling_policy.ui_specified,
+            "{}: UI presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.network_proxy.builtin_test_server,
+            rolling_policy.network_proxy.builtin_test_server,
+            "{}: built-in proxy",
+            policy.version
+        );
+        match (
+            exact_policy.network_proxy.address.as_ref(),
+            rolling_policy.network_proxy.address.as_ref(),
+        ) {
+            (Some(exact), Some(rolling)) => {
+                assert_eq!(exact.address, rolling.address, "{}", policy.version);
+                assert_eq!(exact.port, rolling.port, "{}", policy.version);
+                assert_eq!(
+                    exact.original_url, rolling.original_url,
+                    "{}",
+                    policy.version
+                );
+            }
+            (None, None) => {}
+            (exact, rolling) => panic!(
+                "{}: proxy address mismatch: exact={exact:?}, rolling={rolling:?}",
+                policy.version
+            ),
+        }
+    }
+
+    fn host_process_versions() -> &'static [&'static str] {
+        #[cfg(target_os = "macos")]
+        {
+            &["0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            &["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+        }
+    }
+
+    #[test]
+    fn exact_policy_builder_routes_every_host_supported_version() {
+        for version in host_process_versions() {
+            let policy = SandboxPolicy {
+                version: (*version).to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            let request =
+                super::exact::build_request(&policy, &Containment::Process, TEST_COMMAND, None)
+                    .unwrap();
+            assert_eq!(request.inner.schema_version, *version);
+        }
+    }
+
+    #[test]
+    fn exact_policy_builder_matches_the_wire_oracle_for_every_host_supported_version() {
+        for version in host_process_versions() {
+            let policy = SandboxPolicy {
+                version: (*version).to_string(),
+                filesystem: Some(super::FilesystemSection {
+                    readwrite_paths: vec!["C:\\work".to_string()],
+                    readonly_paths: vec!["C:\\tools".to_string()],
+                    denied_paths: vec!["C:\\secrets".to_string()],
+                    clear_policy_on_exit: Some(false),
+                }),
+                network: Some(NetworkSection {
+                    allow_outbound: true,
+                    allow_local_network: true,
+                    ..Default::default()
+                }),
+                ui: Some(super::UiSection {
+                    allow_windows: true,
+                    clipboard: super::ClipboardPolicy::Read,
+                    allow_input_injection: false,
+                }),
+                timeout_ms: Some(5000),
+            };
+            assert_exact_builder_matches_wire_oracle(&policy, &Containment::Process);
+        }
+    }
+
+    #[test]
+    fn exact_directional_policy_builder_matches_the_wire_oracle() {
+        for version in ["0.8.0-alpha", "0.9.0-alpha"] {
+            let policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: Some(NetworkSection {
+                    egress: Some(NetworkEgressSection {
+                        default: Some(NetworkAction::Deny),
+                        allow: Some(vec![NetworkRuleSection {
+                            to: Some(vec![NetworkPeerSection {
+                                cidr: "10.0.0.0/8".to_string(),
+                                except: Some(vec!["10.1.0.0/16".to_string()]),
+                            }]),
+                            ports: Some(vec![NetworkPortSection {
+                                protocol: Some(NetworkProtocol::Tcp),
+                                port: Some(8000),
+                                end_port: Some(8010),
+                            }]),
+                        }]),
+                        deny: Some(vec![NetworkRuleSection {
+                            to: Some(vec![NetworkPeerSection::new("192.0.2.0/24")]),
+                            ports: Some(vec![NetworkPortSection {
+                                protocol: Some(NetworkProtocol::Udp),
+                                port: Some(53),
+                                end_port: None,
+                            }]),
+                        }]),
+                    }),
+                    ingress: Some(NetworkIngressSection {
+                        default: Some(NetworkAction::Deny),
+                        host_loopback: Some(NetworkAction::Allow),
+                    }),
+                    ..Default::default()
+                }),
+                ui: None,
+                timeout_ms: None,
+            };
+            assert_exact_builder_matches_wire_oracle(
+                &policy,
+                &Containment::ProcessContainer(ProcessContainer::default()),
+            );
+
+            let proxy_policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: Some(NetworkSection {
+                    egress: Some(NetworkEgressSection {
+                        default: Some(NetworkAction::Deny),
+                        ..Default::default()
+                    }),
+                    ingress: Some(NetworkIngressSection {
+                        default: Some(NetworkAction::Allow),
+                        host_loopback: Some(NetworkAction::Deny),
+                    }),
+                    runtime_config: Some(RuntimeConfigSection {
+                        network_proxy: Some("http://127.0.0.1:8080".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+                ui: None,
+                timeout_ms: None,
+            };
+            let proxy_containment = Containment::ProcessContainer(ProcessContainer {
+                network: Some(crate::configs::ProcessContainerNetwork {
+                    allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+                }),
+                ..ProcessContainer::default()
+            });
+
+            assert_exact_builder_matches_wire_oracle(&proxy_policy, &proxy_containment);
+        }
+    }
+
+    #[test]
+    fn exact_wslc_builder_matches_the_wire_oracle_with_all_options() {
+        let policy = SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            filesystem: None,
+            network: Some(NetworkSection {
+                allow_outbound: true,
+                ..Default::default()
+            }),
+            ui: None,
+            timeout_ms: Some(12_345),
+        };
+        let containment = Containment::Wslc(WslcSection {
+            image: "python:3.12".to_string(),
+            image_tar_path: Some("C:\\images\\python.tar".to_string()),
+            cpu_count: Some(2),
+            memory_mb: Some(2048),
+            gpu: true,
+            storage_path: Some("C:\\wslc-store".to_string()),
+            port_mappings: vec![(8080, 80)],
+        });
+
+        assert_exact_builder_matches_wire_oracle(&policy, &containment);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exact_v0_6_policy_builder_rejects_seatbelt_host_process() {
+        let policy = SandboxPolicy {
+            version: "0.6.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+
+        let error = super::exact::build_request(&policy, &Containment::Process, TEST_COMMAND, None)
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Seatbelt containment requires schema version 0.7.0-alpha or later"
+        );
+    }
+
+    #[test]
+    fn exact_policy_builder_rejects_development_containment_before_v0_9() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            for containment in [
+                Containment::Wslc(WslcSection::default()),
+                Containment::IsolationSession,
+            ] {
+                let error = super::exact::build_request(&policy, &containment, TEST_COMMAND, None)
+                    .unwrap_err();
+                assert!(
+                    error
+                        .message
+                        .contains("requires schema version 0.9.0-alpha"),
+                    "{version}: {}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_v0_8_policy_builder_enforces_capability_construction_rules() {
+        let policy = SandboxPolicy {
+            version: "0.8.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let containment = Containment::ProcessContainer(ProcessContainer {
+            capabilities: vec!["internetClient,privateNetworkClientServer".to_string()],
+            ..ProcessContainer::default()
+        });
+
+        let error =
+            super::exact::build_request(&policy, &containment, TEST_COMMAND, None).unwrap_err();
+        assert!(error.message.contains("must not contain a comma"));
+    }
+
     // `ui` must be emitted only when the caller supplied one.
     //
     // These pin the fix for a defect that was invisible by value: the builder
@@ -1115,8 +1425,9 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkEgressSection, NetworkSection,
-        ProxySpec, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
+        NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
+        NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1378,6 +1689,7 @@ mod tests {
             .contains(&"com.example.service".to_string()));
     }
 
+    #[cfg(target_os = "windows")]
     fn process_container_with_capture_denials(config: CaptureDenials) -> Containment {
         Containment::ProcessContainer(ProcessContainer {
             capture_denials: Some(config),
@@ -1576,6 +1888,23 @@ mod tests {
         }
     }
 
+    fn development_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            ..minimal_policy()
+        }
+    }
+
+    fn development_policy_with_network(network: NetworkSection) -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            filesystem: None,
+            network: Some(network),
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
     #[test]
     fn default_containment_resolves_the_host_backend() {
         // `build_request` must keep resolving the host's native backend — the
@@ -1599,7 +1928,7 @@ mod tests {
             ..Default::default()
         };
         let request = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(wslc),
             TEST_COMMAND,
             None,
@@ -1629,7 +1958,7 @@ mod tests {
         // `WslcSection::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(WslcSection::default()),
             TEST_COMMAND,
             None,
@@ -1653,7 +1982,7 @@ mod tests {
         // the caller opts in explicitly, exactly like the SDK's
         // `SandboxSpawnOptions.experimental`.
         let mut request = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(WslcSection::default()),
             TEST_COMMAND,
             None,
@@ -1737,7 +2066,7 @@ mod tests {
             ..Default::default()
         };
         let err = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(wslc),
             TEST_COMMAND,
             None,
@@ -1755,7 +2084,7 @@ mod tests {
         // WSLc cannot enforce per-host egress filtering (containers lack
         // CAP_NET_ADMIN), so allowedHosts with a default-block policy is
         // rejected at build time rather than silently ignored.
-        let policy = policy_with_network(NetworkSection {
+        let policy = development_policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
@@ -1790,7 +2119,7 @@ mod tests {
         // The one-shot surface takes no backend configuration at all, so the
         // wire config must name the backend and add nothing else — unlike
         // WSLc, which also writes an `experimental.wslc` block.
-        let policy = policy_with_network(isolation_session_network());
+        let policy = development_policy_with_network(isolation_session_network());
         let config =
             super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
                 .expect("build_wire_config");
@@ -1805,7 +2134,7 @@ mod tests {
     fn isolation_session_carries_the_unrestricted_network_acknowledgment() {
         // The backend accepts *only* this shape and refuses an absent policy,
         // so the SDK types must be able to express it.
-        let policy = policy_with_network(isolation_session_network());
+        let policy = development_policy_with_network(isolation_session_network());
         let config =
             super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
                 .expect("build_wire_config");
@@ -1829,7 +2158,7 @@ mod tests {
     fn isolation_session_is_not_experimental_enabled_by_default() {
         // Selecting an experimental backend must not silently satisfy the
         // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
-        let policy = policy_with_network(isolation_session_network());
+        let policy = development_policy_with_network(isolation_session_network());
         let mut request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
@@ -1844,7 +2173,7 @@ mod tests {
 
     #[test]
     fn isolation_session_selects_the_backend() {
-        let policy = policy_with_network(isolation_session_network());
+        let policy = development_policy_with_network(isolation_session_network());
         let request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
