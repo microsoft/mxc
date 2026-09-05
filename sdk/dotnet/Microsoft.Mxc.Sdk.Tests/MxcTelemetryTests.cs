@@ -130,13 +130,16 @@ public sealed class MxcTelemetryTests
     [Fact]
     public void FailClosedDiagnostics_DoNotPropagateTraceListenerFailures()
     {
+        var operation = $"ThrowingTrace{Guid.NewGuid():N}";
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
         using var listener = new ThrowingTraceListener();
         Trace.Listeners.Add(listener);
         try
         {
             var exception = Record.Exception(() =>
                 MxcTelemetry.ReportFailClosed(
-                    $"ThrowingTrace{Guid.NewGuid():N}",
+                    operation,
                     "Blocked",
                     ErrorCode.BackendError));
             Assert.Null(exception);
@@ -144,6 +147,20 @@ public sealed class MxcTelemetryTests
         finally
         {
             Trace.Listeners.Remove(listener);
+        }
+
+        using var output = new StringWriter();
+        using var capture = new TextWriterTraceListener(output);
+        Trace.Listeners.Add(capture);
+        try
+        {
+            MxcTelemetry.ReportFailClosed(operation, "Blocked", ErrorCode.BackendError);
+            Trace.Flush();
+            Assert.Contains(operation, output.ToString());
+        }
+        finally
+        {
+            Trace.Listeners.Remove(capture);
         }
     }
 
@@ -156,7 +173,9 @@ public sealed class MxcTelemetryTests
             NeedsConsentPromptImpl = () => new((int)ErrorCode.BackendError, true),
             GetPolicyImpl = () => throw new InvalidOperationException("sensitive policy"),
         };
-        using var nativeScope = MxcTelemetry.OverrideFailClosedTelemetryQueryApiForTesting(native);
+        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(
+            new MxcTelemetry.FailureCategoryTracker(capacity: 64));
         using var output = new StringWriter();
         using var listener = new TextWriterTraceListener(output);
         Trace.Listeners.Add(listener);
@@ -182,17 +201,23 @@ public sealed class MxcTelemetryTests
     [Fact]
     public void TelemetryQueryApiOverride_AllowsConcurrentDispose()
     {
+        var calls = 0;
         var native = new FakeTelemetryQueryApi
         {
             GetConsentImpl = () => new((int)ErrorCode.Success, "undetermined"),
             NeedsConsentPromptImpl = () => new((int)ErrorCode.Success, false),
-            GetPolicyImpl = () => new((int)ErrorCode.Success, "blocked"),
+            GetPolicyImpl = () =>
+            {
+                Interlocked.Increment(ref calls);
+                return new((int)ErrorCode.Success, "blocked");
+            },
         };
-        var scope = MxcTelemetry.OverrideFailClosedTelemetryQueryApiForTesting(native);
+        var scope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
 
         Parallel.Invoke(scope.Dispose, scope.Dispose);
 
-        Assert.True(Enum.IsDefined(MxcTelemetry.GetPolicy()));
+        _ = MxcTelemetry.GetPolicy();
+        Assert.Equal(0, calls);
     }
 
     [Fact]
@@ -641,7 +666,7 @@ public sealed class MxcTelemetryTests
     }
 #endif
 
-    private sealed class FakeTelemetryQueryApi : MxcTelemetry.IFailClosedTelemetryQueryApi
+    private sealed class FakeTelemetryQueryApi : MxcTelemetry.ITelemetryReadApi
     {
         internal required Func<MxcTelemetry.NativePayloadResult> GetConsentImpl { get; init; }
         internal required Func<MxcTelemetry.NativeBooleanResult> NeedsConsentPromptImpl { get; init; }

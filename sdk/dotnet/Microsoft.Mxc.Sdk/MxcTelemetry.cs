@@ -106,23 +106,22 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionYes = 1;
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
-    private static readonly FailureCategoryTracker ReportedFailures = new(capacity: 64);
-    private static IFailClosedTelemetryQueryApi failClosedQueryApi =
-        new PInvokeFailClosedTelemetryQueryApi();
+    private static FailureCategoryTracker reportedFailures = new(capacity: 64);
+    private static ITelemetryReadApi telemetryReadApi = new PInvokeTelemetryReadApi();
 
     internal readonly record struct NativePayloadResult(int Status, string? Payload);
     internal readonly record struct NativeBooleanResult(int Status, bool Value);
 
-    // Only soft-failing reads use this seam; other telemetry APIs retain their
-    // direct P/Invoke and throwing contracts.
-    internal interface IFailClosedTelemetryQueryApi
+    // Read methods share native ownership plumbing, but preserve their public
+    // status contracts: GetConsent may throw while the other reads fail closed.
+    internal interface ITelemetryReadApi
     {
         NativePayloadResult GetConsent();
         NativeBooleanResult NeedsConsentPrompt();
         NativePayloadResult GetPolicy();
     }
 
-    private sealed class PInvokeFailClosedTelemetryQueryApi : IFailClosedTelemetryQueryApi
+    private sealed class PInvokeTelemetryReadApi : ITelemetryReadApi
     {
         public unsafe NativePayloadResult GetConsent()
         {
@@ -160,16 +159,23 @@ public static class MxcTelemetry
         }
     }
 
-    internal static IDisposable OverrideFailClosedTelemetryQueryApiForTesting(
-        IFailClosedTelemetryQueryApi replacement)
+    internal static IDisposable OverrideTelemetryReadApiForTesting(
+        ITelemetryReadApi replacement)
     {
         ArgumentNullException.ThrowIfNull(replacement);
-        var previous = Interlocked.Exchange(ref failClosedQueryApi, replacement);
-        return new FailClosedTelemetryQueryApiScope(previous);
+        var previous = Interlocked.Exchange(ref telemetryReadApi, replacement);
+        return new TelemetryReadApiScope(previous);
     }
 
-    private sealed class FailClosedTelemetryQueryApiScope(
-        IFailClosedTelemetryQueryApi previous) : IDisposable
+    internal static IDisposable OverrideFailureCategoryTrackerForTesting(
+        FailureCategoryTracker replacement)
+    {
+        ArgumentNullException.ThrowIfNull(replacement);
+        var previous = Interlocked.Exchange(ref reportedFailures, replacement);
+        return new FailureCategoryTrackerScope(previous);
+    }
+
+    private sealed class TelemetryReadApiScope(ITelemetryReadApi previous) : IDisposable
     {
         private int disposed;
 
@@ -179,7 +185,22 @@ public static class MxcTelemetry
             {
                 return;
             }
-            Interlocked.Exchange(ref failClosedQueryApi, previous);
+            Interlocked.Exchange(ref telemetryReadApi, previous);
+        }
+    }
+
+    private sealed class FailureCategoryTrackerScope(
+        FailureCategoryTracker previous) : IDisposable
+    {
+        private int disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+            Interlocked.Exchange(ref reportedFailures, previous);
         }
     }
 
@@ -206,6 +227,14 @@ public static class MxcTelemetry
                 return true;
             }
         }
+
+        internal void Remove(string operation, string safeResult, string kind, int code)
+        {
+            lock (categories)
+            {
+                categories.Remove(new FailureCategory(operation, safeResult, kind, code));
+            }
+        }
     }
 
     private sealed class PresenterContext
@@ -224,7 +253,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = failClosedQueryApi.GetConsent();
+            var result = telemetryReadApi.GetConsent();
             if (result.Status != (int)ErrorCode.Success)
             {
                 throw new MxcException(
@@ -400,7 +429,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = failClosedQueryApi.NeedsConsentPrompt();
+            var result = telemetryReadApi.NeedsConsentPrompt();
             if (result.Status != (int)ErrorCode.Success)
             {
                 ReportFailClosed(
@@ -428,7 +457,7 @@ public static class MxcTelemetry
         try
         {
             EnsureNativeInitialized();
-            var result = failClosedQueryApi.GetPolicy();
+            var result = telemetryReadApi.GetPolicy();
             if (result.Status != (int)ErrorCode.Success)
             {
                 ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)result.Status);
@@ -449,29 +478,13 @@ public static class MxcTelemetry
         string safeResult,
         Exception exception)
     {
-        try
-        {
-            var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
-            if (!ReportedFailures.TryAdd(
-                    operation,
-                    safeResult,
-                    exceptionType,
-                    exception.HResult))
-            {
-                return;
-            }
-
-            Trace.TraceError(
-                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2} (HRESULT 0x{3:X8})",
-                operation,
-                safeResult,
-                exceptionType,
-                exception.HResult);
-        }
-        catch
-        {
-            // Diagnostics must not affect the fail-closed result.
-        }
+        var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            exceptionType,
+            exception.HResult,
+            errorCode: null);
     }
 
     internal static void ReportFailClosed(
@@ -479,26 +492,53 @@ public static class MxcTelemetry
         string safeResult,
         ErrorCode errorCode)
     {
+        ReportFailClosedCore(
+            operation,
+            safeResult,
+            nameof(ErrorCode),
+            (int)errorCode,
+            errorCode);
+    }
+
+    private static void ReportFailClosedCore(
+        string operation,
+        string safeResult,
+        string kind,
+        int code,
+        ErrorCode? errorCode)
+    {
+        var registered = false;
         try
         {
-            if (!ReportedFailures.TryAdd(
+            if (!reportedFailures.TryAdd(
                     operation,
                     safeResult,
-                    nameof(ErrorCode),
-                    (int)errorCode))
+                    kind,
+                    code))
             {
                 return;
             }
+            registered = true;
 
+            var description = errorCode is { } nativeError
+                ? $"{nativeError} ({code})"
+                : $"{kind} (HRESULT 0x{code:X8})";
             Trace.TraceError(
-                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2} ({3})",
+                "mxc: {0} failed and is reporting '{1}' to stay fail-closed: {2}",
                 operation,
                 safeResult,
-                errorCode,
-                (int)errorCode);
+                description);
         }
         catch
         {
+            if (registered)
+            {
+                reportedFailures.Remove(
+                    operation,
+                    safeResult,
+                    kind,
+                    code);
+            }
             // Diagnostics must not affect the fail-closed result.
         }
     }
