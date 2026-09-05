@@ -957,8 +957,12 @@ mod tests {
 
         // Provision without containment — the dispatcher rejects it as
         // `MalformedRequest` before ever reaching a backend.
-        let error =
-            super::run_state_aware_json(r#"{"phase":"provision"}"#, false, false).unwrap_err();
+        let error = super::run_state_aware_json(
+            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest);
         assert_eq!(
             telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
@@ -969,7 +973,7 @@ mod tests {
         // `BackendUnavailable` → `InitError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
         let error = super::run_state_aware_json(
-            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             false,
         )
@@ -998,7 +1002,7 @@ mod tests {
         use crate::error::ErrorCode;
         for _ in 0..3 {
             let error = super::run_state_aware_json(
-                r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 false,
                 false,
             )

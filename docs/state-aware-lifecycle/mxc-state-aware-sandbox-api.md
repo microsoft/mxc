@@ -1986,7 +1986,7 @@ calls (and the executor stops gating them behind `--experimental`). For example,
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "provision",
   "containment": "isolation_session",
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
@@ -1998,11 +1998,15 @@ calls (and the executor stops gating them behind `--experimental`). For example,
 }
 ```
 
-to this shape after the backend's state-aware path graduates:
+to a shape like the following after the backend's state-aware path graduates.
+This is a hypothetical, non-runnable example: `<future-graduated-version>` is
+a placeholder for a future registered contract that defines this placement,
+not an existing published version. The policy vocabulary must also match that
+future contract.
 
 ```json
 {
-  "version": "0.7.0-alpha",
+  "version": "<future-graduated-version>",
   "phase": "provision",
   "containment": "isolation_session",
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
