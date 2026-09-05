@@ -106,6 +106,7 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionYes = 1;
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
+    private static readonly HashSet<string> ReportedFailureCategories = new(StringComparer.Ordinal);
 
     private sealed class PresenterContext
     {
@@ -146,8 +147,9 @@ public static class MxcTelemetry
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            ReportFailClosed("GetConsent", "Undetermined", ex);
             return TelemetryConsentState.Undetermined;
         }
     }
@@ -311,11 +313,18 @@ public static class MxcTelemetry
             {
                 int needsPrompt = 0;
                 var status = NativeMethods.mxc_telemetry_needs_consent_prompt(&needsPrompt);
-                return status == (int)ErrorCode.Success && needsPrompt != 0;
+                if (status != (int)ErrorCode.Success)
+                {
+                    ReportFailClosed("NeedsConsentPrompt", "false", (ErrorCode)status);
+                    return false;
+                }
+
+                return needsPrompt != 0;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            ReportFailClosed("NeedsConsentPrompt", "false", ex);
             return false;
         }
     }
@@ -337,6 +346,7 @@ public static class MxcTelemetry
                 {
                     if (status != (int)ErrorCode.Success)
                     {
+                        ReportFailClosed("GetPolicy", "Blocked", (ErrorCode)status);
                         return TelemetryPolicyState.Blocked;
                     }
 
@@ -348,9 +358,32 @@ public static class MxcTelemetry
                 }
             }
         }
+        catch (Exception ex)
+        {
+            ReportFailClosed("GetPolicy", "Blocked", ex);
+            return TelemetryPolicyState.Blocked;
+        }
+    }
+
+    private static void ReportFailClosed(string operation, string safeResult, object detail)
+    {
+        try
+        {
+            var category = $"{operation}:{safeResult}:{detail}";
+            lock (ReportedFailureCategories)
+            {
+                if (!ReportedFailureCategories.Add(category))
+                {
+                    return;
+                }
+            }
+
+            Console.Error.WriteLine(
+                $"mxc: {operation} failed and is reporting '{safeResult}' to stay fail-closed: {detail}");
+        }
         catch
         {
-            return TelemetryPolicyState.Blocked;
+            // Diagnostics must not affect the fail-closed result.
         }
     }
 
