@@ -95,6 +95,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release -p lxc --bin lxc-exec
 
+      - name: Run LXC network capability E2E test
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # sudo resets PATH from secure_path, which drops the rustup shims.
+        run: sudo -E env "PATH=$PATH" cargo test --release -p wxc_e2e_tests --test e2e_lxc_network_capability -- --nocapture
+
       # MXC_LXC_TESTS_REQUIRE_EXECUTION turns an honest skip into a failure.
       # On a developer box a missing ip6tables is a reason to run what you can.
       # Here the runner is provisioned specifically to execute this suite, so a
