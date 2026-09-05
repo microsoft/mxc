@@ -106,7 +106,10 @@ public static class MxcTelemetry
     private const int NativeConsentDecisionYes = 1;
     private const int NativeConsentDecisionDismissed = 2;
     private const int NativeConsentPresenterError = -1;
+    private const int MaxReportedFailureCategories = 64;
     private static readonly HashSet<string> ReportedFailureCategories = new(StringComparer.Ordinal);
+    private static Action<string> failClosedDiagnosticSink =
+        static message => Console.Error.WriteLine(message);
 
     private sealed class PresenterContext
     {
@@ -365,25 +368,70 @@ public static class MxcTelemetry
         }
     }
 
-    private static void ReportFailClosed(string operation, string safeResult, object detail)
+    internal static void ReportFailClosed(string operation, string safeResult, object detail)
     {
         try
         {
-            var category = $"{operation}:{safeResult}:{detail}";
+            var category = detail switch
+            {
+                Exception ex => $"{operation}:{safeResult}:{ex.GetType().FullName}:{ex.HResult:X8}",
+                ErrorCode code => $"{operation}:{safeResult}:ErrorCode:{(int)code}",
+                _ => $"{operation}:{safeResult}:{detail.GetType().FullName}",
+            };
+            Action<string> sink;
             lock (ReportedFailureCategories)
             {
-                if (!ReportedFailureCategories.Add(category))
+                if (ReportedFailureCategories.Contains(category) ||
+                    ReportedFailureCategories.Count >= MaxReportedFailureCategories)
                 {
                     return;
                 }
+                ReportedFailureCategories.Add(category);
+                sink = failClosedDiagnosticSink;
             }
 
-            Console.Error.WriteLine(
-                $"mxc: {operation} failed and is reporting '{safeResult}' to stay fail-closed: {detail}");
+            var description = detail switch
+            {
+                Exception ex => $"{ex.GetType().FullName} (HRESULT 0x{ex.HResult:X8})",
+                ErrorCode code => $"{code} ({(int)code})",
+                _ => detail.GetType().FullName ?? "unknown failure",
+            };
+            sink($"mxc: {operation} failed and is reporting '{safeResult}' to stay fail-closed: {description}");
         }
         catch
         {
             // Diagnostics must not affect the fail-closed result.
+        }
+    }
+
+    internal static IDisposable OverrideFailClosedDiagnosticSinkForTesting(Action<string> sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        lock (ReportedFailureCategories)
+        {
+            var previous = failClosedDiagnosticSink;
+            failClosedDiagnosticSink = sink;
+            ReportedFailureCategories.Clear();
+            return new FailClosedDiagnosticScope(previous);
+        }
+    }
+
+    private sealed class FailClosedDiagnosticScope(Action<string> previous) : IDisposable
+    {
+        private bool disposed;
+
+        public void Dispose()
+        {
+            lock (ReportedFailureCategories)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+                disposed = true;
+                failClosedDiagnosticSink = previous;
+                ReportedFailureCategories.Clear();
+            }
         }
     }
 

@@ -44,6 +44,28 @@ public sealed class MxcTelemetryTests
     }
 
     [Fact]
+    public void FailClosedDiagnostics_AreDeduplicatedAndDoNotExposeExceptionText()
+    {
+        var messages = new List<string>();
+        using var _ = MxcTelemetry.OverrideFailClosedDiagnosticSinkForTesting(messages.Add);
+        var failure = new InvalidOperationException("sensitive\r\n\u001b[31mmessage");
+
+        MxcTelemetry.ReportFailClosed("GetPolicy", "Blocked", failure);
+        MxcTelemetry.ReportFailClosed("GetPolicy", "Blocked", failure);
+        MxcTelemetry.ReportFailClosed(
+            "NeedsConsentPrompt",
+            "false",
+            ErrorCode.BackendError);
+
+        Assert.Equal(2, messages.Count);
+        Assert.Contains(typeof(InvalidOperationException).FullName!, messages[0]);
+        Assert.Contains("HRESULT 0x", messages[0]);
+        Assert.DoesNotContain("sensitive", messages[0]);
+        Assert.DoesNotContain('\u001b', messages[0]);
+        Assert.Contains("BackendError", messages[1]);
+    }
+
+    [Fact]
     public void RequestConsent_IsNotApplicableWithoutInvokingPresenter_OffWindows()
     {
         if (OperatingSystem.IsWindows())
