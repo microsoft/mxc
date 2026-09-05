@@ -12,6 +12,7 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
+// These tests mutate process-global telemetry seams and Trace listeners.
 [CollectionDefinition("MxcTelemetry", DisableParallelization = true)]
 public sealed class MxcTelemetryCollectionDefinition
 {
@@ -291,13 +292,13 @@ public sealed class MxcTelemetryTests
             NeedsConsentPromptImpl = () => new((int)ErrorCode.Success, false),
             GetPolicyImpl = () => new((int)ErrorCode.Success, "blocked"),
         };
-        var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
+        using var nativeScope = MxcTelemetry.OverrideTelemetryReadApiForTesting(native);
         Assert.Throws<InvalidOperationException>(
             () => MxcTelemetry.OverrideTelemetryReadApiForTesting(native));
         Parallel.Invoke(nativeScope.Dispose, nativeScope.Dispose);
 
         var tracker = new MxcTelemetry.FailureCategoryTracker(capacity: 64);
-        var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
+        using var trackerScope = MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker);
         Assert.Throws<InvalidOperationException>(
             () => MxcTelemetry.OverrideFailureCategoryTrackerForTesting(tracker));
         Parallel.Invoke(trackerScope.Dispose, trackerScope.Dispose);
