@@ -1,7 +1,7 @@
 name: Copilot CLI + MXC Build
 
 on:
-  workflow_call:
+  workflow_dispatch:
 
 permissions:
   actions: read
