@@ -35,6 +35,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:WingetPath = $null
+
 function Exit-WithError {
     param([Parameter(Mandatory)][string]$Message)
 
@@ -366,11 +368,13 @@ function Install-PackagedTooling {
     $wanted = $packages | Where-Object { -not (Resolve-Interpreter -Candidates $_.Candidates) }
     if (-not $wanted) {
         Write-Host "Packaged workload tooling is already present."
+        $global:LASTEXITCODE = 0
         return
     }
 
     if (-not $script:WingetPath) {
         Write-Host "::warning::winget is unavailable, so $(($wanted.Name) -join ' and ') cannot be installed."
+        $global:LASTEXITCODE = 0
         return
     }
 
@@ -411,6 +415,8 @@ function Install-PackagedTooling {
             Write-Host "::warning::$($package.Name) installed but still does not resolve on PATH."
         }
     }
+
+    $global:LASTEXITCODE = 0
 }
 
 function Initialize-MicroVmHost {

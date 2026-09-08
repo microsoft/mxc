@@ -52,107 +52,29 @@ parallel, then to the lint / versioning / SDK jobs.
 
 **Validation (E2E) test infrastructure.** Fully documented in
 [`docs/ci-validation-infrastructure.md`](../docs/ci-validation-infrastructure.md)
-(matrix contents, job names, per-backend coverage and status, and the runbook
-for adding/removing an OS, backend, or plan). Backend E2E tests run from those
-same build artifacts — never from a fresh build — so artifact production and
-consumption stay in one workflow run:
+— read it before changing any of the pieces below. Backend E2E tests run from
+the build artifacts, never from a fresh build, so an entry point must call the
+three `Build.*.Job.yml` workflows before calling the matrix job.
 
-- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point.
-  The `nightly` plan runs Mon–Sat; Sunday runs `nightly` *and* `weekly`.
-  `workflow_dispatch` takes a `plan` input to run one on demand.
+- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point
+  (`nightly` Mon–Sat, `nightly` + `weekly` on Sunday); `workflow_dispatch`
+  takes a `plan` input.
 - `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
-  takes a `plan` input. Its `resolve` job expands the plan into per-family
-  matrices, then the `windows` / `linux` / `macos` jobs each download the
-  artifact, prepare the host, and run the backend suite.
-
-An entry point must build the artifacts (call the three `Build.*.Job.yml`
-workflows) before calling the matrix job.
-
-**The matrix is declarative:**
-
-- `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
-  with per-architecture target/artifact/1ES pool and the backends that platform
-  supports), `triggers` (which OS/backend pairs each plan runs), and the
-  optional `backendDelayedStart` (per-backend job-start stagger, in seconds;
-  currently empty — nothing is staggered).
-  The `triggers` keys *are* the plan list — the resolver reads them at run time,
-  so adding a plan needs no script change.
-- `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
-  expands a plan (currently `pr`, `nightly`, `weekly`, `enabled`) into GitHub
-  Actions matrices. It rejects an invalid catalog before any specialized test
-  runner is allocated, so add a backend to a trigger only where the platform
-  declares it.
-- A non-macOS platform architecture with an empty `pool` is never scheduled,
-  which is how a catalog entry stays declared but dormant. macOS entries use a
-  GitHub-hosted `runner` instead of a 1ES `pool`.
-
-**Host preparation** happens in the matrix job before the tests, keyed by the
-matrix `backend` id: `scripts/ci/prepare-windows-host.ps1`,
-`scripts/ci/prepare-linux-host.sh`, and `scripts/ci/prepare-macos-host.sh`. A
-backend with no prerequisites is an explicit no-op, so the step runs
-unconditionally for every entry. Independent of the backend id, all three also
-verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
-`npx`, `python`, `pip`, `dotnet`, `az`, `gh`, `openssl`, plus `nuget`, `winapp`,
-`winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
-Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
-duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
-platform's list can diverge. Every pool runs an image provisioned ahead of time,
-so the whole list is normally present before a job starts. The provisioning
-scripts are **not in this repository** — they live in the
-`validation-provision-artifacts` branch of the ADO repo as
-`ubuntu-debian-provision.sh` / `rhel-provision.sh` (Linux) and
-`windows-provision.ps1` (Windows). No job installs a workload interpreter on any
-platform: all three scripts verify and report only, and a missing one warns
-rather than failing (except `pwsh` on Windows). A backend's own prerequisites
-are separate and are still installed per job — `install_bubblewrap` /
-`install_lxc` in `prepare-linux-host.sh` reach the package manager through
-`resolve_package_manager` and `install_packages`, so a new distribution family
-is one arm in `install_packages` rather than a branch in every installer. The
-Windows provisioning script installs
-no packaged application and never uses winget, because neither is available
-during image provisioning; it takes only `-Architecture` (`x64`/`arm64`, which
-selects the `gh` MSI and the .NET SDK bundle — the Azure CLI has no ARM64 build
-and is used emulated) and `-ScoopRoot`. It launches every installer through
-`Start-Process` rather
-than the call operator, because `msiexec` is a GUI-subsystem program for which
-the call operator leaves `$LASTEXITCODE` unset — which previously read as
-success and turned a failed install into a silent one. Windows Installer
-serializes machine-wide installs behind the `Global\_MSIExecute` mutex and
-returns 1618 to whoever arrives while another provisioning artifact holds it, so
-every MSI-touching call waits for that mutex to clear before each attempt and
-retries a 1618 up to three times. Its scope is the .NET SDK, `choco`, `scoop`,
-`az`, `gh` and `nuget`. The .NET SDK comes from the arch-matched
-`aka.ms/dotnet/LTS/dotnet-sdk-win-<arch>.exe` bundle rather than
-`dotnet-install.ps1`, because that script's only PATH write is to `$env:path` —
-it persists nothing, so an SDK it installs is on disk but resolves from nowhere
-in any later process. The remaining runtimes (`node`, `python`, `pwsh`, `git`)
-arrive from separate image artifacts, which it only inventories.
-Windows therefore provisions
-two entries at job time, also best-effort and also ahead of the inventory.
-`Repair-Winget`
-re-registers the App Installer package (`Add-AppxPackage -RegisterByFamilyName`)
-when `winget` resolves on `PATH` but fails to run, the symptom of a package the
-image shipped but never registered for the account the job runs as. It decides
-by invoking `winget --version`, not by resolving the command, since a resolvable
-alias is the broken case. `Install-PackagedTooling` then installs `winapp` and
-`openssl`, the two interpreters that cannot be baked into an image at all
-because both ship only as packaged applications; `winapp` is requested as
-`--installer-type zip` so the portable build lands on `PATH` instead of behind a
-`WindowsApps` alias the inventory's store-alias filter would reject, and
-`openssl`'s `bin` directory is appended to `PATH` afterwards because its
-installer publishes none.
-
-**Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
-(Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map
-the matrix `backend` id to the repository's existing backend suite. Ids that
-share a suite get their own case (`process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
-host's own `--probe`; `process-t3` additionally runs `T3-Workloads.ps1` and
-reports both suites' exit codes together, so one failing suite never hides the
-other). A backend with no wired suite fails loudly rather than
-reporting a false success. The Windows dispatcher points `TEMP` at
-`$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
-directory is picked up by the job's log upload without per-file CI wiring.
+  takes a `plan`. Its `resolve` job expands the plan into per-family matrices;
+  the `windows` / `linux` / `macos` jobs then download the artifact, prepare
+  the host, and run the backend suite.
+- `scripts/ci/validation-test-matrix.json` — the declarative catalog
+  (`platforms`, `triggers`, `backendDelayedStart`). Its `triggers` keys *are*
+  the plan list. `scripts/ci/resolve-validation-test-matrix.mjs` validates the
+  catalog and expands a plan, so a backend may only be triggered where its
+  platform declares it.
+- `scripts/ci/prepare-{windows,linux,macos}-host.{ps1,sh}` — per-backend host
+  prep, plus a verify-only inventory of the workload interpreters. Backend
+  prerequisites are installed per job; workload interpreters never are (they
+  come from image provisioning scripts that live outside this repository).
+- `scripts/ci/run_backend_validation_tests.{ps1,sh}` — map a matrix `backend`
+  id to the repository's existing backend suite. An unwired id fails loudly
+  rather than reporting a false success.
 
 ### Individual components
 
