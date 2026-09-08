@@ -56,5 +56,6 @@
   "environment": {
     "PARITY": "true"
   },
+  "inheritDefaultEnv": false,
   "experimental": false
 }

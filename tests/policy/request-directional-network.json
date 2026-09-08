@@ -37,5 +37,6 @@
     "type": "process"
   },
   "environment": {},
+  "inheritDefaultEnv": false,
   "experimental": false
 }
