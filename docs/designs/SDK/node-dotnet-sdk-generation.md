@@ -22,8 +22,8 @@ There is no MXC-specific addon, C++, subprocess, daemon, RPC path, or WebAssembl
 
 [node]: https://jhugman.github.io/uniffi-bindgen-react-native/reference/nodejs.html
 
-The prototype bundles generated TypeScript because upstream currently emits extensionless internal imports while MXC
-targets ESM. This is packaging, not an operation-specific adapter.
+The generated TypeScript is bundled because upstream currently emits extensionless internal imports while MXC targets
+ESM. This is packaging, not an operation-specific adapter.
 
 ## .NET
 
@@ -78,8 +78,8 @@ SDK. Public types use product terms such as `MxcSandbox`, `SandboxProcess`, `Run
 | Public facade and Node stream adapters | MXC | Thin handwritten layer |
 
 `@ubjs/node` itself is an upstream handwritten generic runtime, not generated per MXC API. MXC writes no N-API C++,
-libffi dispatch, ABI symbol registry, or operation-specific native addon code. The prototype's only Node-specific
-infrastructure is package configuration, native-library staging, a temporary upstream declaration shim, and tests.
+libffi dispatch, ABI symbol registry, or operation-specific native addon code. MXC's Node-specific infrastructure is
+package configuration, native-library staging, public stream adapters, and tests.
 
 ## True async behavior
 
@@ -117,9 +117,9 @@ Generated finalizers prevent leaks after abandoned objects. Callers should still
 Generated async calls can cancel future polling, but cancellation cannot safely imply process termination. MXC should
 only advertise kill-on-cancel after `mxc-sdk` provides cancellation independent of the lock held by `wait`.
 
-## Conformance scenarios
+## Behavior covered by tests
 
-Both prototypes run against the real library and verify:
+Node and .NET tests run against the real library and verify:
 
 1. version and host discovery
 2. structured malformed-request errors
@@ -130,11 +130,11 @@ Both prototypes run against the real library and verify:
 7. stream read, write, and flush
 8. prompt busy errors during concurrent handle use
 
-## Promotion gates
+## Before switching Node and .NET to the generated bindings
 
 - Run generated SDK scenarios on Windows, Linux, and macOS where supported.
-- Stress futures, finalizers, worker threads, streams, and process teardown.
-- Snapshot generated public APIs and exported ABI symbols.
+- Repeatedly create, use, cancel, and dispose async calls, streams, and processes without leaks or deadlocks.
+- Make CI identify changes to generated public APIs and native entry points.
 - Package one native library per target without changing generated operation code.
-- Remove the flat C exports and csbindgen path when adopting the generated .NET binding.
-- Keep the current SDK paths until behavioral and performance parity is proven.
+- Confirm generated calls return the same results, errors, streams, and process behavior as the Rust SDK.
+- Remove the flat C exports and csbindgen path.

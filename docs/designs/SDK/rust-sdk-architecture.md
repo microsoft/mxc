@@ -125,7 +125,7 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 - `kill` cannot interrupt a concurrent `wait` until `mxc-sdk` exposes independent cancellation.
 - generated object finalizers are a safety net; deterministic disposal remains recommended.
 
-## Exit criteria
+## Rules the implementation must preserve
 
 - Every projected operation immediately delegates to `mxc-sdk`.
 - Rust behavior tests define the expected result.

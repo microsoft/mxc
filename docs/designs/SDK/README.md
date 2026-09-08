@@ -98,11 +98,12 @@ The remaining work is the work that should stay explicit: implementing behavior 
 interop shape, preserving language-native facade semantics, and testing each supported runtime. A time study over
 several representative feature changes should replace these estimates before using them for staffing commitments.
 
-## Decision status
+## Remaining work before switching
 
-The prototype proves one native Rust library can generate and serve both language bindings. Production adoption still
-requires bounded async scheduling, interruptible streams, kill-during-wait behavior, typed state-aware parity,
-cross-platform packaging, generated public-model evaluation, and API compatibility gates.
+The implementation demonstrates that one native Rust library can generate and serve both language bindings. Before
+replacing the current bindings, MXC still needs bounded async scheduling, interruptible streams, kill-during-wait
+behavior, typed state-aware APIs, packages for every supported platform, generated public-model evaluation, and CI
+checks that identify accidental public API changes.
 
 ## Documents
 
@@ -120,4 +121,5 @@ The prototype is intentionally production-shaped:
 - `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
 - `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.
 
-Promotion requires cross-platform tests, API snapshot checks, ownership stress tests, and an upstream-risk review.
+The current bindings should be replaced only after cross-platform tests, public API checks, and ownership stress tests
+pass.
