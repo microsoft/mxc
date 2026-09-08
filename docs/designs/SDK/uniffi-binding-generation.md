@@ -6,7 +6,7 @@ Use one [UniFFI](https://github.com/mozilla/uniffi-rs) object model to generate 
 
 ```mermaid
 flowchart TD
-    U["mxc_uniffi<br/>#[uniffi::export]"]
+    U["mxc_ffi<br/>#[uniffi::export]"]
     U --> L[Host-compiled dynamic library]
     L --> M[Embedded UniFFI metadata]
     M --> N["uniffi-bindgen-react-native<br/>N-API flavor"]
@@ -15,8 +15,8 @@ flowchart TD
     C --> CS[Generated C#]
 ```
 
-The generated ABI is compiled into `mxc_uniffi`. It is not a separately maintained C library and does not wrap the
-legacy flat `mxc_ffi` ABI.
+The generated ABI is compiled into `mxc_ffi`. UniFFI replaces the handwritten flat C projection rather than adding
+another native library. The existing C exports coexist in that library only during compatibility migration.
 
 ## Pinned toolchain
 
@@ -41,7 +41,7 @@ sequenceDiagram
     participant C as Cargo
     participant N as Node generator
     participant D as C# generator
-    G->>C: Build mxc_uniffi cdylib
+    G->>C: Build mxc_ffi cdylib
     C-->>G: Library with UniFFI metadata
     G->>N: generate napi bindings --library
     G->>D: --library --config uniffi.toml
@@ -70,7 +70,7 @@ The object model covers discovery, run results, live sandboxes, owned streams, w
 flowchart LR
     TS[Generated TypeScript] --> N["@ubjs/node<br/>prebuilt N-API runtime"]
     N --> F[libffi]
-    F --> L[mxc_uniffi library]
+    F --> L[mxc_ffi library]
     CS[Generated C#] --> P[Generated P/Invoke]
     P --> L
     L --> S[mxc-sdk]
@@ -98,6 +98,12 @@ Both generators throw the same object model. This avoids duplicating the closed 
 Panics are caught before returning to UniFFI. A panic becomes a structured `panic` failure; it never unwinds into Node
 or the CLR.
 
+## Legacy C migration
+
+The shipping C# SDK initially keeps using the existing C exports from `mxc_ffi`, while generated clients use UniFFI
+exports from that same binary. After public API, behavior, packaging, and performance parity are proven, the C#
+facade moves to generated bindings and the flat C exports plus csbindgen generation are removed.
+
 ## Known generator risks
 
 - Native Node support is new and has no end-to-end build command.
@@ -110,5 +116,6 @@ or the CLR.
 
 - One Rust export model generates both foreign SDKs.
 - Both SDKs load the same library and pass the same real-library scenarios.
+- One `mxc_ffi` library serves migration and remains after legacy C export removal.
 - Regeneration is deterministic and checked in CI.
 - ABI metadata and generated API snapshots are reviewed on every surface change.

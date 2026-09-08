@@ -8,13 +8,14 @@ Keep [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable
 ```mermaid
 flowchart LR
     R[Rust application] --> S[mxc-sdk]
-    U[mxc_uniffi] --> S
-    C[Legacy mxc_ffi] --> S
+    U[mxc_ffi UniFFI exports] --> S
+    C[mxc_ffi legacy C exports] --> S
     S --> E[mxc_engine]
 ```
 
-Rust callers never route through an FFI layer. Foreign projection crates translate and immediately delegate to
-`mxc-sdk`.
+Rust callers never route through an FFI layer. During migration, the single `mxc_ffi` dynamic library carries the
+new UniFFI projection and the legacy C compatibility exports. Both immediately delegate to `mxc-sdk`; the legacy
+exports are removed after the generated SDKs reach parity.
 
 ## Responsibilities
 
@@ -62,11 +63,11 @@ sequenceDiagram
     S-->>F: Stable SDK value
 ```
 
-This removes parser duplication between `mxc_ffi` and `mxc_uniffi`. It does not redesign the public schema.
+This gives both temporary projection surfaces one parser. It does not redesign the public schema.
 
 ## Projection rule
 
-`mxc_uniffi` may:
+The UniFFI module in `mxc_ffi` may:
 
 - map safe SDK values to UniFFI records and objects
 - retain `Sandbox` and stream ownership behind synchronized objects
@@ -78,7 +79,7 @@ It may not validate policy, select a backend, reinterpret results, or maintain a
 
 ## Synchronous and asynchronous behavior
 
-`mxc-sdk` remains synchronous where the engine is synchronous. `mxc_uniffi` exports:
+`mxc-sdk` remains synchronous where the engine is synchronous. `mxc_ffi` exports an internal UniFFI pair:
 
 ```text
 run_sync(request) -> RunResult
@@ -100,6 +101,7 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 
 - Every projected operation immediately delegates to `mxc-sdk`.
 - Rust behavior tests define the canonical result.
-- The old and new FFI crates share request conversion rather than copying it.
+- UniFFI and temporary legacy C exports coexist in one dynamic library.
+- The legacy C exports have an explicit removal gate after generated SDK parity.
 - Rust callers retain direct typed APIs.
-- No backend dependency is introduced into `mxc_uniffi`.
+- No backend dependency is introduced into `mxc_ffi`.

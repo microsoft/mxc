@@ -2,8 +2,8 @@
 
 ## Decision
 
-Generate both foreign SDKs from `mxc_uniffi`. Keep only thin public compatibility facades where existing names require
-them.
+Generate both foreign binding layers from the UniFFI metadata in `mxc_ffi`. Keep thin public facades for stable,
+idiomatic APIs; the generated surface remains internal.
 
 ## Node
 
@@ -12,11 +12,11 @@ flowchart LR
     A[Node application] --> T[Generated TypeScript]
     T --> R["@ubjs/node"]
     R --> F[libffi]
-    F --> L[mxc_uniffi library]
+    F --> L[mxc_ffi library]
 ```
 
 [`uniffi-bindgen-react-native` Node support][node] generates TypeScript that describes the UniFFI symbols and value
-conversions. The generic `@ubjs/node` N-API addon opens `mxc_uniffi` and calls it through libffi.
+conversions. The generic `@ubjs/node` N-API addon opens `mxc_ffi` and calls it through libffi.
 
 There is no MXC-specific addon, C++, subprocess, daemon, RPC path, or WebAssembly module.
 
@@ -31,31 +31,32 @@ targets ESM. This is packaging, not an operation-specific adapter.
 flowchart LR
     A[.NET application] --> C[Generated C# objects]
     C --> P[Generated P/Invoke]
-    P --> L[mxc_uniffi library]
+    P --> L[mxc_ffi library]
 ```
 
 [`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates records, owned objects, async Task
 plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
-The shipping SDK may expose `Run` and `RunAsync` as compatibility names over generated `RunSync` and `Run`.
+The public facade exposes the established `Run` and `RunAsync` names over internal generated `RunSync` and `Run`.
 
 ## API alignment
 
-| Concept | Node generated | C# generated | Rust canonical |
+| Concept | Node public | .NET public | Rust canonical |
 |---|---|---|---|
 | Version | `version()` | `Version()` | package version |
 | Discovery | `discover()` | `Discover()` | discovery functions |
-| Run sync | `runSync()` | `RunSync()` | `run()` |
-| Run async | `run()` | `Run()` | worker calling `run()` |
-| Spawn sync | `spawnSync()` | `SpawnSync()` | `spawn_sandbox()` |
-| Spawn async | `spawn()` | `Spawn()` | worker calling `spawn_sandbox()` |
+| Run sync | `runSync()` | `Run()` | `run()` |
+| Run async | `run()` | `RunAsync()` | worker calling `run()` |
+| Spawn sync | `spawnSync()` | `Spawn()` | `spawn_sandbox()` |
+| Spawn async | `spawn()` | `SpawnAsync()` | worker calling `spawn_sandbox()` |
 | Poll | `tryWait()` | `TryWait()` | `Sandbox::try_wait()` |
-| Wait sync | `waitSync()` | `WaitSync()` | `Sandbox::wait()` |
-| Wait async | `wait()` | `Wait()` | worker calling `Sandbox::wait()` |
-| Kill sync | `killSync()` | `KillSync()` | `Sandbox::kill()` |
-| Kill async | `kill()` | `Kill()` | worker calling `Sandbox::kill()` |
+| Wait sync | `waitSync()` | `Wait()` | `Sandbox::wait()` |
+| Wait async | `wait()` | `WaitAsync()` | worker calling `Sandbox::wait()` |
+| Kill sync | `killSync()` | `Kill()` | `Sandbox::kill()` |
+| Kill async | `kill()` | `KillAsync()` | worker calling `Sandbox::kill()` |
 
-State-aware envelope execution, streaming exec, and attached exec follow the same sync/async suffix rule.
+Generated names are internal implementation details. Node marks blocking operations with `Sync`; .NET marks asynchronous
+operations with `Async`. State-aware envelope execution, streaming exec, and attached exec follow the same convention.
 
 ## True async behavior
 
@@ -112,4 +113,5 @@ Both prototypes run against the real library and verify:
 - Stress futures, finalizers, worker threads, streams, and process teardown.
 - Snapshot generated public APIs and exported ABI symbols.
 - Package one native library per target without changing generated operation code.
+- Remove the legacy C exports after the generated .NET facade reaches parity.
 - Keep the current SDK paths until behavioral and performance parity is proven.
