@@ -88,7 +88,7 @@ Use the base callable operation name for synchronous functions and an `Async` su
 | Run to completion | `run` / `run_async` | `run` / `runAsync` | `Run` / `RunAsync` |
 | Spawn live process | `spawn` / `spawn_async` | `spawn` / `spawnAsync` | `Spawn` / `SpawnAsync` |
 | Wait | `wait` / `wait_async` | `wait` / `waitAsync` | `Wait` / `WaitAsync` |
-| Terminate process | `kill` / `kill_async` | `kill` / `killAsync` | `Kill` / `KillAsync` |
+| Terminate process | `terminate` / `terminate_async` | `terminate` / `terminateAsync` | `Terminate` / `TerminateAsync` |
 
 Public facades preserve these names and delegate without changing semantics.
 
@@ -114,10 +114,10 @@ in the table.
 
 | Work item | Classification | Effect |
 |---|---|---|
-| Bounded async scheduling | Blocker for production async APIs | Replace one-worker-thread-per-call behavior |
+| Bounded async scheduling | Blocker for production async APIs | The prototype creates one Rust thread per async call; use a bounded worker pool |
 | Interruptible stream reads and disposal | Blocker for live streaming | A blocked read must not prevent shutdown |
-| Process termination during a pending wait | Blocker for live process control | `kill` must work while `waitAsync` is pending |
-| Native package and tests for a target | Blocker for that target | Targets may be enabled independently |
+| Process termination during a pending wait | Blocker for live process control | `terminate` must work while `waitAsync` is pending |
+| Package and test each platform's native library | Required before that platform ships | Do not ship an untested native package |
 | Public API and generated-contract checks in CI | Release safeguard | Does not block implementation; add before removing the old path |
 | Typed state-aware facade methods | Follow-up | The JSON state-aware path remains usable |
 | Schema-derived Node/.NET policy models | Out of scope | Existing manual model maintenance is unchanged |

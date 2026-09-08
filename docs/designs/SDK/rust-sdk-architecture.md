@@ -40,7 +40,7 @@ Keep a crate when one of the rules below applies. Otherwise, prefer a private mo
 | One-consumer backend adapters and helpers | Prefer private modules in their consumer |
 
 Do not merge boundaries when that would create a dependency cycle or make backend-independent code depend on a
-backend. Preserve platform feature gating and test selection; package count alone is not a success metric.
+backend.
 
 ## Callable API families
 
@@ -56,7 +56,7 @@ flowchart TD
     R --> R1[run]
     P --> P1[spawn_sandbox]
     P1 --> P2[take stdin, stdout, stderr]
-    P1 --> P3["try_wait, wait, terminate (kill)"]
+    P1 --> P3["try_wait, wait, terminate"]
     A --> A1[run_state_aware_json]
     A --> A2[exec_sandbox]
     A --> A3[exec_attached]
@@ -76,13 +76,16 @@ sequenceDiagram
     S->>E: build_request with typed policy
     E->>E: Construct wire::MxcConfig directly
     E->>E: Shared wire validation and domain mapping
-    E-->>S: SandboxRequest or Error
-    S-->>F: Stable SDK value
+    E-->>S: Validated internal request or error
+    S->>E: Run or spawn the validated request
+    E-->>S: Execution result or error
+    S-->>F: Stable SDK result or error
 ```
 
 This keeps request construction in Rust rather than the projection. The SDK-to-engine handoff never serializes policy
 to JSON and reparses it. JSON remains only at actual external configuration and foreign-language boundaries, where
-path-aware deserialization is required. Both paths converge on the same typed wire validation and domain mapping.
+path-aware deserialization is required. Both paths converge on the same typed wire validation and domain mapping. The
+validated request is an internal value passed into execution; it is not returned to the Node or .NET caller.
 
 ## Projection rule
 
@@ -122,8 +125,8 @@ The initial `mxc_ffi` wrapper places each sandbox and stream behind a Rust `Mute
 typed busy error instead of blocking the foreign runtime thread.
 
 This is a current limitation, not the intended public contract. `wait` holds the sandbox mutex until the process exits,
-so `kill` cannot acquire it to terminate the process. Before adoption, `mxc-sdk` must expose independently synchronized
-wait and termination operations, and Node/.NET tests must prove that `kill` works while `waitAsync` is pending.
+so `terminate` cannot acquire it to stop the process. Before adoption, `mxc-sdk` must expose independently synchronized
+wait and termination operations, and Node/.NET tests must prove that `terminate` works while `waitAsync` is pending.
 
 ## Rules the implementation must preserve
 

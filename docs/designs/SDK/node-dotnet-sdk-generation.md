@@ -97,8 +97,8 @@ schema field before a convenience model adds it; typed policy APIs remain the no
 | Poll | `tryWait()` | `TryWait()` | `Sandbox::try_wait()` |
 | Wait sync | `wait()` | `Wait()` | `Sandbox::wait()` |
 | Wait async | `waitAsync()` | `WaitAsync()` | worker calling `Sandbox::wait()` |
-| Terminate sync | `kill()` | `Kill()` | `Sandbox::kill()` |
-| Terminate async | `killAsync()` | `KillAsync()` | worker calling `Sandbox::kill()` |
+| Terminate sync | `terminate()` | `Terminate()` | `Sandbox::terminate()` |
+| Terminate async | `terminateAsync()` | `TerminateAsync()` | worker calling `Sandbox::terminate()` |
 
 State-aware envelope execution, streaming exec, and attached exec follow the same base-name/`Async` convention.
 
@@ -179,7 +179,7 @@ Node and .NET tests run against the real library and verify:
 5. live process ownership
 6. take-once stdin, stdout, and stderr
 7. stream read, write, and flush
-8. `kill` terminates the process while `waitAsync` is pending, plus defined behavior for conflicting stream calls
+8. `terminate` stops the process while `waitAsync` is pending, plus defined behavior for conflicting stream calls
 
 ## Before switching Node and .NET to the generated bindings
 
