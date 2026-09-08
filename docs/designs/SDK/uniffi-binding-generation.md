@@ -15,8 +15,8 @@ flowchart TD
     C --> CS[Generated C#]
 ```
 
-The generated ABI is compiled into `mxc_ffi`. UniFFI replaces the handwritten flat C projection rather than adding
-another native library. The C# SDK has not shipped, so the old projection does not require compatibility preservation.
+UniFFI generates TypeScript and C# callers from metadata in `mxc_ffi`. The library remains a Rust-built dynamic library
+that exports native entry points. No C source or C SDK is generated.
 
 ## Pinned toolchain
 
@@ -62,7 +62,8 @@ Generated files must not be manually edited.
 | `Vec<u8>` | ArrayBuffer or byte array |
 | `Option<T>` | Optional or nullable value |
 
-The object model covers discovery, run results, live sandboxes, owned streams, wait results, and state-aware calls.
+The concrete operations, results, and owned objects are listed in
+[Projected surface](node-dotnet-sdk-generation.md#projected-surface).
 
 ## Runtime call paths
 
@@ -89,8 +90,8 @@ Node is native and in-process.
 | New target package | Native-library staging and package metadata | Operation bindings remain unchanged |
 
 For a normal behavior fix, no binding code changes. For a new projected operation, the only operation-specific interop
-code is in Rust. MXC does not write C, C++, a Node-API addon, P/Invoke declarations, ABI symbol registration, foreign
-future polling, or foreign object lifetime plumbing.
+code is in Rust. MXC does not write C or C++ source, a Node-API addon, P/Invoke declarations, native symbol
+registration, foreign future polling, or foreign object lifetime plumbing.
 
 ## Error boundary
 
@@ -99,11 +100,6 @@ Both generators throw the same object model. This avoids duplicating the closed 
 
 Panics are caught before returning to UniFFI. A panic becomes a structured `panic` failure; it never unwinds into Node
 or the CLR.
-
-## Legacy C replacement
-
-Adoption removes the flat C exports and csbindgen generation from `mxc_ffi`. They are not a migration promise or
-supported ABI.
 
 ## Third-party dependency policy
 
@@ -122,4 +118,4 @@ stays internal so changing a generator does not require changing the public SDK 
 - Async calls, cancellation, process termination, streams, errors, and object disposal match the Rust SDK behavior.
 - Packages contain the correct native library for every supported target.
 - CI reports unexpected public API or native entry-point changes.
-- The flat C exports and csbindgen path are removed, leaving one generated binding system.
+- The previous interop generation path is removed, leaving one binding system.

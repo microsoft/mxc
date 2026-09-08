@@ -12,8 +12,7 @@ flowchart LR
     S --> E[mxc_engine]
 ```
 
-Rust callers never route through an FFI layer. Foreign bindings immediately delegate to `mxc-sdk`. Adoption replaces
-the unshipped legacy C projection; it does not preserve two API surfaces.
+Rust callers never route through an FFI layer. Foreign bindings immediately delegate to `mxc-sdk`.
 
 ## Responsibilities
 
@@ -28,28 +27,20 @@ the unshipped legacy C projection; it does not preserve two API surfaces.
 
 ## Rust workspace consolidation
 
-SDK unification should also reduce internal Cargo-package overhead, but the goal is not one large crate. The current
-workspace has 43 packages. Convert a private crate to a module when it has one runtime consumer, no independently built
-artifact, no publication boundary, and no dependency-cycle role.
+Keep a crate when one of the rules below applies. Otherwise, prefer a private module in its only consumer.
 
 | Boundary | Direction |
 |---|---|
 | `mxc-sdk` | Keep as the small public Rust facade |
 | `mxc_ffi` | Keep as the generated dynamic-library boundary |
-| `wxc_common` | Keep as the backend-independent foundation that backend code may depend on |
+| `wxc_common` (rename to `mxc_common`) | Keep as the backend-independent foundation that backend code may depend on |
 | `mxc_engine` | Keep as the dispatch layer that depends on backend implementations |
 | Binaries, daemons, guests, and host tools | Keep as crates because Cargo builds them as separate artifacts |
 | Shared protocols and code-generation contracts | Keep when multiple artifacts consume them or they require isolated generation |
 | One-consumer backend adapters and helpers | Prefer private modules in their consumer |
 
-Initial consolidation candidates include `seatbelt_common` and `nanvix_runner` under `mxc_engine`, `mxc_pty` under
-`lxc_common`, and combining the IsolationSession common/bindings pair. Windows Sandbox protocol code is not a module
-candidate because the lifecycle library, daemon, and guest share it.
-
-Consolidation follows the binding and typed-request work rather than blocking it. Each move must preserve platform
-feature gating and compare clean-build time, incremental-build time, binary contents, and test selection before and
-after. Package count alone is not a success metric: fewer crates are useful only when they remove manifests, feature
-forwarding, duplicated configuration, or unnecessary compilation boundaries without weakening dependency direction.
+Do not merge boundaries when that would create a dependency cycle or make backend-independent code depend on a
+backend. Preserve platform feature gating and test selection; package count alone is not a success metric.
 
 ## Operation families
 
@@ -129,6 +120,5 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 
 - Every projected operation immediately delegates to `mxc-sdk`.
 - Rust behavior tests define the expected result.
-- Adoption removes the legacy C exports and csbindgen projection.
 - Rust callers retain direct typed APIs.
 - No backend dependency is introduced into `mxc_ffi`.

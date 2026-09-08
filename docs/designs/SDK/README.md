@@ -24,8 +24,9 @@ a child process, a daemon, or MXC-specific C++.
 
 ## Scope
 
-This design unifies callable operations, results, errors, async behavior, and owned handles. UniFFI replaces the
-handwritten flat C projection inside `mxc_ffi`; it does not introduce a second Rust dynamic library.
+This design unifies callable operations, results, errors, async behavior, and owned handles. UniFFI generates
+TypeScript and C# that call native entry points exported by the Rust-built `mxc_ffi` library. It does not generate C
+source, a C SDK, or a second dynamic library.
 
 It does not yet replace:
 
@@ -34,7 +35,7 @@ It does not yet replace:
 - `mxc_engine`
 - containment backends
 
-The C# SDK has not shipped, so adoption removes the legacy C exports and csbindgen path without a compatibility period.
+The .NET SDK has not shipped, so its existing interop layer can be replaced without a compatibility period.
 
 ## Ownership
 
@@ -85,13 +86,20 @@ Public facades preserve these names and delegate without changing semantics.
 Schema-derived public model generation is a follow-up decision. Until it is implemented, policy changes still require
 manual Node and C# model updates and the repository has not reached the intended maintenance state.
 
+## Versioning and changelogs
+
+All three SDK versions remain synchronized. Each published SDK keeps its own ecosystem-facing changelog so Rust, Node,
+and .NET consumers can see the changes relevant to their package. A shared behavior change uses the same release
+summary in each affected changelog; facade or packaging changes appear only in the affected SDK's changelog. Detailed
+release mechanics belong in [`docs/versioning.md`](../../versioning.md), not in this architecture proposal.
+
 ## Expected maintenance effect
 
 These are planning estimates, not measured delivery-time guarantees:
 
 | Adoption stage | Estimated recurring cross-SDK maintenance reduction | What is eliminated |
 |---|---:|---|
-| UniFFI projection only | 40-60% | Handwritten C ABI, P/Invoke, N-API glue, async bridge, and foreign object plumbing |
+| UniFFI projection only | 40-60% | Handwritten native exports, P/Invoke, N-API glue, async bridge, and foreign object plumbing |
 | UniFFI plus schema-derived public models | 60-75% | Most repeated Node and C# policy/request model edits |
 
 The remaining work is the work that should stay explicit: implementing behavior once in Rust, designing the safe
@@ -116,7 +124,6 @@ checks that identify accidental public API changes.
 The prototype is intentionally production-shaped:
 
 - `src/ffi/mxc_ffi` exports UniFFI discovery, run, live process, streams, and state-aware operations.
-- Legacy C exports remain in the prototype only for comparison and are not part of the target design.
 - `scripts/generate-uniffi-bindings.ps1` pins both generators and regenerates both SDKs.
 - `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
 - `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.

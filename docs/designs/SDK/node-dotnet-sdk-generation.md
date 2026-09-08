@@ -39,6 +39,18 @@ plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
 The public facade exposes `Run` and `RunAsync`, matching the generated operation names.
 
+## Projected surface
+
+| Family | Generated internal surface |
+|---|---|
+| Discovery | Version and platform-support functions and records |
+| Run to completion | Sync/async operations, result record, and structured error |
+| Live process | Sandbox object, take-once streams, poll, wait, and kill |
+| State-aware lifecycle | Provision, start, exec, stop, and deprovision operations |
+
+The public Node and .NET facades rename these internal generated types where needed but do not reimplement their
+behavior.
+
 ## API alignment
 
 | Concept | Node public | .NET public | Rust API |
@@ -137,4 +149,4 @@ Node and .NET tests run against the real library and verify:
 - Make CI identify changes to generated public APIs and native entry points.
 - Package one native library per target without changing generated operation code.
 - Confirm generated calls return the same results, errors, streams, and process behavior as the Rust SDK.
-- Remove the flat C exports and csbindgen path.
+- Remove the previous interop generation path.
