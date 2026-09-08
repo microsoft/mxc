@@ -52,53 +52,34 @@ parallel, then to the lint / versioning / SDK jobs.
 
 **Validation (E2E) test infrastructure.** Fully documented in
 [`docs/ci-validation-infrastructure.md`](../docs/ci-validation-infrastructure.md)
-(matrix contents, job names, per-backend coverage and status, and the runbook
-for adding/removing an OS, backend, or plan). Backend E2E tests run from those
-same build artifacts — never from a fresh build — so artifact production and
-consumption stay in one workflow run:
+— read it before changing any of the pieces below. Backend E2E tests run from
+the build artifacts, never from a fresh build, so an entry point must call the
+three `Build.*.Job.yml` workflows before calling the matrix job.
 
-- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point.
-  The `nightly` plan runs Mon–Sat; Sunday runs `nightly` *and* `weekly`.
-  `workflow_dispatch` takes a `plan` input to run one on demand.
+- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point
+  (`nightly` Mon–Sat, `nightly` + `weekly` on Sunday); `workflow_dispatch`
+  takes a `plan` input.
 - `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
-  takes a `plan` input. Its `resolve` job expands the plan into per-family
-  matrices, then the `windows` / `linux` / `macos` jobs each download the
-  artifact, prepare the host, and run the backend suite.
+  takes a `plan`. Its `resolve` job expands the plan into per-family matrices;
+  the `windows` / `linux` / `macos` jobs then download the artifact, prepare
+  the host, and run the backend suite.
+- `scripts/ci/validation-test-matrix.json` — the declarative catalog
+  (`platforms`, `triggers`, `backendDelayedStart`). Its `triggers` keys *are*
+  the plan list. `scripts/ci/resolve-validation-test-matrix.mjs` validates the
+  catalog and expands a plan, so a backend may only be triggered where its
+  platform declares it.
+- `scripts/ci/prepare-{windows,linux,macos}-host.{ps1,sh}` — per-backend host
+  prep, plus an inventory of the workload interpreters. Backend prerequisites
 
-An entry point must build the artifacts (call the three `Build.*.Job.yml`
-workflows) before calling the matrix job.
+  are installed per job; most workload interpreters come from image provisioning
 
-**The matrix is declarative:**
+  scripts outside this repository, while Windows prep installs packaged `winapp`
 
-- `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
-  with per-architecture target/artifact/1ES pool and the backends that platform
-  supports), `triggers` (which OS/backend pairs each plan runs), and the
-  optional `backendDelayedStart` (per-backend job-start stagger, in seconds).
-  The `triggers` keys *are* the plan list — the resolver reads them at run time,
-  so adding a plan needs no script change.
-- `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
-  expands a plan (currently `pr`, `nightly`, `weekly`, `enabled`) into GitHub
-  Actions matrices. It rejects an invalid catalog before any specialized test
-  runner is allocated, so add a backend to a trigger only where the platform
-  declares it.
-- A non-macOS platform architecture with an empty `pool` is never scheduled,
-  which is how a catalog entry stays declared but dormant. macOS entries use a
-  GitHub-hosted `runner` instead of a 1ES `pool`.
+  and OpenSSL per job.
 
-**Host preparation** happens in the matrix job before the tests, keyed by the
-matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
-`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
-explicit no-op, so the step runs unconditionally for every entry.
-
-**Test dispatch** goes through `tests/scripts/run_ci_backend_tests.ps1`
-(Windows) and `tests/scripts/run_ci_backend_tests.sh` (Linux/macOS), which map
-the matrix `backend` id to the repository's existing backend suite. Ids that
-share a suite get their own case (`process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
-host's own `--probe`). A backend with no wired suite fails loudly rather than
-reporting a false success. The Windows dispatcher points `TEMP` at
-`$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
-directory is picked up by the job's log upload without per-file CI wiring.
+- `scripts/ci/run_backend_validation_tests.{ps1,sh}` — map a matrix `backend`
+  id to the repository's existing backend suite. An unwired id fails loudly
+  rather than reporting a false success.
 
 ### Individual components
 
@@ -150,21 +131,22 @@ tests\scripts\run_wslc_state_aware_tests.ps1  # WSLc state-aware lifecycle E2E (
 tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one-shot E2E (fresh disposable VM per test; requires the Windows Sandbox optional feature)
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
-tests\scripts\run_seatbelt_all_tests.sh       # All Seatbelt tests (macOS). No skip path: a missing prerequisite (mxc-exec-mac, unix-test-proxy, python3, curl, sandbox-exec, or a reachable external anchor) is a FAILURE, not a skip. Must NOT run as root. Individual suites are run_seatbelt_<area>_test.sh; shared setup/assertions live in tests/scripts/lib/seatbelt_common.sh. Includes run_seatbelt_launch_open_test.sh, which needs a GUI login session and asserts side-effect files only (open mode discards stdio). It reaps the Terminal instances each run spawns, since `open -n -W` never returns on its own. Currently red: see microsoft/mxc#1108 and the `process.cwd` gap.
-tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Skips are FAILURES by default; set MXC_BWRAP_TESTS_REQUIRE_EXECUTION=0 on a dev box lacking prerequisites. Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
-sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_ci_backend_tests.sh.
+tests\scripts\run_seatbelt_all_tests.sh       # All Seatbelt tests (macOS). No skip path: a missing prerequisite (mxc-exec-mac, unix-test-proxy, python3, curl, sandbox-exec, or a reachable external anchor) is a FAILURE, not a skip. Must NOT run as root. Individual suites are run_seatbelt_<area>_test.sh; shared setup/assertions live in tests/scripts/lib/seatbelt_common.sh. Includes run_seatbelt_launch_open_test.sh, which needs a GUI login session and asserts side-effect files only (open mode discards stdio). It reaps the Terminal instances each run spawns, since `open -n -W` never returns on its own.
+tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
+sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_backend_validation_tests.sh.
+
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
 
 # WSLC has no cargo E2E suite — it is covered by tests\scripts\run_wslc_all_tests.ps1,
-# which the validation matrix runs via tests\scripts\run_ci_backend_tests.ps1.
+# which the validation matrix runs via scripts\ci\run_backend_validation_tests.ps1.
 
 # CI validation entry points — run a backend suite against a downloaded artifact
 # the way the validation matrix does. Take the matrix backend id exactly as it
 # appears in scripts/ci/validation-test-matrix.json.
-tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
-tests\scripts\run_ci_backend_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
+scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
+scripts\ci\run_backend_validation_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
 
 # Resolve a plan locally to see exactly what CI would schedule
 node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly

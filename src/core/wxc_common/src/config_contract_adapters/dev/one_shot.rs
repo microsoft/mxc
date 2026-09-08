@@ -263,7 +263,6 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
         test,
         windows_sandbox,
         wslc,
-        telemetry,
     } = value;
     wire::Experimental {
         test: test.into_option().map(convert_test),
@@ -271,7 +270,6 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
         wslc: wslc.into_option().map(convert_wslc),
         isolation_session: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
@@ -292,6 +290,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         ui,
         seatbelt,
         runtime_config,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -300,7 +299,6 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         version: Some(convert_version(version).to_owned()),
         phase: None,
         sandbox_id: None,
-        correlation_vector: None,
         container_id: container_id.into_option(),
         containment: containment.into_option().map(convert_containment),
         process: Some(convert_process(process)),
@@ -313,6 +311,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
+        telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         experimental: experimental.into_option().map(convert_experimental),

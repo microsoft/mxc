@@ -814,7 +814,6 @@ mod tests {
             phase,
             containment: Some(ContainmentBackend::IsolationSession),
             sandbox_id: sandbox_id.map(String::from),
-            correlation_vector: None,
             experimental_raw: exp,
             source_text: None,
         }
@@ -1062,7 +1061,6 @@ mod tests {
             phase: Phase::Provision,
             containment: Some(ContainmentBackend::Wslc),
             sandbox_id: None,
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1077,7 +1075,6 @@ mod tests {
             phase: Phase::Provision,
             containment: None,
             sandbox_id: None,
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1092,7 +1089,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-abcd1234".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1109,7 +1105,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("wsb:deadbeef".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1126,7 +1121,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("wslc:deadbeef".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1140,7 +1134,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("unknownxyz:abc".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1155,7 +1148,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("no-colon".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };

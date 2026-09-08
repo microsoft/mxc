@@ -51,8 +51,8 @@ pub enum WaitOutcome {
 pub struct Output {
     /// How the process finished.
     pub outcome: WaitOutcome,
-    /// Warnings emitted while applying the sandbox policy — security warnings,
-    /// and policy warnings such as a network rule that cannot carry traffic.
+    /// Policy and operational warnings emitted while starting the sandbox,
+    /// including security warnings and network rules that cannot carry traffic.
     pub warnings: Vec<String>,
     /// Everything the child wrote to stdout.
     pub stdout: Vec<u8>,
@@ -77,8 +77,8 @@ impl Sandbox {
         Self { inner }
     }
 
-    /// Warnings emitted while applying the sandbox policy — security warnings,
-    /// and policy warnings such as a network rule that cannot carry traffic.
+    /// Policy and operational warnings emitted while starting the sandbox,
+    /// including security warnings and network rules that cannot carry traffic.
     pub fn warnings(&self) -> &[String] {
         self.inner.warnings()
     }
