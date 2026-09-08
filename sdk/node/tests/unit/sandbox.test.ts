@@ -1626,7 +1626,7 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should apply inheritDefaultEnv without replacing the supplied environment', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
       config.process!.env = ['GREETING=hello'];
 
@@ -1638,6 +1638,16 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.process!.inheritDefaultEnv, true);
     });
 
+    it('should reject inheritDefaultEnv before schema version 0.9', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /process\.inheritDefaultEnv requires policy version 0\.9\.0-alpha/ },
+      );
+    });
+
     it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
@@ -1647,7 +1657,7 @@ describe('createConfigFromPolicy', () => {
         () => spawnSandboxFromConfig(config, { inheritDefaultEnv: false }),
         { message: /experimental mode/ },
       );
-      assert.strictEqual(config.process!.inheritDefaultEnv, false);
+      assert.strictEqual(config.process!.inheritDefaultEnv, undefined);
     });
   });
 

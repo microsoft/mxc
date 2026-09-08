@@ -19,6 +19,5 @@
     ]
   },
   "containerName": "golden-wslc",
-  "inheritDefaultEnv": false,
   "experimental": true
 }

@@ -67,6 +67,7 @@ public sealed class SandboxRequest
     /// Has no effect when <see cref="Environment"/> is null.
     /// </remarks>
     [JsonPropertyName("inheritDefaultEnv")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool InheritDefaultEnvironment { get; set; }
 
     /// <summary>Opt in to experimental containment backends and features.</summary>

@@ -391,7 +391,8 @@ fn parse_mxc_request_json(
 
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
-    validate_telemetry_field_version(config)
+    validate_telemetry_field_version(config)?;
+    validate_inherit_default_env_field_version(config)
 }
 
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
@@ -442,6 +443,35 @@ fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), Wx
         ));
     }
     Ok(())
+}
+
+fn validate_inherit_default_env_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    let has_inherit_default_env = config
+        .get("process")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|process| process.contains_key("inheritDefaultEnv"));
+    if !has_inherit_default_env {
+        return Ok(());
+    }
+
+    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
+        let Ok(version) = semver::Version::parse(version) else {
+            // The ordinary schema-version validator owns malformed-version
+            // diagnostics so this feature gate does not mask the more useful error.
+            return Ok(());
+        };
+        if version.major > 0 || version.minor >= 9 {
+            return Ok(());
+        }
+    }
+
+    Err(WxcError::ConfigParse(
+        "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha or later"
+            .to_string(),
+    ))
 }
 
 fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
@@ -6784,6 +6814,65 @@ mod tests {
             load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger, false)
                 .unwrap_err();
         assert!(error.to_string().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn inherit_default_env_rejects_pre_09_and_absent_versions() {
+        let expected = "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha";
+        for version in [Some("0.6.0-alpha"), Some("0.8.0-alpha"), None] {
+            let version = version
+                .map(|value| format!(r#""version":"{value}","#))
+                .unwrap_or_default();
+            let json = format!(
+                r#"{{{version}"process":{{"commandLine":"echo hi","inheritDefaultEnv":true}}}}"#
+            );
+
+            let mut logger = test_logger();
+            let error = load_request_from_json(&json, &mut logger).unwrap_err();
+            assert!(error.to_string().contains(expected), "got {error:?}");
+        }
+
+        let state_aware = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "process": {
+                "commandLine": "echo hi",
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        let error = load_mxc_request_from_json(state_aware, &mut logger).unwrap_err();
+        assert!(error.message().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn inherit_default_env_accepts_09_for_one_shot_and_state_aware() {
+        let one_shot = r#"{
+            "version": "0.9.0-alpha",
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["EXTRA=1"],
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        let request = load_request_from_json(one_shot, &mut logger).unwrap();
+        assert!(request.inherit_default_env);
+
+        let state_aware = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "iso:abc",
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["EXTRA=1"],
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        load_mxc_request_from_json(state_aware, &mut logger)
+            .expect("0.9 state-aware inheritance should parse");
     }
 
     #[test]

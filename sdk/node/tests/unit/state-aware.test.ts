@@ -48,6 +48,44 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
+  it('selects schema 0.9 when exec inherits the backend environment', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
+        },
+      },
+    });
+    assert.equal(env.version, '0.9.0-alpha');
+  });
+
+  it('rejects inherited environments with an explicitly older schema version', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        sandboxId: 'wslc:abc',
+        config: {
+          version: '0.8.0-alpha',
+          process: {
+            commandLine: 'echo hi',
+            inheritDefaultEnv: true,
+          },
+        },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes(
+          'process.inheritDefaultEnv requires schema version 0.9.0-alpha',
+        ),
+    );
+  });
+
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',

@@ -174,7 +174,8 @@ By default, a non-null `Environment` dictionary replaces the child's
 environment, including when the dictionary is explicitly empty. Leave it null
 to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
 dictionary on the backend default instead; on Windows process containers, that
-default is the user profile environment block.
+default is the user profile environment block. Environment inheritance requires
+schema version `0.9.0-alpha` or later.
 
 `MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
 request through the co-versioned native FFI contract. The existing
@@ -640,7 +641,9 @@ IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
 defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
 override the inferred version. State-aware exec options expose working
 directory, `KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and
-timeout. WSLC also accepts a proxy-only per-exec override:
+timeout. When `InheritDefaultEnvironment` is supplied without an explicit
+version, the SDK selects `0.9.0-alpha`; an explicitly older version is rejected.
+WSLC also accepts a proxy-only per-exec override:
 
 ```csharp
 var options = new WslcExecOptions

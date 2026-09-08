@@ -227,7 +227,8 @@ pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 An explicitly supplied environment is used verbatim by default. Set
 `inheritDefaultEnv: true` to layer those entries on the backend default instead;
 on Windows process containers, that default is the user profile environment
-block. The SDK never implicitly copies `process.env` into the child.
+block. This option requires schema version `0.9.0-alpha` or later. The SDK never
+implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
@@ -338,7 +339,7 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests normally default to schema `0.8.0-alpha`; requests that include `telemetry` default to `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests normally default to schema `0.8.0-alpha`; requests that include `telemetry` or `process.inheritDefaultEnv` default to `0.9.0-alpha`. An explicitly older version is rejected for either field. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 

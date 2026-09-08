@@ -88,7 +88,8 @@ pub fn diagnose_missing_required_env(
         message: format!(
             "The sandboxed process could not be created because its environment is missing \
              the variable(s) Windows requires to be present: {}. \
-             MXC used your `process.env` verbatim ({described}), so nothing was added to it. \
+             MXC started from your `process.env` ({described}) and does not inject these \
+             required Windows variables. \
              Add the missing variable(s) to `process.env` — any value will do, the check is \
              presence-only — or omit `process.env` entirely to get the default user \
              environment (ERROR_ENVVAR_NOT_FOUND, 203).",
@@ -412,7 +413,8 @@ mod tests {
         assert_eq!(diag.kind, "missing_required_env");
         assert!(diag.message.contains("SYSTEMROOT"));
         assert!(diag.message.contains("LOCALAPPDATA"));
-        assert!(diag.message.contains("verbatim"));
+        assert!(diag.message.contains("started from your `process.env`"));
+        assert!(diag.message.contains("does not inject"));
         assert!(diag.message.contains("1 variable(s)"));
     }
 

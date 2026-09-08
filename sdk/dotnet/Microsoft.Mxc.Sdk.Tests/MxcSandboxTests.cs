@@ -489,6 +489,7 @@ public class MxcSandboxTests
             "echo hi");
         using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
         Assert.False(omittedDoc.RootElement.TryGetProperty("environment", out _));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("inheritDefaultEnv", out _));
 
         var explicitlyEmpty = new SandboxRequest(
             new SandboxPolicy { Version = "0.8.0-alpha" },

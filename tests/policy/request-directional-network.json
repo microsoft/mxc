@@ -36,6 +36,5 @@
   "containment": {
     "type": "process"
   },
-  "inheritDefaultEnv": false,
   "experimental": false
 }

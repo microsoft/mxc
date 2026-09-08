@@ -13,6 +13,7 @@ import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
+const INHERIT_DEFAULT_ENV_VERSION = '0.9.0-alpha';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -595,10 +596,28 @@ function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOp
   if (options.inheritDefaultEnv === undefined) {
     return;
   }
+  if (!options.inheritDefaultEnv) {
+    if (config.process) {
+      delete config.process.inheritDefaultEnv;
+    }
+    return;
+  }
   if (!config.process) {
     config.process = { commandLine: '' };
   }
-  config.process.inheritDefaultEnv = options.inheritDefaultEnv;
+  config.process.inheritDefaultEnv = true;
+}
+
+function validateInheritDefaultEnvVersion(config: ContainerConfig): void {
+  if (config.process?.inheritDefaultEnv === undefined) {
+    return;
+  }
+  const parsed = semverParse(config.version);
+  if (!parsed || (parsed.major === 0 && parsed.minor < 9)) {
+    throw new Error(
+      `process.inheritDefaultEnv requires policy version ${INHERIT_DEFAULT_ENV_VERSION} or later`,
+    );
+  }
 }
 
 /**
@@ -616,6 +635,7 @@ function spawnWithConfig(
     injectEnvIntoConfig(config, env);
   }
   applyInheritDefaultEnv(config, options);
+  validateInheritDefaultEnvVersion(config);
 
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 

@@ -245,6 +245,28 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
     }
 }
 
+fn environment_keys_equal(left: &str, right: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn apply_environment_overrides<K, V>(
+    entries: &mut Vec<(String, String)>,
+    overrides: impl IntoIterator<Item = (K, V)>,
+) where
+    K: Into<String>,
+    V: Into<String>,
+{
+    for (key, value) in overrides {
+        let key = key.into();
+        entries.retain(|(existing, _)| !environment_keys_equal(existing, &key));
+        entries.push((key, value.into()));
+    }
+}
+
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
 /// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
 /// enumerates the drive root on startup — plus the PSReadLine history directory
@@ -732,12 +754,7 @@ impl SandboxRequest {
         V: Into<String>,
     {
         let mut entries: Vec<(String, String)> = std::env::vars().collect();
-        entries.extend(
-            extra
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect::<Vec<_>>(),
-        );
+        apply_environment_overrides(&mut entries, extra);
         self.set_env(entries)
     }
 
@@ -1388,6 +1405,32 @@ mod tests {
 
         assert!(request.inner.inherit_default_env);
         assert_eq!(env_of(&request), Some(vec!["EXTRA=1".to_string()]));
+    }
+
+    #[test]
+    fn environment_overrides_replace_exact_duplicate_names() {
+        let mut entries = vec![
+            ("PATH".to_string(), "old".to_string()),
+            ("KEEP".to_string(), "value".to_string()),
+        ];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(
+            entries,
+            vec![
+                ("KEEP".to_string(), "value".to_string()),
+                ("PATH".to_string(), "new".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn environment_overrides_replace_windows_names_case_insensitively() {
+        let mut entries = vec![("Path".to_string(), "old".to_string())];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(entries, vec![("PATH".to_string(), "new".to_string())]);
     }
 
     #[test]
