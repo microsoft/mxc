@@ -462,8 +462,9 @@ the provenance manifest so the combination is reproducible.
 1. **Checkouts**: orchestration scripts from the dispatched branch, MXC
    `main` into `source/mxc`, CLI `main` into `source/cli`.
 2. **Build tool setup**: installs the exact Rust channel declared by the CLI
-   checkout and the Visual Studio 2022 C++ Build Tools workload required by
-   the MSVC native addons.
+   checkout through the native Windows rustup installer, then installs the
+   Visual Studio 2022 C++ Build Tools workload required by the MSVC native
+   addons.
 3. **Cargo path binding**: rewrites the CLI's `mxc-sdk` dependency from
    its registry reference to an absolute local path pointing at the MXC
    checkout's `src/core/mxc-sdk`. Rejects zero or multiple matches.

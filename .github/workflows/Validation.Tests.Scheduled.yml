@@ -104,13 +104,25 @@ jobs:
           "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
       - name: Install Copilot CLI Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
-        with:
-          toolchain: ${{ steps.cli-toolchain.outputs.channel }}
-          target: x86_64-pc-windows-msvc
-          cache: false
-          override: false
-          rustflags: ''
+        shell: pwsh
+        run: |
+          $rustupInit = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+          Invoke-WebRequest `
+            -Uri 'https://win.rustup.rs/x86_64' `
+            -OutFile $rustupInit
+
+          & $rustupInit `
+            -y `
+            --no-modify-path `
+            --profile minimal `
+            --default-toolchain '${{ steps.cli-toolchain.outputs.channel }}' `
+            --default-host x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {
+              throw "rustup installation failed (exit $LASTEXITCODE)"
+          }
+
+          "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
+          Remove-Item -LiteralPath $rustupInit -Force
 
       - name: Install Visual C++ build tools
         shell: pwsh
