@@ -5,11 +5,27 @@
 Generate both foreign binding layers from the UniFFI metadata in `mxc_ffi`. Keep thin public facades for stable,
 idiomatic APIs; the generated surface remains internal.
 
+## Generated and handwritten surfaces
+
+| Surface | Generated | Handwritten |
+|---|---:|---|
+| Rust public SDK | No | `mxc-sdk` behavior and safe API |
+| Rust projection | No | Thin UniFFI exports and safe value conversion in `mxc_ffi` |
+| Node internal binding | Yes | None per generated operation |
+| .NET internal binding | Yes | None per generated operation |
+| Node public SDK | No | Names, re-exports, and stream adapters |
+| .NET public SDK | No | Names, re-exports, and .NET-specific adapters |
+| Node/.NET policy models | Not yet | Handwritten until schema-derived generation is implemented |
+
+Adding a public operation therefore changes Rust behavior, one Rust UniFFI export, and normally one forwarding method
+in each public foreign facade. UniFFI generates the foreign calls, records, object plumbing, and async bridge.
+
 ## Node
 
 ```mermaid
 flowchart LR
-    A[Node application] --> T[Generated TypeScript]
+    A[Node application] --> P[Node public facade]
+    P --> T[Generated internal TypeScript]
     T --> R["@ubjs/node"]
     R --> F[libffi]
     F --> L[mxc_ffi library]
@@ -29,7 +45,8 @@ ESM. This is packaging, not an operation-specific adapter.
 
 ```mermaid
 flowchart LR
-    A[.NET application] --> C[Generated C# objects]
+    A[.NET application] --> F[.NET public facade]
+    F --> C[Generated internal C# objects]
     C --> P[Generated P/Invoke]
     P --> L[mxc_ffi library]
 ```

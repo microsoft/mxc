@@ -2,14 +2,17 @@
 
 ## Decision
 
-Keep MXC behavior in Rust and use [UniFFI 0.31](https://github.com/mozilla/uniffi-rs) as the single projection
-system for native Node and .NET SDKs.
+Keep MXC behavior in Rust and use [UniFFI 0.31](https://github.com/mozilla/uniffi-rs) to generate the internal native
+binding layers for Node and .NET. Keep small handwritten public facades for package naming and language-specific
+adaptation.
 
 ```mermaid
 flowchart LR
     R[Rust application] --> S[mxc-sdk]
-    N[Node application] --> TS[Generated TypeScript]
-    D[.NET application] --> CS[Generated C#]
+    N[Node application] --> NP[Node public facade]
+    D[.NET application] --> DP[.NET public facade]
+    NP --> TS[Generated internal TypeScript]
+    DP --> CS[Generated internal C#]
     TS --> NR["@ubjs/node<br/>N-API + libffi"]
     CS --> PI[Generated P/Invoke]
     NR --> U[mxc_ffi dynamic library]
@@ -26,7 +29,7 @@ a child process, a daemon, or MXC-specific C++.
 
 This design unifies callable operations, results, errors, async behavior, and owned handles. UniFFI generates
 TypeScript and C# that call native entry points exported by the Rust-built `mxc_ffi` library. It does not generate C
-source, a C SDK, or a second dynamic library.
+source, a C SDK, the complete public SDK facades, or a second dynamic library.
 
 It does not yet replace:
 
@@ -43,7 +46,8 @@ The .NET SDK has not shipped, so its existing interop layer can be replaced with
 |---|---|---|
 | `mxc-sdk` | Safe Rust API and behavior | Language projection |
 | `mxc_ffi` UniFFI module | Records, objects, conversion, panic boundary | Backend selection |
-| Generated TypeScript and C# | Calls, records, object lifetimes, future plumbing | MXC behavior |
+| Generated internal TypeScript and C# | Calls, records, object lifetimes, future plumbing | Public package design |
+| Node and .NET public facades | Public names, re-exports, and language adapters | MXC behavior |
 | `@ubjs/node` | Generic native loading and UniFFI invocation | MXC-specific glue |
 | `mxc_engine` | Backend dispatch and execution | SDK-specific behavior |
 
@@ -54,8 +58,10 @@ flowchart TD
     A[Implement safe operation in mxc-sdk]
     A --> B[Expose thin operation in mxc_ffi UniFFI module]
     B --> M[UniFFI metadata in dynamic library]
-    M --> N[Generate TypeScript]
-    M --> D[Generate C#]
+    M --> N[Generate internal TypeScript]
+    M --> D[Generate internal C#]
+    N --> NF[Update Node public facade]
+    D --> DF[Update .NET public facade]
 ```
 
 The thin projection remains handwritten because UniFFI intentionally exports an interop-safe object model rather than
@@ -79,8 +85,8 @@ Public facades preserve these names and delegate without changing semantics.
 | Change | Handwritten locations after adoption |
 |---|---|
 | Backend behavior | Backend plus `mxc_engine` integration |
-| Callable SDK operation | `mxc-sdk` plus a thin UniFFI export in `mxc_ffi` |
-| Result or error field | Rust result/projection record; regenerate Node and C# |
+| Callable SDK operation | `mxc-sdk`, one UniFFI export, and thin Node/.NET public facade methods |
+| Result or error field | Rust projection record plus any public facade mapping; regenerate Node and C# |
 | Policy or schema field | Rust wire/parser/domain; regenerate schema-derived Node and C# models |
 
 Schema-derived public model generation is a follow-up decision. Until it is implemented, policy changes still require
