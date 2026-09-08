@@ -27,7 +27,7 @@ the individual local test scripts are documented in
 
 | File | Role |
 |------|------|
-| `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
+| `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled and manual entry point. Builds backend artifacts or runs the inline Copilot CLI + MXC job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
@@ -35,7 +35,6 @@ the individual local test scripts are documented in
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
 | `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `tests/scripts/run_ci_backend_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
-| `.github/workflows/Validation.CopilotCli.Mxc.Job.yml` | Manual entry point. Builds Copilot CLI against latest MXC main on the T1 pool. |
 | `scripts/ci/CopilotCliMxcBuild.psm1` | Testable PowerShell functions: prerequisite checks, MSVC setup, Cargo dependency rewriting, provenance validation, manifest creation. |
 | `scripts/ci/build-copilot-cli-with-mxc.ps1` | Orchestrates the CLI + MXC build: restore, runtime build, bundle, staging, verification. |
 | `scripts/ci/test-copilot-cli-mxc-build.ps1` | Contract tests for the build helper module (runs without private CLI source). |
@@ -44,16 +43,15 @@ the individual local test scripts are documented in
 
 ```
 Validation.Tests.Scheduled.yml
-  └─ dependency-feed-check
+  ├─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
                  ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_ci_backend_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_ci_backend_tests.sh
                  └─ macos   job (matrix) → download artifact →                            run_ci_backend_tests.sh
-
-Validation.CopilotCli.Mxc.Job.yml (manual)
-  └─ checkout orchestration + MXC main + CLI main → build-copilot-cli-with-mxc.ps1
+  └─ copilot-cli-build (manual)
+       └─ checkout orchestration + MXC main + CLI main → build-copilot-cli-with-mxc.ps1
 ```
 
 An entry point that calls the backend matrix **must** build the artifacts first
@@ -72,6 +70,7 @@ does not call the matrix.
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit + `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
+| `copilot-cli-build` | Manual-only inline T1 job selected by `plan: copilot-cli-build`. Builds Copilot CLI against latest MXC main and does not use the backend artifacts. |
 
 Build artifacts are kept for 1 day — they exist only to feed these jobs.
 
@@ -437,10 +436,12 @@ the CLI runtime against that MXC source, stages a job-local
 
 ### When to use
 
-Dispatch `Validation.CopilotCli.Mxc.Job.yml` directly. This lane is
-manual-only — it never runs on a schedule. It proves source access, combined
-compilation, staging, and provenance. It does not authenticate to Copilot or
-run sandbox scenarios.
+Dispatch `Validation.Tests.Scheduled.yml` with `plan: copilot-cli-build`.
+This lane is manual-only — it never runs on a schedule. The T1 job is defined
+directly in this established workflow so its `copilot` environment secret is
+available when the workflow is dispatched from a feature branch. It proves
+source access, combined compilation, staging, and provenance. It does not
+authenticate to Copilot or run sandbox scenarios.
 
 ### Pool and runner
 
@@ -484,10 +485,10 @@ the provenance manifest so the combination is reproducible.
 `GHCP_CLI_SOURCE_READ` is an environment secret in the `copilot`
 environment. It grants read-only source access to the private CLI
 repository. It is **not** a Copilot model credential. The secret is
-available because the directly dispatched build job references
-`environment: copilot`, and is consumed exclusively by `actions/checkout`
-with `persist-credentials: false`. It must not be exposed to untrusted fork
-code, copied to `env`, printed, or referenced after the checkout step.
+available because the inline build job references `environment: copilot`, and
+is consumed exclusively by `actions/checkout` with
+`persist-credentials: false`. It must not be exposed to untrusted fork code,
+copied to `env`, printed, or referenced after the checkout step.
 
 ### Retained evidence
 
