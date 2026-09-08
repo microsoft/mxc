@@ -21,6 +21,15 @@ param(
     # -Wxc explicitly if the layout differs.
     [string]$Wxc          = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'src\target\debug\wxc-exec.exe'),
     [string]$ScratchRoot  = (Join-Path $env:TEMP 'mxc-t3-workloads'),
+    # Grant read-only access to the drive root (C:\) for the pwsh/git
+    # workloads (W4, W5, W17). Those interpreters resolve the ENTIRE
+    # ancestor chain of the working directory at startup, so granting the
+    # leaf alone is not enough. Off by default -- see the TEMPORARY note
+    # above `Get-DriveRootGrant` for the cost of turning it on.
+    [switch]$GrantDriveRoot,
+    # Structured results. Lives in $env:TEMP but OUTSIDE $ScratchRoot so
+    # `Initialize-Scratch`'s recursive nuke can never take it with it.
+    [string]$ResultsJson  = (Join-Path $env:TEMP 'T3-Workloads.results.json'),
     # Subset of workloads to run. Default: all nineteen.
     [int[]] $Run          = @(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
     # Add a few extra "kitchen sink" RO grants (TEMP, LOCALAPPDATA, ...)
@@ -43,25 +52,40 @@ function Record-Workload {
     param(
         [Parameter(Mandatory)] [string]$Id,
         [Parameter(Mandatory)] [string]$Name,
-        [Parameter(Mandatory)] [bool]$Pass,
+        [bool]$Pass = $true,
+        # Visual/semantic status. When omitted, derived from -Pass for back-
+        # compat (pass/fail). 'skip' = the workload's interpreter isn't on this
+        # host, so nothing was proven either way. A skip does not fail the run,
+        # but it renders distinctly so absent coverage is never a green PASS.
+        [ValidateSet('pass', 'fail', 'skip')] [string]$Status,
         [int]$ExitCode = 0,
         [string]$Detail = '',
         [string]$Stderr = ''
     )
+    if (-not $PSBoundParameters.ContainsKey('Status')) {
+        $Status = if ($Pass) { 'pass' } else { 'fail' }
+    } else {
+        # Keep the boolean consistent for downstream logic: only 'fail' fails.
+        $Pass = ($Status -ne 'fail')
+    }
     $entry = [pscustomobject]@{
         Id        = $Id
         Name      = $Name
         Pass      = $Pass
+        Status    = $Status
         ExitCode  = $ExitCode
         Detail    = $Detail
         StderrTop = ($Stderr -split "`r?`n" | Select-Object -First 3) -join ' / '
     }
     $Script:Results.Add($entry) | Out-Null
-    $tag = if ($Pass) { '[PASS]' } else { '[FAIL]' }
-    $color = if ($Pass) { 'Green' } else { 'Red' }
+    $tag, $color = switch ($Status) {
+        'pass' { '[PASS]', 'Green' }
+        'fail' { '[FAIL]', 'Red' }
+        'skip' { '[SKIP]', 'Yellow' }
+    }
     Write-Host ("  {0} {1} :: {2} (exit={3})" -f $tag, $Id, $Name, $ExitCode) -ForegroundColor $color
     if ($Detail) { Write-Host ("        detail: {0}" -f $Detail) }
-    if (-not $Pass -and $entry.StderrTop) {
+    if ($Status -eq 'fail' -and $entry.StderrTop) {
         Write-Host ("        stderr: {0}" -f $entry.StderrTop) -ForegroundColor DarkRed
     }
 }
@@ -274,6 +298,49 @@ function Resolve-HostPaths {
 }
 
 # -----------------------------------------------------------------------
+# TEMPORARY: drive-root read-only grant for pwsh-driven workloads
+#
+# Opt-in via -GrantDriveRoot; off by default.
+#
+# pwsh before 7.7, and git run underneath it, resolve the *whole ancestor
+# chain* of the working directory at startup -- not just the directory
+# itself. The policy only grants the leaf (`$ScratchRoot\rw`), so every
+# segment above it is denied and the interpreter fails before reaching
+# the behaviour these tests exist to check:
+#
+#   W4/W5  git: "Unable to read current working directory: Permission denied"
+#   W17    pwsh falls back to C:\ as its location, then Set-Location is
+#          denied at the first ungranted ancestor.
+#
+# Granting the drive root covers every segment at once, and is what MXC's
+# own launch diagnostic recommends.
+#
+# COST, and why this is a switch rather than the default: at T3 a policy
+# path becomes an inheritable ACE (`filesystem_dacl.rs` sets
+# inheritable = is_dir()), so naming C:\ propagates an ACL rewrite across
+# the whole system drive on every run, and again in reverse on teardown.
+# That is acceptable on a disposable CI runner and unpleasant on a
+# developer box, which is why the caller has to ask for it.
+#
+# REMOVE the switch, the grant, and the warning once pwsh 7.7+ is out of
+# preview and baked into the validation images.
+# -----------------------------------------------------------------------
+
+# The readonlyPaths entry for the pwsh/git workloads: the drive root when
+# -GrantDriveRoot is set, otherwise nothing.
+function Get-DriveRootGrant {
+    if (-not $GrantDriveRoot) { return @() }
+    $root = if ($env:SystemDrive) { "$env:SystemDrive\" } else { 'C:\' }
+    return @($root)
+}
+
+function Write-DriveRootGrantWarning {
+    param([Parameter(Mandatory)] [string]$Id)
+    if (-not $GrantDriveRoot) { return }
+    Write-Host ("  [{0}] WARNING: granting read-only {1} so pwsh/git can resolve the working directory's ancestor chain. TEMPORARY -- remove once pwsh 7.7 ships out of preview." -f $Id, ((Get-DriveRootGrant) -join ', ')) -ForegroundColor Yellow
+}
+
+# -----------------------------------------------------------------------
 # Workloads
 # -----------------------------------------------------------------------
 function W1-CmdTypeMarker {
@@ -291,7 +358,7 @@ function W1-CmdTypeMarker {
 function W2-PwshReadFile {
     Section 'W2: pwsh -NoProfile -c "Get-Content marker.txt"'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W2' -Name 'pwsh Get-Content' -Pass $false -Detail 'pwsh not found on PATH'
+        Record-Workload -Id 'W2' -Name 'pwsh Get-Content' -Status 'skip' -Detail 'pwsh not found on PATH'
         return
     }
     # PowerShell's install dir already grants ReadAndExecute to
@@ -312,11 +379,11 @@ function W2-PwshReadFile {
 function W3-PwshGitVersion {
     Section 'W3: pwsh -NoProfile -c "git --version"'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     if (-not $script:GitDir)  {
-        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Pass $false -Detail 'git not found'
+        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Status 'skip' -Detail 'git not found'
         return
     }
     # Git install dir also grants ReadAndExecute to ALL APPLICATION
@@ -333,6 +400,42 @@ function W3-PwshGitVersion {
     $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'git version')
     Record-Workload -Id 'W3' -Name 'pwsh git --version' -Pass $pass `
         -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
+}
+
+function Repair-FixtureOwnership {
+    param([string]$Dir)
+    # An elevated process's token hands out BUILTIN\Administrators as the
+    # *default owner* of everything it creates, so on a CI agent the repo this
+    # harness just built is owned by Administrators rather than by the user.
+    #
+    # git then refuses it: `detected dubious ownership`. git accepts an
+    # Administrators-owned repo only when the caller is *itself* an elevated
+    # administrator, and a contained process never is -- the AppContainer token
+    # drops that membership by construction. So the check fires inside the
+    # sandbox and cannot be satisfied there.
+    #
+    # That is an artifact of who built the fixture, not of containment: on a
+    # non-elevated dev box the same repo is user-owned and W4/W5 pass. Restamp
+    # the tree so the fixture is identical in both places and the workloads
+    # test git-in-a-sandbox rather than git's host ownership heuristic.
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $items = @(Get-Item -LiteralPath $Dir -Force) +
+             @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue)
+    $restamped = 0
+    foreach ($item in $items) {
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]) -eq $user) { continue }
+            $acl.SetOwner($user)
+            Set-Acl -LiteralPath $item.FullName -AclObject $acl
+            $restamped++
+        } catch {
+            Write-Host ("  WARNING: could not set owner on {0}: {1}" -f $item.FullName, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+    if ($restamped -gt 0) {
+        Write-Host ("  reowned {0} fixture object(s) to {1} (harness is running elevated)" -f $restamped, $user.Value)
+    }
 }
 
 function Initialize-Repo {
@@ -353,12 +456,13 @@ function Initialize-Repo {
     } finally {
         Pop-Location
     }
+    Repair-FixtureOwnership -Dir $Dir
 }
 
 function W4-PwshGitStatus {
     Section 'W4: pwsh -NoProfile -c "cd <repo>; git status"'
     if (-not $script:PwshDir -or -not $script:GitDir) {
-        Record-Workload -Id 'W4' -Name 'pwsh git status' -Pass $false -Detail 'pwsh or git not found'
+        Record-Workload -Id 'W4' -Name 'pwsh git status' -Status 'skip' -Detail 'pwsh or git not found'
         return
     }
     $repo = "$ScratchRoot\rw\repo"
@@ -370,9 +474,11 @@ function W4-PwshGitStatus {
     # `C:\Users\...` metadata-access checks that the AppContainer SID
     # doesn't have grants for.
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"& git -C '$repo' status --porcelain; exit `$LASTEXITCODE`""
+    Write-DriveRootGrantWarning -Id 'W4'
     $cfg = New-Config -Name 'w4-git-status' `
         -CommandLine $cmd `
         -ReadWrite @("$ScratchRoot\rw") `
+        -ReadOnly (Get-DriveRootGrant) `
         -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w4.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 90
@@ -385,7 +491,7 @@ function W4-PwshGitStatus {
 function W5-PwshGitLog {
     Section 'W5: pwsh -NoProfile -c "cd <repo>; git log --oneline -n 10"'
     if (-not $script:PwshDir -or -not $script:GitDir) {
-        Record-Workload -Id 'W5' -Name 'pwsh git log' -Pass $false -Detail 'pwsh or git not found'
+        Record-Workload -Id 'W5' -Name 'pwsh git log' -Status 'skip' -Detail 'pwsh or git not found'
         return
     }
     $repo = "$ScratchRoot\rw\repo"
@@ -394,9 +500,11 @@ function W5-PwshGitLog {
         Initialize-Repo -Dir $repo
     }
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"& git -C '$repo' log --oneline -n 10; exit `$LASTEXITCODE`""
+    Write-DriveRootGrantWarning -Id 'W5'
     $cfg = New-Config -Name 'w5-git-log' `
         -CommandLine $cmd `
         -ReadWrite @("$ScratchRoot\rw") `
+        -ReadOnly (Get-DriveRootGrant) `
         -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w5.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 90
@@ -412,7 +520,7 @@ function W5-PwshGitLog {
 function W6-PwshListDir {
     Section 'W6: pwsh Get-ChildItem on rw directory'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W6' -Name 'pwsh Get-ChildItem' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W6' -Name 'pwsh Get-ChildItem' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"Get-ChildItem -LiteralPath '$ScratchRoot\rw' | Select-Object -ExpandProperty Name; exit 0`""
@@ -428,7 +536,7 @@ function W6-PwshListDir {
 function W7-PwshInProcEval {
     Section 'W7: pwsh in-process script eval (math, env, pipeline)'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W7' -Name 'pwsh in-proc eval' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W7' -Name 'pwsh in-proc eval' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $script = '$x = 6 * 7; Write-Output "answer=$x"; 1..3 | ForEach-Object { Write-Output "iter=$_" }; exit 0'
@@ -445,7 +553,7 @@ function W7-PwshInProcEval {
 function W8-PwshSpawnCmd {
     Section 'W8: pwsh spawning cmd /c (no NUL)'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W8' -Name 'pwsh spawn cmd' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W8' -Name 'pwsh spawn cmd' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     # No NUL redirects in the child — just a one-line echo.
@@ -462,7 +570,7 @@ function W8-PwshSpawnCmd {
 function W9-PwshWriteReadRoundTrip {
     Section 'W9: pwsh Set-Content + Get-Content round-trip'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W9' -Name 'pwsh write+read' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W9' -Name 'pwsh write+read' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $target = "$ScratchRoot\rw\w9-out.txt"
@@ -480,7 +588,7 @@ function W9-PwshWriteReadRoundTrip {
 function W10-PwshDotNetIo {
     Section 'W10: pwsh .NET [System.IO.File]::ReadAllText'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W10' -Name 'pwsh .NET IO' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W10' -Name 'pwsh .NET IO' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $script = "Write-Output ([System.IO.File]::ReadAllText('$ScratchRoot\rw\marker.txt')); exit 0"
@@ -504,7 +612,7 @@ function W10-PwshDotNetIo {
 function W11-NodeReadFile {
     Section 'W11: node -e fs.readFileSync(marker)'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W11' -Name 'node read file' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W11' -Name 'node read file' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $markerFwd = ("$ScratchRoot\rw\marker.txt") -replace '\\','/'
@@ -524,7 +632,7 @@ function W11-NodeReadFile {
 function W12-NodeEval {
     Section 'W12: node in-proc eval (math, loop)'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W12' -Name 'node eval' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W12' -Name 'node eval' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $js  = "let x=6*7;console.log('answer='+x);for(let i=1;i<=3;i++)console.log('iter='+i);"
@@ -543,7 +651,7 @@ function W12-NodeEval {
 function W13-NodeRoundTrip {
     Section 'W13: node fs.writeFileSync + readFileSync round-trip'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W13' -Name 'node write+read' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W13' -Name 'node write+read' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $targetFwd = ("$ScratchRoot\rw\w13-out.txt") -replace '\\','/'
@@ -570,7 +678,7 @@ function W13-NodeRoundTrip {
 function W14-PyReadFile {
     Section 'W14: python -c open(marker).read()'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W14' -Name 'python read file' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W14' -Name 'python read file' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     $py  = "import sys; sys.stdout.write(open(r'$ScratchRoot\rw\marker.txt').read())"
@@ -589,7 +697,7 @@ function W14-PyReadFile {
 function W15-PyEval {
     Section 'W15: python in-proc eval (math, loop)'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W15' -Name 'python eval' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W15' -Name 'python eval' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     # `python -c` accepts ';' between simple statements but requires
@@ -628,7 +736,7 @@ function Initialize-ChdirTarget {
 function W16-PyRoundTrip {
     Section 'W16: python open(w,write) + open(r,read) round-trip'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W16' -Name 'python write+read' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W16' -Name 'python write+read' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     $target = "$ScratchRoot\rw\w16-out.txt"
@@ -662,13 +770,14 @@ function W16-PyRoundTrip {
 function W17-PwshSetLocation {
     Section 'W17: pwsh Set-Location into rw subdir'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $target = Initialize-ChdirTarget
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"Set-Location -LiteralPath '$target'; Get-ChildItem -Name; exit 0`""
+    Write-DriveRootGrantWarning -Id 'W17'
     $cfg = New-Config -Name 'w17-pwsh-cd' -CommandLine $cmd `
-        -ReadWrite @("$ScratchRoot\rw") -Cwd "$ScratchRoot\rw"
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly (Get-DriveRootGrant) -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w17.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
     $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'chdir-marker\.txt')
@@ -679,7 +788,7 @@ function W17-PwshSetLocation {
 function W18-NodeChdir {
     Section 'W18: node process.chdir into rw subdir'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W18' -Name 'node chdir' -Pass $false -Detail 'node not found'
+        Record-Workload -Id 'W18' -Name 'node chdir' -Status 'skip' -Detail 'node not found'
         return
     }
     $target = Initialize-ChdirTarget
@@ -700,7 +809,7 @@ function W18-NodeChdir {
 function W19-PyChdir {
     Section 'W19: python os.chdir into rw subdir'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W19' -Name 'python chdir' -Pass $false -Detail 'python not found'
+        Record-Workload -Id 'W19' -Name 'python chdir' -Status 'skip' -Detail 'python not found'
         return
     }
     $target = Initialize-ChdirTarget
@@ -749,13 +858,23 @@ catch {
     Write-Host ''
     Write-Host "ABORT: $_" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
-    exit 2
+    # ABORT = FAIL test.
+    Record-Workload -Id 'ABORT' -Name 'harness aborted' -Status 'fail' -ExitCode 2 -Detail "$_"
 }
 finally {
     Section 'Summary'
-    $passed = @($Script:Results | Where-Object { $_.Pass })
-    $failed = @($Script:Results | Where-Object { -not $_.Pass })
-    Write-Host ("Total: {0}    Passed: {1}    Failed: {2}" -f $Script:Results.Count, $passed.Count, $failed.Count)
+    $passed  = @($Script:Results | Where-Object { $_.Status -eq 'pass' })
+    $failed  = @($Script:Results | Where-Object { $_.Status -eq 'fail' })
+    $skipped = @($Script:Results | Where-Object { $_.Status -eq 'skip' })
+    Write-Host ("Total: {0}    Passed: {1}    Failed: {2}    Skipped: {3}" -f `
+        $Script:Results.Count, $passed.Count, $failed.Count, $skipped.Count)
+    if ($skipped.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Skipped (interpreter not available on this host):' -ForegroundColor Yellow
+        foreach ($r in $skipped) {
+            Write-Host ("  [{0}] {1} :: {2}" -f $r.Id, $r.Name, $r.Detail) -ForegroundColor Yellow
+        }
+    }
     if ($failed.Count -gt 0) {
         Write-Host ''
         Write-Host 'Failures:' -ForegroundColor Red
@@ -765,8 +884,40 @@ finally {
             if ($r.StderrTop) { Write-Host ("        stderr: {0}" -f $r.StderrTop) -ForegroundColor DarkRed }
         }
     }
+
+    # Structured results for programmatic consumption, mirroring the shape
+    # WinProcessContainer-Tests.ps1 writes. Every step here is guarded: this
+    # runs in `finally`, so an unhandled throw would skip the exit-code line
+    # below and report a bogus result. CIM in particular is unavailable on
+    # locked-down hosts.
+    try {
+        $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $osCaption = [string]$osInfo.Caption
+        $osBuild = [string]$osInfo.BuildNumber
+    } catch {
+        $osCaption = 'unknown'
+        $osBuild = 'unknown'
+    }
+    try {
+        $summary = [pscustomobject]@{
+            timestamp = (Get-Date).ToString('o')
+            host      = $env:COMPUTERNAME
+            os        = $osCaption
+            osBuild   = $osBuild
+            total     = $Script:Results.Count
+            passed    = $passed.Count
+            failed    = $failed.Count
+            skipped   = $skipped.Count
+            results   = $Script:Results
+        }
+        ($summary | ConvertTo-Json -Depth 6) | Out-File -LiteralPath $ResultsJson -Encoding utf8 -Force
+    } catch {
+        Write-Host "warning: could not write JSON results: $_" -ForegroundColor Yellow
+    }
+
     Write-Host ''
     Write-Host ("Scratch / logs: {0}" -f $ScratchRoot)
+    Write-Host ("JSON summary:   {0}" -f $ResultsJson)
     if (-not $KeepArtifacts -and $failed.Count -eq 0 -and $passed.Count -gt 0 -and (Test-Path $ScratchRoot)) {
         # Re-validate before deletion — `Assert-SafeScratchRoot` ran
         # at the start of the suite, but the variable could in
@@ -775,4 +926,7 @@ finally {
         Assert-SafeScratchRoot
         Remove-Item -Recurse -Force -LiteralPath $ScratchRoot -ErrorAction SilentlyContinue
     }
+    # A run that recorded nothing but skips proved nothing, so it is not a
+    # pass — otherwise a host missing every interpreter reports green.
+    if ($failed.Count -gt 0 -or $passed.Count -eq 0) { exit 1 } else { exit 0 }
 }
