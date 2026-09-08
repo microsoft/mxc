@@ -209,7 +209,7 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.6.0-alpha',
+  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,

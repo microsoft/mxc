@@ -27,7 +27,7 @@ struct RequestSpec {
     #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
-    environment: BTreeMap<String, String>,
+    environment: Option<BTreeMap<String, String>>,
     #[serde(default)]
     inherit_default_env: bool,
     #[serde(default)]
@@ -243,16 +243,11 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
-    // An empty map means "the caller set no environment", not "give the child
-    // an empty one": the managed binding's `Environment` is a non-nullable
-    // dictionary that defaults to empty, so an empty map cannot be a
-    // deliberate request for an empty environment and must keep yielding the
-    // backend default.
-    if !spec.environment.is_empty() {
+    if let Some(environment) = spec.environment {
         if spec.inherit_default_env {
-            request.inherit_default_env(spec.environment);
+            request.inherit_default_env(environment);
         } else {
-            request.set_env(spec.environment);
+            request.set_env(environment);
         }
     }
     request.set_experimental(spec.experimental);
@@ -278,7 +273,11 @@ mod tests {
             serde_json::from_str(process_container).expect("process-container golden parses");
         assert_eq!(process_spec.command, "echo parity");
         assert_eq!(
-            process_spec.environment.get("PARITY").map(String::as_str),
+            process_spec
+                .environment
+                .as_ref()
+                .and_then(|environment| environment.get("PARITY"))
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(process_spec.policy.timeout_ms, Some(30_000));
@@ -400,6 +399,28 @@ mod tests {
             _ => panic!("WSLC golden selected the wrong containment"),
         }
         build_request_from_json(wslc).expect("WSLC golden builds a public SDK request");
+    }
+
+    #[test]
+    fn environment_presence_distinguishes_default_from_explicitly_empty() {
+        let omitted = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect("omitted environment builds");
+        assert!(omitted.env().is_none());
+
+        let explicitly_empty = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi",
+                "environment": {}
+            }"#,
+        )
+        .expect("explicitly empty environment builds");
+        assert_eq!(explicitly_empty.env(), Some([].as_slice()));
     }
 
     #[test]

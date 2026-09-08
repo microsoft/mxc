@@ -119,6 +119,9 @@ pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
         }
         block.push(0);
     }
+    if block.is_empty() {
+        block.push(0);
+    }
     block.push(0);
     block
 }
@@ -1154,7 +1157,11 @@ impl AppContainerScriptRunner {
                 &request.script_code,
                 &request.policy.readonly_paths,
                 &working_directory.describe(),
-                request.env.as_deref(),
+                if request.inherit_default_env {
+                    None
+                } else {
+                    request.env.as_deref()
+                },
             )
         })?;
 
@@ -2491,6 +2498,11 @@ mod tests {
         let parsed = super::parse_environment_block(block.as_ptr());
         assert_eq!(parsed[0].0, "alpha");
         assert_eq!(parsed[1].0, "Zebra");
+    }
+
+    #[test]
+    fn encode_env_block_empty_input_is_double_null_terminated() {
+        assert_eq!(super::encode_env_block(&[]), vec![0u16, 0u16]);
     }
 
     #[test]

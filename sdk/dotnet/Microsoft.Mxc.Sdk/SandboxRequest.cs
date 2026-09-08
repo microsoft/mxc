@@ -41,18 +41,19 @@ public sealed class SandboxRequest
     public string? WorkingDirectory { get; set; }
 
     /// <summary>
-    /// Environment variables supplied to the sandboxed process.
+    /// Optional environment variables supplied to the sandboxed process.
     /// </summary>
     /// <remarks>
-    /// When non-empty, this is the child's environment and is used verbatim —
-    /// nothing is merged into it, so an environment missing what the platform
-    /// requires fails the launch. Set <see cref="InheritDefaultEnvironment"/>
-    /// to layer these on top of the default environment instead. Leaving the
-    /// dictionary empty gives the child the backend's default environment (on
-    /// Windows, the user's profile block).
+    /// When non-null, this is the child's environment and is used verbatim —
+    /// including when the dictionary is empty. Nothing is merged into it, so
+    /// an environment missing what the platform requires fails the launch.
+    /// Set <see cref="InheritDefaultEnvironment"/> to layer these entries on
+    /// top of the default environment instead. Leave this property null to
+    /// give the child the backend's default environment (on Windows, the
+    /// user's profile block).
     /// </remarks>
     [JsonPropertyName("environment")]
-    public Dictionary<string, string> Environment { get; set; } = new();
+    public Dictionary<string, string>? Environment { get; set; }
 
     /// <summary>
     /// Start from the backend's default environment and layer
@@ -63,7 +64,7 @@ public sealed class SandboxRequest
     /// default is the user's profile block, which only the OS can produce, so
     /// it cannot be assembled by a caller. This is a different set from the
     /// calling process's own variables, which you can still add explicitly.
-    /// Has no effect when <see cref="Environment"/> is empty.
+    /// Has no effect when <see cref="Environment"/> is null.
     /// </remarks>
     [JsonPropertyName("inheritDefaultEnv")]
     public bool InheritDefaultEnvironment { get; set; }

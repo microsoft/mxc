@@ -663,6 +663,7 @@ impl SandboxRequest {
         K: Into<String>,
         V: Into<String>,
     {
+        self.inner.inherit_default_env = false;
         self.inner.env = Some(
             env.into_iter()
                 .map(|(k, v)| {
@@ -688,6 +689,7 @@ impl SandboxRequest {
     /// environment, whereas this asks for the backend's default one.
     pub fn clear_env(&mut self) -> &mut Self {
         self.inner.env = None;
+        self.inner.inherit_default_env = false;
         self
     }
 
@@ -1355,14 +1357,21 @@ mod tests {
         assert_eq!(env_of(&request), Some(vec!["ONLY=me".to_string()]));
         assert!(!request.inner.inherit_default_env);
 
+        request.inherit_default_env([("EXTRA", "1")]);
+        request.set_env([("REPLACEMENT", "2")]);
+        assert_eq!(env_of(&request), Some(vec!["REPLACEMENT=2".to_string()]));
+        assert!(!request.inner.inherit_default_env);
+
         // An empty iterator is a request for an empty environment, which is
         // distinct from never having set one.
         request.set_env(Vec::<(String, String)>::new());
         assert_eq!(env_of(&request), Some(Vec::<String>::new()));
 
         // clear_env goes back to the backend default.
+        request.inherit_default_env([("EXTRA", "1")]);
         request.clear_env();
         assert_eq!(env_of(&request), None::<Vec<String>>);
+        assert!(!request.inner.inherit_default_env);
     }
 
     #[test]

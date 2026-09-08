@@ -588,17 +588,17 @@ function injectEnvIntoConfig(
 /**
  * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
  * environment is layered on the backend's default rather than replacing it.
- * Only ever sets the flag: an option left unset must not clobber a value the
- * caller already put in the config.
+ * An option left unset does not clobber a value the caller already put in the
+ * config; an explicit boolean overrides it.
  */
 function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
-  if (!options.inheritDefaultEnv) {
+  if (options.inheritDefaultEnv === undefined) {
     return;
   }
   if (!config.process) {
     config.process = { commandLine: '' };
   }
-  config.process.inheritDefaultEnv = true;
+  config.process.inheritDefaultEnv = options.inheritDefaultEnv;
 }
 
 /**

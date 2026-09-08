@@ -161,7 +161,7 @@ var request = new SandboxRequest(
     ContainerName = "example",
     WorkingDirectory = @"C:\work",
     InheritDefaultEnvironment = true,
-    Environment =
+    Environment = new()
     {
         ["GREETING"] = "hello",
     },
@@ -170,10 +170,11 @@ var request = new SandboxRequest(
 RunResult result = await MxcSandbox.RunAsync(request);
 ```
 
-By default, a non-empty `Environment` dictionary replaces the child's
-environment. Set `InheritDefaultEnvironment` to layer those entries on the
-backend default instead; on Windows process containers, that default is the
-user profile environment block.
+By default, a non-null `Environment` dictionary replaces the child's
+environment, including when the dictionary is explicitly empty. Leave it null
+to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
+dictionary on the backend default instead; on Windows process containers, that
+default is the user profile environment block.
 
 `MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
 request through the co-versioned native FFI contract. The existing

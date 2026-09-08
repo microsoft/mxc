@@ -1092,7 +1092,7 @@
           "type": "string"
         },
         "env": {
-          "description": "Optional environment entries encoded as `KEY=VALUE` strings.\n\nOmitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inherit_default_env` is set.",
+          "description": "Optional environment entries encoded as `KEY=VALUE` strings.\n\nOmitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.",
           "items": {
             "type": "string"
           },

@@ -279,7 +279,9 @@ public static class MxcSandbox
             Containment = containment,
             ContainerName = request.ContainerName,
             WorkingDirectory = request.WorkingDirectory,
-            Environment = new Dictionary<string, string>(request.Environment),
+            Environment = request.Environment is null
+                ? null
+                : new Dictionary<string, string>(request.Environment),
             InheritDefaultEnvironment = request.InheritDefaultEnvironment,
             Experimental = request.Experimental,
         };

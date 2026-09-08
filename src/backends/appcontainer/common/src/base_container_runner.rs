@@ -1768,14 +1768,18 @@ impl BaseContainerRunner {
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
             //
-            let diag =
-                diagnose_missing_required_env(err.0, request.env.as_deref()).unwrap_or_else(|| {
-                    diagnose_create_process_failure(
-                        err.0,
-                        &request.script_code,
-                        &request.policy.readonly_paths,
-                    )
-                });
+            let diagnostic_env = if request.inherit_default_env {
+                None
+            } else {
+                request.env.as_deref()
+            };
+            let diag = diagnose_missing_required_env(err.0, diagnostic_env).unwrap_or_else(|| {
+                diagnose_create_process_failure(
+                    err.0,
+                    &request.script_code,
+                    &request.policy.readonly_paths,
+                )
+            });
 
             let mut extended_error = format!(
                 "{launch_api_name} failed: {err:?} (working directory: {})",
@@ -3951,10 +3955,10 @@ mod tests {
                 .expect("an explicitly empty env must still produce a block");
             assert_eq!(
                 environment.len(),
-                1,
-                "an empty block is just the terminator"
+                2,
+                "an empty block still requires two terminators"
             );
-            assert_eq!(environment, vec![0u16]);
+            assert_eq!(environment, vec![0u16, 0u16]);
         }
     }
 

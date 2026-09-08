@@ -580,7 +580,7 @@ export interface Process {
   /**
    * Optional environment entries encoded as `KEY=VALUE` strings.
    * 
-   * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inherit_default_env` is set.
+   * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.
    */
   env?: string[];
   /**
