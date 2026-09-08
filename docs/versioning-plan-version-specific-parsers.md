@@ -6,22 +6,31 @@ through PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941,
 from tag `v0.8.0`; Phase 6.5 reconstructed its exact Rust contract and
 advanced exact development to `0.9.0-alpha`.
 
-The current implementation stack is complete and open for review:
+The implementation stack is published through Phase 9.5 as of 2026-09-08.
+All seven PRs remain open: "complete" below means implemented, not merged or
+fully accepted. Phase 9.5 still awaits native Unix and live-backend acceptance.
 
 | Scope | PR | Published tip |
 | --- | --- | --- |
 | Phase 7a: command-before-parse integration | #969 | `aa6c12d3` |
-| Phase 7.2: shared state-aware normalization | #1091 | `656213ec` |
-| Phase 7.3: private exact parser and builders | #1096 | `825490f2` |
-| Phase 7.4: differential equivalence harness | #1097 | `4fb1d177` |
-| Phase 8: producer and corpus migration | #1099 | `8c19352e` |
-| Phase 9: authoritative exact dispatch | #1104 | `7e8ee675` |
+| Phase 7.2: shared state-aware normalization | #1091 | `c3519b3d` |
+| Phase 7.3: private exact parser and builders | #1096 | `b13c0bae` |
+| Phase 7.4: differential equivalence harness | #1097 | `3b411771` |
+| Phase 8: producer and corpus migration | #1099 | `92581c44` |
+| Phase 9: authoritative exact dispatch | #1104 | `bcc2ac7f` |
+| Phase 9.5: typed state-aware dispatch | #1123 | `01b05281` |
 
-All six branches were rebased in stack order onto `origin/main` at `29702c3a`,
-validated, and published with explicit force-with-lease on 2026-09-04. Phase
-7.5 is maintained on this dedicated plan branch. Phases 9.5-11 remain; the
-planned end state publishes `0.9.0-alpha` and opens `0.10.0-alpha`
-development.
+The stack root was rebased onto `origin/main` at `29702c3a` on 2026-09-04.
+Review fixes and subsequent restacks were published with explicit leases on
+2026-09-05; #1096 and #1104 are each a single commit relative to their stack
+bases. Phase 7.5 is maintained on this dedicated plan branch. Phase 9.5 was
+published as a single commit in #1123 on 2026-09-08, with acceptance pending.
+Phase 10a is the next unimplemented step; the planned end state after Phases
+10-11 publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
+
+The phase descriptions retain the design and behavior at each intermediate
+boundary. In particular, references to rolling production authority in Phase 7
+or Phase 8 do not describe the completed Phase 9 implementation.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -124,8 +133,9 @@ behavior, missing versions, experimental fields on published contracts, and
 `experimental.macos_sandbox` after Seatbelt promotion are not preserved.
 
 ### Two coexisting versioning models
-The rolling and exact models coexist until Phase 9 makes exact dispatch
-authoritative and Phase 11 retires the remaining rolling metadata.
+Phase 9 makes exact dispatch authoritative on the implementation stack. Rolling
+artifacts and compatibility metadata coexist with it until Phase 11 retires
+their remaining consumers; they no longer authorize production requests.
 
 #### The two models
 
@@ -135,7 +145,7 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 | Shape authority | `wxc_common::wire` | per-version Rust modules |
 | Version model | a range, `min` to `maxSupported` | an exact enum |
 | Artifacts | `…0.9.0-dev.json`, `generated/wire.ts` | immutable published modules plus `…0.9.0-alpha.json` and `generated/v0_9_0_alpha/wire.ts` |
-| Gates | `check-schema-versions`, `check-schema-codegen`, `validate-configs` | `check-contract-codegen` |
+| Gates after cutover | `check-schema-versions`, `check-schema-codegen`, `check-sdk-types-codegen` for retained metadata/oracles | `check-contract-codegen`; `validate-configs` selects an exact schema per declared version |
 | Enforced at runtime | yes through Phase 8 | yes beginning with Phase 9 |
 
 #### Current resolution
@@ -148,8 +158,13 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 - The exact codegen gate covers mutable development artifacts only.
 - The Phase 9 implementation stack makes exact registry dispatch authoritative
   and retains rolling parsing only as a test oracle.
+- Corpus validation selects an exact schema from each document's declaration;
+  intentionally invalid fixtures are explicitly exempted, not treated as valid.
 - Phase 11 still replaces duplicated version metadata and adds general
-  published-contract freeze/digest enforcement.
+  published-contract freeze/digest enforcement. Its final cleanup also deletes
+  the test-only rolling parser, rolling builders, and legacy payload-extraction
+  references after replacing their coverage with exact-contract regression
+  gates.
 
 ### Intended parse flow
 ```text
@@ -427,14 +442,14 @@ Status:
   PR #941
 - **Phase 5A follow-up** — string enum contract coverage generated from each
   `string_enum!` declaration, addressing Phase 5A review feedback after #909
-  merged. Complete and under review in PR #949, now based on `main`. It
+  merged. Merged in PR #949. It
   rewrites the `string_enum!` macro in the `dev`, `published/v0_6_0_alpha`, and
   `published/v0_7_0_alpha` modules so canonical, alias, non-string, and
   externally tagged object coverage derives from the macro's own value table.
   Phase 6.2 extends those same macros, so it must build on this shape
 - **Phase 5A remediation** — the `ProcessContainerCapability` validating
-  newtype closing the Phase 6 review finding, complete and under review in
-  PR #966, stacked on the follow-up. See "Phase 6 review finding: contract
+  newtype closing the Phase 6 review finding, merged in PR #966 after the
+  follow-up. See "Phase 6 review finding: contract
   value-rule gaps"
 
 Separate the mutable development contract into:
@@ -817,7 +832,7 @@ published v0.6/v0.7/v0.8 syntax remains immutable.
 
 ### Phase 8: Migrate producers and the config corpus
 
-Status: complete at `8c19352e` on
+Status: complete at `92581c44` on
 `user/gudge/version_specific_config_parsers_phase8`, open as PR #1099 and
 stacked on Phase 7.4 PR #1097.
 
@@ -826,7 +841,7 @@ Regenerate and check in an inventory report at the start of this phase,
 covering configs, examples, SDK producers, state-aware envelopes, and schema
 references.
 
-The most recent focused audit (2026-08-11, `tests/configs` plus
+An early focused audit (2026-08-11, `tests/configs` plus
 `tests/examples`) found:
 
 - 97 configs declaring `0.6.0-alpha`: 54 conformed to the exact stable
@@ -869,7 +884,16 @@ uses a shape that its declared exact contract cannot express.
 | 8j | `$schema` members under `tests/configs` and `tests/examples`, SDK documentation links, and editor examples | JSON and documentation changes | Make every schema reference agree with its document's selected exact version. Do not add `$schema` solely to satisfy the parser; add or change it only where the document already carries or documents an editor schema reference | Complete in #1099 |
 | 8k | `src/core/wxc_common/src/config_parser.rs`, `expected_corpus_divergences` and its differential corpus test | Test changes | Remove each declaration-only migration from the exact-stricter inventory. Keep the focused non-corpus divergence tests and the seven explicitly recorded development-contract tightenings below. Any unclassified, exact-looser, or runtime-model divergence must fail with its path and classification | Complete in #1099 |
 | 8l | Rust workspace, `sdk/node`, `sdk/dotnet`, FFI, schema/versioning scripts, and corpus validators | Validation | Run the complete validation matrix below and repair producer expectations without weakening exact contracts or the differential harness | Complete in #1099 |
-| 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Complete at `8c19352e` in #1099 |
+| 8m | `user/gudge/version_specific_config_parsers_phase8` | Commit and PR | Commit the mechanical migration as one reviewable change and open it against the Phase 7d branch used by PR #1097 | Complete at `92581c44` in #1099 |
+
+Review follow-up completed the remaining producer paths: the three engine
+state-aware test requests now declare `0.9.0-alpha`, and both WSLC test-script
+helpers default an inline request's absent version on a clone. Explicit values
+(including deliberately invalid versions), caller hashtables, and file-fixture
+handling are preserved. The lifecycle guide distinguishes optional SDK config
+versions from required wire declarations, uses the existing
+`StateAwareSchemaVersion`, and labels post-graduation examples as hypothetical.
+The WSLC SDK examples also use the development version.
 
 #### Phase 8 authority and compatibility boundaries
 
@@ -922,6 +946,15 @@ These are all exact-stricter results. The executable inventory must name each
 path and verify its expected structural diagnostic. A new residual path, an
 exact-looser acceptance, or a runtime-model difference remains a test failure.
 
+The current inventory pins the field paths for all seven residual rejections,
+including `network.defaultPolicy` as a typed structural error. Phase 9 has
+completed their public-surface cutover: the first two fixtures are renamed
+`isolation_session_configid_rejected.json` and
+`isolation_session_one_shot_stray_config_rejected.json`, and the backend suites
+expect structural rejection while retaining direct backend-policy coverage.
+The seven differences remain only as rolling-oracle characterization, not
+unfinished migration work.
+
 #### Phase 8 validation
 
 Run, in order:
@@ -945,8 +978,10 @@ shape beyond `version` and `$schema`.
 
 #### Phase 8 exit criteria
 
-- Every config, example, policy fixture, and SDK-produced envelope declares a
-  registered version that can express its complete shape.
+- Every valid complete request config, example, and SDK-produced envelope
+  declares a registered version that can express its complete shape. Negative
+  fixtures retain their intended invalidity; the three wrapper-only policy
+  inputs recorded in the inventory remain non-request documents.
 - State-aware and development-only producers emit `0.9.0-alpha`.
 - Stable one-shot producers retain intentional published-version coverage.
 - Every existing `$schema` reference matches the selected declaration.
@@ -963,7 +998,7 @@ This step is primarily mechanical and is suitable for delegation.
 
 ### Phase 9: Enable exact dispatch
 
-Status: complete at `7e8ee675` on
+Status: complete at `bcc2ac7f` on
 `user/gudge/version_specific_config_parsers_phase9a`, open as PR #1104 and
 stacked on Phase 8 PR #1099.
 
@@ -1008,12 +1043,46 @@ one-shot, state-aware, Rust SDK, and FFI request construction. Input sources
 are still decoded once, and CLI command overrides are spliced into the source
 before exact typed parsing. Stable top-level telemetry remains outside
 `experimental`, and obsolete `experimental.telemetry` receives a focused
-migration diagnostic. Public SDK version properties remain strings; exact
-registered-version enforcement is private runtime behavior rather than a
-premature handwritten public version registry. The rolling parser and rolling
-builders remain only as test oracles.
+migration diagnostic. Public one-shot SDK version properties remain strings
+with runtime exact-version validation; the existing state-aware-specific type
+continues to name `0.9.0-alpha`. No general handwritten public version registry
+or union is introduced. Registry-derived public metadata remains Phase 11
+work. The rolling parser and rolling builders remain only as test oracles.
+
+#### Phase 9 review follow-up completed
+
+- All legacy rolling file/base64, value, and raw-JSON loaders are test-only,
+  including the raw-JSON options helper. A compile-fail regression guards the
+  former public raw loader's absence from production builds.
+- `ParseError::Version` distinguishes unsupported versions and declaration
+  data errors from genuine JSON syntax, EOF, and input-decoding failures.
+  Version failures retain pre-discrimination stderr routing but audit as
+  `schema_violation`; decode failures still audit as `malformed_json`.
+  Engine conversion preserves the existing `malformed_request` wire code.
+- Once the development phase probe succeeds, discriminator failures preserve
+  the selected request kind. Duplicate `experimental` members on lifecycle
+  requests produce the state-aware JSON envelope; one-shot failures retain
+  stderr diagnostics. Neither path accepts the duplicate.
+- Public-loader, CLI output-route, and actual audit-record regressions cover
+  these boundaries. The diagnostic oracle records the new `Version` outcome
+  separately rather than collapsing it into `Decode`.
+- Codegen, schema-reference, contributor, and SDK guidance reflects exact
+  registered-version selection. These changes do not replace the raw
+  state-aware payload bridge, remove legacy networking, or add publication
+  tooling.
+
+No new telemetry initialization is performed for pre-request failures, and
+the command-preparation compatibility boundary recorded under Phase 7a is
+unchanged.
 
 ### Phase 9.5: Replace raw state-aware dispatch payloads
+
+Status: implemented at `01b05281` on
+`user/gudge/version_specific_config_parsers_phase9b`, published as PR #1123
+stacked on Phase 9a PR #1104. Native Linux/macOS execution and successful live
+lifecycle acceptance for all three Windows backends remain outstanding.
+The six design decisions and acceptance gates below were agreed on 2026-09-05;
+implementation does not by itself satisfy the full phase acceptance criteria.
 
 Phase 9 makes exact contracts authoritative, which removes the rolling parser's
 open experimental subtree from the production trust boundary. Phase 9.5 then
@@ -1027,11 +1096,363 @@ types remain the semantic authority. The adapter between them becomes static:
 exact phase/backend request
     |
     v
-typed state-aware backend payload
+neutral typed operation + normalized cross-cutting ExecutionRequest
     |
     v
-StatefulSandboxBackend phase validation and execution
+mxc_engine: existing backend resolution and execution gates
+    |
+    v
+checked binding to BoundStateAwareRequest<B>
+    |
+    v
+generic dispatcher: StatefulSandboxBackend phase validation and execution
 ```
+
+#### Adopted design: engine-side binding
+
+**Adopted 2026-09-05:** use Option 1 from the Phase 9.5 design discussion.
+Keep the generic lifecycle dispatcher and the backend trait's per-phase
+configuration associated types. Bind the neutral parsed operation to the
+selected backend in `mxc_engine`, rather than adding payload-extraction methods
+to backend implementations or introducing a configuration-family trait.
+
+The parser produces a closed neutral operation enum. Its variant is the single
+source of truth for the phase: callers obtain `phase()` by matching the variant,
+not from an independently writable `phase` field alongside a typed payload.
+Provision identifies the selected backend even when its optional configuration
+is absent; non-provision variants carry their required `sandbox_id`. The common
+`ExecutionRequest`, including process, policy, and telemetry values, remains
+outside the backend-specific payload. The JSON still declares `phase` and uses
+the same exact contract roots; this is an internal representation change.
+
+Keep construction controlled through the exact adapter and checked
+constructors/binding helpers, with private fields and read-only accessors where
+needed. Migrate existing callers and test fixtures that assemble the public
+parsed-request struct directly. Construction establishes structural
+relationships; it does not replace backend semantic validation, apply backend
+defaults, or introduce earlier sandbox-ID content validation.
+
+The engine keeps the existing routing authority: declared `containment` for
+provision, and the `sandbox_id` prefix for every later phase. After the existing
+backend-resolution and experimental/backend-availability gates, it consumes the
+neutral request through a checked binding helper. A payload incompatible with
+the selected backend is an explicit error, never an absent configuration or a
+reason to select a different backend. Preserve existing error ordering and
+response routing for externally supplied requests.
+
+Successful binding produces `BoundStateAwareRequest<B>` (name illustrative).
+Its operation enum carries `Option<B::ProvisionConfig>`,
+`Option<B::StartConfig>`, `Option<B::ExecConfig>`, `Option<B::StopConfig>`, or
+`Option<B::DeprovisionConfig>` as appropriate, together with the required
+sandbox ID for non-provision operations. Its phase is likewise derived from
+the operation variant. The generic dispatcher consumes this bound request,
+borrows its configuration for validation, then moves it into the phase method.
+Keep configuration presence intact and leave defaults and semantic validation
+in the backend.
+
+Both the relayed lifecycle dispatcher and the streaming-exec dispatcher take
+bound requests. Their engine entry points reuse the same binding helpers;
+streaming still requires the exec operation and retains its existing failure
+behavior for other phases. Bindings and neutral types live in `wxc_common`
+without backend-crate dependencies; `mxc_engine` selects the concrete backend
+type at its existing feature-gated routing arms. Remove the configuration
+associated types' `DeserializeOwned` bounds where no longer needed.
+
+Binding is a mechanical typed conversion, not another parser. Do not serialize
+payloads back through JSON, introduce type-erased configuration downcasts, or
+add fallback deserialization. Test incompatible payload/backend combinations
+at the binding boundary as well as successful delivery to both dispatch paths.
+
+#### Adopted payload model: sparse operations and runtime-owned configuration
+
+**Adopted 2026-09-05:** use Option B from the payload-model discussion.
+Separate wire representations from runtime configuration, following the
+one-shot adapter pattern, rather than retaining a runtime dependency on the
+rolling WSLC wire type or moving/re-exporting that type as a shared definition.
+
+Use a sparse neutral operation model. Provision carries a backend-tagged
+payload with only the configuration each backend actually supports:
+
+| Backend | Neutral provision payload |
+| --- | --- |
+| IsolationSession | `Option<models::IsolationSessionProvisionConfig>` |
+| Windows Sandbox | No backend-specific configuration |
+| WSLC | `Option<models::WslcProvisionConfig>` |
+
+The backend tag remains present when its optional provision configuration is
+absent. Start, exec, stop, and deprovision carry their required sandbox ID but
+no backend-specific configuration today; exec process settings stay in the
+common `ExecutionRequest`. Do not introduce fifteen configuration structs to
+mirror the backend/phase test matrix. Binding these no-configuration operations
+preserves the existing absent `Option<()>` argument rather than manufacturing
+a present unit configuration from an empty `experimental` object.
+
+Keep the existing IsolationSession runtime type. Add
+`models::WslcProvisionConfig` in `wxc_common` with `image: Option<String>` and
+`image_tar_path: Option<String>`, and change the WSLC backend's provision
+associated type and configuration consumers to use it. Exact contract adapters
+construct these runtime values directly, with exhaustive field mapping.
+
+Retain `wire::WslcProvisionPhase` for rolling artifacts and the test oracle
+where still needed, with an explicit wire-to-runtime conversion at that
+boundary. The temporarily similar definitions have distinct responsibilities;
+do not alias them together or serialize through JSON to convert them. Cover
+the retained wire conversion and the exact adapter with independent expected
+values and parity tests. This decision changes no contract or generated JSON
+shape.
+
+#### Adopted presence model: backend-observable distinctions
+
+**Adopted 2026-09-05:** use Option A from the presence/defaulting discussion.
+Preserve every configuration and field-presence distinction observable by the
+backend using `Option<Config>` and the configuration's optional fields. Do not
+retain additional metadata solely to distinguish otherwise equivalent absent
+and empty outer JSON wrappers.
+
+For IsolationSession provision, the required mapping is:
+
+| Exact input | Runtime provision configuration |
+| --- | --- |
+| No provision member | `None` |
+| `"provision": {}` | `Some(Config { app_id: None })` |
+| `"provision": {"appId": ""}` | `Some(Config { app_id: Some("") })` |
+| `"provision": {"appId": "example"}` | `Some(Config { app_id: Some("example") })` |
+| `"provision": {"appId": null}` | Rejected by the exact contract; no runtime configuration |
+
+For accepted IsolationSession and WSLC provision requests, an absent
+`experimental` object, an empty one, or an allowed empty backend wrapper all
+produce no provision configuration unless the `provision` member is present.
+These outer-wrapper distinctions need not survive exact structural validation.
+Do not collapse an absent provision configuration into a present empty one,
+normalize away explicit empty strings, or reinterpret rejected `null` values
+as absence.
+
+An omitted WSLC `image` stays `None` through adaptation and binding; the backend
+chooses its default image. Defaulting and semantic validation remain backend
+responsibilities. Preserve the shared normalization seam's existing policy
+presence information, including `network_specified` and `ui_specified`, so
+post-provision inheritance is not replaced by a newly supplied default policy.
+
+Use explicit expected-value cases for the exact and retained rolling adapters
+and for binding, plus backend-level cases for default resolution. The runtime
+does not need to retain original source text or wrapper-presence metadata to
+enforce these invariants.
+
+#### Adopted equivalence strategy: independent reference and observed behavior
+
+**Adopted 2026-09-05:** use the combined three-layer approach from the
+equivalence-harness discussion. Introduce its coverage before deleting
+production raw handling; do not merely remove the existing `experimental_raw`
+and `source_text` assertions or generate expected results through the new
+adapter being tested.
+
+1. Retain independent legacy payload extraction in dedicated test-only support.
+   For inputs accepted by both paths, compare the old extraction's typed
+   configuration values with the new exact adapter's runtime configuration.
+   The WSLC reference can deserialize into `wire::WslcProvisionPhase` and inspect
+   its fields directly; it must not obtain its expected values through the new
+   production wire-to-runtime conversion. This reference does not preserve raw
+   payload fields on production request types or keep
+   `ParsedStateAwareRequest::deserialize_config` as a production API.
+2. Add independently written expected-value cases for configuration absence,
+   present empty configuration, explicit empty `appId`, supplied field values,
+   and backend-owned defaulting. These establish the adopted presence contract
+   and catch errors shared by the reference and new implementation. Exercise
+   the retained rolling wire conversion separately as well as the exact adapter.
+3. Use recording backend implementations to observe the common request and
+   configuration delivered to validation and execution after engine-side
+   binding. Cover both relayed lifecycle and streaming-exec dispatch so a
+   correct adapter cannot mask a dropped or misrouted configuration later.
+
+Replace transport-oriented snapshot fields with backend-observable state:
+selected backend, operation, sandbox ID, configuration presence and values,
+the common runtime request and its policy-presence flags, and telemetry.
+Do not compare retained source text, raw experimental JSON, or equivalent
+absent/empty outer wrappers that the adopted presence model deliberately drops.
+Keep diagnostic coverage separate, preserving source-aware exact parse errors,
+semantic errors, and their response routes without retaining source text on
+successful runtime requests.
+
+Legacy acceptance is not an authority for the exact contract. Value parity
+applies to shared accepted inputs; existing classified acceptance/rejection
+differences remain explicit tests. In particular, the legacy parser's
+acceptance of `appId: null` must not turn that value into an accepted exact
+request. The new coverage must be in place before the old production transport
+and reparsing code are removed.
+
+#### Adopted normalization split: shared conversion and separate wrappers
+
+**Adopted 2026-09-05:** extract the existing common-field conversion into a
+shared function, with a typed production wrapper and a separate test-only
+legacy wrapper. Do not write a replacement policy normalizer or leave
+test-only raw-JSON branches scattered through the production normalizer.
+
+Replace `StateAwareWireInput` with a controlled input whose illustrative shape
+is:
+
+```rust
+struct StateAwareInput {
+    common: wire::MxcConfig,
+    operation: StateAwareOperation,
+}
+```
+
+The operation is the adopted phase/backend/configuration representation.
+The common wire value carries the existing common-field representation, with
+`phase`, `sandbox_id`, `containment`, and `experimental` unset and one-shot-only
+sections absent. Exact adapters construct this shape explicitly; its checked
+construction boundary rejects contradictory input instead of silently
+discarding fields. This preserves the existing common-policy representation
+for Phase 9.5 rather than introducing another domain-model migration.
+
+Extract the shared conversion with an interface along these lines:
+
+```rust
+fn normalize_state_aware_common(
+    common: wire::MxcConfig,
+    context: NormalizationContext<'_>,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError>;
+```
+
+`NormalizationContext` is a temporary phase/provision-containment/sandbox-ID
+view, derived from the operation in production, not another persistent or
+independently writable routing authority. Preserve the existing conversion
+sequence: remember supplied network policy; populate the temporary wire
+containment context from the provision backend or existing sandbox-ID-prefix
+lookup; derive the existing `require_process` and `state_aware_wslc_exec`
+flags; call `convert_wire_config`; and retain the clearing of directional
+network values for non-provision requests with no supplied network policy.
+Telemetry and network/UI presence mapping remain in the existing conversion.
+Do not add backend-availability checks, earlier ID validation, backend defaults,
+or new policy rules here.
+
+The production `normalize_state_aware` becomes a thin wrapper: derive the
+context, invoke the shared conversion, and assemble the controlled parsed
+request from its `ExecutionRequest` and operation.
+
+Assign structural checks explicitly:
+
+| Behavior | Owner after the split |
+| --- | --- |
+| Exact JSON shape validation | Existing exact contract deserialization |
+| Focused obsolete-telemetry diagnostic | Existing exact-input boundary, preserving error ordering and routing |
+| Legacy missing phase and non-provision containment checks | Test-only legacy wrapper |
+| Legacy raw experimental backend-key and moved-section checks | Test-only legacy wrapper |
+| Legacy stray one-shot section rejection | Test-only legacy wrapper |
+| Common process, policy, and telemetry conversion | Shared common conversion |
+| Typed payload/backend mismatch rejection | Engine-side binding |
+
+Keep legacy structural checks in their existing order relative to one another
+and common conversion. Legacy observations retain a separate test-only
+representation and independent payload extraction: do not force legacy inputs
+that exact contracts reject into the stricter production operation enum. The
+legacy wrapper supplies its original, possibly incomplete phase/backend/ID
+context to shared conversion where the old path did so, then constructs its
+own observation for equivalence comparisons.
+
+The concrete source changes are the input replacement in `state_aware_wire.rs`,
+direct common-fields-plus-operation output from
+`config_contract_adapters/dev/state_aware.rs`, removal of the source-text
+argument and raw-extraction error path in `config_contract_adapters/dev/mod.rs`,
+the shared conversion and separate wrappers in `config_parser.rs`, and removal
+of production raw fields and phase-fragment reparsing in
+`state_aware_request.rs`. Keep source-based diagnostics, discriminator probes,
+and CLI command splicing wherever they still have consumers.
+
+#### Adopted acceptance gates
+
+**Adopted 2026-09-05:** require the following six gates rather than treating
+"exhaustive parity" as an unspecified test obligation.
+
+##### Gate 1: Configuration and binding matrix
+
+Cover IsolationSession, Windows Sandbox, and WSLC across provision, start,
+exec, stop, and deprovision using the adopted independent reference, explicit
+expectations, and recording backends. Assert selected backend, operation,
+sandbox ID, common request, and configuration delivered downstream.
+Provision cases include absent configuration, present empty configuration,
+individual fields, combined fields, and explicit empty `appId` where applicable.
+Incompatible backend/payload combinations fail binding rather than becoming
+`None`. This specifies coverage, not exactly fifteen test functions.
+
+##### Gate 2: Execution-path behavior
+
+| Path | Required observation |
+| --- | --- |
+| Normal lifecycle dispatch | Successful validation precedes the corresponding operation, which executes exactly once |
+| Validation failure | No execution occurs |
+| Dry run | Validation occurs; no lifecycle operation executes |
+| Streaming exec | Uses the same binding rules and passes `ExecStdio::Piped` |
+| Relayed exec | Passes `ExecStdio::Relayed` |
+| Streaming request for another phase | Preserves the existing rejection behavior |
+
+Preserve backend-specific streaming support: IsolationSession supports piped
+execution; Windows Sandbox and WSLC refuse it before running the workload.
+Recording backends establish ordering and arguments without live sandboxes;
+real-backend tests cover backend-specific refusal and defaulting behavior.
+
+##### Gate 3: Diagnostics and entry-point boundaries
+
+Retain regression coverage for unknown fields, duplicates, rejected `null`,
+wrong field types, missing required declarations, structural error paths and
+source coordinates, backend semantic error codes and messages, existing
+stderr/state-aware-envelope routing, the focused obsolete-telemetry migration
+diagnostic, experimental opt-in, and unavailable-backend errors.
+Exercise representative file, base64, and raw-JSON entry points plus CLI
+command override, not only private adapter helpers. Preserve classified
+legacy/exact acceptance differences instead of forcing their rejections to
+match.
+
+##### Gate 4: Platform and feature matrix
+
+| Platform | Engine configuration | Compiled state-aware backends |
+| --- | --- | --- |
+| Windows | Default | Windows Sandbox |
+| Windows | `isolation_session` | Windows Sandbox and IsolationSession |
+| Windows | `wslc` | Windows Sandbox and WSLC |
+| Windows | `isolation_session,wslc` | All three |
+| Linux | Default | No Windows state-aware implementations; neutral types and unavailable-backend paths remain covered |
+| macOS | Default | No Windows state-aware implementations; neutral types and unavailable-backend paths remain covered |
+
+Run relevant compilation and targeted tests in each configuration, including
+affected backend tests and existing Rust SDK/FFI state-aware boundary tests.
+Exercise the feature configurations separately: a combined-feature build alone
+does not cover the unavailable-backend branches. Neutral types and adapter tests
+must remain usable without Windows backend dependencies. Retain applicable
+repository formatting and lint gates; introduce no new testing framework.
+
+Windows Sandbox is not an optional `mxc_engine` Cargo feature:
+`windows_sandbox_lifecycle` is an unconditional Windows dependency. Compilation,
+experimental execution opt-in, and host availability are separate gates.
+Windows Sandbox participates in every Windows configuration's lifecycle,
+binding, dry-run, validation-order, and piped-exec-refusal coverage. A host
+without the Windows Sandbox OS feature cannot supply its live lifecycle
+evidence, but that does not skip ordinary adapter, binding, or recording-backend
+tests.
+
+##### Gate 5: Production architecture and artifacts
+
+Require evidence that successful production state-aware requests retain
+neither raw backend JSON nor source text; both dispatch paths consume bound
+typed requests; no production backend-payload reparsing or
+typed-to-JSON-to-typed conversion remains; legacy extraction is test-only; and
+the removed production deserialization API is no longer callable. Removing
+only a method name is insufficient if a replacement hides the same reparsing.
+Existing schema/type codegen gates stay clean: this phase changes no published
+contract or generated JSON shape.
+
+##### Gate 6: Live lifecycle evidence
+
+Run the existing state-aware lifecycle suites for IsolationSession, Windows
+Sandbox, and WSLC on suitable hosts or CI infrastructure, covering real
+provision-through-teardown behavior beyond recording backends.
+Local development need not have every backend's prerequisites, but a skipped
+suite is not passing evidence. Record unsupported or unrun coverage explicitly
+and obtain the required backend evidence on an appropriate host before
+declaring Phase 9.5 complete.
+
+#### Implementation and exit criteria
 
 Implement:
 
@@ -1039,6 +1460,8 @@ Implement:
   state-aware backend and phase
 - adapt exact contract payloads directly into the backend-facing configuration
   types, preserving exhaustive field mapping
+- introduce the runtime-owned WSLC provision configuration and migrate its
+  backend consumers, retaining a separate rolling wire conversion where needed
 - carry the typed payload on `ParsedStateAwareRequest` or its replacement
 - update state-aware dispatch to consume the typed payload rather than calling
   `deserialize_config<C>` over raw JSON
@@ -1048,17 +1471,25 @@ Implement:
   `source_text` where it has no remaining consumer
 - retain telemetry as a cross-cutting value populated by the shared Phase 7.2
   normalization seam rather than embedding it in the backend payload
+- extract the shared common-field conversion and separate typed production
+  normalization from test-only legacy structural checks and observations
+- replace transport-oriented equivalence assertions with the independent
+  test-only reference, explicit expected values, and dispatch observations
 - add exhaustive parity tests for IsolationSession, Windows Sandbox, and WSLC
   across every lifecycle phase
+- satisfy all six acceptance gates, including separate feature configurations
+  and live lifecycle evidence for all three backends
 
 This phase changes no published contract and no user-visible JSON shape. It is
 an internal representation and dispatch migration made safe by the Phase 9
 cutover: production requests have already passed a closed exact contract, so
 the rolling parser's lossless open-object preservation is no longer required.
 
-Done when state-aware dispatch receives no raw backend JSON, no production code
-calls `ParsedStateAwareRequest::deserialize_config`, and removing the raw
-representation changes neither accepted exact requests nor backend behavior.
+Done when both dispatch paths consume bound typed requests, state-aware
+dispatch receives no raw backend JSON, and no production backend-payload
+reparsing remains (including `ParsedStateAwareRequest::deserialize_config`).
+Removing the raw representation must change neither accepted exact requests
+nor backend behavior, with all six acceptance gates satisfied.
 
 ### Phase 10: Finalize the v0.9 stable candidate
 
@@ -1177,6 +1608,53 @@ current min/stable/dev constants as the exact-contract registry. Exact contracts
 are registered deliberately as their Rust modules are implemented; Phase 11
 replaces the old synchronization mechanism with generated registry metadata.
 
+#### Final cleanup exit criteria (Phases 11b-11c)
+
+**Adopted 2026-09-05:** complete rolling-parser retirement includes test builds,
+not just production entry points. Phase 9 removes production authority;
+Phase 9.5 deliberately retains a test-only legacy reference; Phase 11's final
+cleanup removes that remaining implementation after its replacement evidence
+is established.
+
+Before deleting the rolling references, replace their coverage with explicit
+exact-contract acceptance/rejection fixtures and diagnostic regressions,
+adapter/runtime snapshots including field-presence semantics, versioned
+builder-versus-parser equivalence, and backend dispatch observations. Expected
+values must remain independent of the mapping under test. Preserve the
+meaningful exact-contract regressions from the former divergence inventory;
+do not delete coverage merely because the rolling comparison is going away.
+
+The final tree must satisfy all of the following:
+
+- No rolling whole-request parser, rolling loader, or rolling policy-builder
+  oracle remains callable in production or test builds. Remove their obsolete
+  test entry points and helpers rather than retaining a renamed or archived
+  executable implementation.
+- Remove the independent legacy payload-extraction reference retained by
+  Phase 9.5, including its separate legacy request/observation machinery and
+  any masking, source-retention, or structural-validation helpers used only
+  by that reference. Keep the replacement exact expectations and dispatch
+  coverage.
+- No surviving test depends on executing the rolling parser or rolling
+  builders. Replace obsolete differential assertions and classifications with
+  direct exact-contract regressions where they still describe required
+  behavior.
+- Retire `--legacy-wire` generation, remaining rolling development artifacts
+  and drift gates, and duplicated version metadata/synchronization after their
+  consumers have migrated to exact artifacts and the generated registry.
+  Historical published schemas and exact published contract modules remain
+  immutable; they are not rolling-cleanup targets.
+- Retain shared normalization, semantic validation, and internal conversion
+  types still consumed by the exact path. Removing the obsolete parser does
+  not require deleting `convert_wire_config`, the common state-aware
+  normalization function, or every use of `wire::MxcConfig`. Remove a shared
+  helper or type only when it has no remaining consumer.
+
+Phase 11 is not complete while a rolling parser or builder survives solely as
+a test oracle. The exact-contract regression and freeze gates must pass
+without those implementations, and no production or test entry point may
+fall back to rolling whole-request parsing.
+
 ### Suggested ownership
 Good substantive Rust work to keep with the primary implementer:
 
@@ -1197,28 +1675,31 @@ Good tasks to delegate:
 
 ### Implementation PR plan
 
-**Adopted 2026-09-02; status updated 2026-09-04.** The work uses ten reviewable
+**Adopted 2026-09-02; status updated 2026-09-08.** The work uses ten reviewable
 PRs rather than one PR per fine-grained work item or one very large PR per
 major phase. Each PR must build and test green on its own; later PRs may be
 stacked while review is in progress, but merge in the order below.
 
 | Sequence / PR | Plan scope | Boundary | Status |
 | --- | --- | --- | --- |
-| 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests | Complete at `656213ec` |
-| 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders | Complete at `825490f2` |
-| 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory | Complete at `4fb1d177` |
-| 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Complete at `8c19352e` |
-| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `7e8ee675` |
-| 6 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Not started |
+| 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests | Complete at `c3519b3d` |
+| 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders | Complete at `b13c0bae` |
+| 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory | Complete at `3b411771` |
+| 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Complete at `92581c44` |
+| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `bcc2ac7f` |
+| 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `01b05281`; acceptance pending |
 | 7 | Phase 10a | Add the IsolationSession acknowledgment and canonical runtime preparation without removing legacy v0.9 input yet | Not started |
 | 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Not started |
 | 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state | Not started |
-| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling metadata | Not started |
+| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling artifacts, metadata, and test-only parser/builder oracles | Not started |
 
 Phase 10's internal subphases are detailed in Appendix C. Phase 11a is
 deliberately additive so publication mechanics can be reviewed before they
 rewrite the contract lifecycle; the final publication and rolling-stack cleanup
 remain together so no intermediate tree has conflicting version authorities.
+That cleanup includes deleting the Phase 9.5 legacy payload reference and all
+remaining rolling parser/builder oracles after their exact-contract replacement
+coverage is established.
 Phase 7.5 is maintained on the dedicated plan branch rather than adding this
 planning document to an implementation PR.
 
@@ -1875,7 +2356,9 @@ Requirements:
 - `--version` accepts only exact registered spellings. A published version
   returns a specific "published contract generation is not implemented until
   Phase 11" error rather than panicking or silently falling back.
-- `--legacy-wire` targets the rolling model and is removed in Phase 9.
+- `--legacy-wire` targets the rolling model. It remains an oracle-generation
+  path through Phase 9 and retires with the remaining rolling artifacts and
+  metadata consumers in Phase 11.
 - Omitting `--out` writes to standard output, preserving current behavior.
 - `versions --json` emits the registry — version, status, and default artifact
   paths — so the CI gate never hardcodes a version list. This is the seed of
@@ -2333,8 +2816,9 @@ accident, with the drift it implies closed by a test.
 
 **Why not option B (typed payload authoritative at dispatch) now.** The stated
 goal is to surface errors as early as possible, and option C already achieves
-that. The contract root is recursively closed, so `appIdd` fails at
-`dev::parse_request`, before dispatch and before any backend runs. Option B
+that. The contract root is recursively closed, so `appIdd` fails during
+concrete-root deserialization, before dispatch and before any backend runs.
+The exact parser uses the path-aware helper in `wxc_common` for that step. Option B
 adds no earliness whatsoever; its only gains are removing the redundant second
 parse and the drift risk. Since the Phase 5 stack is already long, the
 redundancy is a fair price for now.
@@ -2349,12 +2833,12 @@ types already live in `wxc_common`, not in the backend crates:
 | Windows Sandbox | `()` | — |
 
 So the contract type, the adapter, and the backend config type are all visible
-in one crate, and the crate-boundary obstacle does not exist. Option B's cost
-is confined to dispatch plumbing — `StatefulSandboxBackend::ProvisionConfig`,
-the six `deserialize_config` call sites in `state_aware_dispatch.rs`, the three
-backend impls, and `state_aware_request.rs`. It touches no contract module, no
-adapter destructuring, no published contract, and no generated artifact. Option
-C adds no coupling that B must later unpick. Phase 9.5 is now the explicit
+in one crate, and the crate-boundary obstacle does not exist. The Phase 9.5
+engine-side binding decision supersedes the earlier dispatch-only scope
+estimate: implementation also covers the neutral adapter/normalization
+boundary, engine routing, controlled request construction, and the equivalence
+harness. It changes no published contract or user-visible JSON shape. Option C
+adds no coupling that B must later unpick. Phase 9.5 is now the explicit
 retirement point: exact dispatch is authoritative first, then the raw bridge is
 removed before the v0.9 stable-candidate cleanup.
 
@@ -2362,8 +2846,9 @@ removed before the v0.9 stable-candidate cleanup.
 is a property of parsing, not of adaptation:
 
 ```rust
-let request = contract::parse_request(json)?;   // enforcement happens here
-adapt_request(request, json)                    // runs on an already-valid value
+let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
+let request = deserialize_development_request(json, phase)?;
+adapt_request(request, json) // runs on an already-validated contract value
 ```
 
 The contract types are the validator; the adapter output is the payload.
@@ -2387,13 +2872,14 @@ copy of a value that has already served its purpose as a check.
    classification entry. This mirrors the existing
    `check-dotnet-errorcode-parity.js` gate.
 
-**Telemetry must move to the seam.** The adapter's internal mapping tests retain
-the typed `wire::Experimental.telemetry` conversion, but
-`into_state_aware_wire_input` clears that copy before normalization. The shared
-seam therefore reads telemetry from `experimental_raw` and writes it onto the
-domain request for both paths. The internal mapping remains a compile-time and
-test oracle to be retargeted to the backend payload type in Phase 9.5; it is not
-a second runtime authority.
+**Telemetry belongs to the seam.** After telemetry's promotion to the stable
+top-level surface, the neutral representation carries it in `config.telemetry`.
+Shared normalization populates the domain request from that field for both
+parser paths. Clearing `config.experimental` affects the redundant backend
+payload, not telemetry; `experimental_raw` is not a telemetry source, and
+obsolete `experimental.telemetry` is rejected. This supersedes the earlier
+experimental-telemetry mapping design. Phase 9.5 must keep telemetry
+cross-cutting rather than moving it into a backend payload.
 
 **Known live divergence, and the trigger to revisit.** The two authorities
 already disagree: `models::IsolationSessionProvisionConfig` is
@@ -2509,7 +2995,7 @@ and is deleted outright.
 #### Phase 7 production surface
 
 Decision 2 keeps the comparison in tests, but the phase still carries a
-production diff. Three changes land in non-test code:
+production diff. Its entry-point, staging, and comparison changes are:
 
 | Change | Kind | Step |
 | --- | --- | --- |
@@ -2605,7 +3091,7 @@ bytes. Phase 7a tests this behavior against an explicitly spliced document; it
 does not retain an edit map or translate locations back to the original source.
 
 Command preparation also precedes construction of the typed request that owns
-the experimental telemetry configuration. A failure to resolve, render, or
+the top-level telemetry configuration. A failure to resolve, render, or
 splice the trailing command is consequently a pre-request failure and does not
 initialize policy-configured telemetry. This is an accepted entry-point
 classification, not a reason to add a partial telemetry parser or a synthetic
@@ -2784,7 +3270,7 @@ backend is known is the defect this design exists to prevent.
 ##### Phase 7.2: Extract the shared state-aware normalization seam
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7b` at `656213ec`; open as
+`user/gudge/version_specific_config_parsers_phase7b` at `c3519b3d`; open as
 PR #1091, stacked on Phase 7a PR #969.
 
 Before Phase 7.2, `convert_wire_state_aware` interleaved three concerns: recovering
@@ -2850,9 +3336,10 @@ branch.
 ##### Phase 7.3: Add the private exact-contract path
 
 Status: complete on
-`user/gudge/version_specific_config_parsers_phase7c` at `825490f2`, stacked on
-the Phase 7.2 branch and open as PR #1096. The development commits were
-squashed on 2026-09-03; their original history is retained locally on
+`user/gudge/version_specific_config_parsers_phase7c` at `b13c0bae`, stacked on
+the Phase 7.2 branch and open as PR #1096. The initial development commits were
+squashed on 2026-09-03; the diagnostic follow-up was folded into the current
+single commit on 2026-09-05. Original history is retained locally on
 `backup/version_specific_config_parsers_phase7c_presquash-764a9850`.
 
 The implementation adds a private path in `config_parser` that probes the
@@ -2861,6 +3348,14 @@ produces the same runtime model:
 
 - one-shot results feed the existing one-shot normalization
 - state-aware results feed `normalize_state_aware` from Phase 7.2
+
+The selected concrete development roots, like published roots, deserialize
+directly from source through `config_deserialize::from_str` in `wxc_common`.
+The exact parser path does not delegate typed development deserialization to the
+contract crate's plain-Serde convenience parser. Review follow-up covers
+nested paths and whole-document locations for all registered one-shot versions
+and all eight development roots, plus escaping and secret-path redaction;
+the contract crate remains independent of runtime crates.
 
 Nothing calls the exact JSON parser path in production. It exists for the
 harness in Phase 7.4 and becomes authoritative in Phase 9.
@@ -2908,8 +3403,8 @@ The Phase 7c development sequence was:
 | 7c-d | Test-only per-version Rust policy builders and rolling parity oracle |
 | 7c-e | SDK, authoring, versioning, and architecture documentation |
 
-The original squashed commit was `f790ec76`; the current rebased tip is
-`825490f2` (`Add private exact contract parsing`).
+The original squashed commit was `f790ec76`; the current published single
+commit is `b13c0bae` (`Add private exact contract parsing`).
 The earlier exact-production variant is retained locally on
 `backup/version_specific_config_parsers_phase7c_exact-production-27717182`.
 
@@ -2920,7 +3415,7 @@ The full Rust workspace format, compile, clippy, and test gates pass. The
 
 ##### Phase 7.4: Build the equivalence harness and classify differences
 
-Status: complete at `4fb1d177` on
+Status: complete at `3b411771` on
 `user/gudge/version_specific_config_parsers_phase7d`, open as PR #1097 and
 stacked on Phase 7.3 PR #1096.
 
@@ -2997,7 +3492,8 @@ in `config_parser::tests::expected_corpus_divergences`: every divergent path is
 named, and a new or changed divergence fails until its classification is
 updated deliberately.
 
-The corpus contains 282 documents:
+The pre-migration Phase 7d inventory contains 282 documents. The following
+tables record that baseline; Phase 8 above records the completed migration.
 
 | Result | Count |
 | --- | ---: |
@@ -3027,7 +3523,7 @@ The focused non-corpus cases classify structural and diagnostic differences:
 | Unknown IsolationSession provision member | Ignores the member | Rejects the closed payload | Exact stricter | Intentional recursive closure |
 | `sandboxId` on provision | Accepts and lifts the value | Rejects the field on the provision root | Exact stricter | Intentional phase-specific root shape |
 | Network policy on start, stop, or deprovision | Retains the supplied policy for semantic rejection | Rejects the field structurally | Exact stricter | Intentional immutable-policy shape |
-| IsolationSession filesystem or UI policy | Produces a curated backend-policy error | Rejects the field structurally | Exact stricter with diagnostic change | Structural rejection is correct; record the loss of the backend explanation |
+| IsolationSession filesystem or UI policy | Retains the supplied policy for later backend validation | Rejects the field structurally | Exact stricter with later diagnostic change | Structural rejection is correct; the public request no longer reaches the backend's curated explanation |
 | `phase: null` | Rejects as a missing phase | Rejects as an invalid declaration | Diagnostic only | Both reject; retain the routing distinction |
 | Malformed JSON after a readable version | Reports JSON syntax | Reports version-probe failure | Diagnostic only | Both reject; retain the attribution difference |
 | Invalid v0.8 or v0.9 capability name | Rejects during semantic conversion | Rejects during contract construction | Diagnostic only | Both reject the same value rule |
@@ -3045,9 +3541,25 @@ The exact path also preserves every sampled rolling value-rule rejection:
 
 No exact-looser acceptance or accepted-model difference was found. The runtime
 snapshot compares the serialized `ExecutionRequest`, proxy internals, all five
-policy fields omitted from serialization, and every field on
-`ParsedStateAwareRequest`, so the equivalence assertion does not depend on
-serialization alone.
+policy fields omitted from serialization, the serde-skipped
+`telemetry.requested_sandbox_kind`, and every field on
+`ParsedStateAwareRequest`. Logger snapshots retain both primary output and
+warnings, so the comparison does not depend on model serialization alone.
+
+Review follow-up closes the distinction between retaining a snapshot field
+and actually asserting it. Each of the 14 curated divergence cases declares a
+full `DiagnosticExpectation` for every rejecting side: route, category, path,
+line, column, and required message fragments. Logger expectations constrain
+channel, order, count, and stable fragments on both accepted and rejected
+sides. Negative mutation cases exercise those checks; positive cases permit
+nonessential wording changes. This is not byte-for-byte error-message freezing
+or a requirement that intentionally different parser outcomes become equal.
+
+The snapshot also distinguishes `OneShotMalformed` from `OneShot`, even when
+their rendered messages are identical. Phase 9 adds the separate `Version`
+outcome for pre-discrimination declaration failures and updates the affected
+expectations at that cutover boundary; the Phase 7 staging behavior is not
+retroactively changed.
 
 #### Phase 7 tests
 
@@ -3067,7 +3579,8 @@ Status: satisfied by the Phase 7a-7d test suites.
 
 #### Phase 7 exit criteria
 
-Status: satisfied.
+Status: satisfied at the Phase 7 boundary; Phase 9 later changes production
+authority without retiring the differential oracle.
 
 - The rolling parser is still authoritative and its behavior is unchanged.
 - The exact path produces the same runtime model for every convergent input.
@@ -3179,6 +3692,12 @@ though the override machinery itself is identical in both.
 | Programmatic policy construction | Prepare direct typed exact builders under tests in Phase 7, keep rolling construction authoritative, and promote the exact builders with the common Phase 9 cutover |
 | Command overrides | Resolve and splice the command before exact parsing so every effective request satisfies the required process shape |
 | State-aware backend payload transport | Preserve `experimental_raw` through exact-dispatch cutover, then replace it with typed payloads in Phase 9.5 |
+| Phase 9.5 typed dispatch | Engine-side checked binding to `BoundStateAwareRequest<B>`; derive phase from the operation variant, control construction, and retain containment/sandbox-ID routing plus backend-owned defaults and validation |
+| Phase 9.5 payload model | Sparse operations with runtime-owned provision configuration; retain IsolationSession's domain type, add `models::WslcProvisionConfig`, and adapt the separate exact/rolling wire types explicitly |
+| Phase 9.5 presence/defaulting | Preserve backend-observable configuration/field presence and existing policy-presence flags; discard otherwise equivalent outer-wrapper distinctions and leave default resolution in the backend |
+| Phase 9.5 equivalence evidence | Before raw-transport deletion, combine independent test-only legacy extraction, explicit expected values, and recording-backend dispatch observations; compare behavior rather than source/raw representation and retain exact rejection boundaries |
+| Phase 9.5 normalization | Preserve common wire-backed conversion behind typed production and separate test-only legacy wrappers; derive production context from the operation and keep exact diagnostics, legacy check ordering, telemetry, and policy-presence behavior |
+| Phase 9.5 acceptance | Require configuration/binding, execution-path, diagnostic/entry-point, platform/feature, production/artifact, and live lifecycle gates; Windows Sandbox is compiled in every Windows configuration and skipped live suites are not passing evidence |
 | Freeze model | Published JSON shapes are fixed now; Phase 11 freezes contract-to-runtime behavior as well, while permitting behavior-equivalent source refactoring and security hardening |
 | Publication mechanics | Future publication freezes contract, adapter, and policy builder behavior together and adds artifact, fixture, and equivalence checks |
 
