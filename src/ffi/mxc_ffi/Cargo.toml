@@ -3,7 +3,7 @@ name = "mxc_ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "C ABI over the MXC public Rust SDK (mxc-sdk) for language bindings (e.g. the C# SDK)."
+description = "Generated native bindings over the MXC public Rust SDK (mxc-sdk)."
 
 [lib]
 name = "mxc_ffi"
@@ -13,9 +13,11 @@ name = "mxc_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
+futures-channel.workspace = true
 mxc-sdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uniffi.workspace = true
 
 [features]
 # WSL Container backend (Windows only, experimental). Both sidecars resolve

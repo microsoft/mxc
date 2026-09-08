@@ -1679,9 +1679,11 @@ name = "mxc_ffi"
 version = "0.8.0"
 dependencies = [
  "csbindgen",
+ "futures-channel",
  "mxc-sdk",
  "serde",
  "serde_json",
+ "uniffi",
 ]
 
 [[package]]
@@ -1717,16 +1719,6 @@ version = "0.8.0"
 dependencies = [
  "tracelogging",
  "uuid",
-]
-
-[[package]]
-name = "mxc_uniffi"
-version = "0.8.0"
-dependencies = [
- "futures-channel",
- "mxc-sdk",
- "serde_json",
- "uniffi",
 ]
 
 [[package]]

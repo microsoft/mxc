@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! C ABI over the MXC public Rust SDK ([`mxc_sdk`]).
+//! Native language projections over the MXC public Rust SDK ([`mxc_sdk`]).
 //!
-//! This is the flat, panic-safe C surface that language bindings (currently the
-//! C# SDK) load. It spans three surfaces:
+//! UniFFI is the primary projection for generated Node and .NET bindings. The
+//! legacy flat, panic-safe C surface remains in this same dynamic library while
+//! the shipping C# SDK migrates. It spans three surfaces:
 //!
 //! - **Run to completion** — [`mxc_run_request`] accepts the complete binding
 //!   request; [`mxc_run`] is the policy + command compatibility entry point.
@@ -65,9 +66,12 @@ use mxc_sdk::{
 mod error_detail;
 mod state_aware;
 mod streaming;
+mod uniffi_api;
 pub use error_detail::*;
 pub use state_aware::*;
 pub use streaming::*;
+
+uniffi::setup_scaffolding!();
 
 // ---------------------------------------------------------------------------
 // Status codes

@@ -1,7 +1,10 @@
 # MXC UniFFI Node prototype
 
-This prototype loads `mxc_uniffi` directly into Node through the generic `@ubjs/node` N-API runtime. It has no
+This prototype loads `mxc_ffi` directly into Node through the generic `@ubjs/node` N-API runtime. It has no
 MXC-specific C++, native addon, subprocess, daemon, RPC layer, or WebAssembly module.
+
+The same library temporarily retains the legacy flat C exports used by the shipping C# SDK. UniFFI replaces that
+handwritten projection after compatibility migration; MXC does not ship a second Rust library.
 
 ## Regenerate
 
@@ -11,7 +14,7 @@ From the repository root:
 scripts\generate-uniffi-bindings.ps1
 ```
 
-The script builds `src/ffi/mxc_uniffi` and regenerates this directory's `generated/` files from UniFFI metadata.
+The script builds `src/ffi/mxc_ffi` and regenerates this directory's `generated/` files from UniFFI metadata.
 Do not edit files under `generated/`.
 
 ## Test

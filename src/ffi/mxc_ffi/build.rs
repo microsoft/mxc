@@ -18,6 +18,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/error_detail.rs");
     println!("cargo:rerun-if-changed=src/streaming.rs");
     println!("cargo:rerun-if-changed=src/state_aware.rs");
+    println!("cargo:rerun-if-changed=src/uniffi_api.rs");
+    println!("cargo:rerun-if-changed=uniffi.toml");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(feature = "dotnetsdk")]

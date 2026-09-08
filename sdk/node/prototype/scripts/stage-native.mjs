@@ -7,10 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const libraryName = process.platform === 'win32'
-  ? 'mxc_uniffi.dll'
+  ? 'mxc_ffi.dll'
   : process.platform === 'darwin'
-    ? 'libmxc_uniffi.dylib'
-    : 'libmxc_uniffi.so';
+    ? 'libmxc_ffi.dylib'
+    : 'libmxc_ffi.so';
 const source = join(root, '..', '..', '..', 'src', 'target', 'debug', libraryName);
 const destination = join(root, 'dist', libraryName);
 

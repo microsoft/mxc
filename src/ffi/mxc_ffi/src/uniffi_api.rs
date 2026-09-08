@@ -4,8 +4,9 @@
 //! UniFFI projection of the safe [`mxc_sdk`] API.
 //!
 //! UniFFI generates the native ABI metadata, TypeScript API, and C# API from
-//! this object model. This crate owns only language-neutral value conversion,
-//! process-handle synchronization, and panic containment.
+//! this object model. This module owns only language-neutral value conversion,
+//! process-handle synchronization, and panic containment. The legacy flat C
+//! exports remain in the same dynamic library only during SDK migration.
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -594,8 +595,6 @@ where
         )),
     }
 }
-
-uniffi::setup_scaffolding!();
 
 #[cfg(test)]
 mod tests {

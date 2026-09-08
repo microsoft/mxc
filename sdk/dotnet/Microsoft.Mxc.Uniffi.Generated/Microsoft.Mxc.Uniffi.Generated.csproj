@@ -6,8 +6,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="..\..\..\src\target\debug\mxc_uniffi.dll"
-          Link="mxc_uniffi.dll"
+    <None Include="..\..\..\src\target\debug\mxc_ffi.dll"
+          Link="mxc_ffi.dll"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

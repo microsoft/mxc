@@ -16,18 +16,18 @@ $src = Join-Path $root 'src'
 $profile = $Configuration.ToLowerInvariant()
 $extension = if ($IsWindows) { '.exe' } else { '' }
 $libraryName = if ($IsWindows) {
-    'mxc_uniffi.dll'
+    'mxc_ffi.dll'
 } elseif ($IsMacOS) {
-    'libmxc_uniffi.dylib'
+    'libmxc_ffi.dylib'
 } else {
-    'libmxc_uniffi.so'
+    'libmxc_ffi.so'
 }
 $library = Join-Path $src "target\$profile\$libraryName"
 $nodeToolRoot = Join-Path $src 'target\uniffi-tools\node'
 $csharpToolRoot = Join-Path $src 'target\uniffi-tools\csharp'
 $nodeTool = Join-Path $nodeToolRoot "bin\uniffi-bindgen-react-native$extension"
 $csharpTool = Join-Path $csharpToolRoot "bin\uniffi-bindgen-cs$extension"
-$config = Join-Path $src 'ffi\mxc_uniffi\uniffi.toml'
+$config = Join-Path $src 'ffi\mxc_ffi\uniffi.toml'
 $nodeOut = Join-Path $root 'sdk\node\prototype\generated'
 $csharpOut = Join-Path $root 'sdk\dotnet\Microsoft.Mxc.Uniffi.Generated\Generated'
 
@@ -83,21 +83,23 @@ if (-not (Test-Path $nodeTool) -or -not (Test-Path $csharpTool)) {
 
 Push-Location $src
 try {
-    $buildArguments = @('build', '-p', 'mxc_uniffi')
+    $buildArguments = @('build', '-p', 'mxc_ffi')
     if ($Configuration -eq 'Release') {
         $buildArguments += '--release'
     }
     Invoke-Checked cargo @buildArguments
 
     New-Item -ItemType Directory -Force $nodeOut, $csharpOut | Out-Null
+    Get-ChildItem $nodeOut -File -Filter '*.ts' | Remove-Item -Force
+    Get-ChildItem $csharpOut -File -Filter '*.cs' | Remove-Item -Force
     Invoke-Checked $nodeTool generate napi bindings $library `
-        --library --crate mxc_uniffi --ts-dir $nodeOut --lib-colocated --no-format
+        --library --crate mxc_ffi --ts-dir $nodeOut --lib-colocated --no-format
     Invoke-Checked $csharpTool $library `
-        --library --crate mxc_uniffi --config $config --out-dir $csharpOut --no-format
+        --library --crate mxc_ffi --config $config --out-dir $csharpOut --no-format
     Get-ChildItem $nodeOut -Filter '*.ts' | ForEach-Object {
         Normalize-GeneratedFile $_.FullName
     }
-    Normalize-GeneratedFile (Join-Path $csharpOut 'mxc_uniffi.cs')
+    Normalize-GeneratedFile (Join-Path $csharpOut 'mxc_ffi.cs')
 } finally {
     Pop-Location
 }
