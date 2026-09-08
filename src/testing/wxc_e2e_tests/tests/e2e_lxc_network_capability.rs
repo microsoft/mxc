@@ -38,7 +38,7 @@ fn workload_cannot_reconfigure_the_network() {
         result.stderr
     );
 
-    // The kernel writes the effective capability set as a hex mask on its own line.
+    // The kernel writes this file; the workload cannot forge the mask.
     let holds_net_admin = status
         .lines()
         .find(|line| line.starts_with("CapEff:"))

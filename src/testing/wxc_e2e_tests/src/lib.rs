@@ -195,9 +195,8 @@ pub fn has_lxc_exe() -> bool {
 
 /// Return whether this host can start a system container.
 ///
-/// [`has_lxc_exe`] only answers whether the binary was built. The Linux build
-/// lane builds it and never installs LXC, so a test that starts a container
-/// needs this instead.
+/// [`has_lxc_exe`] is not enough: the Linux build lane builds the binary and
+/// never installs LXC.
 pub fn has_lxc_host() -> bool {
     match Command::new("lxc-start").arg("--version").output() {
         Ok(_) => true,

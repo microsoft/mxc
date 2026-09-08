@@ -147,22 +147,8 @@ fn build_attach_args_with_env_control(
     args
 }
 
-/// Take away the workload's power to undo the network policy confining it.
-///
-/// The request's network policy is carried by firewall rules that sit in the
-/// container's own network namespace, so a workload holding `CAP_NET_ADMIN`
-/// can take its own interface down or delete the rules outright.
-///
-/// Dropping it from the *caller's* bounding set is what reaches the workload.
-/// `lxc-attach` reads the container init's live bounding set and issues drops
-/// to match, never restoring a bit its caller already gave up, and a
-/// bounding-set drop survives `execve` and cannot be undone. Container init
-/// keeps everything, so the guest's own DHCP client still configures the
-/// interface at boot.
-///
-/// Every attach goes through here, including this backend's own `/etc/hosts`
-/// housekeeping, which edits a file. The rules themselves are installed from
-/// the host with `nsenter`, on a different process that this never touches.
+/// A capability given up here can never come back for the workload —
+/// `lxc-attach` only ever drops bits to match container init.
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
