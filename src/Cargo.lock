@@ -1022,6 +1022,7 @@ name = "hyperlight_common"
 version = "0.8.0"
 dependencies = [
  "hyperlight-unikraft",
+ "windows",
  "wxc_common",
 ]
 
@@ -1488,6 +1489,7 @@ dependencies = [
 name = "mxc-sdk"
 version = "0.8.0"
 dependencies = [
+ "bwrap_common",
  "libc",
  "mxc_engine",
  "serde_json",
@@ -1550,6 +1552,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "tempfile",
  "windows",
  "windows_sandbox_lifecycle",
  "wslc_common",
@@ -1562,6 +1565,7 @@ version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "serde",
  "serde_json",
 ]
 
@@ -3198,6 +3202,7 @@ version = "0.8.0"
 dependencies = [
  "base64",
  "cidr",
+ "filetime",
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
@@ -3209,6 +3214,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "unicode-general-category",

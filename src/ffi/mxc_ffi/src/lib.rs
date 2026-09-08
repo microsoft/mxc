@@ -6,12 +6,14 @@
 //! This is the flat, panic-safe C surface that language bindings (currently the
 //! C# SDK) load. It spans three surfaces:
 //!
-//! - **Run to completion** — [`mxc_run`] builds a request from a `SandboxPolicy`
-//!   JSON + a command string, runs the sandbox to completion, and returns the
-//!   captured stdout/stderr and exit outcome.
-//! - **Streaming** (`streaming` module) — [`mxc_spawn`] returns an opaque live
-//!   handle the caller reads/writes/waits/kills via the `mxc_stream_*` /
-//!   `mxc_sandbox_*` externs.
+//! - **Run to completion** — [`mxc_run_request`] accepts the complete binding
+//!   request; [`mxc_run`] is the policy + command compatibility entry point.
+//! - **Host discovery** — [`mxc_available_backends_json`] reports every
+//!   host-available backend, while [`mxc_platform_support_json`] reports the
+//!   subset this SDK can launch.
+//! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
+//!   complete binding request and returns an opaque live handle;
+//!   [`mxc_spawn`] is the compatibility entry point.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
 //!   drives the envelope phases (provision / start / stop / deprovision), and
 //!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
@@ -55,9 +57,13 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{build_request, run, ErrorCode, SandboxPolicy, WaitOutcome};
+use mxc_sdk::{
+    available_backends, build_request, platform_support, run, ErrorCode, SandboxPolicy,
+    SandboxRequest, WaitOutcome,
+};
 
 mod error_detail;
+mod request;
 mod state_aware;
 mod streaming;
 pub use error_detail::*;
@@ -126,7 +132,7 @@ pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
 // Result struct
 // ---------------------------------------------------------------------------
 
-/// The result of an [`mxc_run`] call.
+/// The result of an [`mxc_run`] or [`mxc_run_request`] call.
 ///
 /// On success (`status == 0`), `exit_code` / `timed_out` describe how the
 /// process finished and `stdout_utf8` / `stderr_utf8` carry its captured output
@@ -267,21 +273,63 @@ pub unsafe extern "C" fn mxc_run(
     command_utf8: *const c_char,
     out: *mut MxcRunResult,
 ) -> i32 {
-    let result = catch_unwind(|| run_inner(policy_json_utf8, command_utf8))
-        .unwrap_or_else(|_| MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
-
     if out.is_null() {
-        // Nowhere to hand ownership; free anything we allocated to avoid a leak.
-        let mut orphan = result;
-        orphan.free_strings();
         return MXC_STATUS_NULL_ARGUMENT;
     }
+
+    let result = catch_unwind(|| run_inner(policy_json_utf8, command_utf8))
+        .unwrap_or_else(|_| MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable; ownership of the
     // out-strings transfers to the caller (freed via `mxc_run_result_free`).
     unsafe { ptr::write(out, result) };
     status
+}
+
+/// Run a complete one-shot request to completion and capture its output.
+///
+/// `request_json_utf8` describes the policy, command, containment backend,
+/// container name, working directory, environment, and experimental opt-in.
+/// The managed and native SDKs are co-versioned, so this JSON contract evolves
+/// with them rather than becoming an independently stable C ABI.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out` must be null or point to writable [`MxcRunResult`]-sized storage.
+/// - On success the caller must release `*out` with [`mxc_run_result_free`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_request(
+    request_json_utf8: *const c_char,
+    out: *mut MxcRunResult,
+) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let result = catch_unwind(|| run_request_inner(request_json_utf8))
+        .unwrap_or_else(|_| MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
+
+    let status = result.status;
+    // SAFETY: `out` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out, result) };
+    status
+}
+
+fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
+    // SAFETY: caller contract on `mxc_run_request`; borrowed only within scope.
+    let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+        Some(value) => value,
+        None if request_json_utf8.is_null() => {
+            return MxcRunResult::error(MXC_STATUS_NULL_ARGUMENT, "request JSON pointer is null")
+        }
+        None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
+    };
+    let request = match request::build_request_from_json(request_json) {
+        Ok(request) => request,
+        Err(error) => return MxcRunResult::from_sdk_error(&error),
+    };
+    execute_request(request)
 }
 
 /// The bulk of [`mxc_run`], split out so the whole thing runs under
@@ -319,6 +367,10 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
     };
     request.set_script(command);
 
+    execute_request(request)
+}
+
+fn execute_request(request: SandboxRequest) -> MxcRunResult {
     match run(request) {
         Ok(output) => {
             let (exit_code, timed_out) = match output.outcome {
@@ -407,6 +459,33 @@ pub unsafe extern "C" fn mxc_string_free(s: *mut c_char) {
     });
 }
 
+/// Return every containment backend currently available on this host as JSON.
+///
+/// The result is a JSON array of `AvailableBackend` objects. It includes
+/// host-capability backends that the public SDK cannot necessarily launch.
+/// The returned string is owned by the caller and must be freed with
+/// [`mxc_string_free`]. Returns null if probing panics or serialization fails.
+#[no_mangle]
+pub extern "C" fn mxc_available_backends_json() -> *mut c_char {
+    catch_unwind(|| serialize_owned_json(&available_backends())).unwrap_or(ptr::null_mut())
+}
+
+/// Return support for the backends this public SDK can launch as JSON.
+///
+/// The result is a `PlatformSupport` object. The returned string is owned by
+/// the caller and must be freed with [`mxc_string_free`]. Returns null if
+/// probing panics or serialization fails.
+#[no_mangle]
+pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
+    catch_unwind(|| serialize_owned_json(&platform_support())).unwrap_or(ptr::null_mut())
+}
+
+fn serialize_owned_json(value: &impl serde::Serialize) -> *mut c_char {
+    serde_json::to_vec(value)
+        .map(|json| alloc_cstring(&json))
+        .unwrap_or(ptr::null_mut())
+}
+
 /// Return the library version as a static, NUL-terminated C string.
 ///
 /// The pointer is valid for the lifetime of the process and must **not** be
@@ -478,6 +557,30 @@ mod tests {
         // SAFETY: `mxc_version` returns a valid static C string.
         let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap();
         assert_eq!(s, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn available_backends_returns_owned_json_array() {
+        let mut p = mxc_available_backends_json();
+        assert!(!p.is_null());
+        // SAFETY: the discovery entry point returns a valid owned C string.
+        let json = unsafe { CStr::from_ptr(p) }.to_str().unwrap();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(value.is_array(), "unexpected discovery JSON: {json}");
+        free_cstr(&mut p);
+    }
+
+    #[test]
+    fn platform_support_returns_owned_camel_case_json() {
+        let mut p = mxc_platform_support_json();
+        assert!(!p.is_null());
+        // SAFETY: the discovery entry point returns a valid owned C string.
+        let json = unsafe { CStr::from_ptr(p) }.to_str().unwrap();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert!(value.get("isSupported").is_some());
+        assert!(value.get("availableMethods").is_some());
+        assert!(value.get("is_supported").is_none());
+        free_cstr(&mut p);
     }
 
     #[test]

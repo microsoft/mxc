@@ -12,9 +12,12 @@
 //! `dispatch.rs`, so both the public SDK and the executor binaries can share a
 //! single implementation.
 
+use serde::Serialize;
+
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlatformSupport {
     /// Whether MXC is supported on the current host.
     pub is_supported: bool,
@@ -23,6 +26,27 @@ pub struct PlatformSupport {
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     pub available_methods: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_platform_support_with<F>(probe: F) -> PlatformSupport
+where
+    F: FnOnce() -> Result<
+        bwrap_common::bwrap_version::BwrapVersion,
+        bwrap_common::bwrap_version::BwrapUnavailable,
+    >,
+{
+    match probe() {
+        Ok(_) => PlatformSupport {
+            is_supported: true,
+            available_methods: vec!["bubblewrap".to_string()],
+            ..Default::default()
+        },
+        Err(err) => PlatformSupport {
+            reason: Some(err.to_string()),
+            ..Default::default()
+        },
+    }
 }
 
 /// Detect MXC support on the current host.
@@ -61,17 +85,7 @@ pub fn platform_support() -> PlatformSupport {
         // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
         // host-capability backend the SDK can't launch, so it is reported by
         // `available_backends()` rather than here.
-        match bwrap_common::bwrap_version::probe_bwrap() {
-            Ok(_) => PlatformSupport {
-                is_supported: true,
-                available_methods: vec!["bubblewrap".to_string()],
-                ..Default::default()
-            },
-            Err(err) => PlatformSupport {
-                reason: Some(err.to_string()),
-                ..Default::default()
-            },
-        }
+        linux_platform_support_with(bwrap_common::bwrap_version::probe_bwrap)
     }
 
     #[cfg(target_os = "windows")]
@@ -137,7 +151,11 @@ pub fn isolation_session_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::linux_platform_support_with;
     use super::platform_support;
+    #[cfg(target_os = "linux")]
+    use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use wxc_common::wire::Containment;
 
     fn wire_name(containment: &Containment) -> String {
@@ -191,5 +209,25 @@ mod tests {
                 "reported method {method:?} is not a Containment wire name"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_bubblewrap_when_probe_succeeds() {
+        let support = linux_platform_support_with(|| Ok(MIN_BWRAP_VERSION));
+        assert!(support.is_supported);
+        assert_eq!(support.reason, None);
+        assert_eq!(support.available_methods, ["bubblewrap"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_preserves_probe_failure_reason() {
+        let failure = BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1));
+        let expected = failure.to_string();
+        let support = linux_platform_support_with(|| Err(failure));
+        assert!(!support.is_supported);
+        assert_eq!(support.reason.as_deref(), Some(expected.as_str()));
+        assert!(support.available_methods.is_empty());
     }
 }

@@ -133,23 +133,19 @@ impl std::error::Error for Error {}
 
 impl From<MxcError> for Error {
     fn from(error: MxcError) -> Self {
-        let (operation, native_code, remediation) = match error.api_failure {
+        let (operation, native_code) = match error.api_failure {
             Some(failure) => {
                 let failure = *failure;
-                (
-                    Some(failure.operation),
-                    failure.native_code,
-                    failure.remediation,
-                )
+                (Some(failure.operation), failure.native_code)
             }
-            None => (None, None, None),
+            None => (None, None),
         };
         Self {
             code: error.code.into(),
             message: error.message,
             operation,
             native_code,
-            remediation,
+            remediation: error.remediation,
         }
     }
 }
@@ -168,11 +164,11 @@ mod tests {
     /// backend had already produced.
     #[test]
     fn the_conversion_preserves_the_api_detail() {
-        let inner = MxcError::backend_error("The provision was not found.").with_api_failure(
-            InnerFailure::new("IsoSessionOps.StopSessionAsync")
-                .with_native_code("0x80070490")
-                .with_remediation("Provision the session first."),
-        );
+        let inner = MxcError::backend_error("The provision was not found.")
+            .with_api_failure(
+                InnerFailure::new("IsoSessionOps.StopSessionAsync").with_native_code("0x80070490"),
+            )
+            .with_remediation("Provision the session first.");
 
         let error = Error::from(inner);
 
@@ -189,9 +185,9 @@ mod tests {
         );
     }
 
-    /// A failure that names only its operation leaves the optional halves
-    /// absent rather than empty — `None` and `Some("")` are different answers
-    /// to "did the API supply a status?".
+    /// A failure that names only its operation leaves the status absent rather
+    /// than empty — `None` and `Some("")` are different answers to "did the API
+    /// supply a status?".
     #[test]
     fn an_operation_without_a_status_leaves_the_rest_absent() {
         let error = Error::from(
@@ -220,16 +216,21 @@ mod tests {
         assert_eq!(constructed.remediation, None);
     }
 
-    /// The flat shape admits a remediation with no operation. `Display` renders
-    /// only the operation and status, so that combination has to come out as
+    /// A hint with no API call behind it survives the conversion, and `Display`
+    /// renders only the operation and status — so that combination comes out as
     /// plain `code: message` rather than as an empty bracket.
     #[test]
     fn a_remediation_without_an_operation_renders_without_brackets() {
-        let error = Error {
-            remediation: Some("Supply a supported policy.".into()),
-            ..Error::new(ErrorCode::PolicyValidation, "unsupported policy")
-        };
+        let error = Error::from(
+            MxcError::policy_validation("unsupported policy")
+                .with_remediation("Supply a supported policy."),
+        );
 
+        assert_eq!(error.operation, None);
+        assert_eq!(
+            error.remediation.as_deref(),
+            Some("Supply a supported policy.")
+        );
         assert_eq!(error.to_string(), "policy_validation: unsupported policy");
     }
 

@@ -78,9 +78,10 @@ impl core::fmt::Display for WslcComponentFlags {
 impl WslcSdk {
     /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
     ///
-    /// Loads from the same directory as the running executable to avoid DLL
-    /// search-order hijacking. Returns an error if the DLL is not found, or if
-    /// any function this crate depends on cannot be resolved.
+    /// Loads from the same directory as the native module containing this code
+    /// to avoid DLL search-order hijacking and support NuGet runtime assets.
+    /// Returns an error if the DLL is not found, or if any required function
+    /// cannot be resolved.
     ///
     /// The generated `WslcSdk::new` (bindgen `--dynamic-loading`) succeeds as
     /// long as the DLL itself opens, storing each unresolved symbol as an `Err`
@@ -89,10 +90,9 @@ impl WslcSdk {
     /// validates that every function actually called by this crate resolved,
     /// via [`ensure_required_symbols`](Self::ensure_required_symbols).
     pub fn load() -> Result<Self, String> {
-        let dll_path = std::env::current_exe()
-            .map_err(|e| format!("Failed to determine current executable path: {e}"))?
+        let dll_path = wxc_common::process_util::module_path_for_address(Self::load as *const ())?
             .parent()
-            .ok_or_else(|| "Failed to determine current executable directory".to_string())?
+            .ok_or_else(|| "Failed to determine the MXC native module directory".to_string())?
             .join("wslcsdk.dll");
 
         // SAFETY: loading a DLL and resolving symbols is inherently unsafe.
@@ -101,7 +101,7 @@ impl WslcSdk {
                 format!(
                     "Failed to load wslcsdk.dll from {}: {e}. \
                      Ensure the WSLC SDK runtime is installed or the DLL is \
-                     in the same directory as the running executable.",
+                     beside the loaded MXC native module.",
                     dll_path.display()
                 )
             })?

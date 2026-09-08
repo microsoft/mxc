@@ -10,8 +10,8 @@
 //! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
 //! exercised by the executor E2E suites instead.
 //!
-//! Those suites drive the `ExecConsumer::Executor` path. The
-//! `ExecConsumer::Library` path [`exec_sandbox`] uses is covered end-to-end by
+//! Those suites drive the `ExecStdio::Relayed` path. The
+//! `ExecStdio::Piped` path [`exec_sandbox`] uses is covered end-to-end by
 //! `tests/isolation_session.rs`, which is gated on a host running the OS-side
 //! service. So the assertions here deliberately stop at the facade's contract:
 //! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
@@ -118,8 +118,9 @@ fn the_optin_admits_an_experimental_backend() {
     }
 }
 
-/// The gate's refusal carries no failing-API detail, because no platform API is
-/// in flight when it fires — the same shape a malformed request produces.
+/// The gate's refusal names no failing call, because no platform API is in
+/// flight when it fires — the same shape a malformed request produces. It
+/// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
     let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;

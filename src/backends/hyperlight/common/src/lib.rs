@@ -89,6 +89,20 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use hyperlight_unikraft::pyhl;
 use hyperlight_unikraft::{AllowList, BlockList, Preopen};
 
+// -- Availability probe -------------------------------------------------------
+
+/// WHP is delay-loaded; check before pyhl::install warms a VM.
+#[cfg(target_os = "windows")]
+pub fn is_whp_available() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::LibraryLoader::{LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+
+    // SAFETY: LOAD_LIBRARY_SEARCH_SYSTEM32 restricts to %SystemRoot%\system32.
+    let module =
+        unsafe { LoadLibraryExW(w!("winhvplatform.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) };
+    module.is_ok()
+}
+
 // -- Error classification ----------------------------------------------------
 
 #[derive(Debug)]

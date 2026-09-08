@@ -91,6 +91,16 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      # The job defaults working-directory to src/core/lxc, so the `Test lxc`
+      # step above covers only the lxc package -- nothing else in this job runs
+      # mxc-sdk's tests, making this step their sole CI coverage. It must follow
+      # the install: these skip when bwrap is absent, so running them earlier
+      # would silently exercise nothing.
+      - name: Test Bubblewrap streaming (mxc-sdk)
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --test streaming_bubblewrap
+
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
       - name: Test executor characterization (wxc_e2e_tests)

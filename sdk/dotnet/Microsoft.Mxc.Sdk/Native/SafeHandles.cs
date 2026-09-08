@@ -98,3 +98,32 @@ internal sealed class MxcWriteStreamHandle : SafeHandle
         return true;
     }
 }
+
+/// <summary>
+/// Owns a native <c>MxcStreamCloser*</c>. The closer is independent of its read
+/// stream and may be fired concurrently with a blocking read.
+/// </summary>
+internal sealed class MxcStreamCloserHandle : SafeHandle
+{
+    private MxcStreamCloserHandle() : base(IntPtr.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == IntPtr.Zero;
+
+    internal static unsafe MxcStreamCloserHandle FromRaw(MxcStreamCloser* ptr)
+    {
+        var safe = new MxcStreamCloserHandle();
+        safe.SetHandle((IntPtr)ptr);
+        return safe;
+    }
+
+    internal unsafe MxcStreamCloser* Ptr => (MxcStreamCloser*)handle;
+
+    protected override bool ReleaseHandle()
+    {
+        unsafe
+        {
+            NativeMethods.mxc_stream_closer_free((MxcStreamCloser*)handle);
+        }
+        return true;
+    }
+}

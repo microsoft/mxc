@@ -1,0 +1,60 @@
+{
+  "policy": {
+    "version": "0.8.0-alpha",
+    "filesystem": {
+      "readwritePaths": ["C:\\work"],
+      "readonlyPaths": ["C:\\input"],
+      "deniedPaths": ["C:\\secret"],
+      "clearPolicyOnExit": true
+    },
+    "network": {
+      "allowOutbound": false,
+      "allowLocalNetwork": false,
+      "allowedHosts": [],
+      "blockedHosts": [],
+      "egress": {
+        "default": "deny"
+      },
+      "ingress": {
+        "default": "allow",
+        "hostLoopback": "deny"
+      },
+      "runtimeConfig": {
+        "networkProxy": "http://127.0.0.1:8080"
+      }
+    },
+    "ui": {
+      "allowWindows": false,
+      "clipboard": "read",
+      "allowInputInjection": false
+    },
+    "timeoutMs": 30000
+  },
+  "command": "echo parity",
+  "containment": {
+    "type": "processContainer",
+    "leastPrivilege": true,
+    "learningMode": false,
+    "capabilities": ["internetClient"],
+    "captureDenials": {
+      "mode": "block",
+      "outputPath": "C:\\logs\\denials.json",
+      "retainEtl": true
+    },
+    "ui": {
+      "isolation": "handles",
+      "desktopSystemControl": false,
+      "systemSettings": "parameters",
+      "ime": true
+    },
+    "network": {
+      "allowedProxyPeer": "Contoso.App_123"
+    }
+  },
+  "containerName": "golden-process-container",
+  "workingDirectory": "C:\\work",
+  "environment": {
+    "PARITY": "true"
+  },
+  "experimental": false
+}

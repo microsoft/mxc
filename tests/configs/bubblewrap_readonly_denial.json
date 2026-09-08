@@ -1,0 +1,11 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Readonly-Denial",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "B=/tmp/mxc_rodenial; if cat \"$B/test.txt\" 2>/dev/null | grep -q RO_CONTENT; then echo READ_OK; else echo READ_MISSING; fi; if ( echo mutated > \"$B/test.txt\" ) 2>/dev/null; then echo WRITE_LEAK; else echo WRITE_DENIED_OK; fi; if ( : > \"$B/new.txt\" ) 2>/dev/null; then echo CREATE_LEAK; else echo CREATE_DENIED_OK; fi"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/tmp/mxc_rodenial"]
+  }
+}

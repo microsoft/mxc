@@ -35,14 +35,12 @@ mod provider {
     // optionally `group_id(...)` for internal Microsoft builds.
     include!(concat!(env!("OUT_DIR"), "/provider_def.rs"));
 
-    /// Sampling keyword for Measures-level telemetry.
-    /// Same value as WIL's `traceloggingconfig.h` `MICROSOFT_KEYWORD_MEASURES`.
-    pub(crate) const MICROSOFT_KEYWORD_MEASURES: u64 = 0x0000_4000_0000_0000;
+    /// Privacy-approved WinExt product identifier for
+    /// MXC (Microsoft Execution Containers).
+    pub(crate) const PRIVACY_PRODUCT_MXC: u16 = 11;
 
-    /// Privacy data tag for Product and Service Usage.
-    /// Same value as WIL's `MicrosoftTelemetry.h` `PDT_ProductAndServiceUsage`.
-    /// Applied via a `PartA_PrivTags` field per the `TelemetryPrivacyDataTag` pattern.
-    pub(crate) const PDT_PRODUCT_AND_SERVICE_USAGE: u64 = 0x0000_0000_0200_0000;
+    /// WinExt permits only Client Diagnostic Data.
+    pub(crate) const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;
 
     /// Cached provider state, set once at init and read on every event.
     struct ProviderState {
@@ -60,7 +58,7 @@ mod provider {
     /// concurrent `init`/`shutdown` race from leaving the wrapper flag and the
     /// provider's real state out of sync (e.g. flag set to registered after a
     /// `register()` that actually failed, or a double register/unregister).
-    static REGISTERED: Mutex<bool> = Mutex::new(false);
+    static REGISTERED: Mutex<usize> = Mutex::new(0);
 
     /// Lock-free "is the provider currently registered" flag.
     ///
@@ -100,22 +98,36 @@ mod provider {
         });
 
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 0 {
             // Already registered — the tracelogging crate panics on double
-            // register, so we must not call `register()` again.
+            // register, so retain a reference instead.
+            *registered += 1;
             return true;
         }
 
-        // SAFETY: MXC_PROVIDER is a process-lifetime static. MXC is an
-        // executable (not a DLL), so unload ordering is not a concern.
+        // SAFETY: MXC_PROVIDER is a process-lifetime static declared inside
+        // this module (via `include!("provider_def.rs")`), so its storage
+        // outlives every ETW callback the tracelogging runtime installs
+        // against it. This function is however now called from library
+        // contexts too (`mxc_engine::spawn` is compiled into the `mxc_ffi`
+        // cdylib and the `mxc-sdk` library, both of which may be dynamically
+        // loaded by a host). To keep the "callbacks always point at mapped
+        // code" invariant, every `init` here is refcounted and paired with a
+        // `shutdown` in the wrapper that returned by `mxc_engine::spawn`
+        // (see the `TelemetryProcess` `Drop` contract in `mxc_engine`), so
+        // the ETW registration is released before the caller can dlclose /
+        // FreeLibrary the containing module. Callers that unload the library
+        // while a spawned handle is still live violate this precondition
+        // (documented on `mxc_engine::spawn`) and can leave ETW holding
+        // callbacks into unmapped memory.
         let status = unsafe { MXC_PROVIDER.register() };
         if status != 0 {
-            // Registration failed; leave `*registered` false so the wrapper
+            // Registration failed; leave the reference count at zero so the wrapper
             // state matches reality and a later attempt can retry.
             return false;
         }
 
-        *registered = true;
+        *registered = 1;
         ACTIVE.store(true, Ordering::Release);
         true
     }
@@ -123,9 +135,11 @@ mod provider {
     /// Unregister the ETW provider.
     pub fn shutdown() {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 1 {
+            *registered -= 1;
+        } else if *registered == 1 {
             MXC_PROVIDER.unregister();
-            *registered = false;
+            *registered = 0;
             ACTIVE.store(false, Ordering::Release);
         }
     }
@@ -144,8 +158,10 @@ mod provider {
     /// the shared base prefix). Carries no `sandbox_id` / UPN or other caller
     /// identity — privacy-safe by construction. Empty for one-shot executions
     /// (which are a single process already correlated by `AppSessionGuid`).
+    #[allow(clippy::too_many_arguments)]
     pub fn log_execution(
         backend: &str,
+        sandbox_kind: &str,
         exit_code: i32,
         outcome: &str,
         duration_ms: u64,
@@ -170,8 +186,13 @@ mod provider {
             // "what happened" record, not a fault. Severity is reserved for
             // MXC.Error (Warning) and any future provider malfunction.
             level(Informational),
-            keyword(MICROSOFT_KEYWORD_MEASURES),
-            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
                 str8("Channel", &state.channel),
@@ -179,6 +200,7 @@ mod provider {
                 bool8("UTCReplace_AppSessionGuid", &true),
             }),
             str8("mxc.backend", backend),
+            str8("mxc.sandbox_kind", sandbox_kind),
             i32("mxc.exit_code", &exit_code),
             str8("mxc.outcome", outcome),
             u64("mxc.duration_ms", &duration_ms),
@@ -209,6 +231,7 @@ mod provider {
     /// under `__TlgCV__` (see [`log_execution`]); empty for one-shot executions.
     pub fn log_error(
         backend: &str,
+        sandbox_kind: &str,
         error_type: &str,
         exit_code: i32,
         phase: &str,
@@ -231,8 +254,13 @@ mod provider {
             // product faults that feed reliability alerting, so those levels are
             // reserved for genuine provider/telemetry malfunctions.
             level(Warning),
-            keyword(MICROSOFT_KEYWORD_MEASURES),
-            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
                 str8("Channel", &state.channel),
@@ -240,6 +268,7 @@ mod provider {
                 bool8("UTCReplace_AppSessionGuid", &true),
             }),
             str8("mxc.backend", backend),
+            str8("mxc.sandbox_kind", sandbox_kind),
             str8("mxc.error_type", error_type),
             i32("mxc.exit_code", &exit_code),
             // State-aware lifecycle phase (provision|start|exec|stop|
@@ -247,6 +276,245 @@ mod provider {
             str8("mxc.phase", phase),
             // MS-CV under `__TlgCV__` (see MXC.Execution); empty for one-shot.
             str8("__TlgCV__", correlation_vector),
+        );
+    }
+    fn common_params(state: &ProviderState) -> (&str, &str, bool, bool) {
+        (&state.version, &state.channel, cfg!(debug_assertions), true)
+    }
+
+    pub fn log_process_exited(identity: &str, process_id: u32, exit_code: i32) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessExited",
+            level(Informational),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            i32("mxc.exit_code", &exit_code),
+        );
+    }
+
+    pub fn log_process_timed_out(identity: &str, process_id: u32, timeout_ms: u64) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessTimedOut",
+            level(Warning),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            u64("mxc.timeout_ms", &timeout_ms),
+        );
+    }
+
+    pub fn log_process_kill_failed(
+        identity: &str,
+        process_id: u32,
+        error_type: &str,
+        error_code: i32,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessKillFailed",
+            level(Error),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            str8("mxc.error_type", error_type),
+            i32("mxc.error_code", &error_code),
+        );
+    }
+
+    pub fn log_enforcement_degraded(
+        identity: &str,
+        tier: &str,
+        needs_dacl_augmentation: bool,
+        degradation_reasons: &str,
+        effective_enforcement_level: &str,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.EnforcementDegraded",
+            level(Warning),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.tier", tier),
+            bool8("mxc.needs_dacl_augmentation", &needs_dacl_augmentation),
+            str8("mxc.degradation_reasons", degradation_reasons),
+            str8("mxc.effective_enforcement_level", effective_enforcement_level),
+        );
+    }
+
+    pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.PolicyHash",
+            level(Informational),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.policy_hash", policy_hash),
+            str8("mxc.config_schema_version", config_schema_version),
+        );
+    }
+
+    pub fn log_network_policy_applied(
+        identity: &str,
+        enforcement_mode: &str,
+        default_policy: &str,
+        proxy_port: u64,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.SandboxNetworkPolicyApplied",
+            level(Informational),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.enforcement_mode", enforcement_mode),
+            str8("mxc.default_policy", default_policy),
+            u64("mxc.proxy_port", &proxy_port),
+        );
+    }
+
+    pub fn log_sandbox_torn_down(identity: &str, status: &str, released_resources: &str) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.SandboxTornDown",
+            level(Informational),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.status", status),
+            str8("mxc.released_resources", released_resources),
+        );
+    }
+
+    pub fn log_config_rejected(
+        correlation_id: &str,
+        backend: &str,
+        reason: &str,
+        offending_field: &str,
+        phase: &str,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ConfigRejected",
+            level(Warning),
+            keyword(MXC_EVENT_KEYWORD),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
+            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.correlation_id", correlation_id),
+            str8("mxc.backend", backend),
+            str8("mxc.reason", reason),
+            str8("mxc.offending_field", offending_field),
+            str8("mxc.phase", phase),
         );
     }
 }
@@ -257,6 +525,9 @@ mod provider {
 
 #[cfg(not(target_os = "windows"))]
 mod provider {
+    /// Non-Windows builds never route to the Microsoft telemetry pipeline.
+    pub const IS_UTC_ROUTED: bool = false;
+
     pub fn init(_version: &str, _channel: &str) -> bool {
         false
     }
@@ -267,8 +538,10 @@ mod provider {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_execution(
         _backend: &str,
+        _sandbox_kind: &str,
         _exit_code: i32,
         _outcome: &str,
         _duration_ms: u64,
@@ -280,10 +553,45 @@ mod provider {
 
     pub fn log_error(
         _backend: &str,
+        _sandbox_kind: &str,
         _error_type: &str,
         _exit_code: i32,
         _phase: &str,
         _correlation_vector: &str,
+    ) {
+    }
+    pub fn log_process_exited(_identity: &str, _process_id: u32, _exit_code: i32) {}
+    pub fn log_process_timed_out(_identity: &str, _process_id: u32, _timeout_ms: u64) {}
+    pub fn log_process_kill_failed(
+        _identity: &str,
+        _process_id: u32,
+        _error_type: &str,
+        _error_code: i32,
+    ) {
+    }
+    pub fn log_enforcement_degraded(
+        _identity: &str,
+        _tier: &str,
+        _needs_dacl_augmentation: bool,
+        _degradation_reasons: &str,
+        _effective_enforcement_level: &str,
+    ) {
+    }
+    pub fn log_policy_hash(_identity: &str, _policy_hash: &str, _config_schema_version: &str) {}
+    pub fn log_network_policy_applied(
+        _identity: &str,
+        _enforcement_mode: &str,
+        _default_policy: &str,
+        _proxy_port: u64,
+    ) {
+    }
+    pub fn log_sandbox_torn_down(_identity: &str, _status: &str, _released_resources: &str) {}
+    pub fn log_config_rejected(
+        _correlation_id: &str,
+        _backend: &str,
+        _reason: &str,
+        _offending_field: &str,
+        _phase: &str,
     ) {
     }
 }
@@ -304,6 +612,76 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn event_names_preserve_collector_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+        assert!(
+            provider_source.contains("\"MXC.Execution\","),
+            "execution event identity changed"
+        );
+        assert!(
+            provider_source.contains("\"MXC.Error\","),
+            "error event identity changed"
+        );
+        let error_section = provider_source
+            .split("\"MXC.Error\",")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            error_section.contains("str8(\"mxc.backend\", backend)"),
+            "MXC.Error must emit mxc.backend"
+        );
+        assert!(
+            error_section.contains("str8(\"mxc.sandbox_kind\", sandbox_kind)"),
+            "MXC.Error must emit mxc.sandbox_kind"
+        );
+    }
+
+    #[test]
+    fn winext_part_a_fields_preserve_privacy_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+
+        assert!(provider_source.contains("const PRIVACY_PRODUCT_MXC: u16 = 11;"));
+        assert!(provider_source
+            .contains("const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;"));
+        assert_eq!(
+            provider_source
+                .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
+                .count(),
+            10,
+            "every MXC event must carry privacy product 11"
+        );
+        assert_eq!(
+            provider_source
+                .matches("\"PartA_PrivacyDataCategory\"")
+                .count(),
+            10,
+            "every MXC event must carry a privacy data category"
+        );
+        assert_eq!(
+            provider_source
+                .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
+                .count(),
+            10,
+            "every MXC event must use Client Diagnostic Data category 1"
+        );
+        assert_eq!(
+            provider_source
+                .matches("u64(\"PartA_PrivTags\", &MXC_PRIVACY_TAG)")
+                .count(),
+            10,
+            "every MXC event must retain its approved privacy tag"
+        );
+    }
+
+    #[test]
     fn init_shutdown_roundtrip() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ok = init("0.0.0-test", "dev");
@@ -318,9 +696,20 @@ mod tests {
     #[test]
     fn double_init_is_safe() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = init("0.0.0-test", "dev");
-        let _ = init("0.0.0-test", "dev");
+        let first = init("0.0.0-test", "dev");
+        let second = init("0.0.0-test", "dev");
+        assert_eq!(second, first);
         shutdown();
+        assert_eq!(
+            is_active(),
+            first,
+            "one retained registration must remain active only when init succeeded"
+        );
+        shutdown();
+        assert!(
+            !is_active(),
+            "the final release must leave the provider inactive"
+        );
     }
 
     #[test]
@@ -346,6 +735,7 @@ mod tests {
         let _ = init("0.0.0-test", "dev");
         log_execution(
             "test_backend",
+            "test_backend",
             0,
             "success",
             100,
@@ -362,6 +752,7 @@ mod tests {
         let _ = init("0.0.0-test", "dev");
         log_error(
             "test_backend",
+            "test_backend",
             "config_error",
             1,
             "provision",
@@ -373,8 +764,17 @@ mod tests {
     #[test]
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        log_execution("test_backend", 0, "success", 50, "none", "", "");
-        log_error("test_backend", "unknown", 1, "", "");
+        log_execution(
+            "test_backend",
+            "test_backend",
+            0,
+            "success",
+            50,
+            "none",
+            "",
+            "",
+        );
+        log_error("test_backend", "test_backend", "unknown", 1, "", "");
     }
 
     #[test]
@@ -384,6 +784,7 @@ mod tests {
         shutdown();
         log_execution(
             "test_backend",
+            "test_backend",
             1,
             "failure",
             200,
@@ -391,16 +792,62 @@ mod tests {
             "exec",
             "iso:wxc-abcd",
         );
-        log_error("test_backend", "process_error", 1, "exec", "iso:wxc-abcd");
+        log_error(
+            "test_backend",
+            "test_backend",
+            "process_error",
+            1,
+            "exec",
+            "iso:wxc-abcd",
+        );
     }
 
     #[test]
     fn handles_empty_strings() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("", "");
-        log_execution("", 0, "", 0, "", "", "");
-        log_error("", "", 0, "", "");
+        log_execution("", "", 0, "", 0, "", "", "");
+        log_error("", "", "", 0, "", "");
         shutdown();
+    }
+
+    #[test]
+    fn concurrent_init_shutdown_is_safe() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let active = init("0.0.0-concurrent-test", "dev");
+                        if active {
+                            log_execution(
+                                "test_backend",
+                                "test_backend",
+                                0,
+                                "success",
+                                0,
+                                "",
+                                "",
+                                "",
+                            );
+                            shutdown();
+                        }
+                        active
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        if cfg!(target_os = "windows") {
+            assert!(results.iter().all(|active| *active));
+            assert!(!is_active());
+        } else {
+            assert!(results.iter().all(|active| !*active));
+        }
     }
 }
 
@@ -421,18 +868,21 @@ mod provider_codegen_tests {
         let def = generate_provider_def(None);
         assert!(def.contains("\"Microsoft.MXC\""));
         assert!(!def.contains("group_id"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn empty_guid_yields_plain_provider() {
         let def = generate_provider_def(Some(""));
         assert!(!def.contains("group_id"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn valid_guid_adds_group_id() {
         let def = generate_provider_def(Some("7f10def4-a258-5fea-510e-2c3bb976687f"));
         assert!(def.contains("group_id(\"7f10def4-a258-5fea-510e-2c3bb976687f\")"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = true"));
     }
 
     #[test]
@@ -450,5 +900,27 @@ mod provider_codegen_tests {
         assert!(!is_valid_guid("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"));
         // Wrong segment lengths.
         assert!(!is_valid_guid("7f10def-a258-5fea-510e-2c3bb976687f"));
+    }
+
+    #[test]
+    fn absent_guid_yields_local_only_event_metadata() {
+        let constants = generate_event_metadata_consts(None);
+        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
+        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
+    }
+
+    #[test]
+    fn empty_guid_yields_local_only_event_metadata() {
+        let constants = generate_event_metadata_consts(Some(""));
+        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
+        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
+    }
+
+    #[test]
+    fn valid_guid_yields_telemetry_event_metadata() {
+        let constants =
+            generate_event_metadata_consts(Some("7f10def4-a258-5fea-510e-2c3bb976687f"));
+        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000"));
+        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000"));
     }
 }

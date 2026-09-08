@@ -419,6 +419,10 @@ fn egress_probe(loopback_port: u16) -> String {
 
 /// Directional (0.8) config. `deny` needs the loopback runtime proxy, which is
 /// the only egress Seatbelt permits under a deny default.
+///
+/// The allow variant states `ingress` explicitly: an omitted `hostLoopback` is
+/// `deny`, which would close the loopback endpoint this probe uses as its
+/// control. Seatbelt requires `hostLoopback` to equal `default`.
 fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Value {
     let mut cfg = json!({
         "version": "0.8.0-alpha",
@@ -428,8 +432,24 @@ fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Valu
     });
     if default == "deny" {
         cfg["runtimeConfig"] = json!({ "networkProxy": format!("http://127.0.0.1:{port}") });
+    } else {
+        cfg["network"]["ingress"] = json!({ "default": "allow", "hostLoopback": "allow" });
     }
     cfg
+}
+
+/// Directional config pinning `network.ingress.hostLoopback` while egress stays
+/// open, so the only thing under test is the host-loopback posture.
+fn host_loopback_config(label: &str, port: u16, action: &str) -> serde_json::Value {
+    json!({
+        "version": "0.8.0-alpha",
+        "containerId": format!("char-seatbelt-{label}"),
+        "process": { "commandLine": egress_probe(port) },
+        "network": {
+            "egress": { "default": "allow" },
+            "ingress": { "default": action, "hostLoopback": action }
+        }
+    })
 }
 
 /// Legacy (0.7) twin of [`directional_config`].
@@ -498,7 +518,7 @@ fn assert_denies_direct_egress(label: &str, cfg: &serde_json::Value) {
 
 /// Schema 0.8 `network.egress.default: "deny"` restricts egress to the loopback
 /// runtime proxy. This is the enforcement half of
-/// `tests/examples/30_mac_network_schema_v2.json`, which CI cannot run because
+/// `tests/examples/31_mac_network_0_8.json`, which CI cannot run because
 /// it expects an externally supplied proxy.
 #[test]
 fn seatbelt_directional_deny_blocks_direct_egress() {
@@ -531,4 +551,47 @@ fn seatbelt_legacy_block_blocks_direct_egress() {
 
     let block = legacy_config("legacy-block", endpoint.port, "block");
     assert_denies_direct_egress("seatbelt 0.7 defaultPolicy block", &block);
+}
+
+/// `network.ingress.hostLoopback: "deny"` must close the host's own loopback
+/// even though egress is otherwise wide open.
+///
+/// Unlike the egress tests above, this one needs no reachable external host —
+/// its control is a loopback listener this process owns — so it proves
+/// enforcement on every macOS host instead of skipping on an offline one.
+#[test]
+fn seatbelt_host_loopback_deny_blocks_host_loopback() {
+    if !has_platform_exec() {
+        return;
+    }
+    let endpoint = LoopbackEndpoint::start();
+
+    // Control: same policy but hostLoopback=allow, proving the endpoint is up
+    // and that a denial below comes from the policy, not a dead listener.
+    let allow = host_loopback_config("hl-allow", endpoint.port, "allow");
+    let allow_result = run_platform_config_value("seatbelt hostLoopback allow", &allow, &[], None);
+    let allow_output = allow_result.combined_output();
+    assert_eq!(
+        allow_result.code,
+        Some(0),
+        "hostLoopback=allow should run to completion. Output:\n{allow_output}"
+    );
+    assert!(
+        allow_output.contains("LOOPBACK_REACHABLE"),
+        "hostLoopback=allow must leave host loopback reachable. Output:\n{allow_output}"
+    );
+
+    let deny = host_loopback_config("hl-deny", endpoint.port, "deny");
+    let deny_result = run_platform_config_value("seatbelt hostLoopback deny", &deny, &[], None);
+    let deny_output = deny_result.combined_output();
+    assert_eq!(
+        deny_result.code,
+        Some(0),
+        "hostLoopback=deny should run to completion. Output:\n{deny_output}"
+    );
+    assert!(
+        deny_output.contains("LOOPBACK_BLOCKED"),
+        "hostLoopback=deny must block host loopback — it is reachable under the allow twin \
+         above, so this is enforcement, not a dead listener. Output:\n{deny_output}"
+    );
 }

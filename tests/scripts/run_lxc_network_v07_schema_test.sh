@@ -43,6 +43,20 @@ fail() {
     exit 1
 }
 
+IP_FORWARD_WAS=""
+restore_ip_forward() {
+    if [ -n "$IP_FORWARD_WAS" ]; then
+        sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
+    fi
+}
+trap restore_ip_forward EXIT
+
+# Without this the container's DNS query stops at the host and never leaves the
+# box, and the dns case below reads that as a missing port 53 accept.
+IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
+
 # shellcheck source=lib/chain_name.sh
 . "$SCRIPT_DIR/lib/chain_name.sh"
 

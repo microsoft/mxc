@@ -16,6 +16,17 @@ public class MxcSandboxProcessTests
     private static bool HostCanSpawn =>
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1";
 
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(0u, null)]
+    [InlineData(1u, 1u)]
+    public void NormalizeTimeout_TreatsZeroAsNoManagedDeadline(
+        uint? timeoutMs,
+        uint? expected)
+    {
+        Assert.Equal(expected, MxcSandboxProcess.NormalizeTimeout(timeoutMs));
+    }
+
     [Fact]
     public void Spawn_NullPolicy_Throws()
     {
@@ -39,6 +50,58 @@ public class MxcSandboxProcessTests
         var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(policy, "echo hi"));
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
+    }
+
+    [Fact]
+    public void StandardOutputCloser_RequiresTakingTheStreamFirst()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+
+        Assert.Throws<InvalidOperationException>(() => proc.StandardOutputCloser);
+    }
+
+    [Fact]
+    public async Task StandardOutputCloser_UnblocksReadWithoutKillingChild()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdout = proc.StandardOutput;
+        var closer = proc.StandardOutputCloser;
+        Assert.NotNull(stdout);
+        Assert.NotNull(closer);
+
+        using var readStarted = new ManualResetEventSlim();
+        var read = Task.Run(() =>
+        {
+            var buffer = new byte[1];
+            readStarted.Set();
+            return stdout!.Read(buffer, 0, buffer.Length);
+        });
+        readStarted.Wait(TestContext.Current.CancellationToken);
+        closer!.Close();
+
+        Assert.Equal(0, await read);
+        Assert.False(proc.TryGetExitCode(out _));
+        proc.Kill();
+        proc.Wait();
+    }
+
+    [Fact]
+    public void StreamingWarnings_AreAvailableImmediately()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+
+        Assert.Empty(proc.Warnings);
+        proc.Kill();
+        proc.Wait();
     }
 
     [Fact]
@@ -81,6 +144,30 @@ public class MxcSandboxProcessTests
         Assert.False(result.TimedOut);
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("mxc_async_ok", Encoding.UTF8.GetString(stdout));
+    }
+
+    [Fact]
+    public async Task TryGetExitCode_ReportsRunningThenExited()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        using var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+
+        Assert.False(proc.TryGetExitCode(out var runningExitCode));
+        Assert.Equal(0, runningExitCode);
+
+        proc.Kill();
+        while (!proc.TryGetExitCode(out _))
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(proc.TryGetExitCode(out var exitCode));
+        var result = proc.Wait();
+        Assert.Equal(result.ExitCode, exitCode);
     }
 
     [Fact]
@@ -171,12 +258,14 @@ public class MxcSandboxProcessTests
         var proc = MxcSandbox.Spawn(policy, command);
         var stdout = proc.StandardOutput!;
         Exception? readError = null;
+        using var readStarted = new ManualResetEventSlim();
         var reader = Task.Run(() =>
         {
             try
             {
                 var buf = new byte[64];
                 // Loop until EOF (0) — Dispose kills the child, closing the pipe.
+                readStarted.Set();
                 while (stdout.Read(buf, 0, buf.Length) > 0) { }
             }
             catch (ObjectDisposedException)
@@ -189,8 +278,7 @@ public class MxcSandboxProcessTests
             }
         }, TestContext.Current.CancellationToken);
 
-        // Give the reader a moment to park inside the native read, then dispose.
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        readStarted.Wait(TestContext.Current.CancellationToken);
         proc.Dispose();
 
         var finished = await Task.WhenAny(
@@ -236,7 +324,6 @@ public class MxcSandboxProcessTests
         Assert.NotNull(stdin);
 
         var waitTask = proc.WaitAsync(TestContext.Current.CancellationToken);
-        await Task.Delay(100, TestContext.Current.CancellationToken); // let the wait loop park
         Assert.False(waitTask.IsCompleted, "child should still be running");
 
         proc.Kill();
@@ -328,7 +415,13 @@ public class MxcSandboxProcessTests
         sw.Stop();
 
         Assert.True(result.TimedOut, "Wait should report the policy timeout");
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"Wait took {sw.Elapsed}");
+
+        // Bounded at 1.5x the policy timeout. The old 20x bound could not
+        // distinguish correct enforcement from handing off to a native wait that
+        // restarts the budget, which costs ~2x. Legitimate overshoot is one poll
+        // interval (50ms cap) plus the kill and reap.
+        var budget = TimeSpan.FromMilliseconds(policy.TimeoutMs.Value * 1.5);
+        Assert.True(sw.Elapsed < budget, $"Wait took {sw.Elapsed}, budget {budget}");
     }
 
     [Fact]
@@ -354,9 +447,10 @@ public class MxcSandboxProcessTests
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
         // Cancelling while the child is blocked (its pipes never reach EOF) must
-        // not deadlock: the cancellation path kills the child so the parked native
-        // reads return, then surfaces the cancellation. Previously it awaited the
-        // reads before killing and hung forever, leaking the native child.
+        // not deadlock: the cancellation path closes the readers so the parked
+        // native reads return, then surfaces cancellation without killing the
+        // child. Previously it awaited the reads before unblocking them and hung
+        // forever, leaking the native child.
         var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
@@ -369,5 +463,8 @@ public class MxcSandboxProcessTests
             Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         Assert.Same(call, finished);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => call);
+        Assert.False(proc.TryGetExitCode(out _), "cancellation must not kill the child");
+        proc.Kill();
+        proc.Wait();
     }
 }

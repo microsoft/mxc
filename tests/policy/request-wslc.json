@@ -1,0 +1,24 @@
+{
+  "policy": {
+    "version": "0.8.0-alpha"
+  },
+  "command": "printf parity",
+  "containment": {
+    "type": "wslc",
+    "image": "alpine:3.20",
+    "imageTarPath": "C:\\images\\alpine.tar",
+    "cpuCount": 2,
+    "memoryMb": 1024,
+    "gpu": true,
+    "storagePath": "C:\\wslc",
+    "portMappings": [
+      {
+        "windowsPort": 8080,
+        "containerPort": 80
+      }
+    ]
+  },
+  "containerName": "golden-wslc",
+  "environment": {},
+  "experimental": true
+}

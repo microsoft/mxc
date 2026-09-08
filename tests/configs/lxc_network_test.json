@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-Network-Test",
   "containment": "lxc",
   "process": {
-    "commandLine": "wget -qO- https://api.github.com/zen"
+    "commandLine": "wget -qO- --timeout=10 http://198.51.100.18:443/"
   },
   "lifecycle": {
     "destroyOnExit": true
@@ -15,7 +15,7 @@
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"],
-    "blockedHosts": ["evil.example.com"]
+    "allowedHosts": ["allowed.nettest.mxc.test"],
+    "blockedHosts": ["blocked.nettest.mxc.test"]
   }
 }

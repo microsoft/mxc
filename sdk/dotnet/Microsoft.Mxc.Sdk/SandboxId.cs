@@ -6,7 +6,8 @@ namespace Microsoft.Mxc.Sdk;
 /// <summary>
 /// A state-aware sandbox identifier minted by
 /// <see cref="MxcLifecycle.ProvisionSandbox"/>. Carries the backend prefix (e.g.
-/// <c>iso:</c>) the later phases resolve the backend from. Treat it as opaque.
+/// <c>iso:</c>, <c>wsb:</c>, or <c>wslc:</c>) the later phases resolve the
+/// backend from. Treat it as opaque.
 /// </summary>
 public readonly struct SandboxId : IEquatable<SandboxId>
 {

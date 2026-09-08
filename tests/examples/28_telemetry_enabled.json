@@ -4,9 +4,7 @@
     "process": {
         "commandLine": "cmd.exe /c echo Hello from telemetry-enabled sandbox"
     },
-    "experimental": {
-        "telemetry": {
-            "enabled": true
-        }
+    "telemetry": {
+        "enabled": true
     }
 }

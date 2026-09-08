@@ -287,8 +287,15 @@ Seatbelt has the caveat described below.
   scoped to the AppContainer SID. WSLc/LXC/Bubblewrap require paired routing
   and filtering for both directions across their private network namespaces.
   Seatbelt maps `ingress.default` to its existing
-  `(allow network-inbound (local ip))` behavior but cannot enforce an
-  independent `hostLoopback` posture.
+  `(allow network-inbound (local ip))` behavior and enforces `hostLoopback` on
+  the container-to-host direction with a `localhost`-scoped `network-outbound`
+  rule. The inbound half is not expressible in a Seatbelt profile, so
+  `hostLoopback` must equal `ingress.default` there. That rule is scoped to the
+  host, not to loopback: SBPL's `localhost` means *this machine*, so it covers
+  every address bound to the host (loopback, LAN, and any public address) in
+  both the `deny` and `allow` cases. Other machines are unaffected — they
+  remain governed by `egress.default` — and Seatbelt offers no narrower
+  primitive, since a literal `127.0.0.1` is a profile syntax error.
 
 **Seatbelt caveat:** On Seatbelt there is no private loopback, so `ingress.hostLoopback: deny` also blocks
 intra-sandbox TCP loopback, breaking loopback servers used by processes in the same sandbox. For intra-sandbox IPC on

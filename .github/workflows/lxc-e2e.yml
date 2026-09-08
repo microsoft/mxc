@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         run: rustup update stable
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: lxc-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
           retention-days: 7

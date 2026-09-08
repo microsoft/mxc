@@ -130,6 +130,8 @@ cannot mix both formats in one request.
                                            // only via { "url": "http://proxy.example:8080" }
                                            // (own-netns: localhost/builtinTestServer are
                                            //  unreachable, rejected)
+                                           // Seatbelt requires defaultPolicy "block": a proxy
+                                           //  alongside "allow" adds no enforcement and is rejected
                                            // Under LXC the proxy is enforced: forwarded egress is
                                            //  restricted to the proxy endpoint and nothing else, so
                                            //  the allow/block host lists and DNS are not opened.
@@ -188,6 +190,20 @@ cannot mix both formats in one request.
         "release": "3.19"
     },
 
+    "seatbelt": {                          // macOS Seatbelt settings (macOS only)
+        "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
+        "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
+        "launchMethod": "exec",            // "exec" or "open" (LaunchServices, for Apple-constrained apps)
+        "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
+        "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+    },
+
+    "telemetry": {                         // Telemetry (Windows only)
+        "enabled": true                    // Request emission for this run; MXC-owned user consent
+                                           // and a permitting administrative policy are also required
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -199,16 +215,6 @@ cannot mix both formats in one request.
             "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
-        },
-        "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
-            "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
-            "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
-            "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
-            "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        },
-        "telemetry": {                // Telemetry (Windows only)
-            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }
@@ -304,11 +310,15 @@ backend (via job-object UI restrictions plus the Win32k mitigation — see
 [`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
-whether it applies, rejects, or ignores the section. **IsolationSession refuses
-any supplied `ui` at every phase on both surfaces** — no `ui` posture is truthful
+whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
+refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
+omitted one without applying any UI restriction — so the section's default-deny
+reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)) —
-and accepts an omitted one without applying any UI restriction. The Windows
+[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
+while WSLc has no mechanism to enforce UI restrictions on a container (see
+[`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
+The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
 when `containment` is `processcontainer`.
@@ -347,7 +357,7 @@ force a particular backend.
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is accepted;

@@ -90,6 +90,19 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     }
 }
 
+/// Surface warnings the run recorded (e.g. Bubblewrap reporting an IPv6 allow
+/// the sandbox namespace cannot reach).
+///
+/// The logger only retains these rather than writing them itself, so that
+/// `mxc_engine` embedders don't get unannounced writes to a terminal they own.
+/// `lxc-exec` *does* own its terminal, so it opts in here — matching wxc-exec.
+/// stderr, not stdout: stdout carries the workload's own output.
+fn emit_warnings(logger: &Logger) {
+    for warning in logger.warnings() {
+        eprintln!("{warning}");
+    }
+}
+
 fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
     use lxc_common::lxc_bindings::LxcContainer;
 
@@ -131,6 +144,16 @@ fn main() {
     if cli.setup_hyperlight {
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
+            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            #[cfg(target_os = "windows")]
+            if !hyperlight_common::is_whp_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot."
+                );
+                process::exit(1);
+            }
+
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {
@@ -207,23 +230,22 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -242,10 +264,12 @@ fn main() {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e.message);
+            emit_warnings(&logger);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -254,16 +278,20 @@ fn main() {
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
+    // Emitted before the dry-run branch below, which exits the process.
+    emit_warnings(&logger);
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
-    telemetry::emit_completion(
+    // ── Telemetry emit ──────────────────────────────────────────────
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

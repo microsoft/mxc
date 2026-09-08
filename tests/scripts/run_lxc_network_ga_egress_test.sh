@@ -4,6 +4,9 @@
 # Asserts reachability rather than a log line: a chain can install cleanly,
 # name the right chain, and still filter nothing.
 #
+# The tcp/443 cases probe a CI-controlled peer this script stands up in its own
+# routed namespace.  The udp/53 cases still query a public resolver.
+#
 # A directional posture carries no port 53 exemption, unlike the legacy chain,
 # which is what the two DNS cases pin.
 set -euo pipefail
@@ -27,6 +30,8 @@ skip() {
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the egress peer needs it to host a listener."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny.json"
@@ -120,11 +125,96 @@ assert_allowed() {
     fi
 }
 
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on (-i <veth> / --physdev-in <veth>).
+PEER_NETNS="mxc-ga-egress-peer"
+PEER_HOST_VETH="mxcgah0"
+PEER_VETH="mxcgap0"
+# An RFC 5737 test range.  The host routes by longest matching prefix, and two
+# peers sharing a range let whichever suite ran last capture the other's
+# traffic.
+PEER_HOST_IP="203.0.113.1"
+PEER_IP="203.0.113.2"
+PEER_CIDR="203.0.113.0/24"
+PEER_PORT="443"
+
+PEER_LISTENER_PID=""
+IP_FORWARD_WAS=""
+teardown_peer() {
+    if [ -n "$PEER_LISTENER_PID" ]; then
+        kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
+    fi
+    ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
+    ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
+    if [ -n "$IP_FORWARD_WAS" ]; then
+        sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
+    fi
+}
+trap teardown_peer EXIT
+
+# Clear anything an aborted earlier run left behind, then build the peer.
+teardown_peer
+ip netns add "$PEER_NETNS" || fail "could not create the egress peer namespace."
+ip link add "$PEER_HOST_VETH" type veth peer name "$PEER_VETH" \
+    || fail "could not create the egress peer veth pair."
+ip link set "$PEER_VETH" netns "$PEER_NETNS" \
+    || fail "could not move the egress peer interface into its namespace."
+ip addr add "$PEER_HOST_IP/24" dev "$PEER_HOST_VETH" \
+    || fail "could not address the host side of the egress peer veth."
+ip link set "$PEER_HOST_VETH" up || fail "could not bring up the egress peer veth."
+ip netns exec "$PEER_NETNS" ip addr add "$PEER_IP/24" dev "$PEER_VETH" \
+    || fail "could not address the egress peer."
+ip netns exec "$PEER_NETNS" ip link set "$PEER_VETH" up \
+    || fail "could not bring up the egress peer interface."
+ip netns exec "$PEER_NETNS" ip link set lo up \
+    || fail "could not bring up the egress peer loopback."
+ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
+    || fail "could not route the egress peer back to the container."
+
+# Without this the container's packets stop at the host and never reach the peer.
+IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
+
+# The firewall matches the port and not the payload, so plain HTTP on tcp/443
+# is enough.  A reply proves the SYN reached the peer.
+ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
+    >/dev/null 2>&1 &
+PEER_LISTENER_PID=$!
+sleep 1
+kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
+    || fail "the egress peer listener did not start on $PEER_IP:$PEER_PORT."
+
+# Alive is not reachable.  A peer that never bound has to fail here as harness
+# breakage, rather than later as the firewall blocking the allow case.
+python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the egress peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except OSError as exc:
+    print(exc)
+    sys.exit(1)
+finally:
+    s.close()
+PY
+
+# Drift guard: the tcp/443 fixtures must target this peer, or the run would
+# probe a stale address and prove nothing.
+for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+    grep -Fq "$PEER_IP" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
+done
+for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+    grep -Fq "$PEER_CIDR" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
+done
+
 echo "Running LXC schema 0.8 egress enforcement test..."
 
-# An egress-only config is the shape a backend claiming only the two egress
-# bits would reject outright, which makes any verdict here a test of the
-# support declaration.
 run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG"
 assert_blocked "egress succeeded under egress.default deny with no allow rules. The chain is not filtering this container's traffic."
 

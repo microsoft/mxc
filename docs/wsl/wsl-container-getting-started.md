@@ -372,6 +372,15 @@ filtering at the proxy layer, or remove the host lists. The bare
 `defaultPolicy` forms with **no** host lists remain supported: `"block"` is a
 full network cutoff and `"allow"` is full outbound (NAT).
 
+### `enforcementMode` must be `capabilities`
+
+`network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
+reason as per-host filtering: both ask for per-rule firewall enforcement inside a
+container that has no `CAP_NET_ADMIN` to apply it with. The default
+`"capabilities"` is accepted — it is an honest description of WSLC's
+all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
+rather than refused merely for being present.
+
 ### Inbound: `allowLocalNetwork` is not supported
 
 `network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
@@ -400,6 +409,35 @@ default, is a no-op and is accepted.)
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
+
+### `ui` is not supported
+
+A `ui` section is **rejected** — the backend has no mechanism to enforce UI
+restrictions on a container.
+
+The check is on **presence, not value**. `ui`'s defaults are full lockdown, so
+an explicitly supplied lockdown `ui` is indistinguishable *by value* from an
+absent one — a value-based check would let the single most restrictive request
+you can write through unenforced. Omit the section entirely.
+
+### `lifecycle`: only `destroyOnExit: true` is supported
+
+`lifecycle.destroyOnExit: true` (the default) is honored: it selects the SDK's
+`WSLC_CONTAINER_FLAG_AUTO_REMOVE`, and teardown stops and deletes the container.
+
+`lifecycle.destroyOnExit: false` is **rejected**. It asks for the container to
+outlive the run, which a one-shot invocation cannot deliver: the container is
+scoped to a session this process owns, terminating that session at the end of
+the run reaps the container regardless of the AutoRemove flag, and the WSLC SDK
+has no cross-process re-attach. Use the state-aware lifecycle if you need a
+container to persist — its daemon holds the session open across phase processes.
+
+`lifecycle.preservePolicy: true` is **rejected** — WSLC has no
+policy-persistence primitive, so there is nothing for the flag to select.
+
+Note the state-aware surface differs: it rejects the whole `lifecycle` section
+at parse time, because a multi-invocation sandbox's lifetime is driven by the
+explicit `provision` / `deprovision` phases rather than by per-run flags.
 
 ## Troubleshooting
 

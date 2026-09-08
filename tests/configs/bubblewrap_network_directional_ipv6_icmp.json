@@ -1,0 +1,23 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Directional-IPv6-ICMP",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); capeff=$(grep \"^CapEff\" /proc/self/status | cut -f2); if [ -z \"$capeff\" ]; then echo NO_CAPEFF; exit 1; fi; if [ $((0x$capeff & 0x1000)) -ne 0 ]; then echo CAP_NET_ADMIN_RETAINED; exit 1; fi; echo CAP_NET_ADMIN_DROPPED_OK; echo V6_ICMP_RULES_INSTALLED_OK'"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        { "to": [{ "cidr": "2001:4860:4860::8888/128" }] },
+        { "to": [{ "cidr": "2001:db8:1::/48", "except": ["2001:db8:1:dead::/64"] }] },
+        { "to": [{ "cidr": "2606:4700:4700::1111/128" }], "ports": [{ "protocol": "icmp" }] },
+        { "ports": [{ "protocol": "icmp" }] }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}

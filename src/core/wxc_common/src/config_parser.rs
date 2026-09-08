@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::mxc_error::MxcError;
 use crate::network_parser::{
-    directional_network_version_error, host_is_loopback, parse_network_policy,
+    directional_network_version_error, host_is_any_loopback, parse_network_policy,
     supports_directional_network, NetworkSections,
 };
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -34,6 +34,8 @@ pub enum ParseError {
     Decode(WxcError),
     /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
+    /// Discriminated as one-shot, but the JSON payload was malformed.
+    OneShotMalformed(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
@@ -48,20 +50,22 @@ enum ErrorOutput {
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
-            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::Decode(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => ErrorOutput::Primary,
             Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::Decode(error) | Self::OneShot(error) | Self::OneShotMalformed(error) => {
+                error.to_string()
+            }
             Self::StateAware(error) => error.to_string(),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(expecting = "a configuration object")]
 struct RequestDiscriminator<'a> {
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
@@ -75,6 +79,40 @@ where
     D: Deserializer<'de>,
 {
     <&RawValue>::deserialize(deserializer).map(Some)
+}
+
+fn reject_legacy_telemetry_raw(experimental: Option<&str>) -> Result<(), WxcError> {
+    let Some(experimental) = experimental else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(experimental)
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+    if value
+        .as_object()
+        .is_some_and(|object| object.contains_key("telemetry"))
+    {
+        return Err(WxcError::ConfigParse(
+            "'experimental.telemetry' has moved to the stable section; \
+             use top-level 'telemetry' instead."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcError> {
+    if config
+        .get("experimental")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|object| object.contains_key("telemetry"))
+    {
+        return Err(WxcError::ConfigParse(
+            "'experimental.telemetry' has moved to the stable section; \
+             use top-level 'telemetry' instead."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // ---------- Public API ----------
@@ -124,15 +162,71 @@ pub fn load_request_with_options(
     opts: LoadOptions,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
-        let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
+        let json_str = decode_request_input(input, opts.is_base64)?;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(&json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         let raw: serde_json::Value = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_versioned_fields(&raw)?;
 
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
+    })();
+    log_one_shot_error(logger, &result);
+    result
+}
+
+/// Parse a one-shot request from a **raw JSON string** (already decoded — not
+/// a file path or base64). For executors that decode the request once and
+/// thread the JSON string through both the maintenance-probe check and this
+/// loader, avoiding the double-read that would otherwise drain named pipes,
+/// `/dev/stdin`, and process-substitution paths.
+pub fn load_request_from_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError> {
+    load_request_from_json_with_options(
+        json_str,
+        logger,
+        LoadOptions {
+            is_base64: false,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_request_from_json`]. It remains
+/// crate-private because the options are only needed by the executor's
+/// request-loading paths.
+pub(crate) fn load_request_from_json_with_options(
+    json_str: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<ExecutionRequest, WxcError> {
+    // `is_base64` is meaningless on an already-decoded JSON string; the field
+    // is kept in `LoadOptions` for signature parity with the from-input path.
+    let _ = opts.is_base64;
+    let result = (|| {
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        if discriminator.phase.is_some() {
+            return Err(WxcError::ConfigParse(
+                "expected a one-shot execution request, got a state-aware lifecycle request"
+                    .to_string(),
+            ));
+        }
+        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
+
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        let raw: serde_json::Value = config_deserialize::from_str(json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        validate_versioned_fields(&raw)?;
+
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -152,11 +246,12 @@ pub fn load_request_from_value(
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
         let raw = config.clone();
+        reject_legacy_telemetry_value(&config)?;
         let cfg: wire::MxcConfig = config_deserialize::from_value(config)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_versioned_fields(&raw)?;
 
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command, false)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -189,8 +284,7 @@ pub fn load_mxc_request_with_options(
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
     let result = (|| {
-        let json_str = decode_request_input_without_logging(input, opts.is_base64)
-            .map_err(ParseError::Decode)?;
+        let json_str = decode_request_input(input, opts.is_base64).map_err(ParseError::Decode)?;
         parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
     })();
 
@@ -208,7 +302,34 @@ pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
 ) -> Result<MxcRequest, ParseError> {
-    let result = parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false);
+    load_mxc_request_from_json_with_options(
+        json_str,
+        logger,
+        LoadOptions {
+            is_base64: false,
+            allow_missing_command: false,
+        },
+    )
+}
+
+/// Options-aware variant of [`load_mxc_request_from_json`]. When
+/// `LoadOptions::allow_missing_command` is set, a missing or empty
+/// `process.commandLine` in the policy is tolerated and `script_code` is left
+/// empty for the driver to fill in from a CLI override.
+///
+/// Executor binaries call this after [`decode_request_input`] to avoid a
+/// second read of the input source (file / named pipe / `/dev/stdin` /
+/// process-substitution path) that the top-level [`load_mxc_request_with_options`]
+/// would perform internally.
+pub fn load_mxc_request_from_json_with_options(
+    json_str: &str,
+    logger: &mut Logger,
+    opts: LoadOptions,
+) -> Result<MxcRequest, ParseError> {
+    // `is_base64` is meaningless on an already-decoded JSON string; the field
+    // is kept in `LoadOptions` for signature parity with the from-input path.
+    let _ = opts.is_base64;
+    let result = parse_mxc_request_json(json_str, logger, opts.allow_missing_command);
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
@@ -227,31 +348,50 @@ fn parse_mxc_request_json(
 ) -> Result<MxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
-
     if discriminator.phase.is_some() {
+        let experimental = discriminator.experimental.map(|raw| raw.get());
+        let experimental_span = experimental
+            .map(|raw| experimental_source_span(json_str, raw))
+            .transpose()
+            .map_err(ParseError::Decode)?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
-        validate_directional_network_field_versions(&raw).map_err(|error| {
+        validate_versioned_fields(&raw).map_err(|error| {
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
         convert_wire_state_aware(
             json_str,
-            discriminator.experimental,
+            experimental,
+            experimental_span,
             logger,
             allow_missing_command,
         )
         .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
+            .map_err(ParseError::OneShot)?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
+            let malformed = error.is_syntax_error();
+            let error = WxcError::ConfigParse(error.to_string());
+            if malformed {
+                ParseError::OneShotMalformed(error)
+            } else {
+                ParseError::OneShot(error)
+            }
+        })?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-        validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
+        convert_wire_config(cfg, logger, true, allow_missing_command, false)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
+}
+
+fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
+    validate_directional_network_field_versions(config)?;
+    validate_telemetry_field_version(config)
 }
 
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
@@ -281,6 +421,29 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     Ok(())
 }
 
+fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    if !config.contains_key("telemetry") {
+        return Ok(());
+    }
+    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Ok(version) = semver::Version::parse(version) else {
+        // The ordinary schema-version validator owns malformed-version
+        // diagnostics so this feature gate does not mask the more useful error.
+        return Ok(());
+    };
+    if version.major == 0 && version.minor < 9 {
+        return Err(WxcError::ConfigParse(
+            "top-level 'telemetry' requires config schema version 0.9.0-alpha or later".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
     if let Err(error) = result {
         log_error(logger, &error.to_string(), ErrorOutput::Primary);
@@ -294,8 +457,11 @@ fn log_error(logger: &mut Logger, message: &str, output: ErrorOutput) {
     }
 }
 
-/// Reads a request from disk or decodes it from base64.
-fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<String, WxcError> {
+/// Decode a config/maintenance input supplied as a file path or base64 JSON.
+///
+/// This performs no logging so callers can apply the correct output contract
+/// after discriminating execution requests from maintenance commands.
+pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcError> {
     if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
             WxcError::ConfigParse("Failed to decode base64 configuration".to_string())
@@ -644,6 +810,22 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
     }
 }
 
+fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
+    match c {
+        None | Some(wire::Containment::Process) => "process",
+        Some(wire::Containment::ProcessContainer) => "processcontainer",
+        Some(wire::Containment::Vm) => "vm",
+        Some(wire::Containment::WindowsSandbox) => "windows_sandbox",
+        Some(wire::Containment::Lxc) => "lxc",
+        Some(wire::Containment::Microvm) => "microvm",
+        Some(wire::Containment::Hyperlight) => "hyperlight",
+        Some(wire::Containment::Wslc) => "wslc",
+        Some(wire::Containment::Seatbelt) => "seatbelt",
+        Some(wire::Containment::IsolationSession) => "isolation_session",
+        Some(wire::Containment::Bubblewrap) => "bubblewrap",
+    }
+}
+
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
 /// writes the JSON denials output file there after the workload exits). The
@@ -702,11 +884,17 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
 // silently accepted and `script_code` is left empty.
+//
+// `state_aware_wslc_exec` identifies the state-aware exec exception: network
+// mode was fixed at provision, so a proxy-only exec inherits that mode rather
+// than restating `defaultPolicy`. Backend phase validation still rejects every
+// post-provision network-mode or host-filtering field.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
+    state_aware_wslc_exec: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -721,11 +909,6 @@ fn convert_wire_config(
         return Err(WxcError::ConfigParse(
             "'sandboxId' is only valid on state-aware lifecycle requests".to_string(),
         ));
-    }
-    if cfg.correlation_vector.is_some() {
-        let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
     }
 
     // Backend sections present in the config (captured before fields move out).
@@ -1023,7 +1206,7 @@ fn convert_wire_config(
             // supports.
             if containment == ContainmentBackend::Lxc {
                 if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
-                    if host_is_loopback(host) {
+                    if host_is_any_loopback(host) {
                         let msg = "network.proxy.url host is a loopback address \
                                    (127.0.0.0/8, ::1, or localhost), which names the \
                                    container's own network-namespace loopback rather than \
@@ -1042,6 +1225,7 @@ fn convert_wire_config(
         // Require an 'allow' default with no host lists so the proxy is reachable.
         if containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
+            && !state_aware_wslc_exec
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1105,54 +1289,7 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
-        // Seatbelt has no privileged packet-filter layer on macOS: it enforces
-        // network policy through the sandbox profile (capabilities-style) and
-        // ignores enforcementMode. Combining network.proxy with a firewall mode
-        // would silently drop the firewall expectation, so reject it explicitly,
-        // mirroring the Bubblewrap guard above.
-        if containment == ContainmentBackend::Seatbelt
-            && policy.network_proxy.is_enabled()
-            && matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "Seatbelt: network.proxy cannot be combined with \
-                       network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
-                       enforces network policy through the sandbox profile and has no \
-                       packet-filter layer, so a firewall mode cannot be honored.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // Seatbelt scopes a *loopback* proxy's reachability to its exact port
-        // even under default-deny (profile_builder::write_proxy_reachability_rules),
-        // but it cannot filter a *remote* proxy by host: a remote proxy under
-        // defaultPolicy='block' degrades to allow-all outbound, silently turning
-        // the kernel-enforced deny into allow-all for raw-socket clients that
-        // ignore HTTP_PROXY. Reject that combination. Loopback proxies (including
-        // builtinTestServer, whose loopback address is resolved at runtime and is
-        // therefore absent here) stay port-scoped and are allowed.
-        if containment == ContainmentBackend::Seatbelt
-            && policy.default_network_policy == NetworkPolicy::Block
-            && policy
-                .network_proxy
-                .address
-                .as_ref()
-                .is_some_and(|addr| !matches!(addr.host(), "127.0.0.1" | "::1" | "localhost"))
-        {
-            let msg = "Seatbelt: a remote network.proxy (non-loopback host) cannot be \
-                       combined with defaultPolicy='block'. Seatbelt cannot filter a remote \
-                       proxy by host, so outbound reachability degrades to allow-all, \
-                       silently weakening the deny for raw-socket clients that ignore \
-                       HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
-                       'network.proxy.builtinTestServer: true' for port-scoped reachability \
-                       under deny.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // LXC is the inverse of the two guards above: it *does* have a
+        // LXC is the inverse of the guard above: it *does* have a
         // privileged packet-filter layer, and that layer is the only thing that
         // makes the proxy an exception rather than a suggestion. Under the
         // default `Capabilities` mode `apply_firewall_rules` installs nothing,
@@ -1243,7 +1380,7 @@ fn convert_wire_config(
             && policy.allowed_hosts.is_empty()
             && policy.blocked_hosts.is_empty()
         {
-            logger.log_line(
+            logger.warning_line(
                 "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
                  cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
                  denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
@@ -1349,14 +1486,10 @@ fn convert_wire_config(
                 .to_string();
             return Err(WxcError::ConfigParse(msg));
         }
-        let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
-            enabled: raw_t.enabled,
-        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
-            telemetry,
         }
     } else {
         ExperimentalConfig::default()
@@ -1365,6 +1498,10 @@ fn convert_wire_config(
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
     // rejected above.
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
+    let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
+        enabled: raw.enabled,
+        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
+    });
 
     // UI section. Capture presence before the typed mapping consumes `ui`:
     // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
@@ -1393,6 +1530,7 @@ fn convert_wire_config(
         policy,
         lxc_config,
         seatbelt,
+        telemetry,
         experimental_enabled: false,
         testing_features_enabled: false,
         experimental,
@@ -1402,13 +1540,14 @@ fn convert_wire_config(
 
 fn convert_wire_state_aware(
     json: &str,
-    experimental: Option<&RawValue>,
+    experimental: Option<&str>,
+    experimental_span: Option<(usize, usize)>,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let experimental_raw = experimental
         .map(|raw| {
-            config_deserialize::from_str::<serde_json::Value>(raw.get())
+            config_deserialize::from_str::<serde_json::Value>(raw)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))
         })
         .transpose()?;
@@ -1428,7 +1567,7 @@ fn convert_wire_state_aware(
         }
     }
 
-    let base_json = mask_state_aware_experimental(json, experimental)?;
+    let base_json = mask_state_aware_experimental_with_span(json, experimental, experimental_span)?;
     let mut cfg: wire::MxcConfig = config_deserialize::from_str(&base_json)
         .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
@@ -1479,12 +1618,18 @@ fn convert_wire_state_aware(
                 return Err(WxcError::ConfigParse(msg));
             }
         }
+        if exp.contains_key("telemetry") {
+            return Err(WxcError::ConfigParse(
+                "'experimental.telemetry' has moved to the stable section; \
+                 use top-level 'telemetry' instead."
+                    .to_string(),
+            ));
+        }
     }
 
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
 
     let sandbox_id = cfg.sandbox_id.clone();
-    let correlation_vector = cfg.correlation_vector.clone();
     let network_supplied = cfg.network.is_some();
 
     // State-aware requests carry only cross-cutting fields (process /
@@ -1519,7 +1664,6 @@ fn convert_wire_state_aware(
     // now-validated-absent stable sections so the shared one-shot converter
     // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
     cfg.sandbox_id = None;
-    cfg.correlation_vector = None;
     cfg.experimental = None;
     cfg.seatbelt = None;
     cfg.process_container = None;
@@ -1532,34 +1676,21 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let state_aware_wslc_exec = phase == Phase::Exec
+        && cfg
+            .containment
+            .as_ref()
+            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
+    let mut request = convert_wire_config(
+        cfg,
+        logger,
+        require_process,
+        allow_missing_command,
+        state_aware_wslc_exec,
+    )?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
-    }
-
-    // Populate the typed `experimental.telemetry` field from the raw block that
-    // was peeled off above. The rest of `experimental` is typed per-backend at
-    // dispatch time (from `experimental_raw`), but telemetry is a cross-cutting,
-    // backend-independent setting consumed the same way as the one-shot path —
-    // so it belongs on the typed request, not in a parallel raw-JSON reader. A
-    // present-but-malformed `telemetry` object is a client error (rejected here,
-    // exactly like the one-shot parser), not a silent disable.
-    if let Some(telemetry_val) = experimental_raw
-        .as_ref()
-        .and_then(|exp| exp.get("telemetry"))
-    {
-        let telemetry: TelemetryConfig =
-            serde_json::from_value(telemetry_val.clone()).map_err(|e| {
-                // Do not log here: state-aware parse errors are routed centrally
-                // and exactly once by the outer `load_mxc_request*` wrapper via
-                // `log_error(..., ErrorOutput::DiagnosticOnly)`. Logging here as
-                // well would produce a duplicate auxiliary diagnostic.
-                // Returning the error keeps stdout clean (envelope-owned) and
-                // yields a single auxiliary-sink line.
-                WxcError::ConfigParse(format!("invalid experimental.telemetry: {e}"))
-            })?;
-        request.experimental.telemetry = Some(telemetry);
     }
 
     Ok(ParsedStateAwareRequest {
@@ -1567,7 +1698,6 @@ fn convert_wire_state_aware(
         phase,
         containment,
         sandbox_id,
-        correlation_vector,
         experimental_raw,
         // Retain the decoded request text so the dispatcher can deserialize each
         // `experimental.<backend>.<phase>` sub-slice positionally and report
@@ -1600,16 +1730,29 @@ fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), Wxc
     Ok((start, end))
 }
 
+#[cfg(test)]
 fn mask_state_aware_experimental<'a>(
     json: &'a str,
-    experimental: Option<&RawValue>,
+    experimental: Option<&str>,
+) -> Result<Cow<'a, str>, WxcError> {
+    let span = experimental
+        .map(|raw| experimental_source_span(json, raw))
+        .transpose()?;
+    mask_state_aware_experimental_with_span(json, experimental, span)
+}
+
+fn mask_state_aware_experimental_with_span<'a>(
+    json: &'a str,
+    experimental: Option<&str>,
+    span: Option<(usize, usize)>,
 ) -> Result<Cow<'a, str>, WxcError> {
     let Some(experimental) = experimental else {
         return Ok(Cow::Borrowed(json));
     };
 
-    let raw = experimental.get();
-    let (start, end) = experimental_source_span(json, raw)?;
+    let (start, end) = span.ok_or_else(|| {
+        WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
+    })?;
     let (prefix, suffix) = match (json.get(..start), json.get(end..)) {
         (Some(prefix), Some(suffix)) => (prefix, suffix),
         _ => {
@@ -1627,7 +1770,7 @@ fn mask_state_aware_experimental<'a>(
     let mut masked = String::with_capacity(json.len());
     masked.push_str(prefix);
     let mut braces = ['{', '}'].into_iter();
-    for byte in raw.bytes() {
+    for byte in experimental.bytes() {
         match byte {
             b'\r' => masked.push('\r'),
             b'\n' => masked.push('\n'),
@@ -1650,6 +1793,27 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    #[test]
+    fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+        }"#;
+        let mut logger = test_logger();
+
+        let parsed = load_mxc_request_from_json(json, &mut logger).unwrap();
+        let MxcRequest::StateAware(parsed) = parsed else {
+            panic!("expected a state-aware request");
+        };
+        assert!(parsed.request.policy.network_proxy.is_enabled());
+        assert!(!parsed.request.policy.network_mode_specified);
+        assert!(parsed.request.policy.allowed_hosts.is_empty());
+        assert!(parsed.request.policy.blocked_hosts.is_empty());
     }
 
     fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
@@ -1795,28 +1959,43 @@ mod tests {
 
     #[test]
     fn state_aware_telemetry_populates_typed_field() {
-        // Telemetry is a cross-cutting setting: the state-aware parser must
-        // populate the typed `experimental.telemetry` field (consumed the same
-        // way as one-shot) while leaving the per-backend `experimental_raw`
-        // block intact for dispatch.
+        // Telemetry is a stable cross-cutting setting parsed identically for
+        // one-shot and state-aware requests.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "experimental": {"telemetry": {"enabled": true}}
+            "telemetry": {"enabled": true},
+            "experimental": {"isolation_session": {"provision": {}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
-                let telem = p
-                    .request
-                    .experimental
-                    .telemetry
-                    .expect("telemetry should be populated");
+                let telem = p.request.telemetry.expect("telemetry should be populated");
                 assert_eq!(telem.enabled, Some(true));
                 // The raw block is still available for per-backend dispatch.
                 assert!(p.experimental_raw.is_some());
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
+    }
+
+    #[test]
+    fn state_aware_telemetry_rejects_pre_09_schema_version() {
+        let error = load_mxc(
+            r#"{
+                "version": "0.8.0-alpha",
+                "phase": "start",
+                "sandboxId": "iso:abcd1234",
+                "telemetry": {"enabled": true}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("telemetry' requires config schema version 0.9.0-alpha"),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -1827,7 +2006,7 @@ mod tests {
             "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
+            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
@@ -1839,7 +2018,7 @@ mod tests {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
-            "experimental": {"telemetry": 42}
+            "telemetry": 42
         }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
@@ -1986,7 +2165,7 @@ mod tests {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
-            "experimental": {"telemetry": 42}
+            "telemetry": 42
         }"#;
         let encoded = base64_encode(json.as_bytes());
 
@@ -2009,9 +2188,27 @@ mod tests {
 
         let logged = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(
-            logged.matches("invalid experimental.telemetry").count(),
+            logged.matches("telemetry").count(),
             1,
             "expected exactly one auxiliary diagnostic, got: {logged:?}"
+        );
+    }
+
+    #[test]
+    fn state_aware_experimental_telemetry_reports_migration() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": {"enabled": true}}
+        }"#;
+        let error = load_mxc(json).unwrap_err();
+        let message = match &error {
+            ParseError::StateAware(error) => error.message.as_str(),
+            _ => panic!("expected state-aware error, got {error:?}"),
+        };
+        assert!(
+            message.contains("'experimental.telemetry' has moved to the stable section"),
+            "got {error:?}"
         );
     }
 
@@ -2041,7 +2238,7 @@ mod tests {
             "experimental": null
         }"#;
         match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
+            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
@@ -2146,7 +2343,11 @@ mod tests {
         ] {
             let discriminator: RequestDiscriminator<'_> =
                 config_deserialize::from_str(json).unwrap();
-            let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+            let masked = mask_state_aware_experimental(
+                json,
+                discriminator.experimental.map(|raw| raw.get()),
+            )
+            .unwrap();
 
             assert_eq!(masked.len(), json.len());
             let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
@@ -2158,7 +2359,9 @@ mod tests {
     fn state_aware_mask_handles_whitespace_only_multiline_object() {
         let json = "{\n  \"phase\": \"provision\",\n  \"experimental\": {\r\n    \r\n  }\n}";
         let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+        let masked =
+            mask_state_aware_experimental(json, discriminator.experimental.map(|raw| raw.get()))
+                .unwrap();
 
         assert_eq!(masked.len(), json.len());
         assert_eq!(
@@ -2197,7 +2400,9 @@ mod tests {
         let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
         let raw = discriminator.experimental.unwrap().get();
         let (start, end) = experimental_source_span(json, raw).unwrap();
-        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+        let masked =
+            mask_state_aware_experimental(json, discriminator.experimental.map(|raw| raw.get()))
+                .unwrap();
 
         // The masked span replaces content with exactly one `{`, one `}`,
         // spaces, and preserved newlines; everything outside is byte-identical.
@@ -3294,8 +3499,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// A blank grant names nothing, and previously flowed through to backends
-    /// that treat an empty path as "unset" (e.g. a NULL working directory).
+    /// A blank grant names nothing and must be rejected before backend
+    /// execution, rather than being interpreted as an unset path.
     #[test]
     fn block_blank_filesystem_paths() {
         for blank in ["", "   "] {
@@ -4046,117 +4251,6 @@ mod tests {
     }
 
     #[test]
-    fn proxy_with_seatbelt_and_firewall_enforcement_is_rejected() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "firewall"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("Seatbelt: network.proxy cannot be combined with"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn proxy_with_seatbelt_and_both_enforcement_is_rejected() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "both"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("network.proxy cannot be combined with"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn proxy_remote_url_with_seatbelt_and_default_block_is_rejected() {
-        // A remote (non-loopback) proxy under default-deny would degrade the
-        // Seatbelt profile to allow-all outbound — reject it at validation.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "proxy": {"url": "http://proxy.example.com:8080"}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("remote network.proxy") && msg.contains("defaultPolicy='block'"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn proxy_loopback_url_with_seatbelt_and_default_block_is_accepted() {
-        // A loopback proxy is port-scoped under deny, so it must NOT be rejected.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "proxy": {"url": "http://127.0.0.1:8080"}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(!req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
-    fn proxy_builtin_with_seatbelt_and_default_block_is_accepted() {
-        // builtinTestServer resolves to a loopback port at runtime → port-scoped,
-        // so default-deny is safe and must be accepted.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "proxy": {"builtinTestServer": true}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -4350,8 +4444,13 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-        // Warning is best-effort surfaced via the logger; the request still
-        // succeeds.
+        assert!(
+            logger
+                .take_warnings()
+                .iter()
+                .any(|warning| warning.contains("Bubblewrap network.proxy")),
+            "warning should be retained for callers"
+        );
     }
 
     #[test]
@@ -4937,9 +5036,10 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_rejects_correlation_vector_field() {
-        // `correlationVector` is a state-aware-only relay field; a one-shot
-        // payload carrying it must be rejected, mirroring `phase`/`sandboxId`.
+    fn correlation_vector_is_not_an_accepted_wire_field() {
+        // The correlation vector is purely internal to MXC and generated from
+        // the state-aware `sandboxId`; no config surface accepts one from a
+        // caller. `deny_unknown_fields` rejects it like any other unknown key.
         let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -4947,8 +5047,31 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("correlationVector") && msg.contains("state-aware"),
-            "one-shot path should reject 'correlationVector', got: {msg}"
+            msg.contains("correlationVector"),
+            "unknown field 'correlationVector' should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn state_aware_request_rejects_correlation_vector_field() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "wsb:12345678",
+            "containment": "windows_sandbox",
+            "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"
+        }"#;
+        let mut logger = test_logger();
+
+        let err = load_mxc_request_from_json(json, &mut logger).unwrap_err();
+        let msg = match err {
+            ParseError::StateAware(error) => error.to_string(),
+            ParseError::Decode(error)
+            | ParseError::OneShotMalformed(error)
+            | ParseError::OneShot(error) => error.to_string(),
+        };
+        assert!(
+            msg.contains("correlationVector"),
+            "state-aware path should reject 'correlationVector', got: {msg}"
         );
     }
 
@@ -6611,36 +6734,169 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.telemetry.is_none());
+        assert!(req.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_consent_maintenance_is_not_an_execution_request() {
+        let json = r#"{"command":"telemetryConsent","action":"status"}"#;
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `command`"),
+            "got {error:?}"
+        );
     }
 
     #[test]
     fn telemetry_enabled_true() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":true}}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(true));
+        assert_eq!(telem.requested_sandbox_kind, Some("process"));
+    }
+
+    #[test]
+    fn telemetry_rejects_pre_09_schema_version_across_one_shot_loaders() {
+        let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
+        let expected = "telemetry' requires config schema version 0.9.0-alpha";
+
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error =
+            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger, false)
+                .unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn telemetry_records_abstract_requested_sandbox_kind() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"containment":"vm","telemetry":{"enabled":true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.requested_sandbox_kind, Some("vm"));
     }
 
     #[test]
     fn telemetry_enabled_false() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":false}}}"#;
+        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enabled":false}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(false));
     }
 
     #[test]
     fn telemetry_empty_object() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{}}}"#;
+        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, None);
+    }
+
+    #[test]
+    fn telemetry_rejects_unknown_fields() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enable":true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+
+        assert!(error.to_string().contains("telemetry.enable"));
+    }
+
+    #[test]
+    fn experimental_telemetry_reports_migration() {
+        let json = r#"{
+            "process":{"commandLine":"echo hi"},
+            "experimental":{"telemetry":{"enabled":true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'experimental.telemetry' has moved to the stable section"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn null_experimental_telemetry_reports_migration() {
+        let json = r#"{
+            "process":{"commandLine":"echo hi"},
+            "experimental":{"telemetry":null}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'experimental.telemetry' has moved to the stable section"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn current_schema_rejects_experimental_telemetry() {
+        let json = r#"{
+            "version":"0.8.0-alpha",
+            "process":{"commandLine":"echo hi"},
+            "experimental":{"telemetry":{"enabled":true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("'experimental.telemetry' has moved"));
+    }
+
+    #[test]
+    fn load_request_from_value_legacy_schema_rejects_experimental_telemetry() {
+        let config = serde_json::json!({
+            "version": "0.7.0-alpha",
+            "process": { "commandLine": "echo hi" },
+            "experimental": { "telemetry": { "enabled": true } }
+        });
+        let mut logger = test_logger();
+        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'experimental.telemetry' has moved to the stable section"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn load_request_from_value_current_schema_rejects_experimental_telemetry() {
+        let config = serde_json::json!({
+            "version": "0.8.0-alpha",
+            "process": { "commandLine": "echo hi" },
+            "experimental": { "telemetry": { "enabled": true } }
+        });
+        let mut logger = test_logger();
+        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("'experimental.telemetry' has moved"));
     }
 }

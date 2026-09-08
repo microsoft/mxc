@@ -80,6 +80,9 @@ run_test() {
 
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"
+run_test "Bubblewrap Read-Only Denial" "$SCRIPT_DIR/run_bwrap_readonly_denial_test.sh"
+run_test "Bubblewrap Version Gate" "$SCRIPT_DIR/run_bwrap_version_gate_test.sh"
+run_test "Bubblewrap Teardown" "$SCRIPT_DIR/run_bwrap_teardown_test.sh"
 run_test "Bubblewrap Object Validation" "$SCRIPT_DIR/run_bwrap_filesystem_object_test.sh"
 run_test "Bubblewrap Most-Specific Path" "$SCRIPT_DIR/run_bwrap_most_specific_test.sh"
 run_test "Bubblewrap Denied Masking" "$SCRIPT_DIR/run_bwrap_denied_masking_test.sh"

@@ -1,0 +1,27 @@
+{
+  "resourceVersion": 1,
+  "locale": "en-US",
+  "messages": {
+    "title": {
+      "id": "telemetry-consent-title",
+      "text": "Help improve Microsoft eXecution Container (MXC)"
+    },
+    "body": {
+      "id": "telemetry-consent-body",
+      "text": "Help improve MXC by sharing optional diagnostic data with Microsoft.\nIf enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.\nYou can change your choice at any time."
+    },
+    "affirmativeLabel": {
+      "id": "telemetry-consent-affirmative-label",
+      "text": "Yes"
+    },
+    "negativeLabel": {
+      "id": "telemetry-consent-negative-label",
+      "text": "No"
+    },
+    "learnMoreLabel": {
+      "id": "telemetry-consent-learn-more-label",
+      "text": "Privacy Statement"
+    }
+  },
+  "learnMoreUrl": "https://go.microsoft.com/fwlink/?linkid=521839"
+}

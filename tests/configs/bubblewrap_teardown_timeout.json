@@ -1,0 +1,9 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Teardown-Timeout",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo TEARDOWN_STARTED; (/bin/sleep 987; echo TEARDOWN_DESCENDANT_LEAKED) & wait",
+    "timeout": 1500
+  }
+}

@@ -1,6 +1,9 @@
 # Telemetry consent design
 
-This document defines the Windows telemetry-consent contract.
+This document defines the implemented Windows telemetry-consent contract.
+MXC ships the canonical consent resource, persistent consent storage, and
+consent-management APIs described below. Telemetry remains off by default and
+is enabled only when every gate in this contract permits collection.
 
 MXC telemetry is Windows-only and fails closed. Collection requires all four
 conditions at the time each event is written:
@@ -19,9 +22,11 @@ collection but can never opt a user in.
 
 ## Canonical consent resource
 
-MXC owns one immutable, versioned consent resource. Every EXE and SDK presenter
-must show every supplied field verbatim. Hosts control layout, accessibility,
-and native UI, but may not substitute wording.
+The immutable, versioned authoring resource is
+`src/core/wxc_common/resources/telemetry/consent/en-US.json`. The build embeds
+it in `wxc_common::telemetry::consent_prompt`. Every EXE and SDK presenter must
+show every supplied field verbatim. Hosts control layout, accessibility, and
+native UI, but may not substitute wording.
 
 Current resource:
 
@@ -32,15 +37,17 @@ Current resource:
 
 ### Title
 
-> Help improve Microsoft eXecution Container (MXC)
+```text
+Help improve Microsoft eXecution Container (MXC)
+```
 
 ### Body
 
-> Help improve MXC by sharing optional diagnostic data with Microsoft.
-> If enabled, MXC sends diagnostic information about product usage,
-> performance, and reliability. MXC does not send your commands, file paths,
-> credentials, or other customer content.
-> You can change your choice at any time.
+```text
+Help improve MXC by sharing optional diagnostic data with Microsoft.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+You can change your choice at any time.
+```
 
 ### Actions
 
@@ -105,11 +112,11 @@ version is 2 and records:
 - `promptLocale`
 - MXC version, source, and update timestamp for local audit/support provenance
 
-Stored and effective state are reported separately. A legacy grant without the
-current prompt version remains visible as `storedState: "granted"` but is
-`effectiveState: "undetermined"` with reason `prompt-version-missing` or
-`prompt-version-unsupported`. It never authorizes collection. Legacy denial
-remains denied.
+Stored and effective state are reported separately. A grant without the
+current prompt version and canonical prompt locale remains visible as
+`storedState: "granted"` but is `effectiveState: "undetermined"` with reason
+`prompt-version-missing` or `prompt-version-unsupported`. It never authorizes
+collection. Legacy denial remains denied.
 
 Only two operations mutate the store:
 
@@ -160,7 +167,7 @@ in control; neither creates consent.
 A consent request made while policy is blocked does not invoke the presenter or
 persist dormant consent. Withdrawal remains available while blocked.
 
-## Per-run enablement
+## Per-run enablement and integration boundary
 
 Consent is not an execution switch. Each run must also request telemetry with
 the stable top-level `telemetry.enabled: true` setting. The switch never
@@ -194,10 +201,10 @@ rename the provider or events.
 
 ## Validation and release gate
 
-Implementations should include deterministic coverage for policy evaluation,
+Implementations must include deterministic coverage for policy evaluation,
 prompt gating, withdrawal, corruption recovery, and concurrent consent-store
 mutation. The checked-in ETW smoke test only validates event emission; it is
 not a substitute for consent-flow coverage.
 
-The versioned wording and data/control inventory still require Microsoft
-privacy/legal approval before release.
+Release requires Microsoft privacy/legal approval of the versioned wording and
+data/control inventory.

@@ -139,17 +139,16 @@ for the full design and per-backend enforcement matrix), not a
 backend-specific format: it's parsed the same way regardless of
 `containment`. Each backend independently declares which parts of it — if
 any — it actually enforces; a backend that hasn't declared support for a
-given field rejects a config that sets it. **Seatbelt (macOS) is currently
-the only backend with that support implemented** (`EGRESS_DEFAULT`,
-`INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` — see
-[`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy));
-other backends are expected to add their own declarations as separate
-follow-up work. On Seatbelt, `runtimeConfig.networkProxy` covers only the
+given field rejects a config that sets it.
+
+Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
+without it accepts only `egress.default`. On Seatbelt,
+`runtimeConfig.networkProxy` covers only the
 loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
 there is no schema-0.8 equivalent for a remote proxy URL or
 `builtinTestServer`. See
 [`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
-for the full field mapping and [`tests/examples/30_mac_network_schema_v2.json`](../tests/examples/30_mac_network_schema_v2.json)
+for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
 for a complete example:
 
 ```json

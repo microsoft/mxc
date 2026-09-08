@@ -15,14 +15,6 @@ use appcontainer_common::guarded_capture::{
     AnalyzedTrace, GuardedCaptureFactory, GuardedCaptureSession,
 };
 use learning_mode_core::AnalysisResult;
-use std::os::windows::ffi::OsStringExt;
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-};
-
 const GUARDIAN_CONFIRM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_GUARDIAN_CONFIRM_ATTEMPTS: usize = 3;
 /// Bounded per-attempt deadline for confirming that the guardian released the
@@ -89,40 +81,11 @@ fn confirm_guardian_release_after_discard_failure(
 /// `wxc-exec.exe` / `mxc_ffi.dll` in released artifacts) is delivered by #834;
 /// this resolver only locates the co-located binary at runtime.
 fn plm_exe_path() -> Result<std::path::PathBuf, String> {
-    let module = module_containing_plm_resolver()?;
+    let module = wxc_common::process_util::module_path_for_address(plm_exe_path as *const ())?;
     let dir = module
         .parent()
         .ok_or_else(|| "the MXC native module has no parent directory".to_string())?;
     Ok(dir.join("plm.exe"))
-}
-
-fn module_containing_plm_resolver() -> Result<std::path::PathBuf, String> {
-    let mut module = HMODULE::default();
-    let address = plm_exe_path as *const () as *const u16;
-    unsafe {
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            PCWSTR(address),
-            &mut module,
-        )
-    }
-    .map_err(|error| format!("failed to locate the MXC native module: {error}"))?;
-
-    let mut path = vec![0u16; 32_768];
-    let len = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
-    if len == 0 {
-        return Err(format!(
-            "failed to resolve the MXC native module path: {}",
-            windows::core::Error::from_thread()
-        ));
-    }
-    if len >= path.len() {
-        return Err("the MXC native module path exceeds the Windows path limit".to_string());
-    }
-    path.truncate(len);
-    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
-        &path,
-    )))
 }
 
 /// [`GuardedCaptureSession`] backed by a live `plm::elevated::GuardedSession`.
@@ -313,7 +276,10 @@ mod tests {
 
     #[test]
     fn resolver_locates_the_current_native_module() {
-        let module = module_containing_plm_resolver().expect("test module path should resolve");
+        let module = wxc_common::process_util::module_path_for_address(
+            resolver_locates_the_current_native_module as *const (),
+        )
+        .expect("test module path should resolve");
         assert!(module.is_absolute());
         assert!(module.is_file());
     }

@@ -85,12 +85,43 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    log_policy_hash(request, logger);
     #[cfg(target_os = "windows")]
     {
         resolve_runner_inner_windows(request, logger).map_err(Error::from)
     }
     #[cfg(not(target_os = "windows"))]
     resolve_runner_inner(request, logger).map_err(Error::from)
+}
+
+/// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
+/// run is about to be launched under, plus the config schema version.
+pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
+    use wxc_common::audit::{AuditEvent, AuditEventName};
+
+    if !logger.has_diagnostic_sink() && !wxc_common::telemetry::is_active() {
+        return;
+    }
+
+    let policy_hash = wxc_common::policy_identity::policy_hash(request);
+    if wxc_common::telemetry::is_active() {
+        let identity = policy_hash_identity(&request.container_id);
+        wxc_common::telemetry::log_policy_hash(&identity, &policy_hash, &request.schema_version);
+    }
+    let record = AuditEvent::new(AuditEventName::PolicyHash)
+        .str("backend", request.containment.wire_name())
+        .str("policy_hash", &policy_hash)
+        .str("config_schema_version", &request.schema_version);
+    logger.log_audit_event(&record);
+}
+
+fn policy_hash_identity(container_id: &str) -> String {
+    let identity = if container_id.is_empty() {
+        "CLI"
+    } else {
+        container_id
+    };
+    wxc_common::policy_identity::redact_identity(identity)
 }
 
 /// Resolve a runner for the `wxc-exec --audit` compatibility workflow.
@@ -151,6 +182,7 @@ fn resolve_runner_inner_windows(
                         "selected isolation tier: {}",
                         dispatched.tier.as_str()
                     );
+                    dispatched.log_enforcement_degraded(logger);
                     let (runner, dacl_manager) = dispatched.into_runner_and_guard();
                     Ok(ResolvedRunner {
                         runner,
@@ -371,6 +403,8 @@ fn resolve_runner_inner(
 
 /// Construct the Hyperlight runner, shared by the Windows and Linux bodies.
 /// Requires x86_64 (Hyperlight needs KVM or WHP) and the `hyperlight` feature.
+/// On Windows, pre-checks that `winhvplatform.dll` is loadable so a missing
+/// WHP becomes a typed error rather than a delay-load SEH exception.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
     #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -379,6 +413,14 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
             return Err(MxcError::malformed_request(
                 "Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
                  Use --experimental flag.",
+            ));
+        }
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(target_os = "windows")]
+        if !hyperlight_common::is_whp_available() {
+            return Err(MxcError::backend_unavailable(
+                "Hyperlight requires Windows Hypervisor Platform (WHP). \
+                 Enable the HypervisorPlatform Windows optional feature and reboot.",
             ));
         }
         Ok(ResolvedRunner::without_guard(Box::new(
@@ -410,6 +452,17 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn policy_hash_identity_matches_runner_identity_rules() {
+        assert_eq!(policy_hash_identity(""), "CLI");
+        assert_eq!(
+            policy_hash_identity("sandbox-0123456789abcdef"),
+            "sandbox-0123456789abcdef"
+        );
+        assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
+        assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
     }
 
     #[test]

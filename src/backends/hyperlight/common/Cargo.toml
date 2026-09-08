@@ -10,6 +10,9 @@ wxc_common = { workspace = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight-unikraft = { version = "0.12.1", optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
 [features]
 default = []
 hyperlight = ["dep:hyperlight-unikraft"]

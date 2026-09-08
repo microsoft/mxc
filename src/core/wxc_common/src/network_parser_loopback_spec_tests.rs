@@ -1,6 +1,6 @@
 //! Tests loopback proxy-host detection.
 //!
-//! Contract source: doc comment on `host_is_loopback`:
+//! Contract source: doc comment on `host_is_any_loopback`:
 //!   "127.0.0.0/8, ::1, or the name "localhost".
 //!    Accepts bracketed IPv6 literals (e.g. `[::1]`)."
 
@@ -13,7 +13,7 @@ use super::*;
 fn the_canonical_loopback_address_is_loopback() {
     // Contract: 127.0.0.0/8
     assert!(
-        host_is_loopback("127.0.0.1"),
+        host_is_any_loopback("127.0.0.1"),
         "input=127.0.0.1 — canonical loopback must be rejected"
     );
 }
@@ -23,7 +23,7 @@ fn a_non_canonical_address_inside_127_slash_8_is_loopback() {
     // Contract: "127.0.0.0/8" — the *whole* block, not only .1.
     // This case distinguishes a correct /8 check from an exact-match on 127.0.0.1.
     assert!(
-        host_is_loopback("127.0.0.2"),
+        host_is_any_loopback("127.0.0.2"),
         "input=127.0.0.2 — entire 127.0.0.0/8 block must be loopback"
     );
 }
@@ -32,7 +32,7 @@ fn a_non_canonical_address_inside_127_slash_8_is_loopback() {
 fn the_upper_bound_of_127_slash_8_is_loopback() {
     // Contract: "127.0.0.0/8" — 127.255.255.254 is the last usable host in the block.
     assert!(
-        host_is_loopback("127.255.255.254"),
+        host_is_any_loopback("127.255.255.254"),
         "input=127.255.255.254 — top of 127.0.0.0/8 must be loopback"
     );
 }
@@ -41,7 +41,7 @@ fn the_upper_bound_of_127_slash_8_is_loopback() {
 fn a_midrange_127_address_is_loopback() {
     // Contract: "127.0.0.0/8"
     assert!(
-        host_is_loopback("127.1.2.3"),
+        host_is_any_loopback("127.1.2.3"),
         "input=127.1.2.3 — mid-range 127.x.x.x must be loopback"
     );
 }
@@ -50,7 +50,7 @@ fn a_midrange_127_address_is_loopback() {
 fn the_network_address_of_127_slash_8_is_loopback() {
     // Contract: "127.0.0.0/8" — network address itself is inside the block.
     assert!(
-        host_is_loopback("127.0.0.0"),
+        host_is_any_loopback("127.0.0.0"),
         "input=127.0.0.0 — 127.0.0.0/8 network address must be loopback"
     );
 }
@@ -61,7 +61,7 @@ fn the_network_address_of_127_slash_8_is_loopback() {
 fn an_address_just_above_127_slash_8_is_not_loopback() {
     // Contract negation: 128.0.0.1 is outside 127.0.0.0/8.
     assert!(
-        !host_is_loopback("128.0.0.1"),
+        !host_is_any_loopback("128.0.0.1"),
         "input=128.0.0.1 — outside 127.0.0.0/8, must NOT be loopback"
     );
 }
@@ -70,7 +70,7 @@ fn an_address_just_above_127_slash_8_is_not_loopback() {
 fn an_address_just_below_127_slash_8_is_not_loopback() {
     // Contract negation: 126.255.255.255 is outside 127.0.0.0/8.
     assert!(
-        !host_is_loopback("126.255.255.255"),
+        !host_is_any_loopback("126.255.255.255"),
         "input=126.255.255.255 — outside 127.0.0.0/8, must NOT be loopback"
     );
 }
@@ -79,7 +79,7 @@ fn an_address_just_below_127_slash_8_is_not_loopback() {
 fn a_private_rfc1918_address_is_not_loopback() {
     // Contract negation: only 127.0.0.0/8, ::1, or "localhost" are loopback.
     assert!(
-        !host_is_loopback("10.0.3.1"),
+        !host_is_any_loopback("10.0.3.1"),
         "input=10.0.3.1 — RFC 1918 private address must NOT be loopback"
     );
 }
@@ -88,7 +88,7 @@ fn a_private_rfc1918_address_is_not_loopback() {
 fn the_unspecified_address_is_not_loopback() {
     // Contract negation: 0.0.0.0 is not listed as loopback.
     assert!(
-        !host_is_loopback("0.0.0.0"),
+        !host_is_any_loopback("0.0.0.0"),
         "input=0.0.0.0 — unspecified address must NOT be loopback"
     );
 }
@@ -100,7 +100,7 @@ fn the_unspecified_address_is_not_loopback() {
 fn the_ipv6_loopback_address_is_loopback() {
     // Contract: "::1"
     assert!(
-        host_is_loopback("::1"),
+        host_is_any_loopback("::1"),
         "input=::1 — IPv6 loopback must be rejected"
     );
 }
@@ -113,7 +113,7 @@ fn the_ipv6_loopback_address_is_loopback() {
 fn bracketed_ipv6_loopback_is_loopback() {
     // Contract: explicit bracketed-form acceptance.
     assert!(
-        host_is_loopback("[::1]"),
+        host_is_any_loopback("[::1]"),
         "input=[::1] — bracketed IPv6 loopback must be rejected"
     );
 }
@@ -122,7 +122,7 @@ fn bracketed_ipv6_loopback_is_loopback() {
 fn bracketed_non_loopback_ipv6_is_not_loopback() {
     // Contract: bracket stripping must not make a non-loopback address loopback.
     assert!(
-        !host_is_loopback("[2001:db8::1]"),
+        !host_is_any_loopback("[2001:db8::1]"),
         "input=[2001:db8::1] — bracketed non-loopback IPv6 must NOT be loopback"
     );
 }
@@ -134,7 +134,7 @@ fn bracketed_non_loopback_ipv6_is_not_loopback() {
 fn the_name_localhost_is_loopback() {
     // Contract: `or the name "localhost"`
     assert!(
-        host_is_loopback("localhost"),
+        host_is_any_loopback("localhost"),
         "input=localhost — the name localhost must be loopback"
     );
 }
@@ -144,7 +144,7 @@ fn a_host_merely_prefixed_with_localhost_is_not_loopback() {
     // Contract: "the name" — exact match only.
     // A substring/prefix match would accept localhost.evil.com; the contract forbids it.
     assert!(
-        !host_is_loopback("localhost.evil.com"),
+        !host_is_any_loopback("localhost.evil.com"),
         "input=localhost.evil.com — must NOT be loopback; contract requires exact name match"
     );
 }
@@ -153,7 +153,7 @@ fn a_host_merely_prefixed_with_localhost_is_not_loopback() {
 fn a_host_that_contains_localhost_as_a_suffix_is_not_loopback() {
     // Contract: exact name match, not substring.
     assert!(
-        !host_is_loopback("notlocalhost"),
+        !host_is_any_loopback("notlocalhost"),
         "input=notlocalhost — must NOT be loopback; contract requires exact name match"
     );
 }
@@ -170,7 +170,7 @@ fn empty_string_is_not_loopback() {
     // ::1, "localhost") do not include ""; this assertion pins that it stays false.
     // For a security predicate, silently flipping "" to loopback would be a bug.
     assert!(
-        !host_is_loopback(""),
+        !host_is_any_loopback(""),
         "input='' — empty string must not be treated as loopback"
     );
 }
@@ -183,12 +183,12 @@ fn uppercase_localhost_is_loopback() {
     // This is a characterization test — the contract does not require it,
     // but a change here should be intentional.
     assert!(
-        host_is_loopback("LOCALHOST"),
+        host_is_any_loopback("LOCALHOST"),
         "input=LOCALHOST — implementation treats this as loopback (eq_ignore_ascii_case); \
          pin to catch silent changes"
     );
     assert!(
-        host_is_loopback("LocalHost"),
+        host_is_any_loopback("LocalHost"),
         "input=LocalHost — implementation treats this as loopback (eq_ignore_ascii_case); \
          pin to catch silent changes"
     );
@@ -203,12 +203,12 @@ fn ipv4_mapped_ipv6_loopback_is_not_loopback() {
     // is fail-safe: the container is given an unreachable proxy, not open
     // access.
     assert!(
-        !host_is_loopback("::ffff:127.0.0.1"),
+        !host_is_any_loopback("::ffff:127.0.0.1"),
         "input=::ffff:127.0.0.1 — IPv4-mapped IPv6 loopback; not in contract; \
          currently returns false (not caught); pin to detect behavior change"
     );
     assert!(
-        !host_is_loopback("[::ffff:127.0.0.1]"),
+        !host_is_any_loopback("[::ffff:127.0.0.1]"),
         "input=[::ffff:127.0.0.1] — bracketed IPv4-mapped form; also currently false; \
          pin to detect behavior change"
     );
@@ -221,7 +221,7 @@ fn trailing_dot_localhost_is_not_loopback() {
     // exact-match or eq_ignore_ascii_case, and does not parse as an IpAddr,
     // so the implementation returns false.  Pin that.
     assert!(
-        !host_is_loopback("localhost."),
+        !host_is_any_loopback("localhost."),
         "input='localhost.' — trailing-dot FQDN form; contract requires exact \
          name match; must NOT be loopback"
     );

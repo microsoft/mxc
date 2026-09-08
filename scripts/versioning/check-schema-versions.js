@@ -26,7 +26,14 @@ function read(...parts) {
 // Schema version constants vs canonical source
 // ---------------------------------------------------------------------------
 const schemaVer = JSON.parse(read("schemas", "schema-version.json"));
-const { min, maxSupported, stateAware, stableLatest, devSchemaFile } = schemaVer;
+const {
+  min,
+  maxSupported,
+  stateAware,
+  stateAwareWslc,
+  stableLatest,
+  devSchemaFile,
+} = schemaVer;
 
 // major.minor of a semver-ish "X.Y.Z[-pre]" string.
 function majorMinor(v) {
@@ -101,6 +108,36 @@ expectConst(
   /const STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
   stateAware
 );
+expectConst(
+  "state-aware-helper.ts",
+  stateAwareTs,
+  "WSLC_STATE_AWARE_VERSION",
+  /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
+  stateAwareWslc
+);
+
+// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
+const schemaVersionsCs = read(
+  "sdk",
+  "dotnet",
+  "Microsoft.Mxc.Sdk",
+  "SchemaVersions.cs"
+);
+for (const [label, expected] of [
+  ["Minimum", min],
+  ["MaximumSupported", maxSupported],
+  ["LatestStable", stableLatest],
+  ["StateAware", stateAware],
+  ["WslcStateAware", stateAwareWslc],
+]) {
+  expectConst(
+    "SchemaVersions.cs",
+    schemaVersionsCs,
+    label,
+    new RegExp(`const string ${label}\\s*=\\s*"([^"]+)"`),
+    expected
+  );
+}
 
 // -- Schema files exist for the declared stable + dev versions --
 const stablePath = join(
@@ -128,4 +165,8 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Schema version sync OK: maxSupported ${maxSupported} (min ${min}, state-aware ${stateAware}, stable ${stableLatest})`);
+console.log(
+  `Schema version sync OK: maxSupported ${maxSupported} ` +
+    `(min ${min}, state-aware ${stateAware}, WSLC state-aware ${stateAwareWslc}, ` +
+    `stable ${stableLatest})`
+);
