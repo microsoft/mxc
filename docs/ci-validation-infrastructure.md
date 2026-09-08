@@ -446,7 +446,9 @@ authenticate to Copilot or run sandbox scenarios.
 
 Fixed to `1es-mxc-windows-prerelease-t1-x64` (Standard_D4s_v7: 4 vCPU,
 16 GB RAM). Cargo parallelism is capped at 2 jobs (`CARGO_BUILD_JOBS=2`,
-`CARGO_INCREMENTAL=0`) to avoid resource exhaustion on this SKU.
+`CARGO_INCREMENTAL=0`) to avoid resource exhaustion on this SKU. The workflow
+uses the 1ES ScaleSet API form, with the pool name supplied directly to
+`runs-on`.
 
 ### Latest-main semantics
 

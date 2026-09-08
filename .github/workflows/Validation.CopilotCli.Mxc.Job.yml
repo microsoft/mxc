@@ -11,10 +11,7 @@ jobs:
   build:
     name: Copilot CLI + latest MXC
     environment: copilot
-    runs-on:
-      - self-hosted
-      - 1ES.Pool=1es-mxc-windows-prerelease-t1-x64
-      - JobId=cli-mxc-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: 1es-mxc-windows-prerelease-t1-x64
     timeout-minutes: 180
     steps:
       # Check out the orchestration ref (PR branch) at workspace root.
