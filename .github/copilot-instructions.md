@@ -69,9 +69,10 @@ three `Build.*.Job.yml` workflows before calling the matrix job.
   catalog and expands a plan, so a backend may only be triggered where its
   platform declares it.
 - `scripts/ci/prepare-{windows,linux,macos}-host.{ps1,sh}` — per-backend host
-  prep, plus a verify-only inventory of the workload interpreters. Backend
-  prerequisites are installed per job; workload interpreters never are (they
-  come from image provisioning scripts that live outside this repository).
+  prep, plus an inventory of the workload interpreters. Backend prerequisites
+  are installed per job; most workload interpreters come from image provisioning
+  scripts outside this repository, while Windows prep installs packaged `winapp`
+  and OpenSSL per job.
 - `scripts/ci/run_backend_validation_tests.{ps1,sh}` — map a matrix `backend`
   id to the repository's existing backend suite. An unwired id fails loudly
   rather than reporting a false success.
