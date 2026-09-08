@@ -70,7 +70,7 @@ Use the base operation name for synchronous functions and an `Async` suffix for 
 | Run to completion | `run` / `run_async` | `run` / `runAsync` | `Run` / `RunAsync` |
 | Spawn live process | `spawn` / `spawn_async` | `spawn` / `spawnAsync` | `Spawn` / `SpawnAsync` |
 | Wait | `wait` / `wait_async` | `wait` / `waitAsync` | `Wait` / `WaitAsync` |
-| Kill | `kill` / `kill_async` | `kill` / `killAsync` | `Kill` / `KillAsync` |
+| Terminate process | `kill` / `kill_async` | `kill` / `killAsync` | `Kill` / `KillAsync` |
 
 Public facades preserve these names and delegate without changing semantics.
 

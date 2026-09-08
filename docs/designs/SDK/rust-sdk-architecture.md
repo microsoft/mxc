@@ -20,7 +20,7 @@ Rust callers never route through an FFI layer. Foreign bindings immediately dele
 |---|---|
 | Public run, spawn, and state-aware functions | Backend selection |
 | Safe request, result, and error types | Backend construction |
-| `Sandbox`, live streams, wait, poll, and kill | Platform execution |
+| `Sandbox`, live streams, wait, poll, and process termination | Platform execution |
 | Stable SDK errors | Backend-specific errors and probes |
 | Binding request-envelope parsing | Typed policy-to-wire construction |
 | Foreign-facing request conversion | Wire validation, domain mapping, and containment implementation |
@@ -56,7 +56,7 @@ flowchart TD
     R --> R1[run]
     P --> P1[spawn_sandbox]
     P1 --> P2[take stdin, stdout, stderr]
-    P1 --> P3[try_wait, wait, kill]
+    P1 --> P3["try_wait, wait, terminate (kill)"]
     A --> A1[run_state_aware_json]
     A --> A2[exec_sandbox]
     A --> A3[exec_attached]
@@ -121,8 +121,8 @@ The initial `mxc_ffi` wrapper places each sandbox and stream behind a Rust `Mute
 typed busy error instead of blocking the foreign runtime thread.
 
 This is a current limitation, not the intended public contract. `wait` holds the sandbox mutex until the process exits,
-so `kill` cannot acquire it and interrupt that wait. Before adoption, `mxc-sdk` must expose independently synchronized
-wait and termination operations, and Node/.NET tests must prove that `kill` completes while `waitAsync` is pending.
+so `kill` cannot acquire it to terminate the process. Before adoption, `mxc-sdk` must expose independently synchronized
+wait and termination operations, and Node/.NET tests must prove that `kill` works while `waitAsync` is pending.
 
 ## Rules the implementation must preserve
 

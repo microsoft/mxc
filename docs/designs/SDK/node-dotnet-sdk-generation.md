@@ -45,7 +45,7 @@ The public facade exposes `Run` and `RunAsync`, matching the generated operation
 |---|---|
 | Discovery | Version and platform-support functions and records |
 | Run to completion | Sync/async operations, result record, and structured error |
-| Live process | Sandbox object, take-once streams, poll, wait, and kill |
+| Live process | Sandbox object, take-once streams, poll, wait, and process termination |
 | State-aware lifecycle | Provision, start, exec, stop, and deprovision operations |
 
 The public Node and .NET facades rename these internal generated types where needed but do not reimplement their
@@ -64,8 +64,8 @@ behavior.
 | Poll | `tryWait()` | `TryWait()` | `Sandbox::try_wait()` |
 | Wait sync | `wait()` | `Wait()` | `Sandbox::wait()` |
 | Wait async | `waitAsync()` | `WaitAsync()` | worker calling `Sandbox::wait()` |
-| Kill sync | `kill()` | `Kill()` | `Sandbox::kill()` |
-| Kill async | `killAsync()` | `KillAsync()` | worker calling `Sandbox::kill()` |
+| Terminate sync | `kill()` | `Kill()` | `Sandbox::kill()` |
+| Terminate async | `killAsync()` | `KillAsync()` | worker calling `Sandbox::kill()` |
 
 State-aware envelope execution, streaming exec, and attached exec follow the same base-name/`Async` convention.
 
@@ -103,12 +103,8 @@ reviewable, but internal generator names are not treated as supported public API
 |---|---|---:|
 | Function/type converters and symbol metadata | UniFFI Node generator | None |
 | N-API addon and libffi dispatch | Third-party `@ubjs/node` package | None |
-| Native library staging and package wiring | MXC | One shared packaging path |
-| Public facade and Node stream adapters | MXC | Thin handwritten layer |
-
-`@ubjs/node` itself is an upstream handwritten generic runtime, not generated per MXC API. MXC writes no N-API C++,
-libffi dispatch, ABI symbol registry, or operation-specific native addon code. MXC's Node-specific infrastructure is
-package configuration, native-library staging, public stream adapters, and tests.
+| Native library staging and package wiring | MXC | Generation script and Node package manifest |
+| Public facade and Node stream adapters | MXC | TypeScript facade and stream adapters |
 
 ## True async behavior
 
@@ -127,8 +123,6 @@ sequenceDiagram
     F-->>A: Resolve generated value
 ```
 
-UniFFI's TypeScript `forceAsync` option is not used. It changes a signature but does not make blocking Rust work async.
-
 ## Ownership
 
 | Value | Ownership rule |
@@ -141,11 +135,6 @@ UniFFI's TypeScript `forceAsync` option is not used. It changes a signature but 
 
 Generated finalizers prevent leaks after abandoned objects. Callers should still dispose objects deterministically.
 
-## Cancellation
-
-Generated async calls can cancel future polling, but cancellation cannot safely imply process termination. MXC should
-only advertise kill-on-cancel after `mxc-sdk` provides cancellation independent of the lock held by `wait`.
-
 ## Behavior covered by tests
 
 Node and .NET tests run against the real library and verify:
@@ -157,7 +146,7 @@ Node and .NET tests run against the real library and verify:
 5. live process ownership
 6. take-once stdin, stdout, and stderr
 7. stream read, write, and flush
-8. `kill` while `waitAsync` is pending and defined behavior for conflicting stream operations
+8. `kill` terminates the process while `waitAsync` is pending, plus defined behavior for conflicting stream operations
 
 ## Before switching Node and .NET to the generated bindings
 
