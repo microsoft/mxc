@@ -203,6 +203,33 @@ other-mxc-sdk = { package = "mxc-sdk", path = "$otherMxcSdkPath" }
     } -ExpectedPattern 'exactly 1 mxc-sdk'
 
     # ---------------------------------------------------------------
+    # Get-CopilotCliVersionLine tests
+    # ---------------------------------------------------------------
+    Write-Host "`n--- Get-CopilotCliVersionLine ---"
+
+    $versionLine = Get-CopilotCliVersionLine -Output @"
+GitHub Copilot CLI 0.0.1.
+Run 'copilot update' to check for updates.
+"@
+    if ($versionLine -eq 'GitHub Copilot CLI 0.0.1.') {
+        $passed++
+        Write-Host '  PASS: Version line is extracted from informational output'
+    }
+    else {
+        $failed++
+        $errors.Add("Unexpected extracted CLI version: $versionLine")
+        Write-Host "  FAIL: Unexpected extracted CLI version: $versionLine"
+    }
+
+    Assert-Throws 'Missing CLI version line fails' {
+        Get-CopilotCliVersionLine -Output "Run 'copilot update' to check for updates."
+    } -ExpectedPattern 'exactly one.*found 0'
+
+    Assert-Throws 'Multiple CLI version lines fail' {
+        Get-CopilotCliVersionLine -Output "GitHub Copilot CLI one`nGitHub Copilot CLI two"
+    } -ExpectedPattern 'exactly one.*found 2'
+
+    # ---------------------------------------------------------------
     # New-CopilotCliMxcManifest tests
     # ---------------------------------------------------------------
     Write-Host "`n--- New-CopilotCliMxcManifest ---"

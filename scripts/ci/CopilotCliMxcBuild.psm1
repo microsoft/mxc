@@ -182,6 +182,33 @@ function Enter-MsvcBuildEnvironment {
     Write-Host 'MSVC build environment imported.'
 }
 
+function Get-CopilotCliVersionLine {
+    <#
+    .SYNOPSIS
+        Extracts the single version line from Copilot CLI --version output.
+
+    .DESCRIPTION
+        The CLI may print informational lines in addition to its version.
+        Requires exactly one path-free "GitHub Copilot CLI ..." line.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Output
+    )
+
+    $versionLines = @(
+        $Output -split '\r?\n' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^GitHub Copilot CLI [^\\/\r\n]+$' }
+    )
+    if ($versionLines.Count -ne 1) {
+        throw "Expected exactly one Copilot CLI version line, found $($versionLines.Count)."
+    }
+
+    return $versionLines[0]
+}
+
 function Set-CopilotCliMxcDependency {
     <#
     .SYNOPSIS
@@ -407,6 +434,7 @@ function New-CopilotCliMxcManifest {
 Export-ModuleMember -Function @(
     'Assert-CopilotCliBuildPrerequisites',
     'Enter-MsvcBuildEnvironment',
+    'Get-CopilotCliVersionLine',
     'Set-CopilotCliMxcDependency',
     'Assert-CopilotCliMxcProvenance',
     'New-CopilotCliMxcManifest'

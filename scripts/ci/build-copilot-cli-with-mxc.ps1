@@ -262,9 +262,7 @@ Write-Host "Direct version: $directVersion"
 if ($launcherVersion -ne $directVersion) {
     throw "Version mismatch between launcher ('$launcherVersion') and direct entry ('$directVersion')."
 }
-if ($launcherVersion -notmatch '^GitHub Copilot CLI [^\\/\r\n]+$') {
-    throw "Unexpected CLI version output: '$launcherVersion'"
-}
+$cliVersion = Get-CopilotCliVersionLine -Output $launcherVersion
 Write-Host 'Launcher and direct entry point produce identical version output.'
 
 # ---------------------------------------------------------------
@@ -278,7 +276,7 @@ New-CopilotCliMxcManifest `
     -MxcSdkManifest 'src/core/mxc-sdk/Cargo.toml' `
     -RuntimeSourceSha256 $runtimeSourceHash `
     -RuntimeBundleSha256 $runtimeBundleHash `
-    -CliVersion $launcherVersion `
+    -CliVersion $cliVersion `
     -CargoBuildJobs ([int]$env:CARGO_BUILD_JOBS)
 
 Write-Host "`n=== Build and staging complete ==="
