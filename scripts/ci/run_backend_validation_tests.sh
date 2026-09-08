@@ -93,7 +93,7 @@ case "$backend" in
         # No strict-mode toggle: this suite has no skip path at all. Every
         # prerequisite it needs is one a provisioned macOS runner is expected
         # to have, so an absent one is a failure by construction.
-        bash "$script_root/run_seatbelt_all_tests.sh"
+        bash "$test_script_root/run_seatbelt_all_tests.sh"
         ;;
     *)
         usage
