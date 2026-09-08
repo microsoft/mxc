@@ -171,7 +171,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_deserialize.rs` performs path-aware typed deserialization into the wire model (`wxc_common::wire`) → `config_parser.rs` validates and maps it to `ExecutionRequest` (the internal execution model in `models.rs`)
+1. User provides JSON config (file or base64) → exact version/phase probes select a closed `mxc_config_contract` request → `config_deserialize.rs` performs path-aware typed deserialization → adapters and shared `config_parser.rs` normalization produce `ExecutionRequest` (the internal execution model in `models.rs`).
 2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
@@ -291,7 +291,9 @@ The workspace is organized into six top-level directories under `src/`:
 
 ### Config parser pattern
 
-The parser deserializes JSON directly into the typed wire model (`wxc_common::wire`), the single source of truth for the config shape (it also generates the JSON schema). All typed config deserialization goes through `config_deserialize.rs`, which distinguishes syntax errors from typed policy errors and adds the complete JSON path plus source line/column when available; state-aware backend errors are prefixed with their full `experimental.<backend>.<phase>` location. `config_parser.rs` then maps the wire types to the validated domain structs in `models.rs`. The stable surface uses `deny_unknown_fields` (closed); the `experimental` block is permissive.
+The production parser deserializes each declared version directly into its exact closed contract, including recursively closed development experimental payloads. All typed config deserialization goes through `config_deserialize.rs`, which distinguishes syntax errors from typed policy errors and adds the complete JSON path plus source line/column. Adapters reuse internal `wire::MxcConfig` conversion for common fields; rolling whole-request parsing remains test-only.
+
+State-aware adapters produce a checked `StateAwareInput` containing common fields and a `StateAwareOperation`. Phase is derived from the operation; provision is backend-tagged even with no config, and later operations carry required IDs. `ParsedStateAwareRequest` has private fields and retains no raw JSON/source text. Engine routing and opt-in/build gates precede `state_aware_binding` helpers, which produce `BoundStateAwareRequest<B>` for both lifecycle and streaming dispatch. Config associated types are runtime values, not deserialization targets. Preserve `Option<Config>` and optional-field presence, leave defaults and semantic validation in the backend, and never serialize through JSON to bind. WSLC provision uses `models::WslcProvisionConfig`, separate from the retained rolling `wire::WslcProvisionPhase`. Independent legacy extraction is test-only; common policy and telemetry normalization stays shared.
 
 ### TypeScript conventions
 

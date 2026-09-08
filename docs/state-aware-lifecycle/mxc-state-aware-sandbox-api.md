@@ -65,7 +65,7 @@ elaborates.
 |---|---|---|
 | TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
-| Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Exact registered request contracts selected by version, phase, and provision containment before conversion to the shared execution model. | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
+| Rust executor (§9) | Exact phase contracts selected by version, phase, and provision containment; neutral operations; checked backend binding; and `StatefulSandboxBackend` dispatch. | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
 | Plug-in surface (§11) | Implement `StatefulSandboxBackend` (in addition to or instead of `ScriptRunner`). Define typed per-(backend, phase) `*Config` interfaces. Declare the backend's `ID_PREFIX` and `BACKEND_KEY` consts on the trait impl. Document the cross-cutting policy honor matrix. | Ephemeral-only backends require no changes. The `ContainmentBackend` Rust enum is extended, not replaced. |
 
@@ -197,9 +197,9 @@ read from the same source, eliminating drift within Rust.
 A second const, `const BACKEND_KEY: &'static str`, lives alongside `ID_PREFIX` on the
 trait (§9.2). It carries the wire-format `containment` value for the backend (e.g.,
 `"isolation_session"`) and matches the SDK's `StateAwareContainmentBackend` member name.
-The dispatcher uses it to navigate `experimental.<BACKEND_KEY>.<phase>` for typed-config
-deserialisation and to resolve `provision`-phase requests whose wire `containment`
-string maps to this backend. `ID_PREFIX` and `BACKEND_KEY` are deliberately distinct
+Checked binding verifies it against the provision backend or the backend resolved
+from a later operation's ID. Exact adapters have already converted configuration
+into runtime values; dispatch does not navigate JSON. `ID_PREFIX` and `BACKEND_KEY` are deliberately distinct
 strings: `ID_PREFIX` is a compact tag chosen for sandbox-id brevity (e.g. `"iso"`)
 while `BACKEND_KEY` is the full backend name shared with the SDK type system (e.g.
 `"isolation_session"`). Backends that pick a long `BACKEND_KEY` for SDK readability
@@ -1098,23 +1098,26 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Exact request contracts and the shared execution model
 
-`src/core/wxc_common/src/config_parser.rs` probes the declared version and
-deserializes directly into the matching closed request contract from
-`mxc_config_contract`. Published versions select their one-shot root. The
-`0.9.0-alpha` development contract uses `phase` to select one-shot,
-`provision`, `start`, `exec`, `stop`, or `deprovision`; provision then uses
-`containment` to select the backend-specific closed root.
+`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+deserialization into the exact contract selected by version, phase, and
+provision containment. Published versions select their one-shot root. The
+`0.9.0-alpha` development contract selects one-shot, `provision`, `start`,
+`exec`, `stop`, or `deprovision`; provision then selects its backend-specific
+closed root.
 
-The exact contract is the JSON trust boundary. Missing required fields,
-phase-inappropriate fields, unknown fields, and recursively unknown
-`experimental` fields are rejected there with `malformed_request` before
-backend binding or policy validation. The rolling `wire::MxcConfig` parser is
+The exact contract is the JSON trust boundary. Its recursively closed request
+types enforce required declarations, phase-inappropriate fields,
+duplicate/unknown fields, rejected nulls, and recursively unknown
+`experimental` fields. Structural failures surface as `malformed_request`
+before backend binding or policy validation. Exact adapters convert backend
+payloads directly to runtime configurations, while common fields reuse
+`wire::MxcConfig` conversion in `config_parser.rs`. The rolling parser is
 retained only in tests as a differential migration oracle.
 
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
-effective document. Diagnostics and retained state-aware source text are
-therefore relative to the effective document; replacing or inserting the
+effective document. Structural diagnostics are therefore relative to that
+document; replacing or inserting the
 command may shift a later same-line column from its position in the caller's
 original bytes.
 
@@ -1137,46 +1140,54 @@ fn parse_mxc_request_json_with_cli(
 }
 ```
 
-After exact deserialization, version-specific adapters convert common fields
-into the internal `wire::MxcConfig` representation used by shared semantic
-normalization. For state-aware requests they produce:
+The state-aware adapter produces a checked input:
 
 ```rust
-StateAwareWireInput {
-    config,             // common wire fields; experimental is always None
-    experimental_raw,   // lossless backend payload
-    source_text,        // exact decoded request text
+StateAwareInput {
+    common,             // no phase, containment, sandboxId, or experimental
+    operation,          // backend-tagged provision or a later operation + ID
 }
 ```
 
-`normalize_state_aware` converts this neutral representation into the shared
-`ExecutionRequest` model and `ParsedStateAwareRequest`. The dispatcher then
-types each backend's per-phase config from `experimental_raw`
-(`experimental.<backend>.<phase>`). This raw value is the temporary transport
-between structural parsing and backend phase deserialization.
-
 Per-phase requirements (`containment` for `provision`, `sandboxId` for the
 others, and `process` for `exec`) and phase-specific field exclusion are
-enforced by the selected exact request root. Shared normalization and backend
-`validate_<phase>` hooks therefore receive only structurally representable
-fields and enforce semantic values, cross-field invariants, and backend policy
-capabilities. Those representable policy refusals surface as
-`policy_validation`.
+enforced by the selected exact request root.
+
+The construction boundary rejects contradictory common fields and one-shot
+sections rather than silently discarding them. `normalize_state_aware` derives
+a temporary phase/backend/ID context from the operation and invokes the shared
+common conversion. It preserves policy presence and telemetry, infers the
+existing containment context from the ID prefix without earlier ID validation,
+and clears directional network defaults on later phases when no network policy
+was supplied. It does not apply backend defaults or check host availability.
+
+Backend binding and `validate_<phase>` hooks therefore receive only
+structurally representable fields. They enforce semantic values, cross-field
+invariants, backend identity, and policy capabilities; those representable
+refusals surface as `policy_validation`.
+
+Rolling structural checks and independent legacy payload extraction survive
+only in test support, using a separate legacy observation type. They share
+common conversion but do not force legacy-only inputs into production operations.
 
 Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
 `script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
-telemetry is populated from the neutral config's top-level `config.telemetry`;
-`experimental_raw` remains available for backend phase configuration. The state-aware-only fields
-(`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are bundled with the
-`ExecutionRequest` in a
-`ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
-Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
-experimental_raw: Option<serde_json::Value>, source_text: Option<Box<str>> }` —
-that the dispatcher consumes (§9.3). `source_text` retains the decoded request
-text so per-backend per-phase config errors can be reported with whole-file
-source location (§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
+telemetry is populated from the common top-level `telemetry` field.
+`ParsedStateAwareRequest` has private `request: ExecutionRequest` and
+`operation: StateAwareOperation` fields with read-only accessors. The operation
+is the sole phase authority. Provision carries
+`IsolationSession(Option<IsolationSessionProvisionConfig>)`, `WindowsSandbox`,
+or `Wslc(Option<WslcProvisionConfig>)`; later variants each carry a required
+`sandbox_id`, with no backend-specific configuration today. Exec process
+settings stay in the common request.
+
+Absent provision configuration remains `None`; an empty provision object remains
+a present config with absent fields; explicit empty strings remain supplied.
+Equivalent absent/empty outer wrappers need not survive. Backend validation and
+defaulting retain ownership of those values. Successful requests retain no raw
+backend JSON or source text. The bundling does not modify `ExecutionRequest`'s shape. Domain models
 are exposed to the dispatch layer; the wire types are an implementation detail of
 the parser and schema generation.
 
@@ -1197,17 +1208,15 @@ pub trait StatefulSandboxBackend {
 
     /// Wire-format `containment` value for this backend, matching the SDK's
     /// `StateAwareContainmentBackend` member name (e.g. `"isolation_session"`).
-    /// The dispatcher uses it to navigate `experimental.<BACKEND_KEY>.<phase>`
-    /// for typed-config deserialisation (§9.3), and to resolve `provision`-phase
-    /// requests whose wire `containment` string maps to this backend.
+    /// Checked binding verifies this backend identity before typed dispatch.
     /// Distinct from `ID_PREFIX` — see §5 for the rationale.
     const BACKEND_KEY: &'static str;
 
-    type ProvisionConfig: serde::de::DeserializeOwned;
-    type StartConfig: serde::de::DeserializeOwned;
-    type ExecConfig: serde::de::DeserializeOwned;
-    type StopConfig: serde::de::DeserializeOwned;
-    type DeprovisionConfig: serde::de::DeserializeOwned;
+    type ProvisionConfig;
+    type StartConfig;
+    type ExecConfig;
+    type StopConfig;
+    type DeprovisionConfig;
     type ProvisionMetadata: serde::Serialize;
     type StartMetadata: serde::Serialize;
     type StopMetadata: serde::Serialize;
@@ -1399,8 +1408,8 @@ serves one-shot calls), plus `sandbox_id` for non-provision phases and an option
 backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
 flow through `request.policy` (a `ContainerPolicy`); per-exec process info flows
 through `request.script_code` / `request.working_directory` / `request.script_timeout`
-/ `request.env`; backend-specific per-phase typed config is deserialised by the
-dispatcher from `experimental.<backend>.<phase>` and passed as the `config` parameter
+/ `request.env`; backend-specific config is adapted from the exact contract,
+checked against the selected backend, and passed as the `config` parameter
 (§9.3). Per-phase result types (`ProvisionResult<M>`, `StartResult<M>`,
 `StopResult<M>`, `DeprovisionResult<M>`) carry the typed metadata return value;
 `ExecHandle` exposes the running process's pipe handles for relay.
@@ -1498,8 +1507,10 @@ fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
 
         MxcRequest::StateAware(parsed) => match resolve_backend(&parsed)? {
             ContainmentBackend::IsolationSession => {
+                // Experimental/build gates run before binding in the engine.
+                let bound = bind_isolation_session::<IsolationSessionRunner>(parsed)?;
                 let mut backend = IsolationSessionRunner::new();
-                dispatch_state_aware::<IsolationSessionRunner>(&mut backend, parsed, dry_run)
+                dispatch_state_aware(&mut backend, bound, dry_run)
             }
             // additional state-aware backends added here
             _ => Err(MxcError::UnsupportedPhase),
@@ -1509,85 +1520,71 @@ fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
 
 fn dispatch_state_aware<B: StatefulSandboxBackend>(
     backend: &mut B,
-    parsed: ParsedStateAwareRequest,
+    bound: BoundStateAwareRequest<B>,
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
-    // `parsed` carries the typed `ExecutionRequest`, the parsed `Phase`, the optional
-    // `sandbox_id`, and the raw JSON value for `experimental.<backend>.<phase>` (if
-    // present). The dispatcher deserialises that raw JSON into the backend's
-    // `Self::<Phase>Config` associated type before calling the trait method.
-    let request = &parsed.request;
-    match parsed.phase {
-        Phase::Provision => {
-            let config = parsed.deserialize_config::<B::ProvisionConfig>(B::BACKEND_KEY, "provision")?;
-            backend.validate_provision(request, config.as_ref())?;
+    let (request, operation) = bound.into_parts();
+    match operation {
+        BoundStateAwareOperation::Provision(config) => {
+            backend.validate_provision(&request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.provision(request, config)?;
+            let result = backend.provision(&request, config)?;
             Ok(DispatchOutcome::Envelope(provision_envelope(result)))
         }
-        Phase::Start => {
-            let sandbox_id = parsed.sandbox_id_required()?;
-            let config = parsed.deserialize_config::<B::StartConfig>(B::BACKEND_KEY, "start")?;
-            backend.validate_start(sandbox_id, request, config.as_ref())?;
+        BoundStateAwareOperation::Start { sandbox_id, config } => {
+            backend.validate_start(&sandbox_id, &request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.start(sandbox_id, request, config)?;
+            let result = backend.start(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(start_envelope(result)))
         }
-        Phase::Exec => {
-            let sandbox_id = parsed.sandbox_id_required()?;
-            let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
-            validate_exec_common(request)?;
-            backend.validate_exec(sandbox_id, request, config.as_ref())?;
+        BoundStateAwareOperation::Exec { sandbox_id, config } => {
+            validate_exec_common(&request)?;
+            backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let handle = backend.exec(sandbox_id, request, config, ExecStdio::Relayed)?;
+            let handle = backend.exec(&sandbox_id, &request, config, ExecStdio::Relayed)?;
             // relay_exec_to_stdio streams the script's pipes to the executor's
             // stdout/stderr live, awaits exit, and returns the script's exit code.
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
-        Phase::Stop => {
-            let sandbox_id = parsed.sandbox_id_required()?;
-            let config = parsed.deserialize_config::<B::StopConfig>(B::BACKEND_KEY, "stop")?;
-            backend.validate_stop(sandbox_id, request, config.as_ref())?;
+        BoundStateAwareOperation::Stop { sandbox_id, config } => {
+            backend.validate_stop(&sandbox_id, &request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.stop(sandbox_id, request, config)?;
+            let result = backend.stop(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(stop_envelope(result)))
         }
-        Phase::Deprovision => {
-            let sandbox_id = parsed.sandbox_id_required()?;
-            let config = parsed.deserialize_config::<B::DeprovisionConfig>(B::BACKEND_KEY, "deprovision")?;
-            backend.validate_deprovision(sandbox_id, request, config.as_ref())?;
+        BoundStateAwareOperation::Deprovision { sandbox_id, config } => {
+            backend.validate_deprovision(&sandbox_id, &request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let result = backend.deprovision(sandbox_id, request, config)?;
+            let result = backend.deprovision(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
         }
     }
 }
 ```
 
-`resolve_backend(&parsed)` reads `parsed.containment` when `phase == Provision`; for the
-other phases it reads the prefix from `parsed.sandbox_id` and looks it up in the
+`resolve_backend(&parsed)` reads `parsed.containment()` when `phase() == Provision`; for the
+other phases it reads the prefix from `parsed.sandbox_id()` and looks it up in the
 registered prefix table. Mismatches surface as `unsupported_containment` (unrecognised
 prefix) or `malformed_id` (no prefix structure) per §8.
 
-`ParsedStateAwareRequest::deserialize_config::<C>(backend_key, phase_name)` returns
-`Result<Option<C>, MxcError>`: it navigates the wire `experimental.<backend_key>.<phase_name>`
-JSON value and deserialises it into `C` when present, returns `Ok(None)` when absent,
-and surfaces malformed JSON as `malformed_request`. The dispatcher passes
-`B::BACKEND_KEY` so each backend reads from its own slot. Typed errors carry the
-complete `experimental.<backend>.<phase>.<field>` JSON path **and** whole-file
-source location (line/column), at parity with base-config errors: the phase-config
-sub-slice is deserialised positionally out of the retained request text and its
-fragment-local serde location is translated back to whole-file coordinates. If the
-sub-slice cannot be located, deserialisation falls back to the value-based path,
-which still reports the JSON path (without a source location).
-`sandbox_id_required()` enforces that non-provision phases carry a `sandboxId`,
-returning `&str` on success or `malformed_request` on absence. `validate_exec_common`
+`bind_isolation_session`, `bind_windows_sandbox`, and `bind_wslc` live in
+`wxc_common::state_aware_binding`, without backend crate dependencies. The engine
+chooses a concrete backend after its existing routing/opt-in/availability gates.
+An incompatible payload/backend pair is `malformed_request`, never `None`.
+Binding is a static conversion, not JSON serialization, reparsing, or downcasting.
+Both dispatch entry points accept `BoundStateAwareRequest<B>`; streaming accepts
+only exec and passes `ExecStdio::Piped`, while the lifecycle path passes
+`ExecStdio::Relayed`. Backend-specific piped-exec refusals remain unchanged.
+
+Exact structural errors carry the full field path and source coordinates before
+the successful request is constructed. Semantic errors remain backend-owned.
+`validate_exec_common`
 is a free function in `validator.rs` that checks cross-backend per-phase invariants
 (e.g., `request.script_code` non-empty); other phases have no cross-backend common
 checks today and skip directly to the backend's `validate_<phase>` hook.
 
-Helper functions for handle-validation, config deserialisation, envelope wrapping, and
+Helper functions for handle-validation, envelope wrapping, and
 empty-envelope construction are mechanical and elided. The executor's outer driver
 invokes `run` and handles each outcome:
 
@@ -1607,13 +1604,13 @@ not runtime registry checks.
 State-aware backends additionally register two consts on their trait impl alongside
 their `ContainmentBackend` variant: `ID_PREFIX` (the sandbox-id tag, used by the
 dispatcher to resolve non-provision calls to the right backend) and `BACKEND_KEY` (the
-wire-format `containment` value, used for provision-phase routing and
-`experimental.<BACKEND_KEY>.<phase>` typed-config deserialisation). Both are described
+wire-format `containment` value, used for provision-phase routing and checked
+typed binding). Both are described
 in §5.
 
 Per-stage config contents are also typed at compile time — the backend's associated
-types declare exactly what JSON shape each phase accepts, and the dispatch layer
-deserialises into those types before the trait method runs. There is no
+types declare the runtime configuration each phase consumes. Exact contracts own
+JSON shape, and their adapters construct runtime values before binding. There is no
 `Record<string, unknown>` shim between the wire format and the backend's typed input.
 
 ## 10. Per-stage configs and validation
@@ -1637,17 +1634,19 @@ other phases reject trailing commands. The effective request presented to the
 Rust parser still contains the required non-empty command.
 
 Each layer validates only what it cheaply can. The SDK's typed config catches structural
-errors at compile time. The dispatch layer catches structural errors that escaped the
+errors at compile time. The exact parser catches structural errors that escaped the
 SDK (e.g., from non-TypeScript callers). The backend catches semantic errors that depend
 on runtime state (e.g., "the configuration ID is recognised but not allowed for this
 agent user").
 
 ### 10.2 Backend-side config typing
 
-A typical state-aware backend defines its `*Config` types alongside the trait
-implementation, in both Rust and TypeScript. The Rust types use `#[derive(Deserialize)]`
-with serde renames to camelCase and represent the wire-shape sub-portion that lives
-under `experimental.<BACKEND_KEY>.<phase>` — backend-specific fields only. The
+A state-aware backend declares runtime configuration as trait associated types.
+IsolationSession and WSLC provision types live in `wxc_common::models`, keeping
+neutral operations and binding independent of backend crates. Exact contract
+types separately define the JSON shape under
+`experimental.<BACKEND_KEY>.<phase>`; adapters map their fields exhaustively to
+runtime values. Dispatch does not require `Deserialize`. The
 TypeScript type exported from the SDK package is the consumer-facing per-(backend,
 phase) Config from §6.1; it is a strict superset of the wire shape, adding
 `version?` (for an optional exact schema declaration) and the cross-cutting `filesystem` /
@@ -1655,8 +1654,7 @@ phase) Config from §6.1; it is a strict superset of the wire shape, adding
 as `applied` (§10.3).
 
 ```rust
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default)]
 pub struct IsolationSessionProvisionConfig {
     pub app_id: Option<String>,
 }
@@ -1675,8 +1673,8 @@ wire `version` field) plus any cross-cutting fields the matrix marks as honored 
 that phase (for IsolationSession's `provision`, the required `network`
 acknowledgment). The Rust struct receives only what the wire's
 `experimental.isolation_session.provision` block carries —
-`{ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
-deserialises into `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
+`{ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }` — through exact adaptation and checked
+binding to `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
 the consumer Config into top-level wire fields (cross-cutting, `version`) and the
 experimental sub-block; Rust sees only the post-split shape.
 
@@ -1767,8 +1765,7 @@ The `StatefulSandboxBackend` trait signatures are in §9.2. Declare:
   `sandbox_id` values; also used by the dispatcher for non-provision routing (§5).
 - `const BACKEND_KEY: &'static str` — the wire-format `containment` value for this
   backend, matching the SDK's `StateAwareContainmentBackend` member name (e.g.,
-  `"isolation_session"`). Used by the dispatcher to navigate
-  `experimental.<BACKEND_KEY>.<phase>` for typed-config deserialisation and to resolve
+  `"isolation_session"`). Used by checked binding to verify backend identity and to resolve
   `provision`-phase requests (§5).
 - Per-phase config associated types (`ProvisionConfig`, ..., `DeprovisionConfig`).
 - Per-phase metadata associated types (`ProvisionMetadata`, ..., `DeprovisionMetadata`).
@@ -1835,16 +1832,19 @@ variant for the new backend along with a dispatch arm that invokes the trait met
 `dispatch_state_aware`. The trait impl declares both `ID_PREFIX` and `BACKEND_KEY` (§5);
 `ID_PREFIX` is the routing key for non-provision calls (so pick a short distinct tag
 and treat it as permanent — persisted ids carry it), and `BACKEND_KEY` is the
-wire-format containment value used for `provision`-phase routing and
-`experimental.<BACKEND_KEY>.<phase>` deserialisation. Compile-time errors will catch
+wire-format containment value used for `provision`-phase routing and checked
+binding. Extend the neutral operation and its mechanical binding helper for the
+new backend, then use that helper in both engine dispatch paths. Compile-time errors catch
 capability mismatches automatically (§9.4).
 
 ### 11.5 Add a config-parser case
 
 The state-aware wire format expects `experimental.<backend>.<phase>` blocks for backends
-that declare per-phase configs. Add typed fields to the `experimental` block of the wire
-model (`wire.rs`) for the new backend's JSON shape, then regenerate the schema. Add a
-converter that produces the typed domain models the dispatch layer consumes.
+that declare per-phase configs. Add the new shape to the exact development
+contract and its direct runtime adapter. Keep the retained rolling wire oracle
+aligned while it remains in use, and regenerate both development artifact sets.
+Preserve configuration presence through normalization and binding; leave
+defaults and semantic checks in the backend.
 
 ### 11.6 Document the backend
 

@@ -259,7 +259,7 @@ impl Default for WindowsSandboxConfig {
 /// State-aware provision-phase config for the Isolation Session backend.
 /// Nested under `experimental.isolation_session.provision`. The one-shot
 /// surface takes no backend configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
     /// Optional identifier for the calling application, associating the
@@ -274,9 +274,37 @@ pub struct IsolationSessionProvisionConfig {
     /// without the caller re-supplying it.
     ///
     /// On an unpackaged host an explicitly-supplied empty string is a
-    /// **distinct** value from an absent one and round-trips as such. A JSON
-    /// `null` is a second spelling of absent.
+    /// **distinct** value from an absent one and round-trips as such. The exact
+    /// JSON contract rejects `null`; the retained legacy deserializer treats it
+    /// as absent only for compatibility characterization.
     pub app_id: Option<String>,
+}
+
+/// Runtime-owned state-aware provision config for the WSLc backend.
+///
+/// Image selection and defaulting remain backend responsibilities. Conversion
+/// preserves absent fields and explicitly supplied empty strings unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WslcProvisionConfig {
+    /// Container image reference. The backend selects its default when absent.
+    pub image: Option<String>,
+    /// Local image tarball to import instead of pulling an image.
+    pub image_tar_path: Option<String>,
+}
+
+#[cfg(test)]
+impl From<crate::wire::WslcProvisionPhase> for WslcProvisionConfig {
+    fn from(config: crate::wire::WslcProvisionPhase) -> Self {
+        let crate::wire::WslcProvisionPhase {
+            image,
+            image_tar_path,
+        } = config;
+        Self {
+            image,
+            image_tar_path,
+        }
+    }
 }
 
 /// Configuration specific to the LXC container backend.
@@ -1245,6 +1273,103 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wslc_provision_config_from_wire_preserves_requested_fields() {
+        let cases = [
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: None,
+                    image_tar_path: None,
+                },
+                None,
+                None,
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: Some(String::new()),
+                    image_tar_path: None,
+                },
+                Some(""),
+                None,
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: None,
+                    image_tar_path: Some(String::new()),
+                },
+                None,
+                Some(""),
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: Some(String::new()),
+                    image_tar_path: Some(String::new()),
+                },
+                Some(""),
+                Some(""),
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: Some("custom/image:tag".to_string()),
+                    image_tar_path: None,
+                },
+                Some("custom/image:tag"),
+                None,
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: None,
+                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                },
+                None,
+                Some("C:\\images\\custom.tar"),
+            ),
+            (
+                crate::wire::WslcProvisionPhase {
+                    image: Some("custom/image:tag".to_string()),
+                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                },
+                Some("custom/image:tag"),
+                Some("C:\\images\\custom.tar"),
+            ),
+        ];
+        for (wire, expected_image, expected_tar_path) in cases {
+            let config = WslcProvisionConfig::from(wire);
+            assert_eq!(config.image.as_deref(), expected_image);
+            assert_eq!(config.image_tar_path.as_deref(), expected_tar_path);
+        }
+    }
+
+    #[test]
+    fn wslc_provision_config_deserializes_intermediate_dispatch_payloads() {
+        for (json, expected_image, expected_tar_path) in [
+            ("{}", None, None),
+            (r#"{"image":null,"imageTarPath":null}"#, None, None),
+            (r#"{"image":"","imageTarPath":""}"#, Some(""), Some("")),
+            (
+                r#"{"image":"custom/image:tag","imageTarPath":"C:\\images\\custom.tar"}"#,
+                Some("custom/image:tag"),
+                Some("C:\\images\\custom.tar"),
+            ),
+            (r#"{"futureField":true}"#, None, None),
+        ] {
+            let config: WslcProvisionConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(config.image.as_deref(), expected_image, "{json}");
+            assert_eq!(
+                config.image_tar_path.as_deref(),
+                expected_tar_path,
+                "{json}"
+            );
+        }
+        assert_eq!(
+            WslcProvisionConfig::default(),
+            WslcProvisionConfig {
+                image: None,
+                image_tar_path: None,
+            }
+        );
+    }
 
     #[test]
     fn directional_network_defaults_deny() {

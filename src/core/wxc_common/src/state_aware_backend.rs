@@ -19,7 +19,7 @@
 //! stateless-underneath backends; backends with native session work override
 //! it.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 
 use crate::id::mint_random_token;
 use crate::models::ExecutionRequest;
@@ -225,16 +225,15 @@ pub trait StatefulSandboxBackend {
 
     /// Wire-format `containment` value for this backend, matching the SDK's
     /// `StateAwareContainmentBackend` member name (e.g. `"isolation_session"`).
-    /// Used by the dispatcher to navigate
-    /// `experimental.<BACKEND_KEY>.<phase>` in the request envelope and to
-    /// resolve provision-phase requests to the right backend implementation.
+    /// Checked binding verifies this identity against the selected operation
+    /// before the dispatcher delivers its typed configuration.
     const BACKEND_KEY: &'static str;
 
-    type ProvisionConfig: DeserializeOwned;
-    type StartConfig: DeserializeOwned;
-    type ExecConfig: DeserializeOwned;
-    type StopConfig: DeserializeOwned;
-    type DeprovisionConfig: DeserializeOwned;
+    type ProvisionConfig;
+    type StartConfig;
+    type ExecConfig;
+    type StopConfig;
+    type DeprovisionConfig;
     type ProvisionMetadata: Serialize;
     type StartMetadata: Serialize;
     type StopMetadata: Serialize;

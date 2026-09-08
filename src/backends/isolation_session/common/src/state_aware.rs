@@ -352,11 +352,7 @@ mod tests {
 
     // ====== Wire-format constants ======
 
-    // `BACKEND_KEY` names the `experimental.<key>.<phase>` slot the
-    // dispatcher reads via `deserialize_config`. A typo here would
-    // silently swallow every per-phase config (the field would still
-    // deserialize from the containment slot via models.rs's serde
-    // rename — only the experimental block would go missing).
+    // Checked binding verifies BACKEND_KEY before delivering configuration.
     // ====== Stdio topology ======
 
     /// A piped exec must never get a ConPTY — **including on a host whose
@@ -443,16 +439,10 @@ mod tests {
 
     // ====== Wire-model / backend config parity ======
 
-    // The generated JSON schema (`schemas/dev/`) and the SDK wire types
-    // (`sdk/node/src/generated/wire.ts`) are both emitted from
-    // `wxc_common::wire::IsolationSession`, while the phases that actually
-    // accept a config are the associated types on the impl above. On the
-    // state-aware path the wire model is never constructed — the dispatcher
-    // deserializes raw JSON straight into those associated types — so nothing
-    // couples the two at compile time. The tests below pin that contract from
-    // both directions: the key set the wire model advertises, that the `()`
-    // phases reject a payload, and that the phases which do take one still
-    // accept the payload the wire model describes.
+    // Retained rolling schema/type oracles still use wire::IsolationSession.
+    // These tests characterize their configuration compatibility independently
+    // of the exact adapter. Production dispatch uses checked typed binding, not
+    // this deserialization path; common recording-backend tests cover delivery.
 
     #[test]
     fn wire_model_nests_config_only_for_phases_that_take_one() {

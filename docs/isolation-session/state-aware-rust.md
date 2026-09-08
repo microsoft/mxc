@@ -16,7 +16,7 @@ concurrency story, and error mapping.
   CLI flag.
 - The wire format consumed by `wxc-exec.exe` for state-aware requests
   (top-level `phase` discriminator, `sandboxId`,
-  `experimental.isolation_session.<phase>` typed config blocks).
+  `experimental.isolation_session.provision` typed configuration).
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
@@ -296,34 +296,21 @@ Notes on the rows that are not a simple accept/reject:
   is vacuously satisfied and neither asserts anything untrue. Bringing it under
   the single-backend-section check uniformly across backends is tracked
   separately.
-- **A lone foreign `experimental.<backend>` section on a non-provision phase** is
-  accepted and ignored, not rejected. Those requests carry no `containment`, so
-  `validate_experimental_backend_keys` has no resolved backend to compare
-  against; it rejects two or more foreign keys as unambiguously wrong but
-  tolerates exactly one. The *stable* sections (`processContainer`, `lxc`,
-  `seatbelt`) are rejected on every phase by the separate stray-section check.
-  Closing the lone-foreign-key case requires resolving the backend from the
-  `sandboxId` prefix, which is cross-backend work tracked separately.
-- **`containerId`** is a caller-supplied label, not a restriction. This backend
-  addresses sandboxes by the OS-assigned agent user name, so the field has no
-  effect and ignoring it asserts nothing.
-- **`process` on non-exec state-aware phases** is accepted and ignored. The
-  dispatcher reads `process` only on `exec`, so a `commandLine`, `cwd`, `env` or
-  `timeout` supplied at provision / start / stop / deprovision has no effect and
-  no error. Nothing runs at those phases, so nothing is lost — but the request is
-  not what the caller believes it is. Supply `process` only on `exec`.
-- **Mis-slotted `experimental.isolation_session` payloads are accepted and
-  ignored, not rejected.** `deserialize_config` navigates exactly
-  `experimental.<backend>.<the request's own phase>`; anything else in that block
-  is read by nothing. Two shapes reach that state:
-  - a nested `provision` block on a *one-shot* request;
-  - a block under a phase that is not this request's phase, e.g.
-    `{"phase": "start", …, "isolation_session": {"provision": {…}}}`.
+- **Foreign or mis-slotted experimental payloads** are rejected by the exact
+  request root, not silently ignored. Only provision defines the
+  `experimental.isolation_session.provision` input. Exact adaptation carries
+  its runtime configuration directly to checked engine binding; the dispatcher
+  does not navigate or reparse experimental JSON.
+- **`containerId`** is not part of the exact state-aware roots. Lifecycle
+  requests address the sandbox by its returned `sandboxId` after provision.
+- **`process` on non-exec state-aware phases** is structurally rejected. Supply
+  process settings only on exec; other phases do not run a workload.
 
-  Each is a caller supplying a documented field in an undocumented position, so
-  the value is silently not applied. Detecting mis-slotted
-  payloads generically is a cross-backend concern and is deliberately not solved
-  here. Nest the config under the request's own phase; the SDK already does.
+The absence of a provision member produces `None`; a present empty object
+produces a configuration with `app_id: None`; and an explicit empty `appId`
+remains `Some("")`. Exact input rejects `appId: null`. These distinctions
+survive binding unchanged, so application identity resolution remains owned by
+the backend rather than by the parser or dispatcher.
 
 The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
 fields before backend validation. For example, supplied `ui`, noncanonical
@@ -342,8 +329,7 @@ also structurally refused as `malformed_request`.
 ### Fields valid in both modes
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
-  accepted and ignored at non-exec state-aware phases (the dispatcher reads
-  `process` only on `exec`, and nothing runs at the other phases).
+  not accepted on non-exec state-aware phases.
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
   honoured per-process (each exec receives its own block).
 
@@ -366,14 +352,12 @@ whole section for every backend. See the matrix notes above.
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
-- `experimental.isolation_session.<phase>` — typed per-phase config blocks
-  (`provision` carries optional `appId`; `start` / `exec` / `stop` /
-  `deprovision` use `()`).
+- `experimental.isolation_session.provision` — optional provision configuration;
+  `start` / `exec` / `stop` / `deprovision` carry no backend config.
 - `experimental.isolation_session.provision.appId` — the calling application's
   identifier. Honoured here. The one-shot surface takes no backend
-  configuration at all, so the same field on a one-shot
-  `experimental.isolation_session` is an unrecognised key in the permissive
-  `experimental` block and is accepted and ignored.
+  configuration at all, so a supplied one-shot payload is rejected by the
+  closed exact contract rather than accepted and ignored.
 
 ## Idempotence per phase
 
