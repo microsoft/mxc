@@ -23,7 +23,8 @@ the unshipped legacy C projection; it does not preserve two API surfaces.
 | Safe request, result, and error types | Backend construction |
 | `Sandbox`, live streams, wait, poll, and kill | Platform execution |
 | Stable SDK errors | Backend-specific errors and probes |
-| Request JSON conversion used by foreign bindings | Containment implementation |
+| Binding request-envelope parsing | Typed policy-to-wire construction |
+| Foreign-facing request conversion | Wire validation, domain mapping, and containment implementation |
 
 ## Operation families
 
@@ -55,13 +56,17 @@ sequenceDiagram
     participant S as mxc-sdk
     participant E as mxc_engine
     F->>S: build_request_from_json
-    S->>S: Deserialize binding request
-    S->>E: build_request
+    S->>S: Deserialize binding envelope once
+    S->>E: build_request with typed policy
+    E->>E: Construct wire::MxcConfig directly
+    E->>E: Shared wire validation and domain mapping
     E-->>S: SandboxRequest or Error
     S-->>F: Stable SDK value
 ```
 
-This keeps request construction in the Rust SDK rather than the projection. It does not redesign the public schema.
+This keeps request construction in Rust rather than the projection. The SDK-to-engine handoff never serializes policy
+to JSON and reparses it. JSON remains only at actual external configuration and foreign-language boundaries, where
+path-aware deserialization is required. Both paths converge on the same typed wire validation and domain mapping.
 
 ## Projection rule
 

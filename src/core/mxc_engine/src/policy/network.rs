@@ -229,24 +229,36 @@ pub struct RuntimeConfigSection {
     pub network_proxy: Option<String>,
 }
 
-pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
-    use serde_json::json;
+pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> wxc_common::wire::Proxy {
     match proxy {
-        ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
-        ProxySpec::Localhost(port) => json!({ "localhost": port }),
-        ProxySpec::Url(url) => json!({ "url": url }),
+        ProxySpec::BuiltinTestServer => wxc_common::wire::Proxy {
+            localhost: None,
+            builtin_test_server: Some(true),
+            url: None,
+        },
+        ProxySpec::Localhost(port) => wxc_common::wire::Proxy {
+            localhost: Some(*port),
+            builtin_test_server: None,
+            url: None,
+        },
+        ProxySpec::Url(url) => wxc_common::wire::Proxy {
+            localhost: None,
+            builtin_test_server: None,
+            url: Some(url.clone()),
+        },
     }
 }
 
 /// True when the network section carries any host allow/deny rules.
-pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
-    let non_empty = |key: &str| {
-        network
-            .get(key)
-            .and_then(serde_json::Value::as_array)
+pub(crate) fn has_host_rules(network: &wxc_common::wire::Network) -> bool {
+    network
+        .allowed_hosts
+        .as_ref()
+        .is_some_and(|values| !values.is_empty())
+        || network
+            .blocked_hosts
+            .as_ref()
             .is_some_and(|values| !values.is_empty())
-    };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
 }
 
 #[cfg(test)]
@@ -328,10 +340,10 @@ mod tests {
             .expect("builtinTestServer");
 
         assert!(matches!(proxy, ProxySpec::BuiltinTestServer));
-        assert_eq!(
-            proxy_to_wire(&proxy),
-            serde_json::json!({ "builtinTestServer": true })
-        );
+        let wire = proxy_to_wire(&proxy);
+        assert_eq!(wire.builtin_test_server, Some(true));
+        assert!(wire.localhost.is_none());
+        assert!(wire.url.is_none());
     }
 
     #[test]

@@ -18,15 +18,6 @@ pub enum CaptureDenialsMode {
     Allow,
 }
 
-impl CaptureDenialsMode {
-    pub(crate) fn wire(self) -> &'static str {
-        match self {
-            Self::Block => "block",
-            Self::Allow => "allow",
-        }
-    }
-}
-
 /// ProcessContainer denial-capture settings.
 ///
 /// Its presence enables capture: the runner records the sandboxed process's
@@ -151,27 +142,14 @@ pub enum ProcessContainerUiIsolation {
     Container,
 }
 
-impl ProcessContainerUiIsolation {
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Desktop => "desktop",
-            Self::Handles => "handles",
-            Self::Atoms => "atoms",
-            Self::Container => "container",
-        }
-    }
-}
-
 pub(crate) fn apply(
-    config: &mut serde_json::Value,
+    config: &mut wxc_common::wire::MxcConfig,
     policy: &SandboxPolicy,
     process_container: &ProcessContainer,
     network_format: NetworkFormat,
-    containment: &str,
+    containment: wxc_common::wire::Containment,
 ) -> Result<(), wxc_common::mxc_error::MxcError> {
-    use serde_json::json;
-
-    config["containment"] = json!(containment);
+    config.containment = Some(containment);
 
     if wxc_common::directional_network_support(&policy.version) == Some(false) {
         if process_container.learning_mode {
@@ -218,48 +196,51 @@ pub(crate) fn apply(
         }
     }
 
-    config["processContainer"] = json!({
-        "leastPrivilege": process_container.least_privilege,
-        "capabilities": capabilities,
+    config.process_container = Some(wxc_common::wire::ProcessContainer {
+        least_privilege: Some(process_container.least_privilege),
+        learning_mode: process_container.learning_mode.then_some(true),
+        capabilities: Some(capabilities),
+        capture_denials: process_container.capture_denials.as_ref().map(|capture| {
+            wxc_common::wire::CaptureDenials {
+                mode: Some(match capture.mode {
+                    CaptureDenialsMode::Block => wxc_common::wire::CaptureDenialsMode::Block,
+                    CaptureDenialsMode::Allow => wxc_common::wire::CaptureDenialsMode::Allow,
+                }),
+                output_path: capture.output_path.clone(),
+                retain_etl: Some(capture.retain_etl),
+            }
+        }),
+        ui: process_container
+            .ui
+            .as_ref()
+            .map(|ui| wxc_common::wire::BaseProcessUi {
+                isolation: Some(match ui.isolation {
+                    ProcessContainerUiIsolation::Desktop => wxc_common::wire::UiIsolation::Desktop,
+                    ProcessContainerUiIsolation::Handles => wxc_common::wire::UiIsolation::Handles,
+                    ProcessContainerUiIsolation::Atoms => wxc_common::wire::UiIsolation::Atoms,
+                    ProcessContainerUiIsolation::Container => {
+                        wxc_common::wire::UiIsolation::Container
+                    }
+                }),
+                desktop_system_control: Some(ui.desktop_system_control),
+                system_settings: Some(ui.system_settings.wire().to_string()),
+                ime: Some(ui.ime),
+            }),
+        network: process_container
+            .network
+            .as_ref()
+            .and_then(|network| network.allowed_proxy_peer.as_ref())
+            .map(|peer| wxc_common::wire::ProcessContainerNetwork {
+                allowed_proxy_peer: Some(peer.clone()),
+            }),
     });
-    if process_container.learning_mode {
-        config["processContainer"]["learningMode"] = json!(true);
-    }
-    if let Some(ui) = &process_container.ui {
-        config["processContainer"]["ui"] = json!({
-            "isolation": ui.isolation.wire(),
-            "desktopSystemControl": ui.desktop_system_control,
-            "systemSettings": ui.system_settings.wire(),
-            "ime": ui.ime,
-        });
-    }
-    if let Some(allowed_proxy_peer) = process_container
-        .network
-        .as_ref()
-        .and_then(|network| network.allowed_proxy_peer.as_ref())
-    {
-        config["processContainer"]["network"] = json!({
-            "allowedProxyPeer": allowed_proxy_peer,
-        });
-    }
-    if let Some(capture_denials) = &process_container.capture_denials {
-        let mut capture = json!({
-            "mode": capture_denials.mode.wire(),
-            "retainEtl": capture_denials.retain_etl,
-        });
-        if let Some(output_path) = &capture_denials.output_path {
-            capture["outputPath"] = json!(output_path);
-        }
-        config["processContainer"]["captureDenials"] = capture;
-    }
     if network_format == NetworkFormat::Legacy {
-        if let Some(network) = config.get_mut("network") {
-            let mode = if has_host_rules(network) {
-                "both"
+        if let Some(network) = config.network.as_mut() {
+            network.enforcement_mode = Some(if has_host_rules(network) {
+                wxc_common::wire::NetworkEnforcement::Both
             } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
+                wxc_common::wire::NetworkEnforcement::Capabilities
+            });
         }
     }
 

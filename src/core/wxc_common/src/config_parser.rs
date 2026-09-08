@@ -161,6 +161,25 @@ pub fn load_request_from_value(
     log_one_shot_error(logger, &result);
     result
 }
+
+/// Build a request from an already-typed wire configuration.
+///
+/// This is the in-process SDK handoff: callers construct [`wire::MxcConfig`]
+/// directly and retain the shared wire-to-domain validation without
+/// serializing to JSON and deserializing back into the same wire type.
+pub fn load_request_from_wire(
+    config: wire::MxcConfig,
+    logger: &mut Logger,
+    allow_missing_command: bool,
+) -> Result<ExecutionRequest, WxcError> {
+    let result = (|| {
+        validate_directional_network_wire_fields(&config)?;
+        convert_wire_config(config, logger, true, allow_missing_command, false)
+    })();
+    log_one_shot_error(logger, &result);
+    result
+}
+
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
 /// failures).
@@ -258,11 +277,6 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     let Some(config) = config.as_object() else {
         return Ok(());
     };
-    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
-        if semver::Version::parse(version).is_err() || supports_directional_network(version) {
-            return Ok(());
-        }
-    }
 
     let has_directional_network = config
         .get("network")
@@ -274,6 +288,45 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
         .filter_map(|key| config.get(key))
         .filter_map(serde_json::Value::as_object)
         .any(|process_container| process_container.contains_key("network"));
+
+    validate_directional_network_version(
+        config.get("version").and_then(serde_json::Value::as_str),
+        has_directional_network,
+        has_runtime_config,
+        has_process_container_network,
+    )
+}
+
+fn validate_directional_network_wire_fields(config: &wire::MxcConfig) -> Result<(), WxcError> {
+    let has_directional_network = config
+        .network
+        .as_ref()
+        .is_some_and(|network| network.egress.is_some() || network.ingress.is_some());
+    let has_runtime_config = config.runtime_config.is_some();
+    let has_process_container_network = config
+        .process_container
+        .as_ref()
+        .is_some_and(|process_container| process_container.network.is_some());
+
+    validate_directional_network_version(
+        config.version.as_deref(),
+        has_directional_network,
+        has_runtime_config,
+        has_process_container_network,
+    )
+}
+
+fn validate_directional_network_version(
+    version: Option<&str>,
+    has_directional_network: bool,
+    has_runtime_config: bool,
+    has_process_container_network: bool,
+) -> Result<(), WxcError> {
+    if let Some(version) = version {
+        if semver::Version::parse(version).is_err() || supports_directional_network(version) {
+            return Ok(());
+        }
+    }
 
     if has_directional_network || has_runtime_config || has_process_container_network {
         return Err(directional_network_version_error());
@@ -2295,6 +2348,42 @@ mod tests {
             let mut logger = test_logger();
             assert!(load_request_from_value(config, &mut logger, false).is_err());
         }
+    }
+
+    #[test]
+    fn load_request_from_wire_maps_without_a_json_round_trip() {
+        let config: wire::MxcConfig = serde_json::from_value(serde_json::json!({
+            "version": "0.8.0-alpha",
+            "containment": "process",
+            "process": {"commandLine": "echo typed"},
+            "filesystem": {"readwritePaths": ["C:\\work"]}
+        }))
+        .expect("test config satisfies the wire type");
+        let mut logger = test_logger();
+
+        let request =
+            load_request_from_wire(config, &mut logger, false).expect("typed wire config maps");
+
+        assert_eq!(request.script_code, "echo typed");
+        assert_eq!(request.policy.readwrite_paths, ["C:\\work"]);
+    }
+
+    #[test]
+    fn load_request_from_wire_preserves_directional_version_validation() {
+        let config: wire::MxcConfig = serde_json::from_value(serde_json::json!({
+            "version": "0.7.0-alpha",
+            "process": {"commandLine": "echo typed"},
+            "network": {"egress": {}}
+        }))
+        .expect("test config satisfies the wire type");
+        let mut logger = test_logger();
+
+        let error = load_request_from_wire(config, &mut logger, false)
+            .expect_err("typed directional fields require schema 0.8");
+
+        assert!(error
+            .to_string()
+            .contains("require schema version 0.8 or later"));
     }
 
     #[test]

@@ -423,18 +423,6 @@ pub enum ClipboardPolicy {
     All,
 }
 
-impl ClipboardPolicy {
-    /// Wire-format value accepted by the config parser.
-    fn wire(self) -> &'static str {
-        match self {
-            ClipboardPolicy::None => "none",
-            ClipboardPolicy::Read => "read",
-            ClipboardPolicy::Write => "write",
-            ClipboardPolicy::All => "all",
-        }
-    }
-}
-
 /// Filesystem section of a [`SandboxPolicy`].
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -544,33 +532,29 @@ impl Default for WslcSection {
 impl WslcSection {
     /// The wire-format `experimental.wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
-    fn wire(&self) -> serde_json::Value {
-        use serde_json::json;
-        let mut wslc = json!({ "image": self.image, "gpu": self.gpu });
-        if let Some(tar) = &self.image_tar_path {
-            wslc["imageTarPath"] = json!(tar);
+    fn wire(&self) -> wxc_common::wire::Wslc {
+        wxc_common::wire::Wslc {
+            target_os: None,
+            image: Some(self.image.clone()),
+            image_tar_path: self.image_tar_path.clone(),
+            cpu_count: self.cpu_count,
+            memory_mb: self.memory_mb,
+            gpu: Some(self.gpu),
+            storage_path: self.storage_path.clone(),
+            port_mappings: (!self.port_mappings.is_empty()).then(|| {
+                self.port_mappings
+                    .iter()
+                    .map(
+                        |(windows_port, container_port)| wxc_common::wire::PortMapping {
+                            windows_port: *windows_port,
+                            container_port: *container_port,
+                            protocol: Some(wxc_common::wire::TransportProtocol::Tcp),
+                        },
+                    )
+                    .collect()
+            }),
+            provision: None,
         }
-        if let Some(cpu) = self.cpu_count {
-            wslc["cpuCount"] = json!(cpu);
-        }
-        if let Some(memory) = self.memory_mb {
-            wslc["memoryMb"] = json!(memory);
-        }
-        if let Some(storage) = &self.storage_path {
-            wslc["storagePath"] = json!(storage);
-        }
-        if !self.port_mappings.is_empty() {
-            wslc["portMappings"] = json!(self
-                .port_mappings
-                .iter()
-                .map(|(windows_port, container_port)| json!({
-                    "windowsPort": windows_port,
-                    "containerPort": container_port,
-                    "protocol": "tcp",
-                }))
-                .collect::<Vec<_>>());
-        }
-        wslc
     }
 }
 
@@ -742,25 +726,25 @@ pub fn build_request_with_containment(
     if policy.version.is_empty() {
         return Err(MxcError::malformed_request("Policy version is required").into());
     }
-    let config = build_wire_config(policy, containment, container_name)?;
+    let config = build_typed_wire_config(policy, containment, container_name)?;
 
     let mut logger = Logger::new(Mode::Buffer);
-    // Map the wire config straight to a request — no base64/file round-trip.
+    // Map the typed wire config straight to a request — no JSON round-trip.
     // The command line is intentionally empty here (the caller fills
     // `script_code` before running), so tolerate a missing command.
-    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+    let inner = wxc_common::config_parser::load_request_from_wire(config, &mut logger, true)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
     Ok(SandboxRequest { inner })
 }
 
-/// Construct the wire-format `ContainerConfig` JSON value for the supported
-/// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
-pub(crate) fn build_wire_config(
+/// Construct the typed wire-format configuration for the supported backends,
+/// mirroring `createConfigFromPolicy` + the per-backend builders.
+fn build_typed_wire_config(
     policy: &SandboxPolicy,
     containment: &Containment,
     container_name: Option<&str>,
-) -> Result<serde_json::Value, MxcError> {
-    use serde_json::json;
+) -> Result<wxc_common::wire::MxcConfig, MxcError> {
+    use wxc_common::wire;
 
     let container_id = container_name
         .map(str::to_string)
@@ -769,45 +753,54 @@ pub(crate) fn build_wire_config(
     let fs = policy.filesystem.clone().unwrap_or_default();
     let clear_policy = fs.clear_policy_on_exit.unwrap_or(true);
 
-    let mut config = json!({
-        "version": policy.version,
-        "containerId": container_id,
-        "lifecycle": { "destroyOnExit": true, "preservePolicy": !clear_policy },
-        "process": { "commandLine": "", "timeout": policy.timeout_ms.unwrap_or(0) },
-        "filesystem": {
-            "readwritePaths": fs.readwrite_paths,
-            "readonlyPaths": fs.readonly_paths,
-            "deniedPaths": fs.denied_paths,
-        },
-    });
-
-    // `ui` is emitted only when the caller actually supplied one.
-    //
-    // The parser records presence as `ContainerPolicy::ui_specified`, and
-    // backends that cannot honor a UI posture refuse the section on presence
-    // rather than by value — a `UiPolicy` whose fields all sit at their
-    // defaults is full lockdown, so an explicit lockdown and an absent block
-    // are indistinguishable once the values are read. Emitting a synthesized
-    // `ui` unconditionally would therefore make every request built through
-    // this path look like it asked for a UI posture, and those backends would
-    // refuse requests whose caller never mentioned `ui` at all.
-    if let Some(ui) = policy.ui.as_ref() {
-        config["ui"] = json!({
-            "disable": !ui.allow_windows,
-            "clipboard": ui.clipboard.wire(),
-            "injection": ui.allow_input_injection,
-        });
-    }
+    let mut config = wire::MxcConfig {
+        schema: None,
+        comment: None,
+        version: Some(policy.version.clone()),
+        phase: None,
+        sandbox_id: None,
+        correlation_vector: None,
+        container_id: Some(container_id.clone()),
+        containment: None,
+        process: Some(wire::Process {
+            command_line: Some(String::new()),
+            cwd: None,
+            env: None,
+            timeout: Some(policy.timeout_ms.unwrap_or(0)),
+        }),
+        lifecycle: Some(wire::Lifecycle {
+            destroy_on_exit: Some(true),
+            preserve_policy: Some(!clear_policy),
+        }),
+        process_container: None,
+        lxc: None,
+        filesystem: Some(wire::Filesystem {
+            readwrite_paths: Some(fs.readwrite_paths),
+            readonly_paths: Some(fs.readonly_paths),
+            denied_paths: Some(fs.denied_paths),
+        }),
+        fallback: None,
+        network: None,
+        runtime_config: None,
+        ui: policy.ui.as_ref().map(|ui| wire::Ui {
+            disable: Some(!ui.allow_windows),
+            clipboard: Some(match ui.clipboard {
+                ClipboardPolicy::None => wire::ClipboardPolicy::None,
+                ClipboardPolicy::Read => wire::ClipboardPolicy::Read,
+                ClipboardPolicy::Write => wire::ClipboardPolicy::Write,
+                ClipboardPolicy::All => wire::ClipboardPolicy::All,
+            }),
+            injection: Some(ui.allow_input_injection),
+        }),
+        seatbelt: None,
+        experimental: None,
+    };
 
     // Mirror the SDK's host-rule validation: Unix backends accept host lists
     // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
     // skips this gate so the config parser can reject its (unenforceable)
     // per-host filtering with a precise message instead of the generic
     // require-`allowOutbound` error here.
-    // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
-    // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
-    // anyway to stay consistent with the SDK rather than diverging — keeping the
-    // two ports reconciled matters more than being stricter here.
     let accepts_host_rules_without_outbound = match containment {
         Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
         Containment::ProcessContainer(_) => false,
@@ -849,54 +842,52 @@ pub(crate) fn build_wire_config(
         NetworkFormat::Directional => {
             if let Some(net) = &policy.network {
                 if net.egress.is_some() || net.ingress.is_some() {
-                    let mut network = serde_json::Map::new();
-                    if let Some(egress) = &net.egress {
-                        network.insert(
-                            "egress".to_string(),
-                            serde_json::to_value(egress).map_err(|error| {
-                                MxcError::malformed_request(format!(
-                                    "failed to serialize network.egress: {error}"
-                                ))
-                            })?,
-                        );
-                    }
-                    if let Some(ingress) = &net.ingress {
-                        network.insert(
-                            "ingress".to_string(),
-                            serde_json::to_value(ingress).map_err(|error| {
-                                MxcError::malformed_request(format!(
-                                    "failed to serialize network.ingress: {error}"
-                                ))
-                            })?,
-                        );
-                    }
-                    config["network"] = serde_json::Value::Object(network);
+                    config.network = Some(wire::Network {
+                        default_policy: None,
+                        enforcement_mode: None,
+                        allow_local_network: None,
+                        allowed_hosts: None,
+                        blocked_hosts: None,
+                        proxy: None,
+                        egress: net.egress.as_ref().map(egress_to_wire),
+                        ingress: net.ingress.as_ref().map(ingress_to_wire),
+                    });
                 }
-                if let Some(runtime_config) = &net.runtime_config {
-                    config["runtimeConfig"] =
-                        serde_json::to_value(runtime_config).map_err(|error| {
-                            MxcError::malformed_request(format!(
-                                "failed to serialize runtimeConfig: {error}"
-                            ))
-                        })?;
-                }
+                config.runtime_config =
+                    net.runtime_config
+                        .as_ref()
+                        .map(|runtime| wire::RuntimeConfig {
+                            network_proxy: runtime.network_proxy.clone(),
+                        });
             }
         }
         NetworkFormat::Legacy => {
-            if let Some(net) = &policy.network {
-                let mut network = json!({
-                    "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
-                    "allowLocalNetwork": net.allow_local_network,
-                    "allowedHosts": net.allowed_hosts,
-                    "blockedHosts": net.blocked_hosts,
-                });
-                if let Some(proxy) = &net.proxy {
-                    network["proxy"] = proxy_to_wire(proxy);
-                }
-                config["network"] = network;
-            } else {
-                config["network"] = json!({ "defaultPolicy": "block" });
-            }
+            config.network = Some(match policy.network.as_ref() {
+                Some(net) => wire::Network {
+                    default_policy: Some(if net.allow_outbound {
+                        wire::NetworkPolicy::Allow
+                    } else {
+                        wire::NetworkPolicy::Block
+                    }),
+                    enforcement_mode: None,
+                    allow_local_network: Some(net.allow_local_network),
+                    allowed_hosts: Some(net.allowed_hosts.clone()),
+                    blocked_hosts: Some(net.blocked_hosts.clone()),
+                    proxy: net.proxy.as_ref().map(proxy_to_wire),
+                    egress: None,
+                    ingress: None,
+                },
+                None => wire::Network {
+                    default_policy: Some(wire::NetworkPolicy::Block),
+                    enforcement_mode: None,
+                    allow_local_network: None,
+                    allowed_hosts: None,
+                    blocked_hosts: None,
+                    proxy: None,
+                    egress: None,
+                    ingress: None,
+                },
+            });
         }
     }
 
@@ -909,14 +900,112 @@ pub(crate) fn build_wire_config(
             policy,
             process_container,
             network_format,
-            "processcontainer",
+            wire::Containment::ProcessContainer,
         )?,
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
         Containment::IsolationSession => {
-            config["containment"] = serde_json::json!("isolation_session");
+            config.containment = Some(wire::Containment::IsolationSession);
         }
     }
     Ok(config)
+}
+
+#[cfg(test)]
+/// Serialize the typed wire config for assertions that pin its JSON shape.
+pub(crate) fn build_wire_config(
+    policy: &SandboxPolicy,
+    containment: &Containment,
+    container_name: Option<&str>,
+) -> Result<serde_json::Value, MxcError> {
+    let mut value = serde_json::to_value(build_typed_wire_config(
+        policy,
+        containment,
+        container_name,
+    )?)
+    .map_err(|error| {
+        MxcError::malformed_request(format!("failed to serialize typed wire config: {error}"))
+    })?;
+    remove_null_fields(&mut value);
+    Ok(value)
+}
+
+#[cfg(test)]
+fn remove_null_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.retain(|_, value| !value.is_null());
+            for value in fields.values_mut() {
+                remove_null_fields(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                remove_null_fields(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn action_to_wire(action: NetworkAction) -> wxc_common::wire::NetworkAction {
+    match action {
+        NetworkAction::Allow => wxc_common::wire::NetworkAction::Allow,
+        NetworkAction::Deny => wxc_common::wire::NetworkAction::Deny,
+    }
+}
+
+fn protocol_to_wire(protocol: NetworkProtocol) -> wxc_common::wire::NetworkProtocol {
+    match protocol {
+        NetworkProtocol::Tcp => wxc_common::wire::NetworkProtocol::Tcp,
+        NetworkProtocol::Udp => wxc_common::wire::NetworkProtocol::Udp,
+        NetworkProtocol::Icmp => wxc_common::wire::NetworkProtocol::Icmp,
+        NetworkProtocol::Any => wxc_common::wire::NetworkProtocol::Any,
+    }
+}
+
+fn rule_to_wire(rule: &NetworkRuleSection) -> wxc_common::wire::NetworkRule {
+    wxc_common::wire::NetworkRule {
+        to: rule.to.as_ref().map(|peers| {
+            peers
+                .iter()
+                .map(|peer| wxc_common::wire::NetworkPeer {
+                    cidr: peer.cidr.clone(),
+                    except: peer.except.clone(),
+                })
+                .collect()
+        }),
+        ports: rule.ports.as_ref().map(|ports| {
+            ports
+                .iter()
+                .map(|port| wxc_common::wire::NetworkPort {
+                    protocol: port.protocol.map(protocol_to_wire),
+                    port: port.port,
+                    end_port: port.end_port,
+                })
+                .collect()
+        }),
+    }
+}
+
+fn egress_to_wire(egress: &NetworkEgressSection) -> wxc_common::wire::NetworkEgress {
+    wxc_common::wire::NetworkEgress {
+        default: egress.default.map(action_to_wire),
+        allow: egress
+            .allow
+            .as_ref()
+            .map(|rules| rules.iter().map(rule_to_wire).collect()),
+        deny: egress
+            .deny
+            .as_ref()
+            .map(|rules| rules.iter().map(rule_to_wire).collect()),
+    }
+}
+
+fn ingress_to_wire(ingress: &NetworkIngressSection) -> wxc_common::wire::NetworkIngress {
+    wxc_common::wire::NetworkIngress {
+        default: ingress.default.map(action_to_wire),
+        host_loopback: ingress.host_loopback.map(action_to_wire),
+    }
 }
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
@@ -924,15 +1013,13 @@ pub(crate) fn build_wire_config(
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
 /// AppContainer at runtime by host capability).
 fn apply_host_process_backend(
-    config: &mut serde_json::Value,
+    config: &mut wxc_common::wire::MxcConfig,
     policy: &SandboxPolicy,
     network_format: NetworkFormat,
     container_id: &str,
 ) -> Result<(), MxcError> {
-    use serde_json::json;
-
     // Resolve the abstract Process intent per host.
-    config["containment"] = json!("process");
+    config.containment = Some(wxc_common::wire::Containment::Process);
 
     #[cfg(target_os = "linux")]
     {
@@ -943,10 +1030,15 @@ fn apply_host_process_backend(
     #[cfg(target_os = "macos")]
     {
         let _ = (policy, network_format, container_id);
-        config["containment"] = json!("seatbelt");
-        if config.get("seatbelt").is_none() {
-            config["seatbelt"] = json!({});
-        }
+        config.containment = Some(wxc_common::wire::Containment::Seatbelt);
+        config.seatbelt = Some(wxc_common::wire::Seatbelt {
+            profile_override: None,
+            gui_access: None,
+            launch_method: None,
+            nested_pty: None,
+            keychain_access: None,
+            extra_mach_lookups: None,
+        });
     }
 
     #[cfg(target_os = "windows")]
@@ -957,7 +1049,7 @@ fn apply_host_process_backend(
             policy,
             &ProcessContainer::default(),
             network_format,
-            "process",
+            wxc_common::wire::Containment::Process,
         )?;
     }
 
@@ -974,24 +1066,29 @@ fn apply_host_process_backend(
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
 /// its settings live under `experimental.wslc` because the backend is
 /// experimental.
-fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
-    use serde_json::json;
-    config["containment"] = json!("wslc");
-    config["experimental"] = json!({ "wslc": wslc.wire() });
+fn apply_wslc_backend(config: &mut wxc_common::wire::MxcConfig, wslc: &WslcSection) {
+    config.containment = Some(wxc_common::wire::Containment::Wslc);
+    config.experimental = Some(wxc_common::wire::Experimental {
+        test: None,
+        windows_sandbox: None,
+        wslc: Some(wslc.wire()),
+        isolation_session: None,
+        seatbelt: None,
+        telemetry: None,
+    });
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
 /// no cooperative proxy is configured — the Linux counterpart of the SDK's
 /// `applyLinuxNetworkPolicy`.
 #[cfg(target_os = "linux")]
-fn apply_linux_network_policy(config: &mut serde_json::Value) {
-    use serde_json::json;
-    let Some(network) = config.get_mut("network") else {
+fn apply_linux_network_policy(config: &mut wxc_common::wire::MxcConfig) {
+    let Some(network) = config.network.as_mut() else {
         return;
     };
-    let has_proxy = network.get("proxy").is_some();
+    let has_proxy = network.proxy.is_some();
     if has_host_rules(network) && !has_proxy {
-        network["enforcementMode"] = json!("firewall");
+        network.enforcement_mode = Some(wxc_common::wire::NetworkEnforcement::Firewall);
     }
 }
 
@@ -1414,7 +1511,10 @@ mod tests {
             (CaptureDenialsMode::Allow, wire::CaptureDenialsMode::Allow),
         ] {
             let emitted = serde_json::json!({
-                "mode": mode.wire(),
+                "mode": match mode {
+                    CaptureDenialsMode::Block => "block",
+                    CaptureDenialsMode::Allow => "allow",
+                },
                 "outputPath": Some("/tmp/denials.json"),
                 "retainEtl": true,
             });
@@ -1427,7 +1527,7 @@ mod tests {
         }
 
         let omitted = serde_json::json!({
-            "mode": CaptureDenialsMode::Block.wire(),
+            "mode": "block",
             "retainEtl": false,
         });
         let parsed: wire::CaptureDenials =
