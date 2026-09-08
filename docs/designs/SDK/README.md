@@ -48,17 +48,17 @@ implementation are removed while the public behavior remains.
 | Layer | Responsibility | Maintained by |
 |---|---|---|
 | `mxc-sdk` | Existing safe Rust API and behavior | MXC |
-| `mxc_ffi` UniFFI module | UniFFI-safe records/objects, conversion from `mxc-sdk` values, and panic containment | MXC |
+| `mxc_ffi` UniFFI module | UniFFI-compatible value types and owned objects, SDK value conversion, and panic containment | MXC |
 | Generated internal TypeScript and C# | Calls, value marshalling, object lifetimes, and future plumbing | UniFFI generators |
 | Node and .NET public facades | Public names, re-exports, and language adapters | MXC |
 | `@ubjs/node` | Generic N-API and libffi runtime | Third-party package; no MXC addon code |
 | `mxc_engine` | Existing backend dispatch and execution | MXC |
 
-Conversion in `mxc_ffi` is mechanical mapping from `mxc-sdk` values to UniFFI-safe records and objects. It does not
+Conversion in `mxc_ffi` is mechanical mapping from `mxc-sdk` values to UniFFI-compatible value types and objects. It does not
 parse policy or reinterpret results.
 
 The public facades do not wrap every generated type. Stable public values keep product-owned names; Node may reuse
-identical generated records structurally, .NET maps records to keep generated namespaces internal, and owned
+identical generated value types structurally, .NET maps value types to keep generated namespaces internal, and owned
 sandbox/stream objects use wrappers. Policy and config stay typed in the public SDKs and serialize to JSON at the
 binding boundary, with a raw config/JSON overload for newer schema fields. See
 [Public type policy](node-dotnet-sdk-generation.md#public-type-policy).
@@ -98,7 +98,7 @@ Public facades preserve these names and delegate without changing semantics.
 |---|---|
 | Backend behavior | Backend plus `mxc_engine` integration |
 | Callable SDK operation | `mxc-sdk`, one UniFFI export, and thin Node/.NET public facade methods |
-| Result or error field | Rust projection record plus any public facade mapping; regenerate Node and C# |
+| Result or error field | Rust projection value type plus any public facade mapping; regenerate Node and C# |
 | Policy or schema field | Existing typed public models and JSON serialization; unchanged by this proposal |
 
 ## Versioning and changelogs
@@ -109,18 +109,17 @@ summary in each affected changelog; facade or packaging changes appear only in t
 
 ## Implementation and replacement requirements
 
-Implementation can proceed while these items are addressed. A blocker applies only to the capability or target named
-in the table.
+Implementation can proceed while these items are addressed. The table shows which milestone requires each item.
 
-| Work item | Classification | Effect |
+| Requirement | Needed before | Why it matters |
 |---|---|---|
-| Bounded async scheduling | Blocker for production async APIs | The prototype creates one Rust thread per async call; use a bounded worker pool |
-| Interruptible stream reads and disposal | Blocker for live streaming | A blocked read must not prevent shutdown |
-| Process termination during a pending wait | Blocker for live process control | `terminate` must work while `waitAsync` is pending |
-| Package and test each platform's native library | Required before that platform ships | Do not ship an untested native package |
-| Public API and generated-contract checks in CI | Release safeguard | Does not block implementation; add before removing the old path |
-| Typed state-aware facade methods | Follow-up | The JSON state-aware path remains usable |
-| Schema-derived Node/.NET policy models | Out of scope | Existing manual model maintenance is unchanged |
+| Bounded async scheduling | Shipping async APIs | Current code starts one Rust thread per async call; use a bounded worker pool |
+| Interruptible stream reads and disposal | Shipping live streaming | A blocked read must not prevent shutdown |
+| Process termination during a pending wait | Shipping live process control | `terminate` must work while `waitAsync` is pending |
+| Package and test each platform's native library | Shipping on that platform | Do not ship an untested native package |
+| Public API and generated-contract checks in CI | Removing the previous bindings | Detect accidental API or native-contract changes |
+| Typed state-aware facade methods | Not required for initial adoption | The JSON state-aware path remains usable |
+| Schema-derived Node/.NET policy models | Not part of this proposal | Existing manual model maintenance is unchanged |
 
 ## Documents
 

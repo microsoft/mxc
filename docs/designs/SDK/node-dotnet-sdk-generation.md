@@ -18,7 +18,7 @@ idiomatic APIs; the generated surface remains internal.
 | Node/.NET policy models | No change | Existing typed models and JSON serialization |
 
 Adding a public callable operation therefore changes Rust behavior, one Rust UniFFI export, and normally one
-forwarding method in each public foreign facade. UniFFI generates the foreign calls, records, object plumbing, and
+forwarding method in each public foreign facade. UniFFI generates the foreign calls, value types, object plumbing, and
 async bridge.
 
 ## Node
@@ -50,7 +50,7 @@ flowchart LR
     P --> L[mxc_ffi library]
 ```
 
-[`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates records, owned objects, async Task
+[`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates value types, owned objects, async Task
 plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
 The public facade exposes `Run` and `RunAsync`, matching the generated callable operation names.
@@ -59,8 +59,8 @@ The public facade exposes `Run` and `RunAsync`, matching the generated callable 
 
 | Family | Generated internal surface |
 |---|---|
-| Discovery | Version and platform-support functions and records |
-| Run to completion | Sync/async callable operations, result record, and structured error |
+| Discovery | Version and platform-support functions and value types |
+| Run to completion | Sync/async callable operations, result value type, and structured error |
 | Live process | Sandbox object, take-once streams, poll, wait, and process termination |
 | State-aware lifecycle | Provision, start, exec, stop, and deprovision callable operations |
 
@@ -74,13 +74,13 @@ public API:
 
 | Type category | Public treatment | Binding treatment |
 |---|---|---|
-| Stable results and errors | Public product-named type | Generated record/error mapped by the facade |
-| Plain Node records with an identical shape | Public interface or type alias | Reused structurally; no runtime copy |
-| .NET records returned by generated code | Public record or class | Mapped to keep generated namespaces internal |
+| Stable results and errors | Public product-named type | Generated value/error mapped by the facade |
+| Plain Node values with an identical shape | Public interface or type alias | Reused structurally; no runtime copy |
+| .NET values returned by generated code | Public type | Mapped to keep generated namespaces internal |
 | Sandboxes, streams, and other owned objects | Public wrapper | Delegates to generated object and controls disposal |
 | Policy, request, and config inputs | Typed models plus a raw config/JSON overload | Serialized to JSON before the UniFFI call |
 
-The JSON boundary is for evolving request/config data, not for every API value. Results, errors, discovery records,
+The JSON boundary is for evolving request/config data, not for every API value. Results, errors, discovery values,
 wait results, and owned process/stream handles remain typed across the binding. Raw config allows a caller to use a new
 schema field before a convenience model adds it; typed policy APIs remain the normal entry point.
 
@@ -164,7 +164,7 @@ sequenceDiagram
 | stdin | May be taken once; dropping or disposing closes the writer |
 | stdout/stderr | Each may be taken once; reads return owned byte buffers |
 | Error | Generated thrown object owns an `Arc<BindingError>` |
-| Result records | Copied into language-native values |
+| Result values | Copied into language-native values |
 
 Generated finalizers prevent leaks after abandoned objects. Callers should still dispose objects deterministically.
 

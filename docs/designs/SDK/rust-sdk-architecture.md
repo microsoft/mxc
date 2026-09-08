@@ -91,7 +91,7 @@ validated request is an internal value passed into execution; it is not returned
 
 The UniFFI module in `mxc_ffi` may:
 
-- map safe SDK values to UniFFI records and objects
+- map safe SDK values to UniFFI-compatible value types and owned objects
 - retain `Sandbox` and stream ownership behind synchronized objects
 - move blocking SDK calls to dedicated worker threads for exported async functions
 - convert `mxc_sdk::Error` to a structured projected error

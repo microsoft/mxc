@@ -56,7 +56,7 @@ Generated files must not be manually edited.
 
 | Rust projection | Generated shape |
 |---|---|
-| `#[derive(uniffi::Record)]` | TypeScript type and C# record |
+| `#[derive(uniffi::Record)]` | TypeScript and C# value type |
 | `#[derive(uniffi::Object)]` | Reference-counted foreign object |
 | `Result<T, Arc<BindingError>>` | Thrown structured object |
 | `async fn` | Promise or Task backed by a Rust future |
@@ -86,7 +86,7 @@ Node is native and in-process.
 |---|---|---|
 | Existing callable operation behavior | Rust implementation and tests | Nothing |
 | New callable operation | Rust behavior, UniFFI export, value conversion, and public facade methods | Internal TypeScript/C# calls and interop |
-| New result or error field | Rust record/conversion plus any public facade mapping | Internal TypeScript/C# fields and converters |
+| New result or error field | Rust value conversion plus any public facade mapping | Internal TypeScript/C# fields and converters |
 | New owned handle or stream behavior | Rust ownership rules and public stream adapters | Foreign reference counting, destruction, and calls |
 | New target package | Native-library staging and package metadata | Callable operation bindings remain unchanged |
 
