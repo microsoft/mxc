@@ -1000,7 +1000,7 @@ mod tests {
     #[test]
     fn resolve_environment_without_proxy_passes_through() {
         let mut request = base_request();
-        request.env = vec!["FOO=bar".into(), "BAZ=qux".into()];
+        request.env = Some(vec!["FOO=bar".into(), "BAZ=qux".into()]);
         let pairs = resolve_environment(&request, None);
         assert_eq!(env_value(&pairs, "FOO"), Some("bar"));
         assert_eq!(env_value(&pairs, "BAZ"), Some("qux"));
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn resolve_environment_strips_caller_proxy_when_active() {
         let mut request = base_request();
-        request.env = vec![
+        request.env = Some(vec![
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
             "ALL_PROXY=http://attacker.example:9999".into(),
@@ -1066,7 +1066,7 @@ mod tests {
         // With no proxy active the builder must not touch caller-supplied
         // vars whose keys happen to match PROXY_ENV_KEYS.
         let mut request = base_request();
-        request.env = vec!["HTTP_PROXY=http://caller.example:8080".into()];
+        request.env = Some(vec!["HTTP_PROXY=http://caller.example:8080".into()]);
         let pairs = resolve_environment(&request, None);
         assert_eq!(
             env_value(&pairs, "HTTP_PROXY"),
