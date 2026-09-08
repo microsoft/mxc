@@ -461,23 +461,26 @@ the provenance manifest so the combination is reproducible.
 
 1. **Checkouts**: orchestration scripts from the dispatched branch, MXC
    `main` into `source/mxc`, CLI `main` into `source/cli`.
-2. **Cargo path binding**: rewrites the CLI's `mxc-sdk` dependency from
+2. **Build tool setup**: installs the exact Rust channel declared by the CLI
+   checkout and the Visual Studio 2022 C++ Build Tools workload required by
+   the MSVC native addons.
+3. **Cargo path binding**: rewrites the CLI's `mxc-sdk` dependency from
    its registry reference to an absolute local path pointing at the MXC
    checkout's `src/core/mxc-sdk`. Rejects zero or multiple matches.
-3. **Provenance assertion**: `cargo metadata` confirms exactly one local
+4. **Provenance assertion**: `cargo metadata` confirms exactly one local
    `mxc-sdk` package with `source = null` whose `manifest_path` matches
    the MXC checkout.
-4. **Native builds**: using the CLI checkout's pinned Rust toolchain,
+5. **Native builds**: using the CLI checkout's pinned Rust toolchain,
    `build:runtime` compiles the MXC-backed runtime addon and
    `build:native-addons` compiles the CLI's other required native addon.
-5. **Bundle**: `pnpm run build` with `COPILOT_NAPI_ADDONS_PREBUILT=1`
+6. **Bundle**: `pnpm run build` with `COPILOT_NAPI_ADDONS_PREBUILT=1`
    produces `dist-cli/` from those exact native outputs. The staged
    `prebuilds/win32-x64/runtime.node` must hash-equal the source runtime;
    a mismatch fails the build.
-6. **Job-local staging**: `dist-cli` is copied to `$RUNNER_TEMP/copilot-mxc-test`
+7. **Job-local staging**: `dist-cli` is copied to `$RUNNER_TEMP/copilot-mxc-test`
    with a `copilot-mxc-test.cmd` launcher. The CLI never replaces a
    machine-wide installation.
-7. **Smoke test**: both the launcher and direct `node dist-cli/index.js`
+8. **Smoke test**: both the launcher and direct `node dist-cli/index.js`
    must return identical `--version` output.
 
 ### Credential boundary
@@ -501,12 +504,12 @@ uploaded because it is derived from private source.
 
 ### Image caveats
 
-- The T1 image provisioning script is best-effort and always exits zero.
-  The build script's strict preflight (`Assert-CopilotCliBuildPrerequisites`)
-  is authoritative.
-- If MSVC is missing from the image, the job fails at preflight with an
-  explicit inventory. The fix is to update the image recipe, not to hide
-  the problem with a fallback.
+- The T1 image does not include Rust or Visual Studio. The job installs the
+  CLI-pinned Rust channel and the Visual Studio 2022 C++ Build Tools workload
+  before running the strict build preflight.
+- The Visual Studio bootstrapper must have a valid Microsoft Authenticode
+  signature. Installation errors fail the job rather than falling back to an
+  unverified compiler.
 - The Standard_D4s_v7 SKU (4 vCPU, 16 GB) is capacity-limited. Cargo
   concurrency is fixed at 2 to avoid OOM.
 - The custom CLI binary is never retained as an artifact.

@@ -92,6 +92,55 @@ jobs:
           token: ${{ secrets.GHCP_CLI_SOURCE_READ }}
           persist-credentials: false
 
+      - name: Read Copilot CLI Rust toolchain
+        id: cli-toolchain
+        shell: pwsh
+        run: |
+          $toolchainFile = "$env:GITHUB_WORKSPACE\source\cli\rust-toolchain.toml"
+          $content = Get-Content -LiteralPath $toolchainFile -Raw
+          if ($content -notmatch '(?m)^\s*channel\s*=\s*"([^"]+)"\s*$') {
+              throw "Could not read the Rust channel from $toolchainFile"
+          }
+          "channel=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: Install Copilot CLI Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ steps.cli-toolchain.outputs.channel }}
+          target: x86_64-pc-windows-msvc
+          cache: false
+          override: false
+          rustflags: ''
+
+      - name: Install Visual C++ build tools
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $bootstrapper = Join-Path $env:RUNNER_TEMP 'vs_buildtools.exe'
+          Invoke-WebRequest `
+            -Uri 'https://aka.ms/vs/17/release/vs_buildtools.exe' `
+            -OutFile $bootstrapper
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+              throw "Visual Studio bootstrapper signature validation failed: $($signature.Status)"
+          }
+
+          $process = Start-Process -FilePath $bootstrapper -Wait -PassThru -ArgumentList @(
+              '--quiet'
+              '--wait'
+              '--norestart'
+              '--nocache'
+              '--installPath', 'C:\BuildTools'
+              '--add', 'Microsoft.VisualStudio.Workload.VCTools'
+              '--includeRecommended'
+          )
+          if ($process.ExitCode -notin 0, 3010) {
+              throw "Visual Studio Build Tools installation failed (exit $($process.ExitCode))"
+          }
+          Remove-Item -LiteralPath $bootstrapper -Force
+
       - name: Inventory runner
         shell: pwsh
         run: |
