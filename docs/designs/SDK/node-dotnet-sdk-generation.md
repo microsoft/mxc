@@ -45,7 +45,7 @@ ESM. This is packaging, not a callable operation adapter.
 ```mermaid
 flowchart LR
     A[.NET application] --> F[.NET public facade]
-    F --> C[Generated internal C# objects]
+    F --> C[Generated internal .NET objects]
     C --> P[Generated P/Invoke]
     P --> L[mxc_ffi library]
 ```

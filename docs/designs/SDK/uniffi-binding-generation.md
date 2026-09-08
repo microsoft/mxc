@@ -13,7 +13,7 @@ flowchart TD
     M --> N["uniffi-bindgen-react-native<br/>N-API flavor"]
     M --> C[uniffi-bindgen-cs]
     N --> TS[Generated internal TypeScript]
-    C --> CS[Generated internal C#]
+    C --> CS[Generated internal .NET bindings]
 ```
 
 UniFFI generates TypeScript and C# callers from metadata in `mxc_ffi`. The library remains a Rust-built dynamic library
@@ -41,13 +41,13 @@ sequenceDiagram
     participant G as Generation script
     participant C as Cargo
     participant N as Node generator
-    participant D as C# generator
+    participant D as .NET generator
     G->>C: Build mxc_ffi cdylib
     C-->>G: Library with UniFFI metadata
     G->>N: generate napi bindings --library
     G->>D: --library --config uniffi.toml
     N-->>G: Internal TypeScript
-    D-->>G: Internal C#
+    D-->>G: Internal .NET bindings
 ```
 
 Generated files must not be manually edited.
@@ -73,7 +73,7 @@ flowchart LR
     TS[Generated TypeScript] --> N["@ubjs/node<br/>prebuilt N-API runtime"]
     N --> F[libffi]
     F --> L[mxc_ffi library]
-    CS[Generated C#] --> P[Generated P/Invoke]
+    CS[Generated .NET bindings] --> P[Generated P/Invoke]
     P --> L
     L --> S[mxc-sdk]
 ```

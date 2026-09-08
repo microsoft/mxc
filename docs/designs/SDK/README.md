@@ -12,7 +12,7 @@ flowchart LR
     N[Node application] --> NP[Node public facade]
     D[.NET application] --> DP[.NET public facade]
     NP --> TS[Generated internal TypeScript]
-    DP --> CS[Generated internal C#]
+    DP --> CS[Generated internal .NET bindings]
     TS --> NR["@ubjs/node<br/>N-API + libffi"]
     CS --> PI[Generated P/Invoke]
     NR --> U[mxc_ffi dynamic library]
@@ -71,7 +71,7 @@ flowchart TD
     A --> B[Expose thin callable operation in mxc_ffi UniFFI module]
     B --> M[UniFFI metadata in dynamic library]
     M --> N[Generate internal TypeScript]
-    M --> D[Generate internal C#]
+    M --> D[Generate internal .NET bindings]
     N --> NF[Update Node public facade]
     D --> DF[Update .NET public facade]
 ```
