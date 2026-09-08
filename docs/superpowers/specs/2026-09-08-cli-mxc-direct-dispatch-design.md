@@ -1,4 +1,4 @@
-# CLI + MXC Direct Dispatch Design
+# CLI + MXC Inline Dispatch Design
 
 ## Problem
 
@@ -11,20 +11,23 @@ reusable workflow.
 
 ## Design
 
-Make `.github/workflows/Validation.CopilotCli.Mxc.Job.yml` the manual entry
-point by using `workflow_dispatch`. Its build job continues to specify
-`environment: copilot` and uses
+Keep `.github/workflows/Validation.Tests.Scheduled.yml` as the manual entry
+point because it already exists on the default branch and can therefore be
+dispatched from a feature ref before merge. Define the T1 build job directly in
+that workflow, with `environment: copilot` and
 `runs-on: 1es-mxc-windows-prerelease-t1-x64`.
 
-Remove the `copilot-cli-build` option and reusable-workflow call from
-`.github/workflows/Validation.Tests.Scheduled.yml`. This avoids retaining a
-known-broken invocation path and keeps scheduled backend validation independent
-from the private-source build.
+Remove `.github/workflows/Validation.CopilotCli.Mxc.Job.yml`. A new directly
+dispatchable workflow cannot be invoked through the GitHub API until the file
+exists on the default branch, while a reusable workflow boundary does not
+receive the environment secret used by this lane.
 
 ## Data and credential flow
 
-1. A repository administrator manually dispatches the dedicated workflow.
-2. The job references the `copilot` environment directly.
+1. A repository administrator dispatches `Validation.Tests.Scheduled.yml` with
+   `plan: copilot-cli-build` from the feature branch.
+2. The inline `copilot-cli-build` job references the `copilot` environment
+   directly.
 3. `GHCP_CLI_SOURCE_READ` is consumed only by the private CLI checkout with
    `persist-credentials: false`.
 4. The workflow checks out latest MXC `main` and CLI `main`, builds the combined
@@ -43,7 +46,8 @@ from the private-source build.
 
 - Parse the changed YAML.
 - Run the existing 14 PowerShell contract tests.
-- Dispatch the dedicated workflow from the feature branch.
+- Dispatch `Validation.Tests.Scheduled.yml` from the feature branch with
+  `plan: copilot-cli-build`.
 - Confirm the job receives the T1 ScaleSet runner.
 - Confirm the log reports the environment secret source and the private
   checkout succeeds.

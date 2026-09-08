@@ -1,10 +1,10 @@
-# CLI + MXC Direct Dispatch Implementation Plan
+# CLI + MXC Inline Dispatch Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the Copilot CLI + MXC validation workflow directly dispatchable so its `copilot` environment secret is available to the private CLI checkout.
+**Goal:** Inline the Copilot CLI + MXC validation job into the existing dispatchable workflow so its `copilot` environment secret is available to the private CLI checkout before merge.
 
-**Architecture:** The dedicated workflow becomes the only manual entry point and continues to own the T1 ScaleSet job. The scheduled backend workflow no longer exposes or calls the private-source lane, eliminating the reusable-workflow secret boundary that produced an empty checkout token.
+**Architecture:** `Validation.Tests.Scheduled.yml` remains the manual entry point because it already exists on the default branch. Its `copilot-cli-build` selection runs an inline T1 ScaleSet job with `environment: copilot`, eliminating the reusable-workflow secret boundary; the now-unusable dedicated workflow file is removed.
 
 **Tech Stack:** GitHub Actions, 1ES ScaleSet runners, GitHub environments and secrets, PowerShell 7.
 
@@ -14,72 +14,60 @@
 
 | File | Responsibility |
 |---|---|
-| `.github/workflows/Validation.CopilotCli.Mxc.Job.yml` | Direct manual entry point and T1 build job. |
-| `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled backend validation only. |
+| `.github/workflows/Validation.CopilotCli.Mxc.Job.yml` | Remove the unusable direct/reusable entry point. |
+| `.github/workflows/Validation.Tests.Scheduled.yml` | Existing manual entry point and inline T1 build job. |
 | `docs/ci-validation-infrastructure.md` | Operator instructions and credential flow. |
 | `.github/copilot-instructions.md` | Repository-level workflow convention summary. |
 
-### Task 1: Convert the dedicated workflow to direct dispatch
+### Task 1: Inline the T1 job in the existing entry point
 
 **Files:**
-- Modify: `.github/workflows/Validation.CopilotCli.Mxc.Job.yml:1-5`
-- Modify: `.github/workflows/Validation.Tests.Scheduled.yml:7-65`
+- Delete: `.github/workflows/Validation.CopilotCli.Mxc.Job.yml`
+- Modify: `.github/workflows/Validation.Tests.Scheduled.yml`
 
-- [ ] **Step 1: Change the dedicated workflow trigger**
-
-Replace:
+- [ ] **Step 1: Restore the manual plan**
 
 ```yaml
-on:
-  workflow_call:
+options:
+  - nightly
+  - weekly
+  - copilot-cli-build
 ```
 
-with:
+- [ ] **Step 2: Skip backend builds only for the CLI plan**
 
 ```yaml
-on:
-  workflow_dispatch:
+if: inputs.plan != 'copilot-cli-build'
 ```
 
-Keep:
+Apply this guard to `dependency-feed-check`, `windows`, `linux`, and `macos`.
 
-```yaml
-environment: copilot
-runs-on: 1es-mxc-windows-prerelease-t1-x64
-```
+- [ ] **Step 3: Inline the T1 build job**
 
-on the build job so the job receives the environment secret directly and uses
-Elliot's ScaleSet runner syntax.
-
-- [ ] **Step 2: Remove the broken scheduled-workflow option**
-
-Remove `copilot-cli-build` from the `workflow_dispatch.inputs.plan.options`
-list and remove this job:
-
-```yaml
 copilot-cli-build:
   if: github.event_name == 'workflow_dispatch' && inputs.plan == 'copilot-cli-build'
-  uses: ./.github/workflows/Validation.CopilotCli.Mxc.Job.yml
+  environment: copilot
+  runs-on: 1es-mxc-windows-prerelease-t1-x64
 ```
 
-Remove the `inputs.plan != 'copilot-cli-build'` guards from the dependency and
-platform build jobs, restoring their prior behavior.
+Move the checkout, inventory, build, evidence upload, and cleanup steps from the
+dedicated workflow into this job, then delete the dedicated workflow file.
 
-- [ ] **Step 3: Parse both workflow files**
+- [ ] **Step 4: Parse the scheduled workflow**
 
 Run:
 
 ```powershell
-python -c "import yaml; [yaml.safe_load(open(p, encoding='utf-8')) for p in [r'.github\workflows\Validation.Tests.Scheduled.yml', r'.github\workflows\Validation.CopilotCli.Mxc.Job.yml']]; print('YAML parse OK')"
+python -c "import yaml; yaml.safe_load(open(r'.github\workflows\Validation.Tests.Scheduled.yml', encoding='utf-8')); print('YAML parse OK')"
 ```
 
 Expected: `YAML parse OK`.
 
-- [ ] **Step 4: Commit the workflow change**
+- [ ] **Step 5: Commit the workflow change**
 
 ```powershell
 git add -- .github/workflows/Validation.CopilotCli.Mxc.Job.yml .github/workflows/Validation.Tests.Scheduled.yml
-git commit -m "Dispatch CLI MXC validation directly" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
+git commit -m "Inline CLI MXC validation job" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
 ### Task 2: Update operator documentation
@@ -90,9 +78,9 @@ git commit -m "Dispatch CLI MXC validation directly" -m "Co-authored-by: Copilot
 
 - [ ] **Step 1: Update dispatch instructions**
 
-State that operators run `Validation.CopilotCli.Mxc.Job.yml` directly with
-`workflow_dispatch`. Remove claims that `Validation.Tests.Scheduled.yml` offers
-a `copilot-cli-build` plan or calls the dedicated workflow.
+State that operators dispatch `Validation.Tests.Scheduled.yml` with
+`plan: copilot-cli-build`, which runs the T1 job directly rather than through a
+reusable workflow.
 
 - [ ] **Step 2: Document why the workflow is direct**
 
@@ -118,10 +106,10 @@ git add -- docs/ci-validation-infrastructure.md .github/copilot-instructions.md
 git commit -m "Document direct CLI MXC validation dispatch" -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 ```
 
-### Task 3: Push and prove the direct workflow
+### Task 3: Push and prove the inline workflow
 
 **Files:**
-- Test: `.github/workflows/Validation.CopilotCli.Mxc.Job.yml`
+- Test: `.github/workflows/Validation.Tests.Scheduled.yml`
 - Test: `scripts/ci/test-copilot-cli-mxc-build.ps1`
 
 - [ ] **Step 1: Run local contract tests**
@@ -139,16 +127,17 @@ Expected: 14 passed, 0 failed.
 Push `user/modanish/cli-mxc-1es-workflow` using the SSO-authorized GitHub
 keyring credential. Do not commit or upload `.playwright-cli/`.
 
-- [ ] **Step 3: Dispatch the dedicated workflow**
+- [ ] **Step 3: Dispatch the established workflow with the CLI plan**
 
 Run:
 
 ```powershell
 $env:GH_TOKEN=''
 $env:GITHUB_TOKEN=''
-gh workflow run Validation.CopilotCli.Mxc.Job.yml `
+gh workflow run Validation.Tests.Scheduled.yml `
   --repo microsoft/mxc `
-  --ref user/modanish/cli-mxc-1es-workflow
+  --ref user/modanish/cli-mxc-1es-workflow `
+  -f plan=copilot-cli-build
 ```
 
 Expected: GitHub returns a new Actions run URL.
@@ -169,7 +158,7 @@ Run:
 ```powershell
 $runId = gh run list `
   --repo microsoft/mxc `
-  --workflow Validation.CopilotCli.Mxc.Job.yml `
+  --workflow Validation.Tests.Scheduled.yml `
   --branch user/modanish/cli-mxc-1es-workflow `
   --event workflow_dispatch `
   --limit 1 `
