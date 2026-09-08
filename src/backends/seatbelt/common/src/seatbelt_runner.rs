@@ -1038,7 +1038,7 @@ mod tests {
             "ALL_PROXY=http://attacker.example:9999".into(),
             "NO_PROXY=localhost".into(),
             "KEEP=me".into(),
-        ];
+        ]);
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let pairs = resolve_environment(&request, Some(&addr));
         // Legitimate non-proxy var is preserved.
