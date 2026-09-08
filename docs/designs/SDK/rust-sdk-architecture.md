@@ -9,13 +9,11 @@ Keep [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable
 flowchart LR
     R[Rust application] --> S[mxc-sdk]
     U[mxc_ffi UniFFI exports] --> S
-    C[mxc_ffi legacy C exports] --> S
     S --> E[mxc_engine]
 ```
 
-Rust callers never route through an FFI layer. During migration, the single `mxc_ffi` dynamic library carries the
-new UniFFI projection and the legacy C compatibility exports. Both immediately delegate to `mxc-sdk`; the legacy
-exports are removed after the generated SDKs reach parity.
+Rust callers never route through an FFI layer. Foreign bindings immediately delegate to `mxc-sdk`. Adoption replaces
+the unshipped legacy C projection; it does not preserve two API surfaces.
 
 ## Responsibilities
 
@@ -25,7 +23,7 @@ exports are removed after the generated SDKs reach parity.
 | Safe request, result, and error types | Backend construction |
 | `Sandbox`, live streams, wait, poll, and kill | Platform execution |
 | Stable SDK errors | Backend-specific errors and probes |
-| Request JSON conversion shared by FFI projections | Containment implementation |
+| Request JSON conversion used by foreign bindings | Containment implementation |
 
 ## Operation families
 
@@ -63,7 +61,7 @@ sequenceDiagram
     S-->>F: Stable SDK value
 ```
 
-This gives both temporary projection surfaces one parser. It does not redesign the public schema.
+This keeps request construction in the Rust SDK rather than the projection. It does not redesign the public schema.
 
 ## Projection rule
 
@@ -82,8 +80,8 @@ It may not validate policy, select a backend, reinterpret results, or maintain a
 `mxc-sdk` remains synchronous where the engine is synchronous. `mxc_ffi` exports an internal UniFFI pair:
 
 ```text
-run_sync(request) -> RunResult
-async run(request) -> RunResult
+run(request) -> RunResult
+async run_async(request) -> RunResult
 ```
 
 The async function starts work on a dedicated Rust thread and resolves a Rust future. It does not merely relabel a
@@ -100,8 +98,7 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 ## Exit criteria
 
 - Every projected operation immediately delegates to `mxc-sdk`.
-- Rust behavior tests define the canonical result.
-- UniFFI and temporary legacy C exports coexist in one dynamic library.
-- The legacy C exports have an explicit removal gate after generated SDK parity.
+- Rust behavior tests define the expected result.
+- Adoption removes the legacy C exports and csbindgen projection.
 - Rust callers retain direct typed APIs.
 - No backend dependency is introduced into `mxc_ffi`.

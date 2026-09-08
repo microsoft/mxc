@@ -9,15 +9,15 @@ import {
   BindingError,
   discover,
   exec,
+  execAsync,
+  execAttached,
   execAttachedAsync,
-  execAttachedSync,
-  execSync,
   run,
-  runSync,
+  runAsync,
   spawn,
-  spawnSync,
+  spawnAsync,
   stateAware,
-  stateAwareSync,
+  stateAwareAsync,
   version,
 } from '../dist/index.js';
 
@@ -41,40 +41,40 @@ describe('generated UniFFI Node SDK', () => {
   });
 
   it('preserves structured errors in sync and async run APIs', async () => {
-    assert.throws(() => runSync(malformed), isCode('malformed_request'));
-    await assert.rejects(run(malformed), isCode('malformed_request'));
+    assert.throws(() => run(malformed), isCode('malformed_request'));
+    await assert.rejects(runAsync(malformed), isCode('malformed_request'));
   });
 
   it('preserves structured errors in state-aware sync and async APIs', async () => {
     assert.throws(
-      () => stateAwareSync(malformed, true, true),
+      () => stateAware(malformed, true, true),
       isCode('malformed_request'),
     );
     await assert.rejects(
-      stateAware(malformed, true, true),
+      stateAwareAsync(malformed, true, true),
       isCode('malformed_request'),
     );
   });
 
   it('projects attached and streaming exec as sync and async pairs', async () => {
     assert.throws(
-      () => execAttachedSync(malformed, true),
+      () => execAttached(malformed, true),
       isCode('malformed_request'),
     );
     await assert.rejects(
       execAttachedAsync(malformed, true),
       isCode('malformed_request'),
     );
-    assert.throws(() => execSync(malformed, true), isCode('malformed_request'));
-    await assert.rejects(exec(malformed, true), isCode('malformed_request'));
+    assert.throws(() => exec(malformed, true), isCode('malformed_request'));
+    await assert.rejects(execAsync(malformed, true), isCode('malformed_request'));
   });
 
   it('runs commands through synchronous and asynchronous APIs', async () => {
     const request =
       '{"policy":{"version":"0.8.0-alpha"},' +
       '"command":"cmd /c \\"echo generated-sdk & exit /b 17\\""}';
-    const syncResult = runSync(request);
-    const asyncResult = await run(request);
+    const syncResult = run(request);
+    const asyncResult = await runAsync(request);
 
     assert.equal(syncResult.exitCode, 17);
     assert.equal(asyncResult.exitCode, 17);
@@ -83,7 +83,7 @@ describe('generated UniFFI Node SDK', () => {
   });
 
   it('owns a live sandbox and take-once streams', async () => {
-    const sandbox = await spawn(
+    const sandbox = await spawnAsync(
       '{"policy":{"version":"0.8.0-alpha"},' +
         '"command":"cmd /c \\"echo stdout & echo stderr 1>&2 & exit /b 23\\""}',
     );
@@ -99,9 +99,9 @@ describe('generated UniFFI Node SDK', () => {
 
     stdin.uniffiDestroy();
     const [stdoutBytes, stderrBytes, outcome] = await Promise.all([
-      stdout.read(),
-      stderr.read(),
-      sandbox.wait(),
+      stdout.readAsync(),
+      stderr.readAsync(),
+      sandbox.waitAsync(),
     ]);
     assert.match(new TextDecoder().decode(stdoutBytes), /stdout/);
     assert.match(new TextDecoder().decode(stderrBytes), /stderr/);
@@ -113,31 +113,31 @@ describe('generated UniFFI Node SDK', () => {
   });
 
   it('writes and flushes stdin through synchronous handles', () => {
-    const sandbox = spawnSync(
+    const sandbox = spawn(
       '{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c findstr ."}',
     );
     const stdin = sandbox.takeStdin();
     assert.ok(stdin);
     const data = new TextEncoder().encode('from stdin\r\n').buffer;
 
-    assert.equal(stdin.writeSync(data), 12n);
-    stdin.flushSync();
+    assert.equal(stdin.write(data), 12n);
+    stdin.flush();
     stdin.uniffiDestroy();
-    assert.equal(sandbox.waitSync().timedOut, false);
+    assert.equal(sandbox.wait().timedOut, false);
     sandbox.uniffiDestroy();
   });
 
   it('rejects concurrent access promptly while wait owns the handle', async () => {
-    const sandbox = await spawn(
+    const sandbox = await spawnAsync(
       '{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c set /p X="}',
     );
     const stdin = sandbox.takeStdin();
     assert.ok(stdin);
-    const waiting = sandbox.wait();
+    const waiting = sandbox.waitAsync();
     await delay(200);
 
     const started = Date.now();
-    await assert.rejects(sandbox.kill(), (error) => {
+    await assert.rejects(sandbox.killAsync(), (error) => {
       const inner = asBindingError(error);
       return inner.code() === 'backend_error' &&
         inner.operation() === 'UniFFI handle synchronization' &&

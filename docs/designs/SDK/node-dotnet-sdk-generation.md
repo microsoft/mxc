@@ -37,26 +37,49 @@ flowchart LR
 [`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates records, owned objects, async Task
 plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
-The public facade exposes the established `Run` and `RunAsync` names over internal generated `RunSync` and `Run`.
+The public facade exposes `Run` and `RunAsync`, matching the generated operation names.
 
 ## API alignment
 
-| Concept | Node public | .NET public | Rust canonical |
+| Concept | Node public | .NET public | Rust API |
 |---|---|---|---|
 | Version | `version()` | `Version()` | package version |
 | Discovery | `discover()` | `Discover()` | discovery functions |
-| Run sync | `runSync()` | `Run()` | `run()` |
-| Run async | `run()` | `RunAsync()` | worker calling `run()` |
-| Spawn sync | `spawnSync()` | `Spawn()` | `spawn_sandbox()` |
-| Spawn async | `spawn()` | `SpawnAsync()` | worker calling `spawn_sandbox()` |
+| Run sync | `run()` | `Run()` | `run()` |
+| Run async | `runAsync()` | `RunAsync()` | worker calling `run()` |
+| Spawn sync | `spawn()` | `Spawn()` | `spawn_sandbox()` |
+| Spawn async | `spawnAsync()` | `SpawnAsync()` | worker calling `spawn_sandbox()` |
 | Poll | `tryWait()` | `TryWait()` | `Sandbox::try_wait()` |
-| Wait sync | `waitSync()` | `Wait()` | `Sandbox::wait()` |
-| Wait async | `wait()` | `WaitAsync()` | worker calling `Sandbox::wait()` |
-| Kill sync | `killSync()` | `Kill()` | `Sandbox::kill()` |
-| Kill async | `kill()` | `KillAsync()` | worker calling `Sandbox::kill()` |
+| Wait sync | `wait()` | `Wait()` | `Sandbox::wait()` |
+| Wait async | `waitAsync()` | `WaitAsync()` | worker calling `Sandbox::wait()` |
+| Kill sync | `kill()` | `Kill()` | `Sandbox::kill()` |
+| Kill async | `killAsync()` | `KillAsync()` | worker calling `Sandbox::kill()` |
 
-Generated names are internal implementation details. Node marks blocking operations with `Sync`; .NET marks asynchronous
-operations with `Async`. State-aware envelope execution, streaming exec, and attached exec follow the same convention.
+State-aware envelope execution, streaming exec, and attached exec follow the same base-name/`Async` convention.
+
+## Namespaces
+
+| Surface | Public namespace | Internal generated code |
+|---|---|---|
+| Rust | `mxc_sdk` | `mxc_ffi` is not a Rust consumer API |
+| Node | `@microsoft/mxc-sdk` | Package-private `internal/generated` modules |
+| .NET | `Microsoft.Mxc.Sdk` | `Microsoft.Mxc.Sdk.Interop`, not publicly documented |
+
+UniFFI and generator names such as `BindingSandbox`, `MxcNative`, and `uniffiDestroy` must not appear in the public
+SDK. Public types use product terms such as `MxcSandbox`, `SandboxProcess`, `RunResult`, and `MxcError`.
+
+## Node runtime ownership
+
+| Component | Produced by | MXC-specific handwritten code |
+|---|---|---:|
+| Function/type converters and symbol metadata | UniFFI Node generator | None |
+| N-API addon and libffi dispatch | Third-party `@ubjs/node` package | None |
+| Native library staging and package wiring | MXC | One shared packaging path |
+| Public facade and Node stream adapters | MXC | Thin handwritten layer |
+
+`@ubjs/node` itself is an upstream handwritten generic runtime, not generated per MXC API. MXC writes no N-API C++,
+libffi dispatch, ABI symbol registry, or operation-specific native addon code. The prototype's only Node-specific
+infrastructure is package configuration, native-library staging, a temporary upstream declaration shim, and tests.
 
 ## True async behavior
 
@@ -66,7 +89,7 @@ sequenceDiagram
     participant F as Generated future bridge
     participant W as Rust worker thread
     participant S as mxc-sdk
-    A->>F: run(...)
+    A->>F: runAsync(...)
     F->>W: Start blocking operation
     W->>S: mxc_sdk::run
     F-->>A: Promise or Task remains pending
@@ -113,5 +136,5 @@ Both prototypes run against the real library and verify:
 - Stress futures, finalizers, worker threads, streams, and process teardown.
 - Snapshot generated public APIs and exported ABI symbols.
 - Package one native library per target without changing generated operation code.
-- Remove the legacy C exports after the generated .NET facade reaches parity.
+- Remove the flat C exports and csbindgen path when adopting the generated .NET binding.
 - Keep the current SDK paths until behavioral and performance parity is proven.

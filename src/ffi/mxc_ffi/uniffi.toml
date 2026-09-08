@@ -2,7 +2,7 @@
 strictTypeChecking = true
 
 [bindings.csharp]
-namespace = "Microsoft.Mxc.Sdk.Uniffi"
+namespace = "Microsoft.Mxc.Sdk.Interop"
 cdylib_name = "mxc_ffi"
 global_methods_class_name = "MxcNative"
 access_modifier = "public"

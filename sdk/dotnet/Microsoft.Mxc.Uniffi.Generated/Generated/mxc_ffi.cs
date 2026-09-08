@@ -18,7 +18,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-namespace Microsoft.Mxc.Sdk.Uniffi;
+namespace Microsoft.Mxc.Sdk.Interop;
 
 
 
@@ -957,7 +957,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindinginput_flush(ulong @ptr
+     void uniffi_mxc_ffi_fn_method_bindinginput_flush(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -968,7 +968,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     void uniffi_mxc_ffi_fn_method_bindinginput_flush_sync(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_method_bindinginput_flush_async(ulong @ptr
     );
 
     #if NET8_0_OR_GREATER
@@ -979,7 +979,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindinginput_write(ulong @ptr,RustBuffer @data
+     ulong uniffi_mxc_ffi_fn_method_bindinginput_write(ulong @ptr,RustBuffer @data,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -990,7 +990,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindinginput_write_sync(ulong @ptr,RustBuffer @data,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_method_bindinginput_write_async(ulong @ptr,RustBuffer @data
     );
 
     #if NET8_0_OR_GREATER
@@ -1023,7 +1023,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindingoutput_read(ulong @ptr
+     RustBuffer uniffi_mxc_ffi_fn_method_bindingoutput_read(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1034,7 +1034,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     RustBuffer uniffi_mxc_ffi_fn_method_bindingoutput_read_sync(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_method_bindingoutput_read_async(ulong @ptr
     );
 
     #if NET8_0_OR_GREATER
@@ -1078,7 +1078,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindingsandbox_kill(ulong @ptr
+     void uniffi_mxc_ffi_fn_method_bindingsandbox_kill(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1089,7 +1089,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     void uniffi_mxc_ffi_fn_method_bindingsandbox_kill_sync(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_method_bindingsandbox_kill_async(ulong @ptr
     );
 
     #if NET8_0_OR_GREATER
@@ -1155,7 +1155,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_method_bindingsandbox_wait(ulong @ptr
+     RustBuffer uniffi_mxc_ffi_fn_method_bindingsandbox_wait(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1166,7 +1166,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     RustBuffer uniffi_mxc_ffi_fn_method_bindingsandbox_wait_sync(ulong @ptr,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_method_bindingsandbox_wait_async(ulong @ptr
     );
 
     #if NET8_0_OR_GREATER
@@ -1199,7 +1199,29 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_func_exec(RustBuffer @requestJson,sbyte @experimental
+     ulong uniffi_mxc_ffi_fn_func_exec(RustBuffer @requestJson,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
+    );
+
+    #if NET8_0_OR_GREATER
+    [LibraryImport("mxc_ffi")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial
+#else
+    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
+    public static extern
+#endif
+     ulong uniffi_mxc_ffi_fn_func_exec_async(RustBuffer @requestJson,sbyte @experimental
+    );
+
+    #if NET8_0_OR_GREATER
+    [LibraryImport("mxc_ffi")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial
+#else
+    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
+    public static extern
+#endif
+     RustBuffer uniffi_mxc_ffi_fn_func_exec_attached(RustBuffer @requestJson,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1221,7 +1243,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     RustBuffer uniffi_mxc_ffi_fn_func_exec_attached_sync(RustBuffer @requestJson,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
+     RustBuffer uniffi_mxc_ffi_fn_func_run(RustBuffer @requestJson,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1232,7 +1254,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_func_exec_sync(RustBuffer @requestJson,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_func_run_async(RustBuffer @requestJson
     );
 
     #if NET8_0_OR_GREATER
@@ -1243,7 +1265,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_func_run(RustBuffer @requestJson
+     ulong uniffi_mxc_ffi_fn_func_spawn(RustBuffer @requestJson,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1254,7 +1276,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     RustBuffer uniffi_mxc_ffi_fn_func_run_sync(RustBuffer @requestJson,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_func_spawn_async(RustBuffer @requestJson
     );
 
     #if NET8_0_OR_GREATER
@@ -1265,7 +1287,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_func_spawn(RustBuffer @requestJson
+     RustBuffer uniffi_mxc_ffi_fn_func_state_aware(RustBuffer @requestJson,sbyte @dryRun,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
     );
 
     #if NET8_0_OR_GREATER
@@ -1276,29 +1298,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ulong uniffi_mxc_ffi_fn_func_spawn_sync(RustBuffer @requestJson,ref UniffiRustCallStatus _uniffi_out_err
-    );
-
-    #if NET8_0_OR_GREATER
-    [LibraryImport("mxc_ffi")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial
-#else
-    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
-    public static extern
-#endif
-     ulong uniffi_mxc_ffi_fn_func_state_aware(RustBuffer @requestJson,sbyte @dryRun,sbyte @experimental
-    );
-
-    #if NET8_0_OR_GREATER
-    [LibraryImport("mxc_ffi")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial
-#else
-    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
-    public static extern
-#endif
-     RustBuffer uniffi_mxc_ffi_fn_func_state_aware_sync(RustBuffer @requestJson,sbyte @dryRun,sbyte @experimental,ref UniffiRustCallStatus _uniffi_out_err
+     ulong uniffi_mxc_ffi_fn_func_state_aware_async(RustBuffer @requestJson,sbyte @dryRun,sbyte @experimental
     );
 
     #if NET8_0_OR_GREATER
@@ -1914,29 +1914,29 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
+     ushort uniffi_mxc_ffi_checksum_func_exec_async(
+    );
+
+    #if NET8_0_OR_GREATER
+    [LibraryImport("mxc_ffi")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial
+#else
+    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
+    public static extern
+#endif
+     ushort uniffi_mxc_ffi_checksum_func_exec_attached(
+    );
+
+    #if NET8_0_OR_GREATER
+    [LibraryImport("mxc_ffi")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial
+#else
+    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
+    public static extern
+#endif
      ushort uniffi_mxc_ffi_checksum_func_exec_attached_async(
-    );
-
-    #if NET8_0_OR_GREATER
-    [LibraryImport("mxc_ffi")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial
-#else
-    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
-    public static extern
-#endif
-     ushort uniffi_mxc_ffi_checksum_func_exec_attached_sync(
-    );
-
-    #if NET8_0_OR_GREATER
-    [LibraryImport("mxc_ffi")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial
-#else
-    [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
-    public static extern
-#endif
-     ushort uniffi_mxc_ffi_checksum_func_exec_sync(
     );
 
     #if NET8_0_OR_GREATER
@@ -1958,7 +1958,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_func_run_sync(
+     ushort uniffi_mxc_ffi_checksum_func_run_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -1980,7 +1980,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_func_spawn_sync(
+     ushort uniffi_mxc_ffi_checksum_func_spawn_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2002,7 +2002,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_func_state_aware_sync(
+     ushort uniffi_mxc_ffi_checksum_func_state_aware_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2090,7 +2090,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync(
+     ushort uniffi_mxc_ffi_checksum_method_bindinginput_flush_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2112,7 +2112,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_method_bindinginput_write_sync(
+     ushort uniffi_mxc_ffi_checksum_method_bindinginput_write_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2134,7 +2134,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync(
+     ushort uniffi_mxc_ffi_checksum_method_bindingoutput_read_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2167,7 +2167,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync(
+     ushort uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2244,7 +2244,7 @@ static class _UniFFILib {
     [DllImport("mxc_ffi", CallingConvention = CallingConvention.Cdecl)]
     public static extern
 #endif
-     ushort uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync(
+     ushort uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async(
     );
 
     #if NET8_0_OR_GREATER
@@ -2274,212 +2274,212 @@ static class _UniFFILib {
     static void uniffiCheckContractApiVersion() {
         var scaffolding_contract_version = _UniFFILib.ffi_mxc_ffi_uniffi_contract_version();
         if (30 != scaffolding_contract_version) {
-            throw new UniffiContractVersionException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected version `30`, library returned `{scaffolding_contract_version}`");
+            throw new UniffiContractVersionException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected version `30`, library returned `{scaffolding_contract_version}`");
         }
     }
     static void uniffiCheckApiChecksums() {
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_discover();
             if (checksum != 56981) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_discover` checksum `56981`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_discover` checksum `56981`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec();
-            if (checksum != 35545) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec` checksum `35545`, library returned `{checksum}`");
+            if (checksum != 11464) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec` checksum `11464`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec_async();
+            if (checksum != 40866) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_async` checksum `40866`, library returned `{checksum}`");
+            }
+        }
+        {
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec_attached();
+            if (checksum != 49836) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_attached` checksum `49836`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec_attached_async();
             if (checksum != 56206) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_attached_async` checksum `56206`, library returned `{checksum}`");
-            }
-        }
-        {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec_attached_sync();
-            if (checksum != 46923) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_attached_sync` checksum `46923`, library returned `{checksum}`");
-            }
-        }
-        {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_exec_sync();
-            if (checksum != 23814) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_sync` checksum `23814`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_exec_attached_async` checksum `56206`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_run();
-            if (checksum != 2740) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_run` checksum `2740`, library returned `{checksum}`");
+            if (checksum != 2261) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_run` checksum `2261`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_run_sync();
-            if (checksum != 11829) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_run_sync` checksum `11829`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_run_async();
+            if (checksum != 16822) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_run_async` checksum `16822`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_spawn();
-            if (checksum != 9123) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_spawn` checksum `9123`, library returned `{checksum}`");
+            if (checksum != 54924) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_spawn` checksum `54924`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_spawn_sync();
-            if (checksum != 54108) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_spawn_sync` checksum `54108`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_spawn_async();
+            if (checksum != 11228) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_spawn_async` checksum `11228`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_state_aware();
-            if (checksum != 22135) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_state_aware` checksum `22135`, library returned `{checksum}`");
+            if (checksum != 45857) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_state_aware` checksum `45857`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_state_aware_sync();
-            if (checksum != 24947) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_state_aware_sync` checksum `24947`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_state_aware_async();
+            if (checksum != 28345) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_state_aware_async` checksum `28345`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_func_version();
             if (checksum != 54865) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_version` checksum `54865`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_func_version` checksum `54865`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingerror_code();
             if (checksum != 36007) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_code` checksum `36007`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_code` checksum `36007`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingerror_message();
             if (checksum != 21855) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_message` checksum `21855`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_message` checksum `21855`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingerror_native_code();
             if (checksum != 42239) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_native_code` checksum `42239`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_native_code` checksum `42239`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingerror_operation();
             if (checksum != 26324) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_operation` checksum `26324`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_operation` checksum `26324`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingerror_remediation();
             if (checksum != 55374) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_remediation` checksum `55374`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingerror_remediation` checksum `55374`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_flush();
-            if (checksum != 9780) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_flush` checksum `9780`, library returned `{checksum}`");
+            if (checksum != 46369) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_flush` checksum `46369`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync();
-            if (checksum != 35268) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync` checksum `35268`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_flush_async();
+            if (checksum != 64090) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_flush_async` checksum `64090`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_write();
-            if (checksum != 39240) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_write` checksum `39240`, library returned `{checksum}`");
+            if (checksum != 26926) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_write` checksum `26926`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_write_sync();
-            if (checksum != 11634) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_write_sync` checksum `11634`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindinginput_write_async();
+            if (checksum != 24950) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindinginput_write_async` checksum `24950`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingoutput_read();
-            if (checksum != 15844) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingoutput_read` checksum `15844`, library returned `{checksum}`");
+            if (checksum != 58048) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingoutput_read` checksum `58048`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync();
-            if (checksum != 46774) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync` checksum `46774`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingoutput_read_async();
+            if (checksum != 56610) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingoutput_read_async` checksum `56610`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_id();
             if (checksum != 26226) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_id` checksum `26226`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_id` checksum `26226`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_kill();
-            if (checksum != 63046) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_kill` checksum `63046`, library returned `{checksum}`");
+            if (checksum != 36981) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_kill` checksum `36981`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync();
-            if (checksum != 17861) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync` checksum `17861`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async();
+            if (checksum != 44539) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async` checksum `44539`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json();
             if (checksum != 7589) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json` checksum `7589`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json` checksum `7589`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stderr();
             if (checksum != 37193) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stderr` checksum `37193`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stderr` checksum `37193`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdin();
             if (checksum != 50473) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdin` checksum `50473`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdin` checksum `50473`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdout();
             if (checksum != 63333) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdout` checksum `63333`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdout` checksum `63333`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait();
             if (checksum != 6459) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait` checksum `6459`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait` checksum `6459`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_wait();
-            if (checksum != 56342) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_wait` checksum `56342`, library returned `{checksum}`");
+            if (checksum != 49288) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_wait` checksum `49288`, library returned `{checksum}`");
             }
         }
         {
-            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync();
-            if (checksum != 52006) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync` checksum `52006`, library returned `{checksum}`");
+            var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async();
+            if (checksum != 51473) {
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async` checksum `51473`, library returned `{checksum}`");
             }
         }
         {
             var checksum = _UniFFILib.uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json();
             if (checksum != 49097) {
-                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Uniffi: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json` checksum `49097`, library returned `{checksum}`");
+                throw new UniffiContractChecksumException($"Microsoft.Mxc.Sdk.Interop: uniffi bindings expected function `uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json` checksum `49097`, library returned `{checksum}`");
             }
         }
     }
@@ -2884,25 +2884,25 @@ class FfiConverterTypeBindingErrorErrorHandler : CallStatusErrorHandler<BindingE
 /// </summary>
 public interface IBindingInput {
     /// <summary>
-    /// Flushes stdin without blocking the foreign runtime thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    Task Flush();
-    /// <summary>
     /// Flushes stdin on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    void FlushSync();
+    void Flush();
     /// <summary>
-    /// Writes bytes to stdin without blocking the foreign runtime thread.
+    /// Flushes stdin without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    Task<ulong> Write(byte[] @data);
+    Task FlushAsync();
     /// <summary>
     /// Writes bytes to stdin on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    ulong WriteSync(byte[] @data);
+    ulong Write(byte[] @data);
+    /// <summary>
+    /// Writes bytes to stdin without blocking the foreign runtime thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    Task<ulong> WriteAsync(byte[] @data);
 }
 /// <summary>
 /// An owned stdin stream.
@@ -2997,13 +2997,26 @@ public class BindingInput : IBindingInput, IDisposable {
 
 
     /// <summary>
+    /// Flushes stdin on the calling thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public void Flush() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_flush(thisPtr,  ref _status)
+));
+    }
+
+
+
+    /// <summary>
     /// Flushes stdin without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public async Task Flush() {await _UniFFIAsync.UniffiRustCallAsync(
+    public async Task FlushAsync() {await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
         CallWithPointer(thisPtr => {
-            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_flush(thisPtr);
+            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_flush_async(thisPtr);
         }),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_void(future, continuation, data),
@@ -3018,27 +3031,26 @@ public class BindingInput : IBindingInput, IDisposable {
     }
 
     /// <summary>
-    /// Flushes stdin on the calling thread.
+    /// Writes bytes to stdin on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public void FlushSync() {
-        CallWithPointer(thisPtr =>
+    public ulong Write(byte[] @data) {
+        return CallWithPointer(thisPtr => FfiConverterUInt64.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_flush_sync(thisPtr,  ref _status)
-));
+    _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_write(thisPtr, FfiConverterByteArray.INSTANCE.Lower(@data), ref _status)
+)));
     }
-
 
 
     /// <summary>
     /// Writes bytes to stdin without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public async Task<ulong> Write(byte[] @data) {
+    public async Task<ulong> WriteAsync(byte[] @data) {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
         CallWithPointer(thisPtr => {
-            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_write(thisPtr, FfiConverterByteArray.INSTANCE.Lower(@data));
+            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_write_async(thisPtr, FfiConverterByteArray.INSTANCE.Lower(@data));
         }),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_u64(future, continuation, data),
@@ -3054,18 +3066,6 @@ public class BindingInput : IBindingInput, IDisposable {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
     }
-
-    /// <summary>
-    /// Writes bytes to stdin on the calling thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public ulong WriteSync(byte[] @data) {
-        return CallWithPointer(thisPtr => FfiConverterUInt64.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_method_bindinginput_write_sync(thisPtr, FfiConverterByteArray.INSTANCE.Lower(@data), ref _status)
-)));
-    }
-
 
 
 
@@ -3102,15 +3102,15 @@ class FfiConverterTypeBindingInput: FfiConverter<BindingInput, ulong> {
 /// </summary>
 public interface IBindingOutput {
     /// <summary>
-    /// Reads at most 64 KiB without blocking the foreign runtime thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    Task<byte[]> Read();
-    /// <summary>
     /// Reads at most 64 KiB on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    byte[] ReadSync();
+    byte[] Read();
+    /// <summary>
+    /// Reads at most 64 KiB without blocking the foreign runtime thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    Task<byte[]> ReadAsync();
 }
 /// <summary>
 /// An owned stdout or stderr stream.
@@ -3205,14 +3205,26 @@ public class BindingOutput : IBindingOutput, IDisposable {
 
 
     /// <summary>
+    /// Reads at most 64 KiB on the calling thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public byte[] Read() {
+        return CallWithPointer(thisPtr => FfiConverterByteArray.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingoutput_read(thisPtr,  ref _status)
+)));
+    }
+
+
+    /// <summary>
     /// Reads at most 64 KiB without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public async Task<byte[]> Read() {
+    public async Task<byte[]> ReadAsync() {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
         CallWithPointer(thisPtr => {
-            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingoutput_read(thisPtr);
+            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingoutput_read_async(thisPtr);
         }),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_rust_buffer(future, continuation, data),
@@ -3228,18 +3240,6 @@ public class BindingOutput : IBindingOutput, IDisposable {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
     }
-
-    /// <summary>
-    /// Reads at most 64 KiB on the calling thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public byte[] ReadSync() {
-        return CallWithPointer(thisPtr => FfiConverterByteArray.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingoutput_read_sync(thisPtr,  ref _status)
-)));
-    }
-
 
 
 
@@ -3281,15 +3281,15 @@ public interface IBindingSandbox {
     /// <exception cref="BindingException"></exception>
     uint Id();
     /// <summary>
-    /// Requests process termination without blocking the foreign runtime thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    Task Kill();
-    /// <summary>
     /// Requests process termination on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    void KillSync();
+    void Kill();
+    /// <summary>
+    /// Requests process termination without blocking the foreign runtime thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    Task KillAsync();
     /// <summary>
     /// Returns structured output metadata after terminal completion.
     /// </summary>
@@ -3316,15 +3316,15 @@ public interface IBindingSandbox {
     /// <exception cref="BindingException"></exception>
     PollResult TryWait();
     /// <summary>
-    /// Waits for process completion without blocking the foreign runtime thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    Task<WaitResult> Wait();
-    /// <summary>
     /// Waits for process completion on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    WaitResult WaitSync();
+    WaitResult Wait();
+    /// <summary>
+    /// Waits for process completion without blocking the foreign runtime thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    Task<WaitResult> WaitAsync();
     /// <summary>
     /// Returns policy and backend warnings as JSON.
     /// </summary>
@@ -3436,13 +3436,26 @@ public class BindingSandbox : IBindingSandbox, IDisposable {
 
 
     /// <summary>
+    /// Requests process termination on the calling thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public void Kill() {
+        CallWithPointer(thisPtr =>
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_kill(thisPtr,  ref _status)
+));
+    }
+
+
+
+    /// <summary>
     /// Requests process termination without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public async Task Kill() {await _UniFFIAsync.UniffiRustCallAsync(
+    public async Task KillAsync() {await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
         CallWithPointer(thisPtr => {
-            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_kill(thisPtr);
+            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_kill_async(thisPtr);
         }),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_void(future, continuation, data),
@@ -3455,19 +3468,6 @@ public class BindingSandbox : IBindingSandbox, IDisposable {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
     }
-
-    /// <summary>
-    /// Requests process termination on the calling thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public void KillSync() {
-        CallWithPointer(thisPtr =>
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_kill_sync(thisPtr,  ref _status)
-));
-    }
-
-
 
     /// <summary>
     /// Returns structured output metadata after terminal completion.
@@ -3530,14 +3530,26 @@ public class BindingSandbox : IBindingSandbox, IDisposable {
 
 
     /// <summary>
+    /// Waits for process completion on the calling thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public WaitResult Wait() {
+        return CallWithPointer(thisPtr => FfiConverterTypeWaitResult.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_wait(thisPtr,  ref _status)
+)));
+    }
+
+
+    /// <summary>
     /// Waits for process completion without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public async Task<WaitResult> Wait() {
+    public async Task<WaitResult> WaitAsync() {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
         CallWithPointer(thisPtr => {
-            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_wait(thisPtr);
+            return _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_wait_async(thisPtr);
         }),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_rust_buffer(future, continuation, data),
@@ -3553,18 +3565,6 @@ public class BindingSandbox : IBindingSandbox, IDisposable {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
     }
-
-    /// <summary>
-    /// Waits for process completion on the calling thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public WaitResult WaitSync() {
-        return CallWithPointer(thisPtr => FfiConverterTypeWaitResult.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_method_bindingsandbox_wait_sync(thisPtr,  ref _status)
-)));
-    }
-
 
     /// <summary>
     /// Returns policy and backend warnings as JSON.
@@ -4178,14 +4178,26 @@ public static class MxcNative {
 
 
     /// <summary>
+    /// Executes a state-aware command with live streams on the calling thread.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public static BindingSandbox Exec(string @requestJson, bool @experimental) {
+        return FfiConverterTypeBindingSandbox.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_func_exec(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
+));
+    }
+
+
+    /// <summary>
     /// Executes a state-aware command with live streams off the runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-   public static async Task<BindingSandbox> Exec(string @requestJson, bool @experimental)
+   public static async Task<BindingSandbox> ExecAsync(string @requestJson, bool @experimental)
    {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
-        _UniFFILib.uniffi_mxc_ffi_fn_func_exec(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental)),
+        _UniFFILib.uniffi_mxc_ffi_fn_func_exec_async(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental)),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_u64(future, continuation, data),
         // Complete
@@ -4200,6 +4212,18 @@ public static class MxcNative {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
    }
+    /// <summary>
+    /// Executes a state-aware command on the caller's terminal.
+    /// </summary>
+    /// <exception cref="BindingException"></exception>
+    public static WaitResult ExecAttached(string @requestJson, bool @experimental) {
+        return FfiConverterTypeWaitResult.INSTANCE.Lift(
+    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
+    _UniFFILib.uniffi_mxc_ffi_fn_func_exec_attached(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
+));
+    }
+
+
     /// <summary>
     /// Executes an attached state-aware command off the foreign runtime thread.
     /// </summary>
@@ -4224,25 +4248,13 @@ public static class MxcNative {
     );
    }
     /// <summary>
-    /// Executes a state-aware command on the caller's terminal.
+    /// Runs a sandbox to completion on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public static WaitResult ExecAttachedSync(string @requestJson, bool @experimental) {
-        return FfiConverterTypeWaitResult.INSTANCE.Lift(
+    public static RunResult Run(string @requestJson) {
+        return FfiConverterTypeRunResult.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_func_exec_attached_sync(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
-));
-    }
-
-
-    /// <summary>
-    /// Executes a state-aware command with live streams on the calling thread.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public static BindingSandbox ExecSync(string @requestJson, bool @experimental) {
-        return FfiConverterTypeBindingSandbox.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_func_exec_sync(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
+    _UniFFILib.uniffi_mxc_ffi_fn_func_run(FfiConverterString.INSTANCE.Lower(@requestJson), ref _status)
 ));
     }
 
@@ -4251,11 +4263,11 @@ public static class MxcNative {
     /// Runs a sandbox to completion without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-   public static async Task<RunResult> Run(string @requestJson)
+   public static async Task<RunResult> RunAsync(string @requestJson)
    {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
-        _UniFFILib.uniffi_mxc_ffi_fn_func_run(FfiConverterString.INSTANCE.Lower(@requestJson)),
+        _UniFFILib.uniffi_mxc_ffi_fn_func_run_async(FfiConverterString.INSTANCE.Lower(@requestJson)),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_rust_buffer(future, continuation, data),
         // Complete
@@ -4271,13 +4283,13 @@ public static class MxcNative {
     );
    }
     /// <summary>
-    /// Runs a sandbox to completion on the calling thread.
+    /// Spawns a live sandbox process on the calling thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public static RunResult RunSync(string @requestJson) {
-        return FfiConverterTypeRunResult.INSTANCE.Lift(
+    public static BindingSandbox Spawn(string @requestJson) {
+        return FfiConverterTypeBindingSandbox.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_func_run_sync(FfiConverterString.INSTANCE.Lower(@requestJson), ref _status)
+    _UniFFILib.uniffi_mxc_ffi_fn_func_spawn(FfiConverterString.INSTANCE.Lower(@requestJson), ref _status)
 ));
     }
 
@@ -4286,11 +4298,11 @@ public static class MxcNative {
     /// Spawns a live sandbox process without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-   public static async Task<BindingSandbox> Spawn(string @requestJson)
+   public static async Task<BindingSandbox> SpawnAsync(string @requestJson)
    {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
-        _UniFFILib.uniffi_mxc_ffi_fn_func_spawn(FfiConverterString.INSTANCE.Lower(@requestJson)),
+        _UniFFILib.uniffi_mxc_ffi_fn_func_spawn_async(FfiConverterString.INSTANCE.Lower(@requestJson)),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_u64(future, continuation, data),
         // Complete
@@ -4306,13 +4318,13 @@ public static class MxcNative {
     );
    }
     /// <summary>
-    /// Spawns a live sandbox process on the calling thread.
+    /// Executes a state-aware phase and returns its response envelope JSON.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-    public static BindingSandbox SpawnSync(string @requestJson) {
-        return FfiConverterTypeBindingSandbox.INSTANCE.Lift(
+    public static string StateAware(string @requestJson, bool @dryRun, bool @experimental) {
+        return FfiConverterString.INSTANCE.Lift(
     _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_func_spawn_sync(FfiConverterString.INSTANCE.Lower(@requestJson), ref _status)
+    _UniFFILib.uniffi_mxc_ffi_fn_func_state_aware(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@dryRun), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
 ));
     }
 
@@ -4321,11 +4333,11 @@ public static class MxcNative {
     /// Executes a state-aware phase without blocking the foreign runtime thread.
     /// </summary>
     /// <exception cref="BindingException"></exception>
-   public static async Task<string> StateAware(string @requestJson, bool @dryRun, bool @experimental)
+   public static async Task<string> StateAwareAsync(string @requestJson, bool @dryRun, bool @experimental)
    {
     return await _UniFFIAsync.UniffiRustCallAsync(
         // Get rust future
-        _UniFFILib.uniffi_mxc_ffi_fn_func_state_aware(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@dryRun), FfiConverterBoolean.INSTANCE.Lower(@experimental)),
+        _UniFFILib.uniffi_mxc_ffi_fn_func_state_aware_async(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@dryRun), FfiConverterBoolean.INSTANCE.Lower(@experimental)),
         // Poll
         (ulong future, IntPtr continuation, ulong data) => _UniFFILib.ffi_mxc_ffi_rust_future_poll_rust_buffer(future, continuation, data),
         // Complete
@@ -4340,18 +4352,6 @@ public static class MxcNative {
         FfiConverterTypeBindingErrorErrorHandler.INSTANCE
     );
    }
-    /// <summary>
-    /// Executes a state-aware phase and returns its response envelope JSON.
-    /// </summary>
-    /// <exception cref="BindingException"></exception>
-    public static string StateAwareSync(string @requestJson, bool @dryRun, bool @experimental) {
-        return FfiConverterString.INSTANCE.Lift(
-    _UniffiHelpers.RustCallWithError(FfiConverterTypeBindingErrorErrorHandler.INSTANCE, (ref UniffiRustCallStatus _status) =>
-    _UniFFILib.uniffi_mxc_ffi_fn_func_state_aware_sync(FfiConverterString.INSTANCE.Lower(@requestJson), FfiConverterBoolean.INSTANCE.Lower(@dryRun), FfiConverterBoolean.INSTANCE.Lower(@experimental), ref _status)
-));
-    }
-
-
     /// <summary>
     /// Returns the version of the loaded native MXC library.
     /// </summary>

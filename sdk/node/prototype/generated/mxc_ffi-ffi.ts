@@ -307,52 +307,52 @@ const DEFINITIONS = {
     "uniffi_mxc_ffi_fn_func_exec": {
       args: [FfiType.RustBuffer, FfiType.Int8],
       ret: FfiType.Handle,
+      hasRustCallStatus: true,
+    },
+    "uniffi_mxc_ffi_fn_func_exec_async": {
+      args: [FfiType.RustBuffer, FfiType.Int8],
+      ret: FfiType.Handle,
       hasRustCallStatus: false,
+    },
+    "uniffi_mxc_ffi_fn_func_exec_attached": {
+      args: [FfiType.RustBuffer, FfiType.Int8],
+      ret: FfiType.RustBuffer,
+      hasRustCallStatus: true,
     },
     "uniffi_mxc_ffi_fn_func_exec_attached_async": {
       args: [FfiType.RustBuffer, FfiType.Int8],
       ret: FfiType.Handle,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_fn_func_exec_attached_sync": {
-      args: [FfiType.RustBuffer, FfiType.Int8],
+    "uniffi_mxc_ffi_fn_func_run": {
+      args: [FfiType.RustBuffer],
       ret: FfiType.RustBuffer,
       hasRustCallStatus: true,
     },
-    "uniffi_mxc_ffi_fn_func_exec_sync": {
-      args: [FfiType.RustBuffer, FfiType.Int8],
-      ret: FfiType.Handle,
-      hasRustCallStatus: true,
-    },
-    "uniffi_mxc_ffi_fn_func_run": {
+    "uniffi_mxc_ffi_fn_func_run_async": {
       args: [FfiType.RustBuffer],
       ret: FfiType.Handle,
       hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_fn_func_run_sync": {
-      args: [FfiType.RustBuffer],
-      ret: FfiType.RustBuffer,
-      hasRustCallStatus: true,
     },
     "uniffi_mxc_ffi_fn_func_spawn": {
       args: [FfiType.RustBuffer],
       ret: FfiType.Handle,
-      hasRustCallStatus: false,
+      hasRustCallStatus: true,
     },
-    "uniffi_mxc_ffi_fn_func_spawn_sync": {
+    "uniffi_mxc_ffi_fn_func_spawn_async": {
       args: [FfiType.RustBuffer],
       ret: FfiType.Handle,
-      hasRustCallStatus: true,
+      hasRustCallStatus: false,
     },
     "uniffi_mxc_ffi_fn_func_state_aware": {
       args: [FfiType.RustBuffer, FfiType.Int8, FfiType.Int8],
-      ret: FfiType.Handle,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_fn_func_state_aware_sync": {
-      args: [FfiType.RustBuffer, FfiType.Int8, FfiType.Int8],
       ret: FfiType.RustBuffer,
       hasRustCallStatus: true,
+    },
+    "uniffi_mxc_ffi_fn_func_state_aware_async": {
+      args: [FfiType.RustBuffer, FfiType.Int8, FfiType.Int8],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
     },
     "uniffi_mxc_ffi_fn_func_version": {
       args: [],
@@ -396,33 +396,33 @@ const DEFINITIONS = {
     },
     "uniffi_mxc_ffi_fn_method_bindinginput_flush": {
       args: [FfiType.Handle],
-      ret: FfiType.Handle,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_fn_method_bindinginput_flush_sync": {
-      args: [FfiType.Handle],
       ret: FfiType.Void,
       hasRustCallStatus: true,
     },
-    "uniffi_mxc_ffi_fn_method_bindinginput_write": {
-      args: [FfiType.Handle, FfiType.RustBuffer],
+    "uniffi_mxc_ffi_fn_method_bindinginput_flush_async": {
+      args: [FfiType.Handle],
       ret: FfiType.Handle,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_fn_method_bindinginput_write_sync": {
+    "uniffi_mxc_ffi_fn_method_bindinginput_write": {
       args: [FfiType.Handle, FfiType.RustBuffer],
       ret: FfiType.UInt64,
       hasRustCallStatus: true,
     },
-    "uniffi_mxc_ffi_fn_method_bindingoutput_read": {
-      args: [FfiType.Handle],
+    "uniffi_mxc_ffi_fn_method_bindinginput_write_async": {
+      args: [FfiType.Handle, FfiType.RustBuffer],
       ret: FfiType.Handle,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_fn_method_bindingoutput_read_sync": {
+    "uniffi_mxc_ffi_fn_method_bindingoutput_read": {
       args: [FfiType.Handle],
       ret: FfiType.RustBuffer,
       hasRustCallStatus: true,
+    },
+    "uniffi_mxc_ffi_fn_method_bindingoutput_read_async": {
+      args: [FfiType.Handle],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
     },
     "uniffi_mxc_ffi_fn_method_bindingsandbox_id": {
       args: [FfiType.Handle],
@@ -431,13 +431,13 @@ const DEFINITIONS = {
     },
     "uniffi_mxc_ffi_fn_method_bindingsandbox_kill": {
       args: [FfiType.Handle],
-      ret: FfiType.Handle,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_fn_method_bindingsandbox_kill_sync": {
-      args: [FfiType.Handle],
       ret: FfiType.Void,
       hasRustCallStatus: true,
+    },
+    "uniffi_mxc_ffi_fn_method_bindingsandbox_kill_async": {
+      args: [FfiType.Handle],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
     },
     "uniffi_mxc_ffi_fn_method_bindingsandbox_output_metadata_json": {
       args: [FfiType.Handle],
@@ -466,13 +466,13 @@ const DEFINITIONS = {
     },
     "uniffi_mxc_ffi_fn_method_bindingsandbox_wait": {
       args: [FfiType.Handle],
-      ret: FfiType.Handle,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_fn_method_bindingsandbox_wait_sync": {
-      args: [FfiType.Handle],
       ret: FfiType.RustBuffer,
       hasRustCallStatus: true,
+    },
+    "uniffi_mxc_ffi_fn_method_bindingsandbox_wait_async": {
+      args: [FfiType.Handle],
+      ret: FfiType.Handle,
+      hasRustCallStatus: false,
     },
     "uniffi_mxc_ffi_fn_method_bindingsandbox_warnings_json": {
       args: [FfiType.Handle],
@@ -494,17 +494,17 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
+    "uniffi_mxc_ffi_checksum_func_exec_async": {
+      args: [],
+      ret: FfiType.UInt16,
+      hasRustCallStatus: false,
+    },
+    "uniffi_mxc_ffi_checksum_func_exec_attached": {
+      args: [],
+      ret: FfiType.UInt16,
+      hasRustCallStatus: false,
+    },
     "uniffi_mxc_ffi_checksum_func_exec_attached_async": {
-      args: [],
-      ret: FfiType.UInt16,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_checksum_func_exec_attached_sync": {
-      args: [],
-      ret: FfiType.UInt16,
-      hasRustCallStatus: false,
-    },
-    "uniffi_mxc_ffi_checksum_func_exec_sync": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -514,7 +514,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_func_run_sync": {
+    "uniffi_mxc_ffi_checksum_func_run_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -524,7 +524,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_func_spawn_sync": {
+    "uniffi_mxc_ffi_checksum_func_spawn_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -534,7 +534,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_func_state_aware_sync": {
+    "uniffi_mxc_ffi_checksum_func_state_aware_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -574,7 +574,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync": {
+    "uniffi_mxc_ffi_checksum_method_bindinginput_flush_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -584,7 +584,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_method_bindinginput_write_sync": {
+    "uniffi_mxc_ffi_checksum_method_bindinginput_write_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -594,7 +594,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync": {
+    "uniffi_mxc_ffi_checksum_method_bindingoutput_read_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -609,7 +609,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync": {
+    "uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -644,7 +644,7 @@ const DEFINITIONS = {
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
     },
-    "uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync": {
+    "uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async": {
       args: [],
       ret: FfiType.UInt16,
       hasRustCallStatus: false,
@@ -733,16 +733,16 @@ interface NativeModuleInterface {
     uniffi_mxc_ffi_fn_clone_bindingsandbox(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): bigint;
     uniffi_mxc_ffi_fn_free_bindingsandbox(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     uniffi_mxc_ffi_fn_func_discover(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    uniffi_mxc_ffi_fn_func_exec(requestJson: Uint8Array, experimental: number): bigint;
+    uniffi_mxc_ffi_fn_func_exec(requestJson: Uint8Array, experimental: number, uniffi_out_err: UniffiRustCallStatus): bigint;
+    uniffi_mxc_ffi_fn_func_exec_async(requestJson: Uint8Array, experimental: number): bigint;
+    uniffi_mxc_ffi_fn_func_exec_attached(requestJson: Uint8Array, experimental: number, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_func_exec_attached_async(requestJson: Uint8Array, experimental: number): bigint;
-    uniffi_mxc_ffi_fn_func_exec_attached_sync(requestJson: Uint8Array, experimental: number, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    uniffi_mxc_ffi_fn_func_exec_sync(requestJson: Uint8Array, experimental: number, uniffi_out_err: UniffiRustCallStatus): bigint;
-    uniffi_mxc_ffi_fn_func_run(requestJson: Uint8Array): bigint;
-    uniffi_mxc_ffi_fn_func_run_sync(requestJson: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    uniffi_mxc_ffi_fn_func_spawn(requestJson: Uint8Array): bigint;
-    uniffi_mxc_ffi_fn_func_spawn_sync(requestJson: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
-    uniffi_mxc_ffi_fn_func_state_aware(requestJson: Uint8Array, dryRun: number, experimental: number): bigint;
-    uniffi_mxc_ffi_fn_func_state_aware_sync(requestJson: Uint8Array, dryRun: number, experimental: number, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_func_run(requestJson: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_func_run_async(requestJson: Uint8Array): bigint;
+    uniffi_mxc_ffi_fn_func_spawn(requestJson: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
+    uniffi_mxc_ffi_fn_func_spawn_async(requestJson: Uint8Array): bigint;
+    uniffi_mxc_ffi_fn_func_state_aware(requestJson: Uint8Array, dryRun: number, experimental: number, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_func_state_aware_async(requestJson: Uint8Array, dryRun: number, experimental: number): bigint;
     uniffi_mxc_ffi_fn_func_version(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingerror_code(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingerror_message(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
@@ -751,35 +751,35 @@ interface NativeModuleInterface {
     uniffi_mxc_ffi_fn_method_bindingerror_remediation(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingerror_uniffi_trait_debug(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingerror_uniffi_trait_display(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    uniffi_mxc_ffi_fn_method_bindinginput_flush(uniffiSelf: bigint): bigint;
-    uniffi_mxc_ffi_fn_method_bindinginput_flush_sync(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
-    uniffi_mxc_ffi_fn_method_bindinginput_write(uniffiSelf: bigint, data: Uint8Array): bigint;
-    uniffi_mxc_ffi_fn_method_bindinginput_write_sync(uniffiSelf: bigint, data: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
-    uniffi_mxc_ffi_fn_method_bindingoutput_read(uniffiSelf: bigint): bigint;
-    uniffi_mxc_ffi_fn_method_bindingoutput_read_sync(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_method_bindinginput_flush(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
+    uniffi_mxc_ffi_fn_method_bindinginput_flush_async(uniffiSelf: bigint): bigint;
+    uniffi_mxc_ffi_fn_method_bindinginput_write(uniffiSelf: bigint, data: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
+    uniffi_mxc_ffi_fn_method_bindinginput_write_async(uniffiSelf: bigint, data: Uint8Array): bigint;
+    uniffi_mxc_ffi_fn_method_bindingoutput_read(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_method_bindingoutput_read_async(uniffiSelf: bigint): bigint;
     uniffi_mxc_ffi_fn_method_bindingsandbox_id(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): number;
-    uniffi_mxc_ffi_fn_method_bindingsandbox_kill(uniffiSelf: bigint): bigint;
-    uniffi_mxc_ffi_fn_method_bindingsandbox_kill_sync(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
+    uniffi_mxc_ffi_fn_method_bindingsandbox_kill(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
+    uniffi_mxc_ffi_fn_method_bindingsandbox_kill_async(uniffiSelf: bigint): bigint;
     uniffi_mxc_ffi_fn_method_bindingsandbox_output_metadata_json(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingsandbox_take_stderr(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingsandbox_take_stdin(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingsandbox_take_stdout(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     uniffi_mxc_ffi_fn_method_bindingsandbox_try_wait(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    uniffi_mxc_ffi_fn_method_bindingsandbox_wait(uniffiSelf: bigint): bigint;
-    uniffi_mxc_ffi_fn_method_bindingsandbox_wait_sync(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_method_bindingsandbox_wait(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    uniffi_mxc_ffi_fn_method_bindingsandbox_wait_async(uniffiSelf: bigint): bigint;
     uniffi_mxc_ffi_fn_method_bindingsandbox_warnings_json(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ffi_mxc_ffi_uniffi_contract_version(): number;
     uniffi_mxc_ffi_checksum_func_discover(): number;
     uniffi_mxc_ffi_checksum_func_exec(): number;
+    uniffi_mxc_ffi_checksum_func_exec_async(): number;
+    uniffi_mxc_ffi_checksum_func_exec_attached(): number;
     uniffi_mxc_ffi_checksum_func_exec_attached_async(): number;
-    uniffi_mxc_ffi_checksum_func_exec_attached_sync(): number;
-    uniffi_mxc_ffi_checksum_func_exec_sync(): number;
     uniffi_mxc_ffi_checksum_func_run(): number;
-    uniffi_mxc_ffi_checksum_func_run_sync(): number;
+    uniffi_mxc_ffi_checksum_func_run_async(): number;
     uniffi_mxc_ffi_checksum_func_spawn(): number;
-    uniffi_mxc_ffi_checksum_func_spawn_sync(): number;
+    uniffi_mxc_ffi_checksum_func_spawn_async(): number;
     uniffi_mxc_ffi_checksum_func_state_aware(): number;
-    uniffi_mxc_ffi_checksum_func_state_aware_sync(): number;
+    uniffi_mxc_ffi_checksum_func_state_aware_async(): number;
     uniffi_mxc_ffi_checksum_func_version(): number;
     uniffi_mxc_ffi_checksum_method_bindingerror_code(): number;
     uniffi_mxc_ffi_checksum_method_bindingerror_message(): number;
@@ -787,21 +787,21 @@ interface NativeModuleInterface {
     uniffi_mxc_ffi_checksum_method_bindingerror_operation(): number;
     uniffi_mxc_ffi_checksum_method_bindingerror_remediation(): number;
     uniffi_mxc_ffi_checksum_method_bindinginput_flush(): number;
-    uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync(): number;
+    uniffi_mxc_ffi_checksum_method_bindinginput_flush_async(): number;
     uniffi_mxc_ffi_checksum_method_bindinginput_write(): number;
-    uniffi_mxc_ffi_checksum_method_bindinginput_write_sync(): number;
+    uniffi_mxc_ffi_checksum_method_bindinginput_write_async(): number;
     uniffi_mxc_ffi_checksum_method_bindingoutput_read(): number;
-    uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync(): number;
+    uniffi_mxc_ffi_checksum_method_bindingoutput_read_async(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_id(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_kill(): number;
-    uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync(): number;
+    uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stderr(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdin(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_take_stdout(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_wait(): number;
-    uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync(): number;
+    uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async(): number;
     uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json(): number;
     // Codegen call sites use these via `nativeModule().rustbuffer_alloc(...)`
     // and `nativeModule().rustbuffer_free(...)`. The runtime's registered

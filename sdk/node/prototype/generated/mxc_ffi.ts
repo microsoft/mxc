@@ -36,15 +36,31 @@ export function discover(): Discovery /*throws*/ {
     }
 
 /**
+ * Executes a state-aware command with live streams on the calling thread.
+ */
+export function exec(requestJson: string, experimental: boolean): BindingSandboxLike /*throws*/ {
+    return FfiConverterTypeBindingSandbox.lift(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_mxc_ffi_fn_func_exec(
+        FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
+        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
  * Executes a state-aware command with live streams off the runtime thread.
  */
-export async function exec(requestJson: string, experimental: boolean, asyncOpts_?: { signal: AbortSignal }): Promise<BindingSandboxLike> /*throws*/ {
+export async function execAsync(requestJson: string, experimental: boolean, asyncOpts_?: { signal: AbortSignal }): Promise<BindingSandboxLike> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_exec(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc)
+                return nativeModule().uniffi_mxc_ffi_fn_func_exec_async(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc)
                 );
             },
             /*pollFunc:*/ nativeModule().ffi_mxc_ffi_rust_future_poll_u64,
@@ -66,6 +82,27 @@ export async function exec(requestJson: string, experimental: boolean, asyncOpts
             __error.stack = __stack;
         }
         throw __error;
+    }
+    }
+
+/**
+ * Executes a state-aware command on the caller's terminal.
+ */
+export function execAttached(requestJson: string, experimental: boolean): WaitResult /*throws*/ {
+    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_mxc_ffi_fn_func_exec_attached(
+        FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
+        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    try {
+        return FfiConverterTypeWaitResult.lift(__rb);
+    } finally {
+        nativeModule().rustbuffer_free(__rb);
     }
     }
 
@@ -113,52 +150,35 @@ export async function execAttachedAsync(requestJson: string, experimental: boole
     }
 
 /**
- * Executes a state-aware command on the caller's terminal.
+ * Runs a sandbox to completion on the calling thread.
  */
-export function execAttachedSync(requestJson: string, experimental: boolean): WaitResult /*throws*/ {
+export function run(requestJson: string): RunResult /*throws*/ {
     const __rb: Uint8Array = uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
             /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_exec_attached_sync(
+                return nativeModule().uniffi_mxc_ffi_fn_func_run(
         FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
-        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
     );
     try {
-        return FfiConverterTypeWaitResult.lift(__rb);
+        return FfiConverterTypeRunResult.lift(__rb);
     } finally {
         nativeModule().rustbuffer_free(__rb);
     }
     }
 
 /**
- * Executes a state-aware command with live streams on the calling thread.
- */
-export function execSync(requestJson: string, experimental: boolean): BindingSandboxLike /*throws*/ {
-    return FfiConverterTypeBindingSandbox.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_exec_sync(
-        FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
-        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
-    }
-
-/**
  * Runs a sandbox to completion without blocking the foreign runtime thread.
  */
-export async function run(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<RunResult> /*throws*/ {
+export async function runAsync(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<RunResult> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_run(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                return nativeModule().uniffi_mxc_ffi_fn_func_run_async(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
                 );
             },
             /*pollFunc:*/ nativeModule().ffi_mxc_ffi_rust_future_poll_rust_buffer,
@@ -193,35 +213,30 @@ export async function run(requestJson: string, asyncOpts_?: { signal: AbortSigna
     }
 
 /**
- * Runs a sandbox to completion on the calling thread.
+ * Spawns a live sandbox process on the calling thread.
  */
-export function runSync(requestJson: string): RunResult /*throws*/ {
-    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
+export function spawn(requestJson: string): BindingSandboxLike /*throws*/ {
+    return FfiConverterTypeBindingSandbox.lift(uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
             /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_run_sync(
+                return nativeModule().uniffi_mxc_ffi_fn_func_spawn(
         FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
-    try {
-        return FfiConverterTypeRunResult.lift(__rb);
-    } finally {
-        nativeModule().rustbuffer_free(__rb);
-    }
+    ));
     }
 
 /**
  * Spawns a live sandbox process without blocking the foreign runtime thread.
  */
-export async function spawn(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<BindingSandboxLike> /*throws*/ {
+export async function spawnAsync(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<BindingSandboxLike> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_spawn(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                return nativeModule().uniffi_mxc_ffi_fn_func_spawn_async(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
                 );
             },
             /*pollFunc:*/ nativeModule().ffi_mxc_ffi_rust_future_poll_u64,
@@ -247,30 +262,37 @@ export async function spawn(requestJson: string, asyncOpts_?: { signal: AbortSig
     }
 
 /**
- * Spawns a live sandbox process on the calling thread.
+ * Executes a state-aware phase and returns its response envelope JSON.
  */
-export function spawnSync(requestJson: string): BindingSandboxLike /*throws*/ {
-    return FfiConverterTypeBindingSandbox.lift(uniffiCaller.rustCallWithError(
+export function stateAware(requestJson: string, dryRun: boolean, experimental: boolean): string /*throws*/ {
+    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
             /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_spawn_sync(
+                return nativeModule().uniffi_mxc_ffi_fn_func_state_aware(
         FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
+        FfiConverterBool.lower(dryRun, nativeModule().rustbuffer_alloc),
+        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
+    );
+    try {
+        return FfiConverterString.lift(__rb);
+    } finally {
+        nativeModule().rustbuffer_free(__rb);
+    }
     }
 
 /**
  * Executes a state-aware phase without blocking the foreign runtime thread.
  */
-export async function stateAware(requestJson: string, dryRun: boolean, experimental: boolean, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+export async function stateAwareAsync(requestJson: string, dryRun: boolean, experimental: boolean, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_state_aware(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(dryRun, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc)
+                return nativeModule().uniffi_mxc_ffi_fn_func_state_aware_async(FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(dryRun, nativeModule().rustbuffer_alloc),FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc)
                 );
             },
             /*pollFunc:*/ nativeModule().ffi_mxc_ffi_rust_future_poll_rust_buffer,
@@ -301,28 +323,6 @@ export async function stateAware(requestJson: string, dryRun: boolean, experimen
             __error.stack = __stack;
         }
         throw __error;
-    }
-    }
-
-/**
- * Executes a state-aware phase and returns its response envelope JSON.
- */
-export function stateAwareSync(requestJson: string, dryRun: boolean, experimental: boolean): string /*throws*/ {
-    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_func_state_aware_sync(
-        FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc),
-        FfiConverterBool.lower(dryRun, nativeModule().rustbuffer_alloc),
-        FfiConverterBool.lower(experimental, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
-    try {
-        return FfiConverterString.lift(__rb);
-    } finally {
-        nativeModule().rustbuffer_free(__rb);
     }
     }
 
@@ -874,21 +874,21 @@ const FfiConverterTypeBindingError__as_error = new FfiConverterObjectAsError("Bi
 export interface BindingInputLike {
 
 /**
- * Flushes stdin without blocking the foreign runtime thread.
- */
-    flush(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
-/**
  * Flushes stdin on the calling thread.
  */
-    flushSync() /*throws*/: void;
+    flush() /*throws*/: void;
 /**
- * Writes bytes to stdin without blocking the foreign runtime thread.
+ * Flushes stdin without blocking the foreign runtime thread.
  */
-    write(data: ArrayBuffer, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<bigint>;
+    flushAsync(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
 /**
  * Writes bytes to stdin on the calling thread.
  */
-    writeSync(data: ArrayBuffer) /*throws*/: bigint;
+    write(data: ArrayBuffer) /*throws*/: bigint;
+/**
+ * Writes bytes to stdin without blocking the foreign runtime thread.
+ */
+    writeAsync(data: ArrayBuffer, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<bigint>;
 }
 /**
  * @deprecated Use `BindingInputLike` instead.
@@ -915,15 +915,28 @@ private constructor(pointer: UniffiHandle) {
 
 
 /**
+ * Flushes stdin on the calling thread.
+ */
+    flush(): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => { nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_flush(
+                uniffiTypeBindingInputObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
  * Flushes stdin without blocking the foreign runtime thread.
  */
-    async flush(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    async flushAsync(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_flush(
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_flush_async(
                     uniffiTypeBindingInputObjectFactory.clonePointer(this)
                 );
             },
@@ -945,28 +958,31 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
- * Flushes stdin on the calling thread.
+ * Writes bytes to stdin on the calling thread.
  */
-    flushSync(): void /*throws*/ {uniffiCaller.rustCallWithError(
+    write(data: ArrayBuffer): bigint /*throws*/ {
+    return FfiConverterUInt64.lift(uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => { nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_flush_sync(
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_write(
                 uniffiTypeBindingInputObjectFactory.clonePointer(this),
+        FfiConverterArrayBuffer.lower(data, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
+    ));
     }
 
 /**
  * Writes bytes to stdin without blocking the foreign runtime thread.
  */
-    async write(data: ArrayBuffer, asyncOpts_?: { signal: AbortSignal }): Promise<bigint> /*throws*/ {
+    async writeAsync(data: ArrayBuffer, asyncOpts_?: { signal: AbortSignal }): Promise<bigint> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_write(
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_write_async(
                     uniffiTypeBindingInputObjectFactory.clonePointer(this),FfiConverterArrayBuffer.lower(data, nativeModule().rustbuffer_alloc)
                 );
             },
@@ -990,22 +1006,6 @@ private constructor(pointer: UniffiHandle) {
         }
         throw __error;
     }
-    }
-
-/**
- * Writes bytes to stdin on the calling thread.
- */
-    writeSync(data: ArrayBuffer): bigint /*throws*/ {
-    return FfiConverterUInt64.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindinginput_write_sync(
-                uniffiTypeBindingInputObjectFactory.clonePointer(this),
-        FfiConverterArrayBuffer.lower(data, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
     }
 
 
@@ -1094,13 +1094,13 @@ const FfiConverterTypeBindingInput = new FfiConverterObject(uniffiTypeBindingInp
 export interface BindingOutputLike {
 
 /**
- * Reads at most 64 KiB without blocking the foreign runtime thread.
- */
-    read(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ArrayBuffer>;
-/**
  * Reads at most 64 KiB on the calling thread.
  */
-    readSync() /*throws*/: ArrayBuffer;
+    read() /*throws*/: ArrayBuffer;
+/**
+ * Reads at most 64 KiB without blocking the foreign runtime thread.
+ */
+    readAsync(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<ArrayBuffer>;
 }
 /**
  * @deprecated Use `BindingOutputLike` instead.
@@ -1127,15 +1127,35 @@ private constructor(pointer: UniffiHandle) {
 
 
 /**
+ * Reads at most 64 KiB on the calling thread.
+ */
+    read(): ArrayBuffer /*throws*/ {
+    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindingoutput_read(
+                uniffiTypeBindingOutputObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    try {
+        return FfiConverterArrayBuffer.lift(__rb);
+    } finally {
+        nativeModule().rustbuffer_free(__rb);
+    }
+    }
+
+/**
  * Reads at most 64 KiB without blocking the foreign runtime thread.
  */
-    async read(asyncOpts_?: { signal: AbortSignal }): Promise<ArrayBuffer> /*throws*/ {
+    async readAsync(asyncOpts_?: { signal: AbortSignal }): Promise<ArrayBuffer> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindingoutput_read(
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindingoutput_read_async(
                     uniffiTypeBindingOutputObjectFactory.clonePointer(this)
                 );
             },
@@ -1167,26 +1187,6 @@ private constructor(pointer: UniffiHandle) {
             __error.stack = __stack;
         }
         throw __error;
-    }
-    }
-
-/**
- * Reads at most 64 KiB on the calling thread.
- */
-    readSync(): ArrayBuffer /*throws*/ {
-    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindingoutput_read_sync(
-                uniffiTypeBindingOutputObjectFactory.clonePointer(this),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
-    try {
-        return FfiConverterArrayBuffer.lift(__rb);
-    } finally {
-        nativeModule().rustbuffer_free(__rb);
     }
     }
 
@@ -1280,13 +1280,13 @@ export interface BindingSandboxLike {
  */
     id() /*throws*/: number;
 /**
- * Requests process termination without blocking the foreign runtime thread.
- */
-    kill(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
-/**
  * Requests process termination on the calling thread.
  */
-    killSync() /*throws*/: void;
+    kill() /*throws*/: void;
+/**
+ * Requests process termination without blocking the foreign runtime thread.
+ */
+    killAsync(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
 /**
  * Returns structured output metadata after terminal completion.
  */
@@ -1308,13 +1308,13 @@ export interface BindingSandboxLike {
  */
     tryWait() /*throws*/: PollResult;
 /**
- * Waits for process completion without blocking the foreign runtime thread.
- */
-    wait(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<WaitResult>;
-/**
  * Waits for process completion on the calling thread.
  */
-    waitSync() /*throws*/: WaitResult;
+    wait() /*throws*/: WaitResult;
+/**
+ * Waits for process completion without blocking the foreign runtime thread.
+ */
+    waitAsync(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<WaitResult>;
 /**
  * Returns policy and backend warnings as JSON.
  */
@@ -1360,15 +1360,28 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Requests process termination on the calling thread.
+ */
+    kill(): void /*throws*/ {uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => { nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_kill(
+                uniffiTypeBindingSandboxObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    }
+
+/**
  * Requests process termination without blocking the foreign runtime thread.
  */
-    async kill(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
+    async killAsync(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_kill(
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_kill_async(
                     uniffiTypeBindingSandboxObjectFactory.clonePointer(this)
                 );
             },
@@ -1387,19 +1400,6 @@ private constructor(pointer: UniffiHandle) {
         }
         throw __error;
     }
-    }
-
-/**
- * Requests process termination on the calling thread.
- */
-    killSync(): void /*throws*/ {uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => { nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_kill_sync(
-                uniffiTypeBindingSandboxObjectFactory.clonePointer(this),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
     }
 
 /**
@@ -1503,15 +1503,35 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Waits for process completion on the calling thread.
+ */
+    wait(): WaitResult /*throws*/ {
+    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_wait(
+                uniffiTypeBindingSandboxObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    );
+    try {
+        return FfiConverterTypeWaitResult.lift(__rb);
+    } finally {
+        nativeModule().rustbuffer_free(__rb);
+    }
+    }
+
+/**
  * Waits for process completion without blocking the foreign runtime thread.
  */
-    async wait(asyncOpts_?: { signal: AbortSignal }): Promise<WaitResult> /*throws*/ {
+    async waitAsync(asyncOpts_?: { signal: AbortSignal }): Promise<WaitResult> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
     try {
         return await uniffiRustCallAsync(
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_wait(
+                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_wait_async(
                     uniffiTypeBindingSandboxObjectFactory.clonePointer(this)
                 );
             },
@@ -1543,26 +1563,6 @@ private constructor(pointer: UniffiHandle) {
             __error.stack = __stack;
         }
         throw __error;
-    }
-    }
-
-/**
- * Waits for process completion on the calling thread.
- */
-    waitSync(): WaitResult /*throws*/ {
-    const __rb: Uint8Array = uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeBindingError__as_error.lift.bind(FfiConverterTypeBindingError__as_error),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().uniffi_mxc_ffi_fn_method_bindingsandbox_wait_sync(
-                uniffiTypeBindingSandboxObjectFactory.clonePointer(this),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    );
-    try {
-        return FfiConverterTypeWaitResult.lift(__rb);
-    } finally {
-        nativeModule().rustbuffer_free(__rb);
     }
     }
 
@@ -1703,35 +1703,35 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_mxc_ffi_checksum_func_discover() !== 56981) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_discover");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec() !== 35545) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec() !== 11464) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec");
+    }
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec_async() !== 40866) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec_async");
+    }
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec_attached() !== 49836) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec_attached");
     }
     if (nativeModule().uniffi_mxc_ffi_checksum_func_exec_attached_async() !== 56206) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec_attached_async");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec_attached_sync() !== 46923) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec_attached_sync");
-    }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_exec_sync() !== 23814) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_exec_sync");
-    }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_run() !== 2740) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_run() !== 2261) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_run");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_run_sync() !== 11829) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_run_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_run_async() !== 16822) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_run_async");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_spawn() !== 9123) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_spawn() !== 54924) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_spawn");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_spawn_sync() !== 54108) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_spawn_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_spawn_async() !== 11228) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_spawn_async");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_state_aware() !== 22135) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_state_aware() !== 45857) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_state_aware");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_func_state_aware_sync() !== 24947) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_state_aware_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_func_state_aware_async() !== 28345) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_state_aware_async");
     }
     if (nativeModule().uniffi_mxc_ffi_checksum_func_version() !== 54865) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_func_version");
@@ -1751,32 +1751,32 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingerror_remediation() !== 55374) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingerror_remediation");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_flush() !== 9780) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_flush() !== 46369) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_flush");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync() !== 35268) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_flush_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_flush_async() !== 64090) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_flush_async");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_write() !== 39240) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_write() !== 26926) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_write");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_write_sync() !== 11634) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_write_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindinginput_write_async() !== 24950) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindinginput_write_async");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingoutput_read() !== 15844) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingoutput_read() !== 58048) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingoutput_read");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync() !== 46774) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingoutput_read_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingoutput_read_async() !== 56610) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingoutput_read_async");
     }
     if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_id() !== 26226) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_id");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_kill() !== 63046) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_kill() !== 36981) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_kill");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync() !== 17861) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async() !== 44539) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_kill_async");
     }
     if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json() !== 7589) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_output_metadata_json");
@@ -1793,11 +1793,11 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait() !== 6459) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_try_wait");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_wait() !== 56342) {
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_wait() !== 49288) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_wait");
     }
-    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync() !== 52006) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_sync");
+    if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async() !== 51473) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_wait_async");
     }
     if (nativeModule().uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json() !== 49097) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_mxc_ffi_checksum_method_bindingsandbox_warnings_json");

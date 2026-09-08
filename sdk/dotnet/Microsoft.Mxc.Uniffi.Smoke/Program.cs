@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using Microsoft.Mxc.Sdk.Uniffi;
+using Microsoft.Mxc.Sdk.Interop;
 
 if (!System.Text.RegularExpressions.Regex.IsMatch(MxcNative.Version(), @"^\d+\.\d+\.\d+"))
 {
@@ -15,21 +15,21 @@ if (!discovery.AvailableBackendsJson.StartsWith('[') ||
     throw new InvalidOperationException("Generated discovery returned invalid JSON.");
 }
 
-AssertMalformed(() => MxcNative.RunSync("{"));
-await AssertMalformedAsync(() => MxcNative.Run("{"));
-AssertMalformed(() => MxcNative.StateAwareSync("{", true, true));
-await AssertMalformedAsync(() => MxcNative.StateAware("{", true, true));
+AssertMalformed(() => MxcNative.Run("{"));
+await AssertMalformedAsync(() => MxcNative.RunAsync("{"));
+AssertMalformed(() => MxcNative.StateAware("{", true, true));
+await AssertMalformedAsync(() => MxcNative.StateAwareAsync("{", true, true));
 
 var request =
     """{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c \"echo generated-sdk & exit /b 19\""}""";
-var syncResult = MxcNative.RunSync(request);
-var asyncResult = await MxcNative.Run(request);
+var syncResult = MxcNative.Run(request);
+var asyncResult = await MxcNative.RunAsync(request);
 if (syncResult.ExitCode != 19 || asyncResult.ExitCode != 19)
 {
     throw new InvalidOperationException("Generated run APIs returned the wrong exit code.");
 }
 
-using var sandbox = await MxcNative.Spawn(
+using var sandbox = await MxcNative.SpawnAsync(
     """{"policy":{"version":"0.8.0-alpha"},"command":"cmd /c set /p X="}""");
 using var input = sandbox.TakeStdin()
     ?? throw new InvalidOperationException("Expected an owned stdin stream.");
@@ -38,11 +38,11 @@ if (sandbox.TakeStdin() is not null)
     throw new InvalidOperationException("Stdin must be take-once.");
 }
 
-var waiting = sandbox.Wait();
+var waiting = sandbox.WaitAsync();
 await Task.Delay(200);
 try
 {
-    await sandbox.Kill();
+    await sandbox.KillAsync();
     throw new InvalidOperationException("Concurrent kill should report a busy handle.");
 }
 catch (BindingException error) when (

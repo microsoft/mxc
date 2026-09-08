@@ -16,7 +16,7 @@ flowchart TD
 ```
 
 The generated ABI is compiled into `mxc_ffi`. UniFFI replaces the handwritten flat C projection rather than adding
-another native library. The existing C exports coexist in that library only during compatibility migration.
+another native library. The C# SDK has not shipped, so the old projection does not require compatibility preservation.
 
 ## Pinned toolchain
 
@@ -98,11 +98,10 @@ Both generators throw the same object model. This avoids duplicating the closed 
 Panics are caught before returning to UniFFI. A panic becomes a structured `panic` failure; it never unwinds into Node
 or the CLR.
 
-## Legacy C migration
+## Legacy C replacement
 
-The shipping C# SDK initially keeps using the existing C exports from `mxc_ffi`, while generated clients use UniFFI
-exports from that same binary. After public API, behavior, packaging, and performance parity are proven, the C#
-facade moves to generated bindings and the flat C exports plus csbindgen generation are removed.
+Adoption removes the flat C exports and csbindgen generation from `mxc_ffi`. The prototype keeps them temporarily to
+compare behavior with existing tests, not as a migration promise or supported ABI.
 
 ## Known generator risks
 
@@ -116,6 +115,6 @@ facade moves to generated bindings and the flat C exports plus csbindgen generat
 
 - One Rust export model generates both foreign SDKs.
 - Both SDKs load the same library and pass the same real-library scenarios.
-- One `mxc_ffi` library serves migration and remains after legacy C export removal.
+- One `mxc_ffi` library remains after the legacy C projection is removed.
 - Regeneration is deterministic and checked in CI.
 - ABI metadata and generated API snapshots are reviewed on every surface change.

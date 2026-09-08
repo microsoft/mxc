@@ -3,8 +3,8 @@
 This prototype loads `mxc_ffi` directly into Node through the generic `@ubjs/node` N-API runtime. It has no
 MXC-specific C++, native addon, subprocess, daemon, RPC layer, or WebAssembly module.
 
-The same library temporarily retains the legacy flat C exports used by the shipping C# SDK. UniFFI replaces that
-handwritten projection after compatibility migration; MXC does not ship a second Rust library.
+The target design replaces the legacy flat C projection rather than preserving it as a compatibility contract. The
+prototype keeps those exports only so existing tests can compare both paths before the architecture is adopted.
 
 ## Regenerate
 

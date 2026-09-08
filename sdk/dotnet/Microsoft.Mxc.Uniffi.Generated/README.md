@@ -8,5 +8,4 @@ dotnet run --project sdk\dotnet\Microsoft.Mxc.Uniffi.Smoke
 ```
 
 The generated project loads the Rust dynamic library directly through generated P/Invoke. Do not edit the generated
-C# file. The library also carries temporary legacy C exports during migration; UniFFI replaces those exports rather
-than introducing another native library.
+C# file. UniFFI replaces the legacy flat C projection rather than introducing another native library.

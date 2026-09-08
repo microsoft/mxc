@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use futures_channel::oneshot;
 use mxc_sdk::{
-    available_backends, build_request_from_json, exec_attached, exec_sandbox, platform_support,
-    run as sdk_run, run_state_aware_json, spawn_sandbox, Error, Output, Sandbox, WaitOutcome,
+    available_backends, build_request_from_json, exec_attached as sdk_exec_attached, exec_sandbox,
+    platform_support, run as sdk_run, run_state_aware_json, spawn_sandbox, Error, Output, Sandbox,
+    WaitOutcome,
 };
 
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
@@ -198,31 +199,31 @@ pub fn discover() -> BindingResult<Discovery> {
 
 /// Runs a sandbox to completion on the calling thread.
 #[uniffi::export]
-pub fn run_sync(request_json: String) -> BindingResult<RunResult> {
+pub fn run(request_json: String) -> BindingResult<RunResult> {
     protect(|| run_impl(&request_json))
 }
 
 /// Runs a sandbox to completion without blocking the foreign runtime thread.
 #[uniffi::export]
-pub async fn run(request_json: String) -> BindingResult<RunResult> {
+pub async fn run_async(request_json: String) -> BindingResult<RunResult> {
     blocking(move || run_impl(&request_json)).await
 }
 
 /// Spawns a live sandbox process on the calling thread.
 #[uniffi::export]
-pub fn spawn_sync(request_json: String) -> BindingResult<Arc<BindingSandbox>> {
+pub fn spawn(request_json: String) -> BindingResult<Arc<BindingSandbox>> {
     protect(|| spawn_impl(&request_json))
 }
 
 /// Spawns a live sandbox process without blocking the foreign runtime thread.
 #[uniffi::export]
-pub async fn spawn(request_json: String) -> BindingResult<Arc<BindingSandbox>> {
+pub async fn spawn_async(request_json: String) -> BindingResult<Arc<BindingSandbox>> {
     blocking(move || spawn_impl(&request_json)).await
 }
 
 /// Executes a state-aware phase and returns its response envelope JSON.
 #[uniffi::export]
-pub fn state_aware_sync(
+pub fn state_aware(
     request_json: String,
     dry_run: bool,
     experimental: bool,
@@ -232,7 +233,7 @@ pub fn state_aware_sync(
 
 /// Executes a state-aware phase without blocking the foreign runtime thread.
 #[uniffi::export]
-pub async fn state_aware(
+pub async fn state_aware_async(
     request_json: String,
     dry_run: bool,
     experimental: bool,
@@ -242,19 +243,22 @@ pub async fn state_aware(
 
 /// Executes a state-aware command with live streams on the calling thread.
 #[uniffi::export]
-pub fn exec_sync(request_json: String, experimental: bool) -> BindingResult<Arc<BindingSandbox>> {
+pub fn exec(request_json: String, experimental: bool) -> BindingResult<Arc<BindingSandbox>> {
     protect(|| exec_impl(&request_json, experimental))
 }
 
 /// Executes a state-aware command with live streams off the runtime thread.
 #[uniffi::export]
-pub async fn exec(request_json: String, experimental: bool) -> BindingResult<Arc<BindingSandbox>> {
+pub async fn exec_async(
+    request_json: String,
+    experimental: bool,
+) -> BindingResult<Arc<BindingSandbox>> {
     blocking(move || exec_impl(&request_json, experimental)).await
 }
 
 /// Executes a state-aware command on the caller's terminal.
 #[uniffi::export]
-pub fn exec_attached_sync(request_json: String, experimental: bool) -> BindingResult<WaitResult> {
+pub fn exec_attached(request_json: String, experimental: bool) -> BindingResult<WaitResult> {
     protect(|| exec_attached_impl(&request_json, experimental))
 }
 
@@ -327,22 +331,22 @@ impl BindingSandbox {
     }
 
     /// Waits for process completion on the calling thread.
-    pub fn wait_sync(&self) -> BindingResult<WaitResult> {
+    pub fn wait(&self) -> BindingResult<WaitResult> {
         protect(|| wait_impl(self))
     }
 
     /// Waits for process completion without blocking the foreign runtime thread.
-    pub async fn wait(self: Arc<Self>) -> BindingResult<WaitResult> {
+    pub async fn wait_async(self: Arc<Self>) -> BindingResult<WaitResult> {
         blocking(move || wait_impl(&self)).await
     }
 
     /// Requests process termination on the calling thread.
-    pub fn kill_sync(&self) -> BindingResult<()> {
+    pub fn kill(&self) -> BindingResult<()> {
         protect(|| kill_impl(self))
     }
 
     /// Requests process termination without blocking the foreign runtime thread.
-    pub async fn kill(self: Arc<Self>) -> BindingResult<()> {
+    pub async fn kill_async(self: Arc<Self>) -> BindingResult<()> {
         blocking(move || kill_impl(&self)).await
     }
 
@@ -362,22 +366,22 @@ impl BindingSandbox {
 #[uniffi::export]
 impl BindingInput {
     /// Writes bytes to stdin on the calling thread.
-    pub fn write_sync(&self, data: Vec<u8>) -> BindingResult<u64> {
+    pub fn write(&self, data: Vec<u8>) -> BindingResult<u64> {
         protect(|| write_impl(self, &data))
     }
 
     /// Writes bytes to stdin without blocking the foreign runtime thread.
-    pub async fn write(self: Arc<Self>, data: Vec<u8>) -> BindingResult<u64> {
+    pub async fn write_async(self: Arc<Self>, data: Vec<u8>) -> BindingResult<u64> {
         blocking(move || write_impl(&self, &data)).await
     }
 
     /// Flushes stdin on the calling thread.
-    pub fn flush_sync(&self) -> BindingResult<()> {
+    pub fn flush(&self) -> BindingResult<()> {
         protect(|| flush_impl(self))
     }
 
     /// Flushes stdin without blocking the foreign runtime thread.
-    pub async fn flush(self: Arc<Self>) -> BindingResult<()> {
+    pub async fn flush_async(self: Arc<Self>) -> BindingResult<()> {
         blocking(move || flush_impl(&self)).await
     }
 }
@@ -385,12 +389,12 @@ impl BindingInput {
 #[uniffi::export]
 impl BindingOutput {
     /// Reads at most 64 KiB on the calling thread.
-    pub fn read_sync(&self) -> BindingResult<Vec<u8>> {
+    pub fn read(&self) -> BindingResult<Vec<u8>> {
         protect(|| read_impl(self))
     }
 
     /// Reads at most 64 KiB without blocking the foreign runtime thread.
-    pub async fn read(self: Arc<Self>) -> BindingResult<Vec<u8>> {
+    pub async fn read_async(self: Arc<Self>) -> BindingResult<Vec<u8>> {
         blocking(move || read_impl(&self)).await
     }
 }
@@ -430,7 +434,7 @@ fn exec_impl(request_json: &str, experimental: bool) -> BindingResult<Arc<Bindin
 }
 
 fn exec_attached_impl(request_json: &str, experimental: bool) -> BindingResult<WaitResult> {
-    exec_attached(request_json, experimental)
+    sdk_exec_attached(request_json, experimental)
         .map(wait_result)
         .map_err(binding_error)
 }
@@ -602,7 +606,7 @@ mod tests {
 
     #[test]
     fn malformed_request_keeps_structured_error() {
-        let error = run_sync("{".to_string()).expect_err("request must fail");
+        let error = run("{".to_string()).expect_err("request must fail");
 
         assert_eq!(error.code(), "malformed_request");
         assert!(!error.message().is_empty());

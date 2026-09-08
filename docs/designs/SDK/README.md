@@ -34,7 +34,7 @@ It does not yet replace:
 - `mxc_engine`
 - containment backends
 
-Legacy C exports remain in `mxc_ffi` only while the shipping C# SDK migrates, then are removed.
+The C# SDK has not shipped, so adoption removes the legacy C exports and csbindgen path without a compatibility period.
 
 ## Ownership
 
@@ -62,18 +62,47 @@ arbitrary Rust types. It only converts values, synchronizes handles, catches pan
 
 ## API naming
 
-Align operation semantics while following each language's naming conventions:
+Use the base operation name for synchronous functions and an `Async` suffix for asynchronous functions:
 
 | Behavior | Rust | Node | .NET |
 |---|---|---|---|
-| Run to completion | `run` / `run_async` | `runSync` / `run` | `Run` / `RunAsync` |
-| Spawn live process | `spawn` / `spawn_async` | `spawnSync` / `spawn` | `Spawn` / `SpawnAsync` |
-| Wait | `wait` / `wait_async` | `waitSync` / `wait` | `Wait` / `WaitAsync` |
-| Kill | `kill` / `kill_async` | `killSync` / `kill` | `Kill` / `KillAsync` |
+| Run to completion | `run` / `run_async` | `run` / `runAsync` | `Run` / `RunAsync` |
+| Spawn live process | `spawn` / `spawn_async` | `spawn` / `spawnAsync` | `Spawn` / `SpawnAsync` |
+| Wait | `wait` / `wait_async` | `wait` / `waitAsync` | `Wait` / `WaitAsync` |
+| Kill | `kill` / `kill_async` | `kill` / `killAsync` | `Kill` / `KillAsync` |
 
-Node follows its ecosystem convention by reserving the `Sync` suffix for event-loop-blocking calls. The .NET facade
-uses the established synchronous name plus `Async` suffix. Public facades are required and delegate without changing
-semantics.
+Public facades preserve these names and delegate without changing semantics.
+
+## Authoring impact
+
+| Change | Handwritten locations after adoption |
+|---|---|
+| Backend behavior | Backend plus `mxc_engine` integration |
+| Callable SDK operation | `mxc-sdk` plus a thin UniFFI export in `mxc_ffi` |
+| Result or error field | Rust result/projection record; regenerate Node and C# |
+| Policy or schema field | Rust wire/parser/domain; regenerate schema-derived Node and C# models |
+
+Schema-derived public model generation is a follow-up decision. Until it is implemented, policy changes still require
+manual Node and C# model updates and the repository has not reached the intended maintenance state.
+
+## Expected maintenance effect
+
+These are planning estimates, not measured delivery-time guarantees:
+
+| Adoption stage | Estimated recurring cross-SDK maintenance reduction | What is eliminated |
+|---|---:|---|
+| UniFFI projection only | 40-60% | Handwritten C ABI, P/Invoke, N-API glue, async bridge, and foreign object plumbing |
+| UniFFI plus schema-derived public models | 60-75% | Most repeated Node and C# policy/request model edits |
+
+The remaining work is the work that should stay explicit: implementing behavior once in Rust, designing the safe
+interop shape, preserving language-native facade semantics, and testing each supported runtime. A time study over
+several representative feature changes should replace these estimates before using them for staffing commitments.
+
+## Decision status
+
+The prototype proves one native Rust library can generate and serve both language bindings. Production adoption still
+requires bounded async scheduling, interruptible streams, kill-during-wait behavior, typed state-aware parity,
+cross-platform packaging, generated public-model evaluation, and API compatibility gates.
 
 ## Documents
 
@@ -86,7 +115,7 @@ semantics.
 The prototype is intentionally production-shaped:
 
 - `src/ffi/mxc_ffi` exports UniFFI discovery, run, live process, streams, and state-aware operations.
-- The same library retains legacy C exports only for compatibility migration.
+- Legacy C exports remain in the prototype only for comparison and are not part of the target design.
 - `scripts/generate-uniffi-bindings.ps1` pins both generators and regenerates both SDKs.
 - `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
 - `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.
