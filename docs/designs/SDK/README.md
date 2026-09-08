@@ -57,12 +57,18 @@ implementation are removed while the public behavior remains.
 Conversion in `mxc_ffi` is mechanical mapping from `mxc-sdk` values to UniFFI-safe records and objects. It does not
 parse policy or reinterpret results.
 
-## One operation
+The public facades do not wrap every generated type. Stable public values keep product-owned names; Node may reuse
+identical generated records structurally, .NET maps records to keep generated namespaces internal, and owned
+sandbox/stream objects use wrappers. Policy and config stay typed in the public SDKs and serialize to JSON at the
+binding boundary, with a raw config/JSON overload for newer schema fields. See
+[Public type policy](node-dotnet-sdk-generation.md#public-type-policy).
+
+## One callable operation
 
 ```mermaid
 flowchart TD
-    A[Implement safe operation in mxc-sdk]
-    A --> B[Expose thin operation in mxc_ffi UniFFI module]
+    A[Implement safe callable operation in mxc-sdk]
+    A --> B[Expose thin callable operation in mxc_ffi UniFFI module]
     B --> M[UniFFI metadata in dynamic library]
     M --> N[Generate internal TypeScript]
     M --> D[Generate internal C#]
@@ -75,7 +81,7 @@ arbitrary Rust types. It only converts values, synchronizes handles, catches pan
 
 ## API naming
 
-Use the base operation name for synchronous functions and an `Async` suffix for asynchronous functions:
+Use the base callable operation name for synchronous functions and an `Async` suffix for asynchronous functions:
 
 | Behavior | Rust | Node | .NET |
 |---|---|---|---|
@@ -93,7 +99,7 @@ Public facades preserve these names and delegate without changing semantics.
 | Backend behavior | Backend plus `mxc_engine` integration |
 | Callable SDK operation | `mxc-sdk`, one UniFFI export, and thin Node/.NET public facade methods |
 | Result or error field | Rust projection record plus any public facade mapping; regenerate Node and C# |
-| Policy or schema field | Existing Rust and manual Node/.NET model updates; unchanged by this proposal |
+| Policy or schema field | Existing typed public models and JSON serialization; unchanged by this proposal |
 
 ## Versioning and changelogs
 
@@ -126,7 +132,7 @@ in the table.
 
 The prototype is intentionally production-shaped:
 
-- `src/ffi/mxc_ffi` exports UniFFI discovery, run, live process, streams, and state-aware operations.
+- `src/ffi/mxc_ffi` exports UniFFI discovery, run, live process, stream, and state-aware callable operations.
 - `scripts/generate-uniffi-bindings.ps1` pins both generators and regenerates both SDKs.
 - `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
 - `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.

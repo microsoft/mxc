@@ -11,14 +11,15 @@ idiomatic APIs; the generated surface remains internal.
 |---|---:|---|
 | Rust public SDK | No | `mxc-sdk` behavior and safe API |
 | Rust projection | No | Thin UniFFI exports and safe value conversion in `mxc_ffi` |
-| Node internal binding | Yes | None per generated operation |
-| .NET internal binding | Yes | None per generated operation |
+| Node internal binding | Yes | None per generated callable operation |
+| .NET internal binding | Yes | None per generated callable operation |
 | Node public SDK | No | Names, re-exports, and stream adapters |
 | .NET public SDK | No | Names, re-exports, and .NET-specific adapters |
-| Node/.NET policy models | Not yet | Handwritten until schema-derived generation is implemented |
+| Node/.NET policy models | No change | Existing typed models and JSON serialization |
 
-Adding a public operation therefore changes Rust behavior, one Rust UniFFI export, and normally one forwarding method
-in each public foreign facade. UniFFI generates the foreign calls, records, object plumbing, and async bridge.
+Adding a public callable operation therefore changes Rust behavior, one Rust UniFFI export, and normally one
+forwarding method in each public foreign facade. UniFFI generates the foreign calls, records, object plumbing, and
+async bridge.
 
 ## Node
 
@@ -37,7 +38,7 @@ conversions. The generic `@ubjs/node` N-API addon opens `mxc_ffi` and calls it t
 [node]: https://jhugman.github.io/uniffi-bindgen-react-native/reference/nodejs.html
 
 The generated TypeScript is bundled because upstream currently emits extensionless internal imports while MXC targets
-ESM. This is packaging, not an operation-specific adapter.
+ESM. This is packaging, not a callable operation adapter.
 
 ## .NET
 
@@ -52,19 +53,36 @@ flowchart LR
 [`uniffi-bindgen-cs`](https://github.com/NordSecurity/uniffi-bindgen-cs) generates records, owned objects, async Task
 plumbing, disposal, checksums, and P/Invoke from the same library metadata.
 
-The public facade exposes `Run` and `RunAsync`, matching the generated operation names.
+The public facade exposes `Run` and `RunAsync`, matching the generated callable operation names.
 
 ## Projected surface
 
 | Family | Generated internal surface |
 |---|---|
 | Discovery | Version and platform-support functions and records |
-| Run to completion | Sync/async operations, result record, and structured error |
+| Run to completion | Sync/async callable operations, result record, and structured error |
 | Live process | Sandbox object, take-once streams, poll, wait, and process termination |
-| State-aware lifecycle | Provision, start, exec, stop, and deprovision operations |
+| State-aware lifecycle | Provision, start, exec, stop, and deprovision callable operations |
 
 The public Node and .NET facades rename these internal generated types where needed but do not reimplement their
 behavior.
+
+## Public type policy
+
+The public facades do not wrap every generated type. Use the smallest boundary that keeps generator details out of the
+public API:
+
+| Type category | Public treatment | Binding treatment |
+|---|---|---|
+| Stable results and errors | Public product-named type | Generated record/error mapped by the facade |
+| Plain Node records with an identical shape | Public interface or type alias | Reused structurally; no runtime copy |
+| .NET records returned by generated code | Public record or class | Mapped to keep generated namespaces internal |
+| Sandboxes, streams, and other owned objects | Public wrapper | Delegates to generated object and controls disposal |
+| Policy, request, and config inputs | Typed models plus a raw config/JSON overload | Serialized to JSON before the UniFFI call |
+
+The JSON boundary is for evolving request/config data, not for every API value. Results, errors, discovery records,
+wait results, and owned process/stream handles remain typed across the binding. Raw config allows a caller to use a new
+schema field before a convenience model adds it; typed policy APIs remain the normal entry point.
 
 ## API alignment
 
@@ -130,7 +148,7 @@ sequenceDiagram
     participant W as Rust worker thread
     participant S as mxc-sdk
     A->>F: runAsync(...)
-    F->>W: Start blocking operation
+    F->>W: Start blocking callable operation
     W->>S: mxc_sdk::run
     F-->>A: Promise or Task remains pending
     S-->>W: Result
@@ -161,13 +179,13 @@ Node and .NET tests run against the real library and verify:
 5. live process ownership
 6. take-once stdin, stdout, and stderr
 7. stream read, write, and flush
-8. `kill` terminates the process while `waitAsync` is pending, plus defined behavior for conflicting stream operations
+8. `kill` terminates the process while `waitAsync` is pending, plus defined behavior for conflicting stream calls
 
 ## Before switching Node and .NET to the generated bindings
 
 - Run generated SDK scenarios on Windows, Linux, and macOS where supported.
 - Repeatedly create, use, cancel, and dispose async calls, streams, and processes without leaks or deadlocks.
 - Make CI identify changes to public facades and the generated/native contract.
-- Package one native library per target without changing generated operation code.
+- Package one native library per target without changing generated callable operation code.
 - Confirm generated calls return the same results, errors, streams, and process behavior as the Rust SDK.
 - Remove the previous interop generation path.

@@ -42,7 +42,7 @@ Keep a crate when one of the rules below applies. Otherwise, prefer a private mo
 Do not merge boundaries when that would create a dependency cycle or make backend-independent code depend on a
 backend. Preserve platform feature gating and test selection; package count alone is not a success metric.
 
-## Operation families
+## Callable API families
 
 ```mermaid
 flowchart TD
@@ -94,7 +94,8 @@ The UniFFI module in `mxc_ffi` may:
 - convert `mxc_sdk::Error` to a structured projected error
 - contain panics before they cross the generated ABI
 
-It may not validate policy, select a backend, reinterpret results, or maintain another operation implementation.
+It may not validate policy, select a backend, reinterpret results, or maintain another callable operation
+implementation.
 
 ## Synchronous and asynchronous behavior
 
@@ -117,7 +118,7 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 ### Concurrency limitation to resolve
 
 The initial `mxc_ffi` wrapper places each sandbox and stream behind a Rust `Mutex`. MXC's `lock_handle` helper uses
-`try_lock`; UniFFI, Node, .NET, and `mxc-sdk` do not provide this behavior. A conflicting operation therefore returns a
+`try_lock`; UniFFI, Node, .NET, and `mxc-sdk` do not provide this behavior. A conflicting call therefore returns a
 typed busy error instead of blocking the foreign runtime thread.
 
 This is a current limitation, not the intended public contract. `wait` holds the sandbox mutex until the process exits,
@@ -126,7 +127,7 @@ wait and termination operations, and Node/.NET tests must prove that `kill` work
 
 ## Rules the implementation must preserve
 
-- Every projected operation immediately delegates to `mxc-sdk`.
+- Every projected callable operation immediately delegates to `mxc-sdk`.
 - Rust behavior tests define the expected result.
 - Rust callers retain direct typed APIs.
 - No backend dependency is introduced into `mxc_ffi`.
