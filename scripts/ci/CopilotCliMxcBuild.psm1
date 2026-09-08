@@ -137,7 +137,11 @@ function Enter-MsvcBuildEnvironment {
         throw 'vswhere.exe not found. Visual Studio is required for MSVC builds.'
     }
 
-    $installPath = & $vswhere -latest -property installationPath 2>&1
+    $installPath = & $vswhere `
+        -latest `
+        -products * `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath 2>&1
     if (-not $installPath -or -not (Test-Path $installPath)) {
         throw 'vswhere found no Visual Studio installation.'
     }
