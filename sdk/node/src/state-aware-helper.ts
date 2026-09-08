@@ -109,7 +109,8 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   const hasInheritDefaultEnv =
     typeof process === 'object' &&
     process !== null &&
-    Object.prototype.hasOwnProperty.call(process, 'inheritDefaultEnv');
+    Object.prototype.hasOwnProperty.call(process, 'inheritDefaultEnv') &&
+    (process as Record<string, unknown>).inheritDefaultEnv !== undefined;
   const requires09 = hasTelemetry || hasInheritDefaultEnv;
   const version = suppliedVersion || (requires09 ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
   if (requires09 && suppliedVersion) {

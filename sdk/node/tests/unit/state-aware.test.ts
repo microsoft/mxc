@@ -63,6 +63,22 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.version, '0.9.0-alpha');
   });
 
+  it('does not select schema 0.9 when environment inheritance is undefined', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        version: '0.8.0-alpha',
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: undefined,
+        },
+      },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
+  });
+
   it('rejects inherited environments with an explicitly older schema version', () => {
     assert.throws(
       () => buildStateAwareEnvelope({

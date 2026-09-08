@@ -90,9 +90,11 @@ pub fn diagnose_missing_required_env(
              the variable(s) Windows requires to be present: {}. \
              MXC started from your `process.env` ({described}) and does not inject these \
              required Windows variables. \
-             Add the missing variable(s) to `process.env` — any value will do, the check is \
-             presence-only — or omit `process.env` entirely to get the default user \
-             environment (ERROR_ENVVAR_NOT_FOUND, 203).",
+             Set `process.inheritDefaultEnv` to true to layer `process.env` on the default \
+             user environment. Alternatively, add the missing variable(s) to `process.env` \
+             — any value will do, the check is presence-only — or omit `process.env` \
+             entirely to use the default user environment \
+             (ERROR_ENVVAR_NOT_FOUND, 203).",
             missing.join(", ")
         ),
     })
@@ -416,6 +418,9 @@ mod tests {
         assert!(diag.message.contains("started from your `process.env`"));
         assert!(diag.message.contains("does not inject"));
         assert!(diag.message.contains("1 variable(s)"));
+        assert!(diag
+            .message
+            .contains("Set `process.inheritDefaultEnv` to true"));
     }
 
     #[test]
