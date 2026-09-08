@@ -159,9 +159,10 @@ The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
 
-The developer directory is whatever `DEVELOPER_DIR` or `xcode-select` points
-at. Many `/usr/bin` tools (`python3`, `git`) are `xcrun` shims that load
-`libxcrun.dylib` from there, so without it they fail to start on an
+The developer directory is whatever the root-owned `xcode-select` symlink
+points at; the `DEVELOPER_DIR` environment variable is ignored.
+Many `/usr/bin` tools (`python3`, `git`) are `xcrun` shims
+that load `libxcrun.dylib` from there, so without it they fail to start on an
 Xcode-selected host. It is read-only, and `deniedPaths` still overrides it.
 
 SIP-protected paths stay unwritable no matter what you put in

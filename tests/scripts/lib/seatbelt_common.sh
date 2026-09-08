@@ -55,9 +55,24 @@ trap 'rm -rf "$SEATBELT_TMP"' EXIT
 # developer directory, so it cannot start unless that path is readable. The
 # baseline covers /Library/Developer/CommandLineTools via its /Library grant
 # but not /Applications/Xcode*.app, so probe configs grant this explicitly and
-# measure their own subject on either kind of host.
-DEVDIR="$(xcode-select -p 2>/dev/null || true)"
+# measure their own subject on either kind of host. An Xcode developer
+# directory is widened to its .app bundle, matching the backend's own rule:
+# xcrun dispatches to xcodebuild, which loads frameworks from a sibling of
+# Contents/Developer. Resolved from the root-owned symlinks rather than
+# `xcode-select -p`, which honors the DEVELOPER_DIR override the backend
+# deliberately ignores.
+DEVDIR=""
+for _link in /var/db/xcode_select_link /private/var/select/developer_dir; do
+    _target="$(readlink "$_link" 2>/dev/null || true)"
+    if [ -n "$_target" ] && [ -d "$_target" ]; then DEVDIR="$_target"; break; fi
+done
 [ -n "$DEVDIR" ] || DEVDIR="/Library/Developer/CommandLineTools"
+case "$DEVDIR" in
+    */Contents/Developer)
+        _bundle="${DEVDIR%/Contents/Developer}"
+        case "$_bundle" in *.app) DEVDIR="$_bundle" ;; esac
+        ;;
+esac
 
 # Confirm the probe interpreter actually runs inside a sandbox before any
 # suite trusts a python3-based verdict. Without this a broken interpreter
