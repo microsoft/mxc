@@ -91,9 +91,14 @@ Node is native and in-process.
 | New target package | Native-library staging and package metadata | Callable operation bindings remain unchanged |
 
 For a normal behavior fix, no binding code changes. For a new projected callable operation, the operation-specific
-native interop code is in Rust and the public facades add only forwarding or adaptation. MXC does not write C or C++
-source, a Node-API addon, P/Invoke declarations, native symbol registration, foreign future polling, or foreign object
-lifetime plumbing.
+native interop code is in Rust and the public facades add only forwarding or adaptation. MXC does not write:
+
+- C or C++ source
+- a Node-API addon
+- P/Invoke declarations
+- native symbol registration
+- foreign future polling
+- foreign object lifetime plumbing
 
 ## Error boundary
 
