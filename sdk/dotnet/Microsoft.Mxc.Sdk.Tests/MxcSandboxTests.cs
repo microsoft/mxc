@@ -462,6 +462,7 @@ public class MxcSandboxTests
             ContainerName = "test-container",
             WorkingDirectory = @"C:\work",
             Experimental = true,
+            InheritDefaultEnvironment = true,
             Environment =
             {
                 ["GREETING"] = "hello",
@@ -476,6 +477,7 @@ public class MxcSandboxTests
         Assert.Equal("test-container", root.GetProperty("containerName").GetString());
         Assert.Equal(@"C:\work", root.GetProperty("workingDirectory").GetString());
         Assert.Equal("hello", root.GetProperty("environment").GetProperty("GREETING").GetString());
+        Assert.True(root.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.True(root.GetProperty("experimental").GetBoolean());
     }
 

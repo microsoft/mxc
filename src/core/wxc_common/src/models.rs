@@ -971,8 +971,32 @@ pub struct ExecutionRequest {
     pub schema_version: String,
     /// Externally assigned container identifier.
     pub container_id: String,
-    /// Environment variables as "KEY=VALUE" strings (from process.env).
-    pub env: Vec<String>,
+    /// Environment variables as "KEY=VALUE" strings (from `process.env`).
+    ///
+    /// Three states, deliberately distinct:
+    ///
+    /// * `None` — the caller supplied no environment. Backends provide a
+    ///   default: on Windows, the user's profile block.
+    /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
+    ///   not the same as `None`, and on the Windows process container it is
+    ///   expected to fail at process creation, because the OS requires certain
+    ///   names to be present (see `REQUIRED_CHILD_ENV_VARS`).
+    /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
+    ///   not add to it; callers that want the profile block or the calling
+    ///   process's variables must merge them in themselves.
+    ///
+    /// The distinction is currently honored only by the Windows process
+    /// container. The LXC, Bubblewrap, Seatbelt, and WSLc backends treat `None`
+    /// and `Some(vec![])` alike, as they did before the field became optional.
+    pub env: Option<Vec<String>>,
+
+    /// Layer [`ExecutionRequest::env`] on top of the backend's default
+    /// environment instead of replacing it (from `process.inheritDefaultEnv`).
+    ///
+    /// Only meaningful when `env` is `Some`: with `None` the child already gets
+    /// the default. Only the Windows process container has a non-empty default
+    /// (the user's profile block), so elsewhere this is inert.
+    pub inherit_default_env: bool,
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
@@ -1023,6 +1047,22 @@ pub struct ResolvedWorkingDirectory<'a> {
 }
 
 impl ExecutionRequest {
+    /// The caller's environment entries, with "not supplied" and "supplied but
+    /// empty" flattened to the same empty slice.
+    ///
+    /// For backends that build the child's environment additively from a
+    /// cleared base — LXC, Bubblewrap, Seatbelt, WSLc — the two cases are
+    /// already indistinguishable in the result, so they use this and keep the
+    /// behavior they had before [`ExecutionRequest::env`] became optional.
+    ///
+    /// The Windows process container must *not* use this: there, `None` means
+    /// "give the child the user's profile block" and `Some(vec![])` means "give
+    /// the child nothing", which are very different outcomes. It matches on
+    /// [`ExecutionRequest::env`] directly.
+    pub fn env_entries(&self) -> &[String] {
+        self.env.as_deref().unwrap_or(&[])
+    }
+
     /// Resolve the working directory for the sandboxed child: an explicit
     /// `working_directory`, else the first filesystem-policy grant that is an
     /// existing directory (`readwrite` paths before `readonly` ones), else

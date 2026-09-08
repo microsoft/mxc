@@ -280,6 +280,7 @@ public static class MxcSandbox
             ContainerName = request.ContainerName,
             WorkingDirectory = request.WorkingDirectory,
             Environment = new Dictionary<string, string>(request.Environment),
+            InheritDefaultEnvironment = request.InheritDefaultEnvironment,
             Experimental = request.Experimental,
         };
     }

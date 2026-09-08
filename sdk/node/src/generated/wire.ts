@@ -359,8 +359,16 @@ export interface Process {
   cwd?: string | null;
   /**
    * Environment variables as `"KEY=VALUE"` strings.
+   * 
+   * Omit the field to give the child the backend's default environment (on Windows, the user's profile block). Supply it — including as an empty array — and it is used verbatim; MXC adds nothing to it unless `inheritDefaultEnv` is set.
    */
   env?: string[] | null;
+  /**
+   * Start from the backend's default environment and layer `env` on top of it, rather than replacing it (default false).
+   * 
+   * This exists because the default environment is not something a caller can assemble: on Windows it is the user's profile block, which only the OS can produce. Entries in `env` override same-named defaults. Has no effect on backends whose default environment is empty, and none when `env` is omitted (that already yields the default).
+   */
+  inheritDefaultEnv?: boolean | null;
   /**
    * Wall-clock timeout in milliseconds.
    */

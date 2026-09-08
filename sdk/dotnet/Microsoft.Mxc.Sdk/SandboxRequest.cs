@@ -40,9 +40,33 @@ public sealed class SandboxRequest
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 
-    /// <summary>Environment variables supplied to the sandboxed process.</summary>
+    /// <summary>
+    /// Environment variables supplied to the sandboxed process.
+    /// </summary>
+    /// <remarks>
+    /// When non-empty, this is the child's environment and is used verbatim —
+    /// nothing is merged into it, so an environment missing what the platform
+    /// requires fails the launch. Set <see cref="InheritDefaultEnvironment"/>
+    /// to layer these on top of the default environment instead. Leaving the
+    /// dictionary empty gives the child the backend's default environment (on
+    /// Windows, the user's profile block).
+    /// </remarks>
     [JsonPropertyName("environment")]
     public Dictionary<string, string> Environment { get; set; } = new();
+
+    /// <summary>
+    /// Start from the backend's default environment and layer
+    /// <see cref="Environment"/> on top of it, rather than replacing it.
+    /// </summary>
+    /// <remarks>
+    /// Use this for "the usual environment, plus these": on Windows the
+    /// default is the user's profile block, which only the OS can produce, so
+    /// it cannot be assembled by a caller. This is a different set from the
+    /// calling process's own variables, which you can still add explicitly.
+    /// Has no effect when <see cref="Environment"/> is empty.
+    /// </remarks>
+    [JsonPropertyName("inheritDefaultEnv")]
+    public bool InheritDefaultEnvironment { get; set; }
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
     [JsonPropertyName("experimental")]

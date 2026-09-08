@@ -469,6 +469,7 @@ public class MxcLifecycleTests
                 {
                     WorkingDirectory = "/work",
                     Environment = new List<string> { "A=1", "B=two" },
+                    InheritDefaultEnvironment = true,
                     TimeoutMs = 1234,
                     Network = new WslcExecNetworkPolicy
                     {
@@ -484,6 +485,7 @@ public class MxcLifecycleTests
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
         Assert.Equal("B=two", process.GetProperty("env")[1].GetString());
+        Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.Equal(1234, process.GetProperty("timeout").GetInt32());
         var network = root.GetProperty("network");
         Assert.Equal(

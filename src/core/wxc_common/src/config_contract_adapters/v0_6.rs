@@ -31,6 +31,8 @@ fn convert_process(value: contract::Process) -> wire::Process {
         command_line: Some(command_line.into_inner()),
         cwd: cwd.into_option(),
         env: env.into_option(),
+        // The field postdates this released schema, so it is never set here.
+        inherit_default_env: None,
         timeout: timeout.into_option(),
     }
 }

@@ -52,8 +52,8 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
-    diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
-    is_environment_not_supported,
+    diagnose_create_process_failure, diagnose_environment_not_supported,
+    diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -86,6 +86,23 @@ use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
+/// Build the environment block handed to the contained child.
+///
+/// Honors the three states of [`ExecutionRequest::env`]:
+///
+/// * `None` — no environment supplied. The child gets a clean default user
+///   profile block (never the `wxc-exec` process's own variables). When the
+///   legacy one-shot SBOX API is in play and no proxy has to be injected, we
+///   return `Ok(None)` so the API supplies that default itself.
+/// * `Some(entries)` — the caller's environment, used **verbatim**. MXC adds
+///   nothing to it, including when `entries` is empty: an explicitly empty
+///   environment produces an empty block, not the default one. Proxy variables
+///   are still injected, because the proxy is enforced policy rather than
+///   inherited environment.
+///
+/// When `inherit_default_env` is set, `entries` is layered on top of the
+/// default block instead of replacing it, which is the supported way to ask for
+/// "the user's profile block plus these".
 fn build_child_env_block(
     request: &ExecutionRequest,
     use_process_security_environment: bool,
@@ -96,23 +113,23 @@ fn build_child_env_block(
         None
     };
 
-    let entries = if request.env.is_empty() {
-        if !use_process_security_environment && proxy_address.is_none() {
-            return Ok(None);
+    let entries = match request.env.as_deref() {
+        None => {
+            if !use_process_security_environment && proxy_address.is_none() {
+                return Ok(None);
+            }
+            let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
+            if let Some(address) = proxy_address {
+                crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
+            }
+            entries
         }
-        let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
-        if let Some(address) = proxy_address {
-            crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
+        Some(supplied) if request.inherit_default_env => {
+            crate::appcontainer_runner::build_inherited_entries(supplied, proxy_address)?
         }
-        entries
-    } else {
-        // A caller-supplied environment replaces the block wholesale, so top it up
-        // with the names the OS requires to create the container. Without this a
-        // sparse `process.env` fails with ERROR_ENVVAR_NOT_FOUND (203).
-        let mut entries =
-            crate::appcontainer_runner::build_explicit_entries(&request.env, proxy_address);
-        crate::appcontainer_runner::ensure_required_env_entries(&mut entries)?;
-        entries
+        Some(supplied) => {
+            crate::appcontainer_runner::build_explicit_entries(supplied, proxy_address)
+        }
     };
     Ok(Some(crate::appcontainer_runner::encode_env_block(&entries)))
 }
@@ -1751,11 +1768,14 @@ impl BaseContainerRunner {
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
             //
-            let diag = diagnose_create_process_failure(
-                err.0,
-                &request.script_code,
-                &request.policy.readonly_paths,
-            );
+            let diag =
+                diagnose_missing_required_env(err.0, request.env.as_deref()).unwrap_or_else(|| {
+                    diagnose_create_process_failure(
+                        err.0,
+                        &request.script_code,
+                        &request.policy.readonly_paths,
+                    )
+                });
 
             let mut extended_error = format!(
                 "{launch_api_name} failed: {err:?} (working directory: {})",
@@ -3871,7 +3891,7 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        request.env = vec!["PATH=C:\\Windows".to_string()];
+        request.env = Some(vec!["PATH=C:\\Windows".to_string()]);
 
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
@@ -3885,6 +3905,107 @@ mod tests {
         assert!(rendered.contains("PATH=C:\\Windows"));
         assert!(rendered.contains("HTTP_PROXY=http://127.0.0.1:8080"));
         assert!(rendered.contains("HTTPS_PROXY=http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn absent_env_yields_the_default_user_environment() {
+        // No caller environment: the child must get a populated default block,
+        // not an empty one.
+        let request = ExecutionRequest::default();
+        assert!(request.env.is_none());
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("PSEC always needs an explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+        assert!(
+            rendered.len() > 2,
+            "default block should carry the user profile variables"
+        );
+    }
+
+    #[test]
+    fn absent_env_defers_to_the_sbox_api_default() {
+        // The legacy one-shot API supplies its own default when handed NULL,
+        // and there is no proxy to inject, so we pass NULL rather than
+        // building a block ourselves.
+        let request = ExecutionRequest::default();
+        assert!(build_child_env_block(&request, false)
+            .expect("environment")
+            .is_none());
+    }
+
+    #[test]
+    fn explicitly_empty_env_yields_an_empty_block_not_the_default() {
+        // `"env": []` is a request for an empty environment. It must not be
+        // silently upgraded to the default profile block, and it must not
+        // become NULL (which the SBOX API reads as "give me the default").
+        let request = ExecutionRequest {
+            env: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        for psec in [true, false] {
+            let environment = build_child_env_block(&request, psec)
+                .expect("environment")
+                .expect("an explicitly empty env must still produce a block");
+            assert_eq!(
+                environment.len(),
+                1,
+                "an empty block is just the terminator"
+            );
+            assert_eq!(environment, vec![0u16]);
+        }
+    }
+
+    #[test]
+    fn supplied_env_is_used_verbatim() {
+        // MXC adds nothing to a caller-supplied environment -- notably not the
+        // variables Windows requires to be present. A caller that replaces the
+        // block owns its contents; a missing requirement surfaces as an
+        // actionable launch error instead.
+        let request = ExecutionRequest {
+            env: Some(vec!["MYVAR=hello".to_string()]),
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+
+        assert!(rendered.contains("MYVAR=hello"));
+        assert!(!rendered.to_ascii_uppercase().contains("SYSTEMROOT"));
+        assert!(!rendered.to_ascii_uppercase().contains("LOCALAPPDATA"));
+    }
+
+    #[test]
+    fn inherit_default_env_layers_the_caller_entries_on_the_default_block() {
+        // `inheritDefaultEnv` is how a caller asks for "the profile block plus
+        // these": the defaults must survive, and a caller entry must replace
+        // the same-named default rather than being appended alongside it.
+        let request = ExecutionRequest {
+            env: Some(vec![
+                "MYVAR=hello".to_string(),
+                "systemroot=C:\\Override".to_string(),
+            ]),
+            inherit_default_env: true,
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+
+        assert!(rendered.contains("MYVAR=hello"));
+        assert!(rendered.to_ascii_uppercase().contains("LOCALAPPDATA"));
+        assert!(rendered.contains("systemroot=C:\\Override"));
+        assert_eq!(
+            rendered.to_ascii_uppercase().matches("SYSTEMROOT=").count(),
+            1,
+            "a caller entry must replace the default, not duplicate it"
+        );
     }
 
     #[test]

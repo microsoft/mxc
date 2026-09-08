@@ -99,7 +99,8 @@ cannot mix both formats in one request.
                                            //  backend substitutes a granted directory rather
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
-        "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
+        "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
+        "inheritDefaultEnv": true,         // Layer env on the backend default (default false)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 

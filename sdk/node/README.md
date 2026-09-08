@@ -215,10 +215,19 @@ const pty = spawnSandbox('python script.py', {
     readwritePaths: temp.readwritePaths,
   },
   timeoutMs: 30_000,
+}, {
+  inheritDefaultEnv: true,
+}, undefined, undefined, {
+  APP_MODE: 'development',
 });
 pty.onData((d) => process.stdout.write(d));
 pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 ```
+
+An explicitly supplied environment is used verbatim by default. Set
+`inheritDefaultEnv: true` to layer those entries on the backend default instead;
+on Windows process containers, that default is the user profile environment
+block. The SDK never implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 

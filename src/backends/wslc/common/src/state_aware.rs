@@ -157,10 +157,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         // `None` here means the proxy is disabled, not malformed.
         let env = match exec_proxy_url(request) {
             Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
-                &request.env,
+                request.env_entries(),
                 proxy_url,
             )),
-            None => split_env(&request.env),
+            None => split_env(request.env_entries()),
         };
 
         let client = connect_daemon()?;

@@ -38,8 +38,15 @@ pub struct Process {
     #[serde(default)]
     pub cwd: OptionalField<String>,
     /// Optional environment entries encoded as `KEY=VALUE` strings.
+    ///
+    /// Omitted gives the backend's default environment; supplied (including as
+    /// an empty array) is used verbatim unless `inherit_default_env` is set.
     #[serde(default)]
     pub env: OptionalField<Vec<String>>,
+    /// Layer `env` on top of the backend's default environment rather than
+    /// replacing it.
+    #[serde(default)]
+    pub inherit_default_env: OptionalField<bool>,
     /// Optional execution timeout in milliseconds.
     #[serde(default)]
     pub timeout: OptionalField<u32>,

@@ -271,6 +271,10 @@ public static class MxcLifecycle
         {
             process["env"] = SerializeToNode(env);
         }
+        if (options?.InheritDefaultEnvironment is { } inheritDefaultEnv)
+        {
+            process["inheritDefaultEnv"] = inheritDefaultEnv;
+        }
         if (options?.TimeoutMs is { } timeout)
         {
             process["timeout"] = timeout;

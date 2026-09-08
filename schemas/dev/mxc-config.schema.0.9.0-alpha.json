@@ -1092,11 +1092,15 @@
           "type": "string"
         },
         "env": {
-          "description": "Optional environment entries encoded as `KEY=VALUE` strings.",
+          "description": "Optional environment entries encoded as `KEY=VALUE` strings.\n\nOmitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inherit_default_env` is set.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "inheritDefaultEnv": {
+          "description": "Layer `env` on top of the backend's default environment rather than replacing it.",
+          "type": "boolean"
         },
         "timeout": {
           "description": "Optional execution timeout in milliseconds.",

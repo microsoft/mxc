@@ -467,7 +467,7 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
-        let mut exec_env = request.env.clone();
+        let mut exec_env = request.env_entries().to_vec();
         // Scrub every inherited proxy variable and, when the policy carries a
         // proxy, point HTTP(S)_PROXY at it.
         wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);

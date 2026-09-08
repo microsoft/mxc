@@ -758,7 +758,7 @@ fn resolve_environment(
     proxy_address: Option<&ProxyAddress>,
 ) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for kv in &request.env {
+    for kv in request.env_entries() {
         if let Some((key, value)) = kv.split_once('=') {
             if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
                 continue;

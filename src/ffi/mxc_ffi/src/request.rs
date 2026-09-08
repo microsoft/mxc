@@ -29,6 +29,8 @@ struct RequestSpec {
     #[serde(default)]
     environment: BTreeMap<String, String>,
     #[serde(default)]
+    inherit_default_env: bool,
+    #[serde(default)]
     experimental: bool,
 }
 
@@ -241,7 +243,18 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
-    request.set_env(spec.environment);
+    // An empty map means "the caller set no environment", not "give the child
+    // an empty one": the managed binding's `Environment` is a non-nullable
+    // dictionary that defaults to empty, so an empty map cannot be a
+    // deliberate request for an empty environment and must keep yielding the
+    // backend default.
+    if !spec.environment.is_empty() {
+        if spec.inherit_default_env {
+            request.inherit_default_env(spec.environment);
+        } else {
+            request.set_env(spec.environment);
+        }
+    }
     request.set_experimental(spec.experimental);
     Ok(request)
 }

@@ -164,18 +164,21 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
     // Build a redacted copy for serialization.
     let mut redacted = request.clone();
 
-    // Redact env values: keep keys, replace values.
-    redacted.env = redacted
-        .env
-        .iter()
-        .map(|entry| {
-            if let Some(pos) = entry.find('=') {
-                format!("{}=<redacted>", &entry[..pos])
-            } else {
-                entry.clone()
-            }
-        })
-        .collect();
+    // Redact env values: keep keys, replace values. `None` (no environment
+    // supplied) is preserved as `None` so the dump distinguishes it from an
+    // explicitly empty environment.
+    redacted.env = redacted.env.map(|entries| {
+        entries
+            .iter()
+            .map(|entry| {
+                if let Some(pos) = entry.find('=') {
+                    format!("{}=<redacted>", &entry[..pos])
+                } else {
+                    entry.clone()
+                }
+            })
+            .collect()
+    });
 
     // Truncate script_code.
     if redacted.script_code.len() > SCRIPT_CODE_TRUNCATE_LEN {
@@ -400,10 +403,10 @@ mod tests {
     #[test]
     fn redacted_request_hides_env_values() {
         let request = ExecutionRequest {
-            env: vec![
+            env: Some(vec![
                 "PATH=C:\\Windows".to_string(),
                 "SECRET_TOKEN=abc123".to_string(),
-            ],
+            ]),
             ..Default::default()
         };
         let json = redacted_request_json(&request);

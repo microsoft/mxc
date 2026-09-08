@@ -924,44 +924,46 @@ fn convert_wire_config(
     // non-exec state-aware phases (require_process == false) or when the driver
     // signalled a CLI command-line override (allow_missing_command).
     let command_required = require_process && !allow_missing_command;
-    let (script_code, working_directory, script_timeout, env) = match cfg.process {
-        Some(process) => {
-            let script_code = match process.command_line {
-                Some(s) if !s.is_empty() => s,
-                Some(_) if command_required => {
-                    return Err(WxcError::ConfigParse(
-                        "process.commandLine cannot be empty".to_string(),
-                    ));
-                }
-                None if command_required => {
-                    return Err(WxcError::ConfigParse(
-                        "Missing required field: process.commandLine".to_string(),
-                    ));
-                }
-                _ => String::new(),
-            };
+    let (script_code, working_directory, script_timeout, env, inherit_default_env) =
+        match cfg.process {
+            Some(process) => {
+                let script_code = match process.command_line {
+                    Some(s) if !s.is_empty() => s,
+                    Some(_) if command_required => {
+                        return Err(WxcError::ConfigParse(
+                            "process.commandLine cannot be empty".to_string(),
+                        ));
+                    }
+                    None if command_required => {
+                        return Err(WxcError::ConfigParse(
+                            "Missing required field: process.commandLine".to_string(),
+                        ));
+                    }
+                    _ => String::new(),
+                };
 
-            // Null bytes can hide malicious payloads from audit logs.
-            if script_code.contains('\0') {
+                // Null bytes can hide malicious payloads from audit logs.
+                if script_code.contains('\0') {
+                    return Err(WxcError::ConfigParse(
+                        "process.commandLine must not contain null bytes".to_string(),
+                    ));
+                }
+
+                (
+                    script_code,
+                    process.cwd.unwrap_or_default(),
+                    process.timeout.unwrap_or(0),
+                    process.env,
+                    process.inherit_default_env.unwrap_or(false),
+                )
+            }
+            None if command_required => {
                 return Err(WxcError::ConfigParse(
-                    "process.commandLine must not contain null bytes".to_string(),
+                    "'process' section is required".into(),
                 ));
             }
-
-            (
-                script_code,
-                process.cwd.unwrap_or_default(),
-                process.timeout.unwrap_or(0),
-                process.env.unwrap_or_default(),
-            )
-        }
-        None if command_required => {
-            return Err(WxcError::ConfigParse(
-                "'process' section is required".into(),
-            ));
-        }
-        None => (String::new(), String::new(), 0, Vec::new()),
-    };
+            None => (String::new(), String::new(), 0, None, false),
+        };
 
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
@@ -1522,6 +1524,7 @@ fn convert_wire_config(
         schema_version,
         container_id,
         env,
+        inherit_default_env,
         script_code,
         working_directory,
         script_timeout,
@@ -4847,7 +4850,10 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
+        assert_eq!(
+            req.env,
+            Some(vec!["FOO=bar".to_string(), "BAZ=qux".to_string()])
+        );
     }
 
     #[test]

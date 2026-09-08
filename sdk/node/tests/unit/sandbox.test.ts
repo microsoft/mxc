@@ -1624,6 +1624,19 @@ describe('createConfigFromPolicy', () => {
         { message: /experimental mode/ },
       );
     });
+
+    it('should apply inheritDefaultEnv without replacing the supplied environment', () => {
+      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      config.process!.env = ['GREETING=hello'];
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /experimental mode/ },
+      );
+      assert.deepStrictEqual(config.process!.env, ['GREETING=hello']);
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
   });
 
   describe('Bubblewrap', () => {
