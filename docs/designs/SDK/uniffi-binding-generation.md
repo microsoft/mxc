@@ -1,6 +1,6 @@
 # UniFFI binding generation
 
-## Decision
+## Proposal
 
 Use one [UniFFI](https://github.com/mozilla/uniffi-rs) object model to generate the internal native Node and .NET
 binding layers.

@@ -1,6 +1,6 @@
-# MXC SDK unification
+# MXC SDK unification proposal
 
-## Decision
+## Proposal
 
 Keep MXC behavior in Rust and use [UniFFI 0.31](https://github.com/mozilla/uniffi-rs) to generate the internal native
 binding layers for Node and .NET. Keep small handwritten public facades for package naming and language-specific
@@ -22,34 +22,40 @@ flowchart LR
     E --> B[Containment backends]
 ```
 
-Both foreign SDKs load the same host-compiled Rust dynamic library in-process. Node does not use WebAssembly,
-a child process, a daemon, or MXC-specific C++.
+Both foreign SDKs load the same host-compiled Rust dynamic library in-process.
 
 ## Scope
 
-This design unifies callable operations, results, errors, async behavior, and owned handles. UniFFI generates
+This proposal covers callable operations, results, errors, async behavior, and owned handles. UniFFI generates
 TypeScript and C# that call native entry points exported by the Rust-built `mxc_ffi` library. It does not generate C
 source, a C SDK, the complete public SDK facades, or a second dynamic library.
 
-It does not yet replace:
+This proposal does not change:
 
 - JSON request types and schema generation
 - request parsing or policy validation
+- `mxc-sdk`
 - `mxc_engine`
 - containment backends
 
-The .NET SDK has not shipped, so its existing interop layer can be replaced without a compatibility period.
+`mxc-sdk` and `mxc_engine` already exist and remain the behavioral implementation. During implementation, current Node
+SDK behavior and the existing .NET binding tests provide a comparison point for results, errors, ownership, and
+lifecycle semantics. After the generated bindings match that behavior, the old Node execution path and .NET interop
+implementation are removed while the public behavior remains.
 
 ## Ownership
 
-| Layer | Owns | Must not own |
+| Layer | Responsibility | Maintained by |
 |---|---|---|
-| `mxc-sdk` | Safe Rust API and behavior | Language projection |
-| `mxc_ffi` UniFFI module | Records, objects, conversion, panic boundary | Backend selection |
-| Generated internal TypeScript and C# | Calls, records, object lifetimes, future plumbing | Public package design |
-| Node and .NET public facades | Public names, re-exports, and language adapters | MXC behavior |
-| `@ubjs/node` | Generic native loading and UniFFI invocation | MXC-specific glue |
-| `mxc_engine` | Backend dispatch and execution | SDK-specific behavior |
+| `mxc-sdk` | Existing safe Rust API and behavior | MXC |
+| `mxc_ffi` UniFFI module | UniFFI-safe records/objects, conversion from `mxc-sdk` values, and panic containment | MXC |
+| Generated internal TypeScript and C# | Calls, value marshalling, object lifetimes, and future plumbing | UniFFI generators |
+| Node and .NET public facades | Public names, re-exports, and language adapters | MXC |
+| `@ubjs/node` | Generic N-API and libffi runtime | Third-party package; no MXC addon code |
+| `mxc_engine` | Existing backend dispatch and execution | MXC |
+
+Conversion in `mxc_ffi` is mechanical mapping from `mxc-sdk` values to UniFFI-safe records and objects. It does not
+parse policy or reinterpret results.
 
 ## One operation
 
@@ -87,37 +93,28 @@ Public facades preserve these names and delegate without changing semantics.
 | Backend behavior | Backend plus `mxc_engine` integration |
 | Callable SDK operation | `mxc-sdk`, one UniFFI export, and thin Node/.NET public facade methods |
 | Result or error field | Rust projection record plus any public facade mapping; regenerate Node and C# |
-| Policy or schema field | Rust wire/parser/domain; regenerate schema-derived Node and C# models |
-
-Schema-derived public model generation is a follow-up decision. Until it is implemented, policy changes still require
-manual Node and C# model updates and the repository has not reached the intended maintenance state.
+| Policy or schema field | Existing Rust and manual Node/.NET model updates; unchanged by this proposal |
 
 ## Versioning and changelogs
 
 All three SDK versions remain synchronized. Each published SDK keeps its own ecosystem-facing changelog so Rust, Node,
 and .NET consumers can see the changes relevant to their package. A shared behavior change uses the same release
-summary in each affected changelog; facade or packaging changes appear only in the affected SDK's changelog. Detailed
-release mechanics belong in [`docs/versioning.md`](../../versioning.md), not in this architecture proposal.
+summary in each affected changelog; facade or packaging changes appear only in the affected SDK's changelog.
 
-## Expected maintenance effect
+## Implementation and replacement requirements
 
-These are planning estimates, not measured delivery-time guarantees:
+Implementation can proceed while these items are addressed. A blocker applies only to the capability or target named
+in the table.
 
-| Adoption stage | Estimated recurring cross-SDK maintenance reduction | What is eliminated |
-|---|---:|---|
-| UniFFI projection only | 40-60% | Handwritten native exports, P/Invoke, N-API glue, async bridge, and foreign object plumbing |
-| UniFFI plus schema-derived public models | 60-75% | Most repeated Node and C# policy/request model edits |
-
-The remaining work is the work that should stay explicit: implementing behavior once in Rust, designing the safe
-interop shape, preserving language-native facade semantics, and testing each supported runtime. A time study over
-several representative feature changes should replace these estimates before using them for staffing commitments.
-
-## Remaining work before switching
-
-The implementation demonstrates that one native Rust library can generate and serve both language bindings. Before
-replacing the current bindings, MXC still needs bounded async scheduling, interruptible streams, independent
-termination while an async wait is pending, typed state-aware APIs, packages for every supported platform, generated
-public-model evaluation, and CI checks that identify accidental public API changes.
+| Work item | Classification | Effect |
+|---|---|---|
+| Bounded async scheduling | Blocker for production async APIs | Replace one-worker-thread-per-call behavior |
+| Interruptible stream reads and disposal | Blocker for live streaming | A blocked read must not prevent shutdown |
+| Process termination during a pending wait | Blocker for live process control | `kill` must work while `waitAsync` is pending |
+| Native package and tests for a target | Blocker for that target | Targets may be enabled independently |
+| Public API and generated-contract checks in CI | Release safeguard | Does not block implementation; add before removing the old path |
+| Typed state-aware facade methods | Follow-up | The JSON state-aware path remains usable |
+| Schema-derived Node/.NET policy models | Out of scope | Existing manual model maintenance is unchanged |
 
 ## Documents
 
@@ -133,6 +130,3 @@ The prototype is intentionally production-shaped:
 - `scripts/generate-uniffi-bindings.ps1` pins both generators and regenerates both SDKs.
 - `sdk/node/prototype` tests the generated TypeScript against the real Rust library.
 - `sdk/dotnet/Microsoft.Mxc.Uniffi.*` tests generated C# against that same library.
-
-The current bindings should be replaced only after cross-platform tests, public API checks, and ownership stress tests
-pass.

@@ -1,6 +1,6 @@
 # Node and .NET SDK generation
 
-## Decision
+## Proposal
 
 Generate both foreign binding layers from the UniFFI metadata in `mxc_ffi`. Keep thin public facades for stable,
 idiomatic APIs; the generated surface remains internal.
@@ -33,8 +33,6 @@ flowchart LR
 
 [`uniffi-bindgen-react-native` Node support][node] generates TypeScript that describes the UniFFI symbols and value
 conversions. The generic `@ubjs/node` N-API addon opens `mxc_ffi` and calls it through libffi.
-
-There is no MXC-specific addon, C++, subprocess, daemon, RPC path, or WebAssembly module.
 
 [node]: https://jhugman.github.io/uniffi-bindgen-react-native/reference/nodejs.html
 

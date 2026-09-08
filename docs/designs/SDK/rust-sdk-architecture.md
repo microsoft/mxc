@@ -1,8 +1,8 @@
 # Rust SDK architecture
 
-## Decision
+## Proposal
 
-Keep [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable layer above
+Keep the existing [`mxc-sdk`](../../../src/core/mxc-sdk/src/lib.rs) as the only safe callable layer above the existing
 [`mxc_engine`](../../../src/core/mxc_engine/src/lib.rs).
 
 ```mermaid
