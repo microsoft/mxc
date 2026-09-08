@@ -112,9 +112,17 @@ blocking call as async, and it does not depend on the embedding runtime's thread
 
 - A `Sandbox` owns one native process handle.
 - stdin, stdout, and stderr are take-once owned objects.
-- operations use `try_lock`, so concurrent access returns a typed busy error instead of blocking a runtime thread.
-- `kill` cannot interrupt a concurrent `wait` until `mxc-sdk` exposes independent cancellation.
 - generated object finalizers are a safety net; deterministic disposal remains recommended.
+
+### Concurrency limitation to resolve
+
+The initial `mxc_ffi` wrapper places each sandbox and stream behind a Rust `Mutex`. MXC's `lock_handle` helper uses
+`try_lock`; UniFFI, Node, .NET, and `mxc-sdk` do not provide this behavior. A conflicting operation therefore returns a
+typed busy error instead of blocking the foreign runtime thread.
+
+This is a current limitation, not the intended public contract. `wait` holds the sandbox mutex until the process exits,
+so `kill` cannot acquire it and interrupt that wait. Before adoption, `mxc-sdk` must expose independently synchronized
+wait and termination operations, and Node/.NET tests must prove that `kill` completes while `waitAsync` is pending.
 
 ## Rules the implementation must preserve
 

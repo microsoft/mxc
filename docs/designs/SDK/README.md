@@ -109,9 +109,9 @@ several representative feature changes should replace these estimates before usi
 ## Remaining work before switching
 
 The implementation demonstrates that one native Rust library can generate and serve both language bindings. Before
-replacing the current bindings, MXC still needs bounded async scheduling, interruptible streams, kill-during-wait
-behavior, typed state-aware APIs, packages for every supported platform, generated public-model evaluation, and CI
-checks that identify accidental public API changes.
+replacing the current bindings, MXC still needs bounded async scheduling, interruptible streams, independent
+termination while an async wait is pending, typed state-aware APIs, packages for every supported platform, generated
+public-model evaluation, and CI checks that identify accidental public API changes.
 
 ## Documents
 

@@ -80,6 +80,23 @@ State-aware envelope execution, streaming exec, and attached exec follow the sam
 UniFFI and generator names such as `BindingSandbox`, `MxcNative`, and `uniffiDestroy` must not appear in the public
 SDK. Public types use product terms such as `MxcSandbox`, `SandboxProcess`, `RunResult`, and `MxcError`.
 
+## API compatibility
+
+The generated projection is internal and ships with the matching `mxc_ffi` library. Mixing generated bindings and a
+native library from different package versions is unsupported; UniFFI contract checks must reject a mismatch.
+
+A generated-code change is not a public breaking change when the public facade preserves its existing names, types,
+and behavior. Regeneration and any required facade adaptation happen in the same change. If the public facade must
+break, prefer a compatibility overload or deprecation period. An unavoidable break requires:
+
+1. the next synchronized SemVer breaking release in Rust, Node, and .NET (minor while 0.x, major after 1.0)
+2. matching entries in each affected SDK changelog
+3. migration instructions and updated public API snapshots
+4. one coordinated release so all SDKs describe the same Rust behavior
+
+CI snapshots the public facades separately from the internal generated/native contract. Generated diffs remain
+reviewable, but internal generator names are not treated as supported public API.
+
 ## Node runtime ownership
 
 | Component | Produced by | MXC-specific handwritten code |
@@ -140,13 +157,13 @@ Node and .NET tests run against the real library and verify:
 5. live process ownership
 6. take-once stdin, stdout, and stderr
 7. stream read, write, and flush
-8. prompt busy errors during concurrent handle use
+8. `kill` while `waitAsync` is pending and defined behavior for conflicting stream operations
 
 ## Before switching Node and .NET to the generated bindings
 
 - Run generated SDK scenarios on Windows, Linux, and macOS where supported.
 - Repeatedly create, use, cancel, and dispose async calls, streams, and processes without leaks or deadlocks.
-- Make CI identify changes to generated public APIs and native entry points.
+- Make CI identify changes to public facades and the generated/native contract.
 - Package one native library per target without changing generated operation code.
 - Confirm generated calls return the same results, errors, streams, and process behavior as the Rust SDK.
 - Remove the previous interop generation path.
