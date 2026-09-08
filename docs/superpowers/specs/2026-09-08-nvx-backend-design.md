@@ -12,6 +12,8 @@ Approved design for an experimental MXC backend named `nvx`.
 4. All requested host paths must be beneath one canonical common host root.
 5. Correctness and observability take priority over a fixed startup-latency target. Cold-boot and warm-exec latency are measured but do not initially gate acceptance.
 6. The backend remains behind `--experimental` until its limitations and policy behavior are proven.
+7. VM sizing is immutable after provision. The public NVX config exposes `memoryMiB` and
+   `processors`; processors accepts only NVX's supported values `1`, `2`, `4`, or `8`.
 
 ## Goal
 
@@ -116,7 +118,7 @@ This is safer and smaller than adding virtio-vsock for the first milestone. It a
 
 | Phase | Behavior |
 |---|---|
-| `provision` | Validate runtime compatibility, MXC policy, common-root filesystem mappings, network mode, and resource settings. Persist provision metadata without booting the VM. Mint an `nvx:<token>` sandbox ID. |
+| `provision` | Validate runtime compatibility, MXC policy, common-root filesystem mappings, network mode, `memoryMiB`, and `processors`. Persist provision metadata without booting the VM. Mint an `nvx:<token>` sandbox ID. |
 | `start` | Launch OpenVMM with the provisioned immutable attachments. Wait for the guest agent's launch-bound, version-compatible readiness message. |
 | `exec` | Run a command repeatedly in the warm VM. Stream separate stdin/stdout/stderr, honor cwd/env/timeout, support cancellation, and return exit metadata. |
 | `stop` | Request graceful guest shutdown, then force termination after a bounded deadline. Preserve provisioned host-side state for a later `start`. |
@@ -304,6 +306,15 @@ The installer or runtime resolver must:
 - support explicit local override for development;
 - reject incompatible partial installations;
 - define upgrade, rollback, and stale-daemon behavior.
+
+The public `experimental.nvx` configuration exposes only immutable VM sizing in the first
+milestone:
+
+- `memoryMiB`, with a conservative CPython-capable default;
+- `processors`, restricted to `1`, `2`, `4`, or `8`.
+
+Runtime package resolution remains installation policy rather than a per-request production
+setting. Development builds may use an environment-based local artifact override.
 
 ## Error Semantics
 
