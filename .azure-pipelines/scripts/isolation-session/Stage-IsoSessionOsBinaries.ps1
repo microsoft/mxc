@@ -22,7 +22,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidateSet('amd64fre', 'arm64fre')]
-    [string]$Flavor
+    [string]$Flavor,
+
+    [string]$PreviewWinmdFallbackPath
 )
 
 Set-StrictMode -Version Latest
@@ -59,6 +61,15 @@ Get-ChildItem -LiteralPath $DropRoot -Recurse -File | ForEach-Object {
         }
         $foundByName[$key] = $_
     }
+}
+
+$previewWinmdName = 'windows.ai.isolationsession.preview.winmd'
+$previewWinmdKey = $previewWinmdName.ToLowerInvariant()
+if (-not $foundByName.ContainsKey($previewWinmdKey) -and $PreviewWinmdFallbackPath) {
+    if (-not (Test-Path -LiteralPath $PreviewWinmdFallbackPath -PathType Leaf)) {
+        throw "Preview WinMD fallback not found: '$PreviewWinmdFallbackPath'."
+    }
+    $foundByName[$previewWinmdKey] = Get-Item -LiteralPath $PreviewWinmdFallbackPath
 }
 
 $missing = @(
@@ -101,7 +112,15 @@ $files = foreach ($name in $filesToStage) {
     $destination = Join-Path $stageDir $name
     Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
     $item = Get-Item -LiteralPath $destination
-    $relativeSourcePath = $source.FullName.Substring($dropRootPath.Length).TrimStart('\')
+    $relativeSourcePath = if (
+        $source.FullName.StartsWith(
+            "$dropRootPath\",
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        $source.FullName.Substring($dropRootPath.Length).TrimStart('\')
+    }
+    else {
+        "repository-fallback\$($source.Name)"
+    }
 
     [ordered]@{
         name = $name

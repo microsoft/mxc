@@ -5,6 +5,7 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
     'mxc-isosession-download-test-{0}' -f ([guid]::NewGuid()))
 $fakeDrop = Join-Path $testRoot 'fake-drop.ps1'
 $outDir = Join-Path $testRoot 'out'
+$previewWinmdFallback = Join-Path $testRoot 'windows.ai.isolationsession.preview.winmd'
 $script = Join-Path (Split-Path $PSScriptRoot -Parent) 'Get-IsoSessionOsBinaries.ps1'
 
 try {
@@ -36,7 +37,7 @@ if ($verb -eq 'get') {
     $filterIndex = [array]::IndexOf($args, '-r')
     $filters = if ($filterIndex -ge 0) { $args[$filterIndex + 1] } else { '' }
     if ($filters -notmatch '/windows\.ai\.isolationsession\.winmd' -or
-        $filters -notmatch '/windows\.ai\.isolationsession\.preview\.winmd' -or
+        $filters -match '/windows\.ai\.isolationsession\.preview\.winmd' -or
         $filters -match '/IsoSessionCore\.dll') {
         Write-Output 'Expected lifted payload filters were not requested.'
         exit 3
@@ -49,8 +50,7 @@ if ($verb -eq 'get') {
         'IsoSessionProxyStub.dll',
         'IsolationProxy.exe',
         'IsoSessionCli.exe',
-        'windows.ai.isolationsession.winmd',
-        'windows.ai.isolationsession.preview.winmd'
+        'windows.ai.isolationsession.winmd'
     )) {
         $content = if ($name -eq 'IsoSessionClient.dll') {
             "SOFTWARE\Microsoft\IsoSession ClientClsid IsolationSession_"
@@ -67,11 +67,17 @@ if ($verb -eq 'get') {
 exit 9
 '@ | Set-Content -LiteralPath $fakeDrop -Encoding UTF8
 
+    Set-Content `
+        -LiteralPath $previewWinmdFallback `
+        -Value 'repository-preview-winmd' `
+        -Encoding Unicode
+
     & $script `
         -DropExe $fakeDrop `
         -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
         -ArchTag arm64 `
         -OutDir $outDir `
+        -PreviewWinmdFallbackPath $previewWinmdFallback `
         -UseAadAuth
 
     $manifest = Get-Content (Join-Path $outDir 'source-manifest.json') -Raw |
@@ -84,6 +90,14 @@ exit 9
     }
     if (@($manifest.files | Where-Object { $_.kind -eq 'winmd' }).Count -ne 2) {
         throw 'Download manifest did not contain both WinMD payloads.'
+    }
+    $previewEntry = @(
+        $manifest.files |
+            Where-Object { $_.name -eq 'windows.ai.isolationsession.preview.winmd' })
+    if ($previewEntry.Count -ne 1 -or
+        $previewEntry[0].relativeSourcePath -ne
+            'repository-fallback\windows.ai.isolationsession.preview.winmd') {
+        throw 'Preview WinMD fallback provenance was not recorded.'
     }
 
     Write-Host 'IsoSession filtered download tests passed.'

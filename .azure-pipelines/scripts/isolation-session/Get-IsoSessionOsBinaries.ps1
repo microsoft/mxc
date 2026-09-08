@@ -21,6 +21,8 @@ param(
 
     [string]$OsBranch = 'ge_current_directwinpd_sf2',
 
+    [string]$PreviewWinmdFallbackPath,
+
     [switch]$UseAadAuth
 )
 
@@ -50,16 +52,19 @@ $downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
     'mxc-isosession-drop-{0}' -f ([guid]::NewGuid()))
 New-Item -ItemType Directory -Path $downloadRoot | Out-Null
 
-$filters = @(
+$filterFiles = @(
     '/IsoSessionServer.dll',
     '/IsoSessionClient.dll',
     '/IsoSessionApp.dll',
     '/IsoSessionProxyStub.dll',
     '/IsolationProxy.exe',
     '/IsoSessionCli.exe',
-    '/windows.ai.isolationsession.winmd',
-    '/windows.ai.isolationsession.preview.winmd'
-) -join ';'
+    '/windows.ai.isolationsession.winmd'
+)
+if (-not $PreviewWinmdFallbackPath) {
+    $filterFiles += '/windows.ai.isolationsession.preview.winmd'
+}
+$filters = $filterFiles -join ';'
 
 try {
     if ($UseAadAuth) {
@@ -94,7 +99,8 @@ try {
         -BuildGuid $BuildGuid `
         -DropName $dropName `
         -OsBranch $OsBranch `
-        -Flavor $flavor
+        -Flavor $flavor `
+        -PreviewWinmdFallbackPath $PreviewWinmdFallbackPath
 
     Write-Host "##vso[task.setvariable variable=isoSessionResolvedDrop]$dropName"
 }

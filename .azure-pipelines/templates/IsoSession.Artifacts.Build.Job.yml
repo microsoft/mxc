@@ -138,6 +138,8 @@ jobs:
     - powershell: |
         $ErrorActionPreference = 'Stop'
         $override = '${{ parameters.dropNameOverride }}'.Trim()
+
+        # Temporary fallback until OS BIN drops publish the Preview WinMD again.
         & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-IsoSessionOsBinaries.ps1' `
             -DropExe '$(dropExe)' `
             -DropServiceUri '${{ parameters.dropServiceUri }}' `
@@ -145,7 +147,8 @@ jobs:
             -ArchTag '${{ parameters.archTag }}' `
             -OutDir '$(payloadDirectory)' `
             -DropNameOverride $override `
-            -OsBranch '${{ parameters.osBranch }}'
+            -OsBranch '${{ parameters.osBranch }}' `
+            -PreviewWinmdFallbackPath '$(Build.SourcesDirectory)\packaging\isolation-session\nuget\metadata\windows.ai.isolationsession.preview.winmd'
       displayName: Download filtered OS IsoSession payload
       env:
         SYSTEM_ACCESSTOKEN: $(System.AccessToken)

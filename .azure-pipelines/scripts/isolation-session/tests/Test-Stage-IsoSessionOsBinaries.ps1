@@ -98,10 +98,37 @@ try {
     if (-not $failed) {
         throw 'Staging unexpectedly succeeded with a required WinMD missing.'
     }
+
+    $previewWinmdFallback = Join-Path $testRoot 'windows.ai.isolationsession.preview.winmd'
     [System.IO.File]::WriteAllText(
-        (Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd'),
+        $previewWinmdFallback,
         'test-windows.ai.isolationsession.preview.winmd',
         [System.Text.Encoding]::Unicode)
+
+    $fallbackOutDir = Join-Path $testRoot 'fallback-winmd'
+    & $script `
+        -DropRoot $dropRoot `
+        -OutDir $fallbackOutDir `
+        -ArchTag x64 `
+        -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
+        -DropName 'wdg/test/amd64fre/BIN/test' `
+        -Flavor amd64fre `
+        -PreviewWinmdFallbackPath $previewWinmdFallback
+    $fallbackManifest = Get-Content (
+        Join-Path $fallbackOutDir 'source-manifest.json') -Raw |
+        ConvertFrom-Json
+    $fallbackEntry = @(
+        $fallbackManifest.files |
+            Where-Object { $_.name -eq 'windows.ai.isolationsession.preview.winmd' })
+    if ($fallbackEntry.Count -ne 1 -or
+        $fallbackEntry[0].relativeSourcePath -ne
+            'repository-fallback\windows.ai.isolationsession.preview.winmd') {
+        throw 'Preview WinMD fallback provenance was not recorded.'
+    }
+
+    Copy-Item `
+        -LiteralPath $previewWinmdFallback `
+        -Destination (Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd')
 
     [System.IO.File]::WriteAllText(
         (Join-Path $dropRoot 'IsoSessionClient.dll'),
