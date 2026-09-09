@@ -7,6 +7,14 @@ using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk;
 
+// The public .NET request types are an ergonomic authoring model rather than a
+// direct representation of MXC's cross-language wire contract. This adapter
+// performs the nontrivial projection between those models, including process,
+// lifecycle, containment, and version-dependent network shapes.
+//
+// The adapter does not replace native request validation. It produces and
+// reconstructs canonical JSON, while the central Rust parser remains the
+// authority for whether a request is valid and executable.
 internal static class CanonicalRequestBuilder
 {
     private static readonly JsonSerializerOptions CanonicalReadOptions = new()
