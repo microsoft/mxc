@@ -1247,7 +1247,8 @@ mod tests {
     use super::*;
     use crate::network_iptables::installs_firewall;
     use wxc_common::models::{
-        NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
+        NetworkAction, NetworkEgressPolicy, NetworkEnforcementMode, NetworkIngressPolicy,
+        NetworkPolicy, NetworkRule,
     };
 
     /// The 0.8 ingress posture as the parser delivers it.
@@ -1349,6 +1350,13 @@ mod tests {
             };
             if directional {
                 policy.network_ingress = Some(NetworkIngressPolicy::default());
+                // An allow rule keeps this short of a total denial, which
+                // installs no chain and so logs no posture field at all.
+                policy.network_egress = Some(NetworkEgressPolicy {
+                    default: NetworkAction::Deny,
+                    allow: vec![NetworkRule::default()],
+                    deny: vec![],
+                });
             }
 
             let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
@@ -2983,7 +2991,13 @@ mod tests {
     fn a_stated_directional_posture_installs_the_inbound_chain() {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
-        policy.network_egress = Some(Default::default());
+        // An allow rule keeps this short of a total denial, which is enforced
+        // by withholding the interface rather than by filtering.
+        policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![NetworkRule::default()],
+            deny: vec![],
+        });
 
         assert!(installs_firewall(&policy, true));
     }

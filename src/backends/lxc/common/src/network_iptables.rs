@@ -19,13 +19,55 @@ use wxc_common::models::{
     ProxyHostPin,
 };
 
+/// True when the policy denies every network path and names no exception.
+///
+/// Such a policy has nothing to filter: no host list to resolve, no proxy to
+/// reach, and no rule opening a port. LXC enforces it by giving the container a
+/// network namespace holding only loopback, which reaches the same posture
+/// without iptables and so does not depend on bridged packets being delivered
+/// to the host filter tables.
+///
+/// Both schema shapes reach this state: 0.8 can state it directionally, and the
+/// SDK injects a legacy `defaultPolicy: block` when the caller supplies no
+/// `network` section at all. Restricted to 0.8+ because only there is the
+/// posture stated with no mode to opt out of; a 0.7 config picks its own
+/// mechanism through `enforcementMode`.
+pub(crate) fn denies_all_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    if !uses_directional_schema {
+        return false;
+    }
+
+    if policy.network_proxy.is_enabled()
+        || !policy.allowed_hosts.is_empty()
+        || !policy.blocked_hosts.is_empty()
+    {
+        return false;
+    }
+
+    let egress_denies_all = match policy.network_egress.as_ref() {
+        Some(egress) => egress.default == NetworkAction::Deny && egress.allow.is_empty(),
+        None => policy.default_network_policy == NetworkPolicy::Block,
+    };
+
+    let ingress_denies_all = match policy.network_ingress.as_ref() {
+        Some(ingress) => {
+            ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
+        }
+        None => !policy.allow_local_network,
+    };
+
+    egress_denies_all && ingress_denies_all
+}
+
 /// True when this run installs firewall chains.
 ///
 /// A run carries one schema. 0.8 states a posture with no mode to opt out of,
-/// so it always enforces; 0.7 enforces only where the config asked for it.
+/// so it enforces wherever filtering is what enforcement takes; a total denial
+/// is instead enforced by withholding the interface, so it installs nothing.
+/// 0.7 enforces only where the config asked for it.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
     if uses_directional_schema {
-        true
+        !denies_all_network(policy, uses_directional_schema)
     } else {
         NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode)
     }
@@ -4604,7 +4646,13 @@ mod tests {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
-            network_egress: Some(NetworkEgressPolicy::default()),
+            // An allow rule keeps this short of a total denial, which is
+            // enforced by withholding the interface rather than by filtering.
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule::default()],
+                deny: vec![],
+            }),
             ..Default::default()
         };
 

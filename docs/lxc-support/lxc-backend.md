@@ -190,6 +190,25 @@ CIDRs only; the shape has no hostname form.
 A connection already open when the policy takes effect keeps running;
 enforcement governs connections opened afterwards.
 
+**A policy that denies everything gets no interface at all.** When a 0.8 request
+denies both directions, names no allowed or blocked host, opens no rule, and
+configures no proxy, there is nothing left for a firewall to filter. MXC gives
+that container a network namespace holding only loopback instead of attaching it
+to the host bridge and then filtering it. The container sees no route off the
+machine, which is what the policy asked for.
+
+This is the same choice Bubblewrap makes for the same policy, and it matters
+beyond tidiness: filtering a bridged container depends on the host delivering
+bridged packets to iptables, so on a host without that support the firewall path
+refuses to run at all (see below). Withholding the interface does not depend on
+it, so a total denial runs on any host. A request that denies by default but
+still opens one rule, names a host, or configures a proxy genuinely needs
+filtering, and it continues to take the bridged path and its prerequisites.
+
+An omitted `network` section reaches this state too. The Node SDK fills one in
+with a `block` default when the caller supplies none, so a 0.8 request that says
+nothing about the network is a total denial rather than an unrestricted run.
+
 **DNS is not exempt.** A resolver the policy does not allow is a resolver the
 container cannot reach, and reaching one takes an `egress.allow` rule naming its
 address. That is the GA decision:
@@ -238,7 +257,8 @@ or `0`, both hook rules install cleanly and neither ever fires. MXC reads that
 file and **fails firewall setup** rather than reporting success for a chain
 that could never be reached. When the IPv6 chain is programmed,
 `/proc/sys/net/bridge/bridge-nf-call-ip6tables` is checked separately and to
-the same standard.
+the same standard. A policy that denies everything never reaches this check,
+because it installs no chain and takes no bridged veth.
 
 If MXC cannot discover the container veth at all, firewall setup **fails** and
 the partially created chains are rolled back. An unhooked chain is never

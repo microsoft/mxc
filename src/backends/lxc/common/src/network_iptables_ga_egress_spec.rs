@@ -689,12 +689,18 @@ fn policy_from_json(json: &str) -> ContainerPolicy {
 // the container cannot reach.
 #[test]
 fn a_directional_deny_default_chain_does_not_open_dns() {
-    let policy = directional_policy(NetworkAction::Deny, vec![], vec![]);
+    // The allow rule keeps this policy short of a total denial, which is
+    // enforced by withholding the interface and so builds no chain to inspect.
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(vec![peer("203.0.113.0/24", &[])], vec![])],
+        vec![],
+    );
     let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
-        "input=egress.default=deny; expected no unscoped port 53 accept; output={rules:?}"
+        "input=egress.default=deny, allow.to=[203.0.113.0/24]; expected no unscoped port 53 accept; output={rules:?}"
     );
 }
 
@@ -800,31 +806,67 @@ fn a_parsed_legacy_request_keeps_the_dns_exemption() {
 
 #[test]
 fn a_parsed_directional_request_drops_the_dns_exemption() {
+    // The allow rule keeps this policy short of a total denial, which builds no
+    // chain to inspect.
     let policy = policy_from_json(
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"},
-            "network": {"egress": {"default": "deny"}}}"#,
+            "network": {"egress": {"default": "deny",
+                "allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}}}"#,
     );
     let rules = appended_ipv4_chain_rules("parsed-directional", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
-        "input=0.8 egress.default=deny; expected no port 53 accept; output={rules:?}"
+        "input=0.8 egress.default=deny with one allow rule; expected no port 53 accept; output={rules:?}"
     );
 }
 
 // An omitted network section on 0.8 is a directional deny default, not a
-// legacy request.
+// legacy request. It denies every path and names no exception, which LXC
+// enforces by withholding the interface rather than by filtering — so the
+// legacy port 53 exemption cannot reach the container either way.
 #[test]
-fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
+fn a_parsed_v08_request_without_a_network_section_installs_no_firewall() {
     let policy = policy_from_json(
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy, true);
 
     assert!(
-        !opens_dns_unconditionally(&rules),
-        "input=0.8 with no network section; expected no port 53 accept; output={rules:?}"
+        denies_all_network(&policy, true),
+        "input=0.8 with no network section; expected a total denial; output={:?}/{:?}",
+        policy.network_egress,
+        policy.default_network_policy
+    );
+    assert!(
+        !installs_firewall(&policy, true),
+        "input=0.8 with no network section; expected no firewall chain, since a total \
+         denial is enforced by giving the container only loopback"
+    );
+}
+
+// The shape the Node SDK actually sends: it injects a legacy `defaultPolicy`
+// when the caller supplies no `network` section, so a 0.8 request reaches the
+// backend legacy-shaped rather than directional.
+#[test]
+fn a_parsed_v08_request_with_an_injected_legacy_block_installs_no_firewall() {
+    let policy = policy_from_json(
+        r#"{"version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}}"#,
+    );
+
+    assert!(
+        policy.network_egress.is_none(),
+        "a legacy defaultPolicy must not populate the directional section; output={:?}",
+        policy.network_egress
+    );
+    assert!(
+        !installs_firewall(&policy, true),
+        "input=0.8 legacy defaultPolicy=block; expected no firewall chain. Installing one \
+         makes the run depend on bridged packets reaching the host filter tables, which \
+         fails closed on a host without bridge netfilter even though the policy asks for \
+         nothing that needs filtering."
     );
 }

@@ -17,7 +17,9 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
+use crate::network_iptables::{
+    denies_all_network, installs_firewall, needs_network, NetworkIptablesManager,
+};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -28,6 +30,23 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 /// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
 /// builtins and must never inherit the script's own timeout budget.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Give the container a network namespace holding only loopback.
+///
+/// This is how a total-denial policy is enforced: with no interface there is
+/// nothing to filter, so enforcement no longer depends on bridged packets
+/// reaching the host filter tables. Must be called before the container
+/// starts, since its network is built at start.
+///
+/// `lxc.net` with no value clears the network options inherited from the
+/// distribution template, and a device's type must be set before any other
+/// option on that device, so the inherited veth cannot be amended in place.
+/// Clearing first is also what keeps a stale entry from leaving the container
+/// on the bridge.
+fn isolate_container_network(container: &LxcContainer) -> Result<(), String> {
+    container.set_config_item("lxc.net", "")?;
+    container.set_config_item("lxc.net.0.type", "empty")
+}
 
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
@@ -248,6 +267,30 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+
+        // A policy that denies every network path is enforced by giving the
+        // container only loopback, so the interface has to be withheld before
+        // the container starts rather than filtered afterwards.
+        if !container.is_running() && denies_all_network(&request.policy, uses_directional_schema) {
+            let _ = writeln!(
+                logger,
+                "Network policy denies all traffic; starting container with loopback only."
+            );
+            if let Err(e) = isolate_container_network(&container) {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to isolate container network: {}. The policy denies all network \
+                     access, which LXC enforces by giving the container a namespace holding \
+                     only loopback; refusing rather than starting it on the host bridge.",
+                    e
+                ));
+            }
+        }
+
         // Ensure the container is running so that the veth interface exists
         if !container.is_running() {
             let _ = writeln!(logger, "Starting LXC container...");
@@ -261,9 +304,6 @@ impl LxcScriptRunner {
         } else {
             let _ = writeln!(logger, "Container already running.");
         }
-
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
 
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 
@@ -713,6 +753,78 @@ fn uuid_simple() -> String {
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
+
+    /// A container whose config file already carries the bridged veth stanza
+    /// an LXC distribution template writes, plus its config path and the temp
+    /// directory holding it. The directory is returned so the caller keeps it
+    /// alive.
+    fn container_with_template_network() -> (LxcContainer, std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "mxc-isolate-net-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let name = "netless";
+        std::fs::create_dir_all(base.join(name)).expect("temp container dir must be creatable");
+        let config_path = base.join(name).join("config");
+        std::fs::write(
+            &config_path,
+            "lxc.net.0.type = veth\nlxc.net.0.link = lxcbr0\nlxc.net.0.flags = up\n",
+        )
+        .expect("template config must be writable");
+
+        let container = LxcContainer::new(name, Some(base.to_str().unwrap()));
+        (container, config_path, base)
+    }
+
+    // A total denial is enforced by withholding the interface, so these two
+    // writes are the enforcement. Their order is load-bearing: liblxc reads
+    // the config top-down, a device's type must precede its other options, and
+    // `lxc.net` with no value is what clears the template's bridged device.
+    #[test]
+    fn isolating_the_network_clears_the_template_device_then_declares_an_empty_one() {
+        let (container, config_path, base) = container_with_template_network();
+
+        isolate_container_network(&container).expect("isolation must succeed");
+
+        let config =
+            std::fs::read_to_string(&config_path).expect("config must be readable after isolation");
+        let cleared = config
+            .find("\nlxc.net = \n")
+            .unwrap_or_else(|| panic!("config must clear lxc.net; got:\n{config}"));
+        let declared = config
+            .rfind("lxc.net.0.type = empty")
+            .unwrap_or_else(|| panic!("config must declare an empty device; got:\n{config}"));
+
+        assert!(
+            cleared < declared,
+            "the clear must precede the type, or liblxc keeps the template's veth; got:\n{config}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // `none` shares the host's network namespace, which is the opposite of
+    // what a total denial asks for, and is one keystroke from `empty`.
+    #[test]
+    fn isolating_the_network_never_shares_the_host_namespace() {
+        let (container, config_path, base) = container_with_template_network();
+
+        isolate_container_network(&container).expect("isolation must succeed");
+
+        let config =
+            std::fs::read_to_string(&config_path).expect("config must be readable after isolation");
+
+        assert!(
+            !config.contains("lxc.net.0.type = none"),
+            "sharing the host netns would give the container the host's network; got:\n{config}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn uuid_simple_is_8_chars() {
