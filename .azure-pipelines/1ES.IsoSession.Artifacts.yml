@@ -193,25 +193,59 @@ extends:
         dependsOn: Build_IsoSession_Artifacts
         condition: or(succeeded(), ne(${{ parameters.promotionSourceRunId }}, 0))
         jobs:
-        - job: wait_for_isosession_qualification
-          displayName: Wait for supported-SF2 qualification
-          pool: server
-          timeoutInMinutes: 4320
-          steps:
-          - task: ManualValidation@0
-            timeoutInMinutes: 4200
-            inputs:
-              notifyUsers: ${{ parameters.manualValidationNotifyUsers }}
-              instructions: >-
-                Resume only after the exact artifacts from this pipeline run pass
-                supported-SF2 VM qualification, including proof that
-                IsoSessionCore.dll is absent from the monthly payload and loads
-                from System32.
-              onTimeout: reject
+        - ${{ if eq(parameters.promotionSourceRunId, 0) }}:
+          - job: authorize_isosession_promotion
+            displayName: Wait for supported-SF2 qualification
+            pool: server
+            timeoutInMinutes: 4320
+            steps:
+            - task: ManualValidation@0
+              timeoutInMinutes: 4200
+              inputs:
+                notifyUsers: ${{ parameters.manualValidationNotifyUsers }}
+                instructions: >-
+                  Resume only after the exact artifacts from this pipeline run
+                  pass supported-SF2 VM qualification, including proof that
+                  IsoSessionCore.dll is absent from the monthly payload and
+                  loads from System32.
+                onTimeout: reject
+
+        - ${{ if ne(parameters.promotionSourceRunId, 0) }}:
+          - job: authorize_isosession_promotion
+            displayName: Verify source-run qualification
+            steps:
+            - powershell: |
+                $ErrorActionPreference = 'Stop'
+                if ([string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+                    throw 'SYSTEM_ACCESSTOKEN is required to verify the source run.'
+                }
+                $uri = (
+                    "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/" +
+                    "${{ parameters.promotionSourceRunId }}/timeline?api-version=7.1")
+                $timeline = Invoke-RestMethod `
+                    -Uri $uri `
+                    -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+                $approval = $timeline.records |
+                    Where-Object {
+                        $_.name -eq 'Wait for supported-SF2 qualification' -and
+                        $_.type -in @('Job', 'Phase') -and
+                        $_.state -eq 'completed' -and
+                        $_.result -eq 'succeeded'
+                    } |
+                    Select-Object -First 1
+                if (-not $approval) {
+                    throw (
+                        "Source run ${{ parameters.promotionSourceRunId }} has not " +
+                        'completed the supported-SF2 qualification gate.')
+                }
+                Write-Host "Source run ${{ parameters.promotionSourceRunId }} qualification verified."
+              displayName: Verify completed manual qualification
+              env:
+                SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
         - job: validate_and_publish_isosession_sdk
           displayName: Validate and publish the internal SDK package
-          dependsOn: wait_for_isosession_qualification
+          dependsOn: authorize_isosession_promotion
           variables:
             publishDirectory: $(Pipeline.Workspace)/isosession-publish
           steps:

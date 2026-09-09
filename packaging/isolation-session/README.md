@@ -24,8 +24,9 @@ artifacts.
 
 An independently qualified run can also be selected as a promotion-only source
 when publication must be retried. This path does not rebuild or resign the
-artifacts; it downloads and verifies the exact aggregate produced by the
-qualified run before internal feed publication.
+artifacts; it verifies that the source run completed its manual qualification,
+then downloads and verifies the exact aggregate produced by that run before
+internal NuGet and WinGet publication.
 
 The NuGet uses the x64 WinMD pair and signed x64 activation shim consumed by
 MXC. ARM64 WinMD hashes remain in release provenance but are not required to

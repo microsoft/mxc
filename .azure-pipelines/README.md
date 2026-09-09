@@ -41,9 +41,9 @@ inbox-Core contract remains enforced.
 If publication fails after a release candidate has already passed manual
 qualification, set `promotionSourceRunId` to that qualified run. The pipeline
 skips rebuilding, downloads the exact aggregated artifact from the selected
-run, repeats its production-signing and hash checks, and retries internal NuGet
-publication. ESRP MSI publication is intentionally unavailable in this retry
-mode.
+run, verifies that the source run completed the supported-SF2 manual gate,
+repeats its production-signing and hash checks, and retries internal NuGet
+and WinGet publication without requesting a second manual approval.
 
 For non-release validation, keep `signingMode=test` and
 `enablePromotion=false`.
