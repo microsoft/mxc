@@ -28,6 +28,7 @@ wslc = ["mxc-sdk/wslc"]
 # IsolationSession backend (Windows only). Needed by the
 # `attached_console_ffi` example.
 isolation_session = ["mxc-sdk/isolation_session"]
+isolation_session_lifted = ["isolation_session", "mxc-sdk/isolation_session_lifted"]
 # Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
 # default so normal builds don't compile csbindgen or write into the source
 # tree. Local C# builds, the Windows x64 pipeline build, and the drift gate
@@ -52,5 +53,6 @@ csbindgen = { version = "1", optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
+sha2.workspace = true
 winresource.workspace = true
 zip = "2"

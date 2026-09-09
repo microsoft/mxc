@@ -1,17 +1,19 @@
-# Provenance for the isolation_session_bindings crate.
-#
-# Bindings are regenerated at build time from the Preview WinMD in the pinned
-# SDK package. Run Update-IsoSessionSdk.ps1 rather than editing this file.
+# Provenance for both IsolationSession binding sources.
 
 [tool]
+# Must match the `windows-bindgen` build-dependency pin in the crate's Cargo.toml
+# and stay in lockstep with the workspace `windows` crate major.minor.
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
-generated_date = "2026-08-31"
+generated_date = "2026-08-19"
 
-[source]
-nupkg = "Microsoft.Windows.AI.IsolationSession.SDK.0.202608.5.nupkg"
+[inbox]
+source = "OS-generated committed bindings.rs"
+
+[lifted]
+package_id = "Microsoft.Windows.AI.IsolationSession.SDK"
+package_version = "0.2608.0"
+package_sha256 = "AF609652E691E9F2AE47885BCFCFD29E8D8C05744482F50C104EFD2F3CA1D8E5"
 winmd = "metadata/windows.ai.isolationsession.preview.winmd"
-winmd_sha256 = "C6115B52525B06316BE77BEEB4FC4624C5CBB1CEC02E5493D86C46D90FABD6A9"
+winmd_sha256 = "4D7C49D34778028DA6DD08991765A7E37A0D57564F5B57CA4F7628CDC8917E5E"
 namespace = "Windows.AI.IsolationSession.Preview"
-runtime_version = "2026_08"
-build_guid = "647f7f2e-caf7-eaa6-90d8-90f27fe8a346"
