@@ -178,6 +178,10 @@ public class MxcSandboxTests
 
         Assert.NotNull(request);
         Assert.IsType(expectedContainment, request.Containment);
+        if (expectedContainment == typeof(WslcContainment))
+        {
+            Assert.False(request.Experimental);
+        }
         JsonAssert.MatchesGolden(JsonSerializer.Serialize(request), fixtureName);
     }
 
@@ -255,7 +259,44 @@ public class MxcSandboxTests
         Assert.Contains("only on Windows", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SandboxRequest_RejectsExplicitProcessContainerOnOtherPlatforms()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsWindows(),
+            "ProcessContainer containment is supported on Windows.");
+        const string json = """
+            {
+              "version":"0.8.0-alpha",
+              "process":{"commandLine":"echo hi"},
+              "containment":"processcontainer",
+              "processContainer":{"leastPrivilege":false,"capabilities":[]}
+            }
+            """;
+
+        Assert.ThrowsAny<NotSupportedException>(
+            () => JsonSerializer.Deserialize<SandboxRequest>(json));
+
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Containment = new ProcessContainerContainment(),
+        };
+        Assert.ThrowsAny<NotSupportedException>(
+            () => JsonSerializer.Serialize(request));
+    }
+
     [Theory]
+    [InlineData(
+        """
+        {
+          "version":"0.8.0-alpha",
+          "version":"0.8.0-alpha",
+          "process":{"commandLine":"echo hi"}
+        }
+        """,
+        "Duplicate canonical property")]
     [InlineData(
         """{"policy":{"version":"0.8.0-alpha"},"command":"echo legacy"}""",
         "Unknown canonical property")]

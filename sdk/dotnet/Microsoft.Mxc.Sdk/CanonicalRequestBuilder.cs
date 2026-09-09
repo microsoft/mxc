@@ -362,10 +362,13 @@ internal static class CanonicalRequestBuilder
         return containment;
     }
 
-    private static ProcessContainerContainment ReadExplicitProcessContainer(JsonElement root) =>
-        root.TryGetProperty("processContainer", out var processContainer)
+    private static ProcessContainerContainment ReadExplicitProcessContainer(JsonElement root)
+    {
+        EnsureProcessContainerPlatform();
+        return root.TryGetProperty("processContainer", out var processContainer)
             ? ReadProcessContainer(processContainer)
             : new ProcessContainerContainment { Ui = null };
+    }
 
     private static ProcessContainerContainment ReadProcessContainer(JsonElement element)
     {
@@ -614,6 +617,15 @@ internal static class CanonicalRequestBuilder
         }
     }
 
+    private static void EnsureProcessContainerPlatform()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "ProcessContainer containment is supported only on Windows.");
+        }
+    }
+
     private static JsonObject BuildProcess(SandboxRequest request, SandboxPolicy policy)
     {
         var process = new JsonObject
@@ -730,6 +742,7 @@ internal static class CanonicalRequestBuilder
                 }
                 break;
             case ProcessContainerContainment processContainer:
+                EnsureProcessContainerPlatform();
                 AddProcessContainer(
                     root,
                     processContainer,
