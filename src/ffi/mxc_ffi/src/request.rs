@@ -21,12 +21,24 @@ mod tests {
 
     #[test]
     fn canonical_request_goldens_are_accepted() {
+        // The goldens pin the cross-SDK wire shape, so they keep their Windows
+        // paths. `captureDenials.outputPath` is the one field the parser
+        // resolves against the host filesystem, so point it at a
+        // platform-native temporary file before parsing.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let output_path = temp.path().join("denials.json");
         for request in [
             include_str!("../../../../tests/policy/request-process-container.json"),
             include_str!("../../../../tests/policy/request-directional-network.json"),
             include_str!("../../../../tests/policy/request-wslc.json"),
         ] {
-            build_request_from_json(request, true)
+            let mut document: serde_json::Value =
+                serde_json::from_str(request).expect("canonical golden parses");
+            if let Some(field) = document.pointer_mut("/processContainer/captureDenials/outputPath")
+            {
+                *field = serde_json::Value::String(output_path.to_string_lossy().into_owned());
+            }
+            build_request_from_json(&document.to_string(), true)
                 .unwrap_or_else(|error| panic!("canonical request was rejected: {error}"));
         }
     }

@@ -166,6 +166,56 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void ProcessContainment_PromotesHostRulesToFirewallOnLinux()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Firewall promotion is Linux-specific");
+
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = new NetworkPolicy
+                {
+                    AllowOutbound = true,
+                    AllowedHosts = ["example.com"],
+                },
+            },
+            "echo network");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+
+        Assert.Equal(
+            "firewall",
+            document.RootElement.GetProperty("network").GetProperty("enforcementMode").GetString());
+    }
+
+    [Fact]
+    public void ProcessContainment_LeavesEnforcementModeUnsetForProxyOnLinux()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Firewall promotion is Linux-specific");
+
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = new NetworkPolicy
+                {
+                    AllowOutbound = true,
+                    AllowedHosts = ["example.com"],
+                    Proxy = new UrlNetworkProxyPolicy("http://127.0.0.1:8080"),
+                },
+            },
+            "echo network");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+
+        Assert.False(
+            document.RootElement.GetProperty("network").TryGetProperty(
+                "enforcementMode",
+                out _));
+    }
+
+    [Fact]
     public void NativeVersion_IsNotEmpty()
     {
         // Exercises the native load path + mxc_version() end-to-end.

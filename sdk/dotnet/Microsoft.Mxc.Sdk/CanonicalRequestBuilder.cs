@@ -189,6 +189,10 @@ internal static class CanonicalRequestBuilder
                         "process",
                         options);
                 }
+                else if (OperatingSystem.IsLinux())
+                {
+                    ApplyLinuxNetworkPolicy(root);
+                }
                 break;
             case ProcessContainerContainment processContainer:
                 AddProcessContainer(
@@ -212,6 +216,27 @@ internal static class CanonicalRequestBuilder
                     nameof(containment));
         }
     }
+
+    /// <summary>
+    /// Promotes network enforcement to <c>firewall</c> when host rules are present and no
+    /// cooperative proxy is configured — the Linux counterpart of the Rust builder's
+    /// <c>apply_linux_network_policy</c>. Without it the parser leaves the mode at
+    /// <c>capabilities</c> and the host lists are not applied.
+    /// </summary>
+    private static void ApplyLinuxNetworkPolicy(JsonObject root)
+    {
+        if (root["network"] is not JsonObject network || network["proxy"] is not null)
+        {
+            return;
+        }
+        if (HasHosts(network, "allowedHosts") || HasHosts(network, "blockedHosts"))
+        {
+            network["enforcementMode"] = "firewall";
+        }
+    }
+
+    private static bool HasHosts(JsonObject network, string key) =>
+        network[key] is JsonArray hosts && hosts.Count != 0;
 
     private static JsonObject BuildWslc(WslcContainment wslc)
     {
