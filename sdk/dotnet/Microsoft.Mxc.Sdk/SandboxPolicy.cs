@@ -77,7 +77,10 @@ public sealed class SandboxPolicy
 /// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>
 public sealed class TelemetrySettings
 {
-    /// <summary>Whether this invocation opts telemetry on, subject to consent and policy.</summary>
+    /// <summary>
+    /// Opt this invocation into telemetry, subject to persisted user consent
+    /// and administrative policy.
+    /// </summary>
     [JsonPropertyName("enabled")]
     public bool Enabled { get; set; }
 }

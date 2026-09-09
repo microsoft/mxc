@@ -494,14 +494,50 @@ sanitized technical signatures. It does not include commands, credentials,
 complete file paths, usernames, sandbox output, raw ETL, or general logger
 text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
 
-The .NET consent APIs are UI-agnostic: `MxcTelemetry.RequestConsent` supplies
-the canonical resource to a host callback, while `GetConsentStatus`,
-`NeedsConsentPrompt`, and `WithdrawConsent` provide maintenance operations.
-They persist only explicit yes/no decisions and treat dismissal and failures
-as non-grants. See
+`MxcTelemetry` is UI-agnostic: it passes the canonical prompt to your
+presenter and persists only the typed decision you return.
+`GetConsentStatus`, `NeedsConsentPrompt`, and `WithdrawConsent` provide the
+remaining maintenance operations. Dismissal and failures never grant consent.
+For presenter rules and consent semantics, see
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
+
+Per-invocation opt-in:
+- One-shot (`Run`/`Spawn`): set
+  `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }`.
+  An explicit policy version must be `0.9.0-alpha` or later.
+- State-aware phases: set each phase's
+  `Telemetry = new TelemetrySettings { Enabled = true }` independently.
+  `ProvisionResult` contains the sandbox identity used by later phases; no
+  telemetry context needs to be forwarded between phases.
+
+These switches do not bypass persisted consent or administrative policy.
+
+```csharp
+using Microsoft.Mxc.Sdk;
+
+var outcome = MxcTelemetry.RequestConsent(prompt =>
+{
+    return ShowTelemetryConsentDialog(
+        title: prompt.Title.Text,
+        body: prompt.Body.Text,
+        affirmativeLabel: prompt.AffirmativeLabel.Text,
+        negativeLabel: prompt.NegativeLabel.Text,
+        learnMoreLabel: prompt.LearnMoreLabel.Text,
+        learnMoreUrl: prompt.LearnMoreUrl);
+});
+// ShowTelemetryConsentDialog returns Yes, No, or Dismissed from the user's
+// action; closing or cancelling the dialog must return Dismissed.
+
+TelemetryConsentStatus status = MxcTelemetry.GetConsentStatus();
+MxcTelemetry.WithdrawConsent();
+```
+
+`RequestConsentAsync` accepts an asynchronous presenter. If consent is never
+requested, the presenter fails, or it returns `Dismissed`, telemetry remains
+off. On non-Windows hosts requests and withdrawals return `NotApplicable`
+without invoking a presenter.
 
 `RequestConsentAsync` cancellation is best-effort relative to persistence. It
 stops waiting for an unfinished presenter, but once a completed decision wins
@@ -511,16 +547,25 @@ cancel the host's presenter task.
 
 ### Administrative policy
 
-An IT administrator can still block MXC telemetry device-wide via MXC's own
-registry policy setting. See
-[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Read-only queries fail
-closed rather than upgrading an unreadable device state into collection. When
-that fallback hides a native or parsing failure, the SDK reports a bounded set
-of distinct failure signatures through `System.Diagnostics.Trace`. Each
-signature is reported once; if a listener rejects it, a future occurrence may
-try again. Reports include the exception type and HRESULT or native error code,
-but exclude exception messages and stack traces.
+An administrator can block MXC telemetry device-wide through MXC's registry
+policy. `MxcTelemetry.GetPolicy()` reports the result:
+
+```csharp
+if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
+{
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+`Allowed` does not grant user consent, while `Blocked` disables collection and
+the consent prompt. Failures return a fail-closed state and never grant
+consent; non-Windows hosts return `NotApplicable`. When a read-only fallback
+hides a native or parsing failure, the SDK reports a bounded set of distinct
+failure signatures through `System.Diagnostics.Trace`. Each signature is
+reported once; if a listener rejects it, a future occurrence may try again.
+Reports include the exception type and HRESULT or native error code, but exclude
+exception messages and stack traces. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## Projects
 
