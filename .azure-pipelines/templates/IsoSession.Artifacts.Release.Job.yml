@@ -50,14 +50,14 @@ jobs:
 
   steps:
   - ${{ if eq(parameters.promotionSourceRunId, 0) }}:
-    - task: DownloadPipelineArtifact@2
+    - task: 1ES.DownloadPipelineArtifact@1
       displayName: Download aggregated IsoSession artifact
       inputs:
-        artifact: isosession-artifacts
-        path: $(releaseArtifactDirectory)
+        artifactName: isosession-artifacts
+        targetPath: $(releaseArtifactDirectory)
 
   - ${{ if ne(parameters.promotionSourceRunId, 0) }}:
-    - task: DownloadPipelineArtifact@2
+    - task: 1ES.DownloadPipelineArtifact@1
       displayName: Download qualified IsoSession artifact
       inputs:
         buildType: specific
@@ -189,12 +189,6 @@ jobs:
           -ShortDescription '${{ parameters.WinGetInfo.shortDescription }}' `
           -MinimumOSVersion '${{ parameters.WinGetInfo.minimumOSVersion }}'
     displayName: Build multi-architecture WinGet manifests
-
-  - task: 1ES.PublishPipelineArtifact@1
-    displayName: Publish WinGet submission evidence
-    inputs:
-      path: $(wingetDirectory)
-      artifactName: isosession-winget-submission
 
   - task: EsrpRelease@12
     name: EsrpWingetPublish
