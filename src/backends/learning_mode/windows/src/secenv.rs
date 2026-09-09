@@ -334,6 +334,7 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
+    version_support: Option<PfnIsProcessSecurityEnvironmentVersionSupported>,
     close: PfnCloseProcessSecurityEnvironment,
     cacheable: bool,
 }
@@ -343,6 +344,10 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
         f.debug_struct("SecurityEnvironmentApi")
             .field("create", &(self.create as *const ()))
             .field("query_support", &(self.query_support as *const ()))
+            .field(
+                "version_support",
+                &self.version_support.map(|function| function as *const ()),
+            )
             .field("close", &(self.close as *const ()))
             .field("cacheable", &self.cacheable)
             .finish()
@@ -397,6 +402,15 @@ impl SecurityEnvironmentApi {
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
             let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
+            let version_support =
+                GetProcAddress(hmodule, PCSTR(VERSION_SUPPORT_NAMES[0].as_ptr().cast())).map(
+                    |function| {
+                        std::mem::transmute::<
+                            unsafe extern "system" fn() -> isize,
+                            PfnIsProcessSecurityEnvironmentVersionSupported,
+                        >(function)
+                    },
+                );
             let close_proc = resolve_any(hmodule, CLOSE_NAMES)?;
 
             Ok(Self {
@@ -408,6 +422,7 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnQueryProcessSecurityEnvironmentSupport,
                 >(query_support_proc),
+                version_support,
                 close: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnCloseProcessSecurityEnvironment,
@@ -430,6 +445,7 @@ impl SecurityEnvironmentApi {
         Self {
             create,
             query_support,
+            version_support: None,
             close,
             cacheable: false,
         }
@@ -447,6 +463,7 @@ impl SecurityEnvironmentApi {
         Self {
             create,
             query_support,
+            version_support: None,
             close,
             cacheable: true,
         }
@@ -475,7 +492,10 @@ impl SecurityEnvironmentApi {
 
     /// Whether the requested PSEC contract version is supported.
     pub fn supports_version(&self, major: u32, minor: u32) -> Result<bool, LearningModeError> {
-        query_supported_minor_version(major)
+        let Some(version_support) = self.version_support else {
+            return Ok(major == 1 && minor == 0);
+        };
+        query_supported_minor_version_with(major, version_support)
             .map(|supported| supported.is_some_and(|supported| supported >= minor))
     }
 
@@ -539,26 +559,6 @@ impl SecurityEnvironmentApi {
             handle: env,
             close: self.close,
         })
-    }
-}
-
-fn query_supported_minor_version(major: u32) -> Result<Option<u32>, LearningModeError> {
-    let dll = string_util::to_wide(PROCESSMODEL_DLL);
-    // SAFETY: the DLL name is null-terminated, System32-scoped, and the
-    // resolved function pointer is invoked with the documented ABI.
-    unsafe {
-        let hmodule = LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
-            .map_err(|error| LearningModeError::DllLoad(error.to_string()))?;
-        let Some(version_support) =
-            GetProcAddress(hmodule, PCSTR(VERSION_SUPPORT_NAMES[0].as_ptr().cast()))
-        else {
-            return Ok((major == 1).then_some(0));
-        };
-        let version_support = std::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
-            PfnIsProcessSecurityEnvironmentVersionSupported,
-        >(version_support);
-        query_supported_minor_version_with(major, version_support)
     }
 }
 
@@ -870,6 +870,15 @@ mod tests {
                 code
             } if code == E_FAIL.0
         ));
+    }
+
+    #[test]
+    fn missing_version_export_supports_only_the_baseline_contract() {
+        let api = fake_uncached_api();
+
+        assert!(api.supports_version(1, 0).unwrap());
+        assert!(!api.supports_version(1, 1).unwrap());
+        assert!(!api.supports_version(2, 0).unwrap());
     }
 
     #[test]
