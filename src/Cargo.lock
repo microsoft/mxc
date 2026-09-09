@@ -1286,12 +1286,13 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 name = "isolation_session_bindings"
 version = "0.8.0"
 dependencies = [
+ "mxc_build_common",
+ "semver",
  "windows",
  "windows-bindgen",
  "windows-collections",
  "windows-core",
  "windows-future",
- "zip",
 ]
 
 [[package]]
@@ -1622,6 +1623,7 @@ dependencies = [
 name = "mxc_build_common"
 version = "0.8.0"
 dependencies = [
+ "sha2 0.10.9",
  "winresource",
  "zip",
 ]

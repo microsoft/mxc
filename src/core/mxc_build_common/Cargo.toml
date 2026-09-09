@@ -5,6 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Shared build-time helpers for embedding Windows VersionInfo in MXC binaries"
 
+[features]
+default = []
+isolation_session_sdk = ["dep:sha2", "dep:zip"]
+
+[dependencies]
+sha2 = { version = "0.10", optional = true }
+zip = { version = "2", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 winresource = { version = "0.1.31", default-features = false }
-zip = "2"

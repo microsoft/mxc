@@ -11,8 +11,237 @@
 use std::path::Path;
 use std::process::Command;
 
-#[cfg(windows)]
-use std::io::Read;
+#[cfg(all(windows, feature = "isolation_session_sdk"))]
+pub mod isolation_session_sdk {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub const PACKAGE_ID: &str = "Microsoft.Windows.AI.IsolationSession.SDK";
+    pub const PACKAGE_VERSION: &str = "0.2608.0";
+    pub const PACKAGE_SHA256: &str =
+        "af609652e691e9f2ae47885bcfcfd29e8d8c05744482f50c104efd2f3ca1d8e5";
+    pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
+
+    const APP_DLL: &str = "IsoSessionApp.dll";
+    const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
+    const VERSION_SIDECAR: &str = "IsoSessionApp.runtimeversion";
+
+    pub fn resolve_package() -> Result<PathBuf, String> {
+        println!("cargo:rerun-if-env-changed={PACKAGE_PATH_ENV}");
+
+        if let Ok(value) = std::env::var(PACKAGE_PATH_ENV) {
+            let path = PathBuf::from(value);
+            verify_package(&path)?;
+            println!("cargo:rerun-if-changed={}", path.display());
+            return Ok(path);
+        }
+
+        let package_name = format!(
+            "{}.{}.nupkg",
+            PACKAGE_ID.to_ascii_lowercase(),
+            PACKAGE_VERSION
+        );
+        let package_dir = nuget_cache_root()?
+            .join(PACKAGE_ID.to_ascii_lowercase())
+            .join(PACKAGE_VERSION);
+        let package_path = package_dir.join(&package_name);
+
+        if package_path.exists() {
+            verify_package(&package_path)?;
+            println!("cargo:rerun-if-changed={}", package_path.display());
+            return Ok(package_path);
+        }
+
+        std::fs::create_dir_all(&package_dir).map_err(|e| {
+            format!(
+                "create IsolationSession NuGet cache directory {}: {e}",
+                package_dir.display()
+            )
+        })?;
+
+        let download_path =
+            package_dir.join(format!("{package_name}.download.{}", std::process::id()));
+        let url = format!(
+            "https://api.nuget.org/v3-flatcontainer/{}/{}/{}",
+            PACKAGE_ID.to_ascii_lowercase(),
+            PACKAGE_VERSION,
+            package_name
+        );
+        let status = Command::new("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--retry",
+                "3",
+                "--silent",
+                "--show-error",
+            ])
+            .arg("--output")
+            .arg(&download_path)
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("launch curl to download {PACKAGE_ID} {PACKAGE_VERSION}: {e}"))?;
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&download_path);
+            return Err(format!(
+                "download {PACKAGE_ID} {PACKAGE_VERSION} from NuGet.org failed with {status}; \
+                 set {PACKAGE_PATH_ENV} to a pre-fetched package for an offline build"
+            ));
+        }
+
+        if let Err(e) = verify_package(&download_path) {
+            let _ = std::fs::remove_file(&download_path);
+            return Err(e);
+        }
+
+        match std::fs::rename(&download_path, &package_path) {
+            Ok(()) => {}
+            Err(e) if package_path.exists() => {
+                let _ = std::fs::remove_file(&download_path);
+                verify_package(&package_path).map_err(|verify_error| {
+                    format!(
+                        "another build populated {}, but it is invalid ({verify_error}); \
+                         original rename error: {e}",
+                        package_path.display()
+                    )
+                })?;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&download_path);
+                return Err(format!(
+                    "publish downloaded package to {}: {e}",
+                    package_path.display()
+                ));
+            }
+        }
+
+        println!("cargo:rerun-if-changed={}", package_path.display());
+        Ok(package_path)
+    }
+
+    pub fn stage_runtime() -> Result<(), String> {
+        let package = resolve_package()?;
+        let app_dll = read_entry(&package, APP_DLL)?;
+        let version_bytes = read_entry(&package, VERSION_SIDECAR)?;
+        let instance = String::from_utf8(version_bytes)
+            .map_err(|e| format!("{VERSION_SIDECAR} is not valid UTF-8: {e}"))?
+            .trim()
+            .replace('_', ".");
+        validate_instance(&instance)?;
+
+        let manifest = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n\
+  <assemblyIdentity name=\"IsoSession.Runtime\" version=\"1.0.0.0\" type=\"win32\" />\n\
+  <file name=\"IsoSessionApp.dll\" />\n\
+  <iso:instance xmlns:iso=\"urn:schemas-microsoft-com:agentic-runtime.v1\" name=\"{instance}\" />\n\
+</assembly>\n"
+        );
+        let target_dir = target_profile_dir()?;
+        std::fs::write(target_dir.join(APP_DLL), app_dll)
+            .map_err(|e| format!("stage {APP_DLL} to {}: {e}", target_dir.display()))?;
+        std::fs::write(target_dir.join(RUNTIME_MANIFEST), manifest)
+            .map_err(|e| format!("stage {RUNTIME_MANIFEST} to {}: {e}", target_dir.display()))?;
+        Ok(())
+    }
+
+    pub fn read_entry(package: &Path, file_name: &str) -> Result<Vec<u8>, String> {
+        let file = std::fs::File::open(package)
+            .map_err(|e| format!("open NuGet package {}: {e}", package.display()))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("read NuGet package {}: {e}", package.display()))?;
+        let wanted = file_name.to_ascii_lowercase();
+        let entry_name = (0..archive.len())
+            .find_map(|index| {
+                let name = archive.by_index(index).ok()?.name().to_string();
+                let leaf = name.rsplit(['/', '\\']).next().unwrap_or(&name);
+                (leaf.to_ascii_lowercase() == wanted).then_some(name)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{file_name} was not found in NuGet package {}",
+                    package.display()
+                )
+            })?;
+        let mut entry = archive
+            .by_name(&entry_name)
+            .map_err(|e| format!("open NuGet entry {entry_name}: {e}"))?;
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("read NuGet entry {entry_name}: {e}"))?;
+        Ok(bytes)
+    }
+
+    fn target_profile_dir() -> Result<PathBuf, String> {
+        let out_dir = PathBuf::from(
+            std::env::var("OUT_DIR").map_err(|e| format!("OUT_DIR is not set: {e}"))?,
+        );
+        out_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.parent())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                format!(
+                    "cannot resolve Cargo profile directory from {}",
+                    out_dir.display()
+                )
+            })
+    }
+
+    fn validate_instance(instance: &str) -> Result<(), String> {
+        let bytes = instance.as_bytes();
+        if bytes.len() == 7
+            && bytes[4] == b'.'
+            && bytes[..4].iter().all(u8::is_ascii_digit)
+            && bytes[5..].iter().all(u8::is_ascii_digit)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "{VERSION_SIDECAR} must identify a YYYY_MM instance, got {instance:?}"
+            ))
+        }
+    }
+
+    fn nuget_cache_root() -> Result<PathBuf, String> {
+        if let Ok(path) = std::env::var("NUGET_PACKAGES") {
+            return Ok(PathBuf::from(path));
+        }
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map_err(|_| {
+                format!(
+                    "neither NUGET_PACKAGES, USERPROFILE, nor HOME is set; set \
+                     {PACKAGE_PATH_ENV} to a pre-fetched package"
+                )
+            })?;
+        Ok(PathBuf::from(home).join(".nuget").join("packages"))
+    }
+
+    fn verify_package(path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("read IsolationSession SDK package {}: {e}", path.display()))?;
+        let actual = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if actual.eq_ignore_ascii_case(PACKAGE_SHA256) {
+            Ok(())
+        } else {
+            Err(format!(
+                "IsolationSession SDK package hash mismatch for {}: expected {}, got {}",
+                path.display(),
+                PACKAGE_SHA256,
+                actual
+            ))
+        }
+    }
+}
 
 /// Embed Windows VersionInfo resource metadata into the binary being compiled.
 ///
@@ -59,110 +288,6 @@ pub fn embed_version_info_with_manifest(
     {
         let _ = (file_description, original_filename, manifest_xml);
     }
-}
-
-/// Stages the lifted IsolationSession activation payload from the pinned SDK
-/// package beside the consuming Cargo artifact.
-#[cfg(windows)]
-pub fn stage_isolation_session_runtime(sdk_dir: &Path) -> Option<String> {
-    const APP_DLL: &str = "IsoSessionApp.dll";
-    const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
-    const VERSION_SIDECAR: &str = "IsoSessionApp.runtimeversion";
-
-    let nupkg = find_last_nupkg(sdk_dir)?;
-    println!("cargo:rerun-if-changed={}", nupkg.display());
-
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let target_dir = Path::new(&out_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("could not determine target dir from OUT_DIR");
-
-    let Some(app_dll) = extract_zip_entry(&nupkg, APP_DLL) else {
-        println!(
-            "cargo:warning=isosession: {} not found in {}; lifted activation will be unavailable",
-            APP_DLL,
-            nupkg.display()
-        );
-        return None;
-    };
-    std::fs::write(target_dir.join(APP_DLL), app_dll)
-        .unwrap_or_else(|e| panic!("stage {} to {}: {e}", APP_DLL, target_dir.display()));
-
-    let Some(version_bytes) = extract_zip_entry(&nupkg, VERSION_SIDECAR) else {
-        println!(
-            "cargo:warning=isosession: {} not found in {}; cannot stamp {}",
-            VERSION_SIDECAR,
-            nupkg.display(),
-            RUNTIME_MANIFEST
-        );
-        return None;
-    };
-    let instance = String::from_utf8(version_bytes)
-        .expect("IsoSessionApp.runtimeversion is valid UTF-8")
-        .trim()
-        .replace('_', ".");
-    let instance_bytes = instance.as_bytes();
-    assert!(
-        instance_bytes.len() == 7
-            && instance_bytes[4] == b'.'
-            && instance_bytes[..4]
-                .iter()
-                .all(|value| value.is_ascii_digit())
-            && instance_bytes[5..]
-                .iter()
-                .all(|value| value.is_ascii_digit()),
-        "IsoSessionApp.runtimeversion must identify a YYYY_MM instance"
-    );
-    let manifest = format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n\
-  <assemblyIdentity name=\"IsoSession.Runtime\" version=\"1.0.0.0\" type=\"win32\" />\n\
-  <file name=\"IsoSessionApp.dll\" />\n\
-  <iso:instance xmlns:iso=\"urn:schemas-microsoft-com:agentic-runtime.v1\" name=\"{instance}\" />\n\
-</assembly>\n"
-    );
-    std::fs::write(target_dir.join(RUNTIME_MANIFEST), manifest.as_bytes()).unwrap_or_else(|e| {
-        panic!(
-            "stage {} to {}: {e}",
-            RUNTIME_MANIFEST,
-            target_dir.display()
-        )
-    });
-    Some(manifest)
-}
-
-#[cfg(windows)]
-fn find_last_nupkg(dir: &Path) -> Option<std::path::PathBuf> {
-    let mut packages: Vec<_> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("nupkg"))
-        })
-        .collect();
-    packages.sort();
-    packages.into_iter().next_back()
-}
-
-#[cfg(windows)]
-fn extract_zip_entry(nupkg: &Path, file_name: &str) -> Option<Vec<u8>> {
-    let file =
-        std::fs::File::open(nupkg).unwrap_or_else(|e| panic!("open {}: {e}", nupkg.display()));
-    let mut archive =
-        zip::ZipArchive::new(file).unwrap_or_else(|e| panic!("read zip {}: {e}", nupkg.display()));
-    let wanted = file_name.to_ascii_lowercase();
-    let entry_name = (0..archive.len()).find_map(|index| {
-        let name = archive.by_index(index).ok()?.name().to_string();
-        let leaf = name.rsplit(['/', '\\']).next().unwrap_or(&name);
-        (leaf.to_ascii_lowercase() == wanted).then_some(name)
-    })?;
-    let mut entry = archive.by_name(&entry_name).ok()?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
 }
 
 #[cfg(windows)]

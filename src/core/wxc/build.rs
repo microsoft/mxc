@@ -2,7 +2,7 @@
 
 fn main() {
     #[cfg(all(windows, feature = "isolation_session"))]
-    stage_isolation_session_runtime();
+    reconcile_isolation_session_runtime();
 
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
 
@@ -14,16 +14,39 @@ fn main() {
 }
 
 #[cfg(all(windows, feature = "isolation_session"))]
-fn stage_isolation_session_runtime() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_dir = manifest_dir
-        .join("..")
-        .join("..")
-        .join("..")
-        .join("external")
-        .join("windows-sdk")
-        .join("isolation-session");
-    let _ = mxc_build_common::stage_isolation_session_runtime(&sdk_dir);
+fn reconcile_isolation_session_runtime() {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let target_dir = out_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("could not determine target directory from OUT_DIR");
+
+    // Feature configurations share the final profile directory but have
+    // separate build-script fingerprints. Force this script to reconcile the
+    // shared payload whenever Cargo is invoked.
+    println!(
+        "cargo:rerun-if-changed={}",
+        target_dir.join(".isosession-payload-state").display()
+    );
+
+    #[cfg(feature = "isolation_session_lifted")]
+    mxc_build_common::isolation_session_sdk::stage_runtime()
+        .unwrap_or_else(|e| panic!("IsolationSession SDK staging failed: {e}"));
+
+    #[cfg(not(feature = "isolation_session_lifted"))]
+    for file_name in [
+        "IsoSessionApp.dll",
+        "IsoSession.manifest",
+        "IsoSessionApp.runtimeversion",
+    ] {
+        let path = target_dir.join(file_name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove stale lifted payload {}: {error}", path.display()),
+        }
+    }
 }
 
 /// Emit build warnings when E2E test prerequisites are missing or

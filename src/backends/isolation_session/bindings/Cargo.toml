@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+lifted = ["dep:mxc_build_common", "dep:windows-bindgen"]
+
 [dependencies]
 windows-core = { workspace = true }
 windows-collections = "0.3"
@@ -14,5 +18,6 @@ windows-future = "0.3"
 windows = { workspace = true, features = ["Foundation"] }
 
 [build-dependencies]
-windows-bindgen = "=0.62.1"
-zip = "2"
+semver = "1"
+mxc_build_common = { workspace = true, features = ["isolation_session_sdk"], optional = true }
+windows-bindgen = { version = "=0.62.1", optional = true }
