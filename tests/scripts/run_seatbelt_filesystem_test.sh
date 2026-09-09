@@ -23,6 +23,7 @@ run_config "$(render seatbelt_fs_readonly_readable.json TESTDIR "$TESTDIR")"
 expect_ok "a readonly path is readable" "FS_SECRET_CONTENT"
 
 run_config "$(render seatbelt_fs_readonly_not_writable.json TESTDIR "$TESTDIR")"
+expect_marker "the readonly-write probe ran" "FS_PROBE_DONE"
 expect_absent "a readonly path is not writable" "FS_RO_WRITE_SUCCEEDED"
 [ ! -f "$TESTDIR/ro/written.txt" ] || fail "a readonly path is not writable (the file was created on the host)"
 pass "a readonly write left no file behind"
@@ -31,21 +32,25 @@ run_config "$(render seatbelt_fs_readwrite_writable.json TESTDIR "$TESTDIR")"
 expect_ok "a readwrite path is writable" "written"
 
 run_config "$(render seatbelt_fs_denied_unreadable.json TESTDIR "$TESTDIR")"
+expect_marker "the denied-read probe ran" "FS_PROBE_DONE"
 expect_absent "a denied path is unreadable" "FS_DENIED_READ_SUCCEEDED"
 expect_absent "a denied path leaks no content" "FS_SECRET_CONTENT"
 
 # The documented precedence: deny wins over an enclosing readwrite grant.
 run_config "$(render seatbelt_fs_denied_nested_in_readwrite.json TESTDIR "$TESTDIR")"
+expect_marker "the nested-denied probe ran" "FS_PROBE_DONE"
 expect_absent "a denied path nested in a readwrite grant stays denied" "FS_NESTED_DENIED_READ_SUCCEEDED"
 expect_absent "a nested denied path leaks no content" "FS_SECRET_CONTENT"
 
 run_config "$(render seatbelt_fs_ungranted_denied.json TESTDIR "$TESTDIR")"
+expect_marker "the ungranted-read probe ran" "FS_PROBE_DONE"
 expect_absent "an ungranted path is denied by default" "FS_UNGRANTED_READ_SUCCEEDED"
 expect_absent "an ungranted path leaks no content" "FS_SECRET_CONTENT"
 
 # SIP is enforced by the kernel above the sandbox profile, so a grant cannot
 # lift it. Documented as a Seatbelt-specific limit.
 run_config "$(render seatbelt_fs_sip_beats_grant.json)"
+expect_marker "the SIP probe ran" "FS_PROBE_DONE"
 expect_absent "a readwrite grant on a SIP-protected path does not lift SIP" "FS_SIP_WRITE_SUCCEEDED"
 [ ! -f /usr/mxc-sip-probe ] || fail "SIP probe wrote to /usr, which must be impossible"
 pass "the SIP probe left nothing behind"

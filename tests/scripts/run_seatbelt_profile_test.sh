@@ -22,6 +22,7 @@ extract() { sed -n "/^${BEGIN}\$/,/^${END}\$/p" <<<"$1" | sed '1d;$d'; }
 CFG="$(render seatbelt_basic_hello.json)"
 
 run_config "$CFG"
+expect_marker "the run without --debug still executed" "SEATBELT_BASIC_OK"
 expect_absent "the profile is not printed without --debug" "$BEGIN"
 
 run_config "$CFG" --debug
@@ -75,9 +76,18 @@ pass "profileOverride is logged verbatim instead of a generated profile"
 # --log-file is the alternative sink for callers that cannot take console noise.
 LOG="$SEATBELT_TMP/profile.log"
 run_config "$CFG" --log-file "$LOG"
+expect_marker "the --log-file run still executed" "SEATBELT_BASIC_OK"
 expect_absent "--log-file alone does not print the profile to the console" "$BEGIN"
 [ -f "$LOG" ] || fail "--log-file produced no file"
 grep -qF "$BEGIN" "$LOG" || fail "--log-file captures the profile" "$(cat "$LOG")"
-pass "--log-file captures the profile without printing it"
+# The rules themselves must reach the file, not just the marker. Asserted by
+# content rather than by exact framing: the file sink writes one timestamped
+# record per line, so this copy is deliberately not verbatim -- `--debug` is
+# the path that promises a copy-pasteable block.
+for rule in "(version 1)" "(deny default)"; do
+    grep -qF "$rule" "$LOG" ||
+        fail "--log-file captures the profile rules (missing '$rule')" "$(cat "$LOG")"
+done
+pass "--log-file captures the profile rules without printing them"
 
 summary "Seatbelt profile output"

@@ -3,7 +3,7 @@
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "cat {{TESTDIR}}/ro/secret.txt && echo FS_UNGRANTED_READ_SUCCEEDED",
+        "commandLine": "cat {{TESTDIR}}/ro/secret.txt && echo FS_UNGRANTED_READ_SUCCEEDED; echo FS_PROBE_DONE",
         "timeout": 10000
     },
     "filesystem": { "readonlyPaths": ["/bin"] }

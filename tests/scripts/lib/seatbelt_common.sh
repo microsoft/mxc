@@ -137,6 +137,11 @@ expect_marker() {
     pass "$label"
 }
 
+# Absence of a marker is only meaningful once the run is known to have reached
+# the probe: a validation error, a failed sandbox launch, or an interpreter that
+# never started all produce the same empty output. Every caller must therefore
+# pair this with an expect_ok/expect_marker on the SAME run that proves the
+# workload executed, or the assertion can pass without testing anything.
 expect_absent() {
     local label="$1" marker="$2"
     ! grep -qF "$marker" <<<"$OUT" || fail "$label (unexpected '$marker')" "$OUT"

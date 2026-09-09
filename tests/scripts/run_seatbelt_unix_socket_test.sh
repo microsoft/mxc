@@ -23,6 +23,10 @@ run_config "$(render seatbelt_unix_socket_readwrite.json TESTDIR "$TESTDIR")"
 expect_ok "an AF_UNIX socket binds under a readwrite grant" "UNIX_BIND_OK"
 
 run_config "$(render seatbelt_unix_socket_readonly.json TESTDIR "$TESTDIR")"
+# Assert the refusal positively before asserting the success marker is absent:
+# absence alone would also hold if the interpreter never started, which is how
+# a lost {{DEVDIR}} grant could report a passing test that never bound at all.
+expect_marker "an AF_UNIX bind under a readonly grant is refused" "UNIX_BIND_REFUSED"
 expect_absent "an AF_UNIX socket cannot bind under a readonly grant" "UNIX_BIND_SUCCEEDED"
 [ ! -S "$TESTDIR/ro/s.sock" ] || fail "a socket was created in a readonly grant"
 pass "the refused bind left no socket behind"

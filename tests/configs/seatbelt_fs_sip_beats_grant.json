@@ -3,7 +3,7 @@
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "touch /usr/mxc-sip-probe && echo FS_SIP_WRITE_SUCCEEDED",
+        "commandLine": "touch /usr/mxc-sip-probe && echo FS_SIP_WRITE_SUCCEEDED; echo FS_PROBE_DONE",
         "timeout": 10000
     },
     "filesystem": { "readwritePaths": ["/usr"] }

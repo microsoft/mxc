@@ -3,7 +3,7 @@
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "cat {{TESTDIR}}/rw/nested/secret.txt && echo FS_NESTED_DENIED_READ_SUCCEEDED",
+        "commandLine": "cat {{TESTDIR}}/rw/nested/secret.txt && echo FS_NESTED_DENIED_READ_SUCCEEDED; echo FS_PROBE_DONE",
         "timeout": 10000
     },
     "filesystem": {

@@ -3,8 +3,8 @@
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "/usr/bin/python3 -c \"import socket; p='{{TESTDIR}}/ro/s.sock'; s=socket.socket(socket.AF_UNIX); s.bind(p); print('UNIX_BIND_SUCCEEDED')\"",
+        "commandLine": "/usr/bin/python3 -c \"import socket\np='{{TESTDIR}}/ro/s.sock'\ns=socket.socket(socket.AF_UNIX)\ntry: s.bind(p); print('UNIX_BIND_SUCCEEDED')\nexcept OSError as e: print('UNIX_BIND_REFUSED', e.errno)\"",
         "timeout": 20000
     },
-    "filesystem": { "readonlyPaths": ["{{DEVDIR}}"], "readonlyPaths": ["{{TESTDIR}}/ro"] }
+    "filesystem": { "readonlyPaths": ["{{DEVDIR}}", "{{TESTDIR}}/ro"] }
 }
