@@ -3,7 +3,7 @@
 
 //! `BaseContainerRunner` — executes scripts through the Windows BaseContainer APIs.
 //!
-//! The runner prefers the PSEC 1.0 / `CreateProcessSecurityEnvironment`
+//! The runner prefers the PSEC / `CreateProcessSecurityEnvironment`
 //! two-phase contract whenever its runtime probe succeeds and attaches the
 //! resulting environment to `CreateProcessW`. It temporarily falls back to the
 //! legacy `SandboxSpec` / one-shot `Experimental_CreateProcessInSandbox`
@@ -100,6 +100,7 @@ fn build_child_env_block(
         if !use_process_security_environment && proxy_address.is_none() {
             return Ok(None);
         }
+
         let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
         if let Some(address) = proxy_address {
             crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
@@ -421,7 +422,7 @@ impl BaseContainerRunner {
 
     #[cfg(test)]
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        build_psec_spec(request)
+        build_psec_spec(request, request.policy.network_ingress.is_some())
     }
 
     #[cfg(test)]
@@ -566,7 +567,7 @@ impl BaseContainerRunner {
                 schema_version: "0.8.0-alpha".to_string(),
                 ..Default::default()
             };
-            let specification = build_psec_spec(&request);
+            let specification = build_psec_spec(&request, false);
             SecurityEnvironmentApi::load()
                 .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
                 .and_then(|environment| {
@@ -595,7 +596,7 @@ impl BaseContainerRunner {
             schema_version: "0.8.0-alpha".to_string(),
             ..Default::default()
         };
-        let specification = build_psec_spec(&request);
+        let specification = build_psec_spec(&request, false);
         SecurityEnvironmentApi::load()
             .and_then(|security_environment_api| {
                 CaptureSession::begin(
@@ -698,6 +699,39 @@ impl BaseContainerRunner {
             Self::decode_sbox_proxy_contract(queried_capabilities),
             SboxProxyContract::LegacyOrUnknown
         )
+    }
+
+    fn supports_psec_ingress(request: &ExecutionRequest) -> Result<bool, ScriptResponse> {
+        let Some(ingress) = request.policy.network_ingress.as_ref() else {
+            return Ok(false);
+        };
+        let ingress_supported = SecurityEnvironmentApi::load()
+            .and_then(|api| {
+                if api.supports_version(1, 1)? {
+                    api.supports_network_ingress()
+                } else {
+                    Ok(false)
+                }
+            })
+            .map_err(|error| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&format!(
+                    "failed to query Process Security Environment ingress support: {error}"
+                ))
+            })?;
+        if ingress_supported {
+            return Ok(true);
+        }
+        if ingress.host_loopback == wxc_common::models::NetworkAction::Allow {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "network.ingress.hostLoopback='allow' requires \
+                     Process Security Environment contract version 1.1 with ingress support",
+                )
+            });
+        }
+        Ok(false)
     }
 
     fn validate_resolved_network_contract(
@@ -1128,6 +1162,12 @@ impl BaseContainerRunner {
             logger,
         );
 
+        let use_process_security_environment = self.uses_process_security_environment(request);
+        Self::validate_resolved_network_contract(request, use_process_security_environment)?;
+        let psec_ingress_supported = use_process_security_environment
+            .then(|| Self::supports_psec_ingress(request))
+            .transpose()?;
+
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
         if request.policy.network_proxy.builtin_test_server {
@@ -1164,12 +1204,8 @@ impl BaseContainerRunner {
                  the WinHTTP stack will be proxied; other HTTP stacks may bypass it.",
             );
         }
-
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
-
         let capture_denials = request.policy.capture_denials.clone();
-        let use_process_security_environment = self.uses_process_security_environment(&request);
-        Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
             let bytes = build_sbox_spec(&request);
@@ -1182,12 +1218,13 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec =
-            use_process_security_environment.then(|| build_psec_spec(&request));
+        let process_security_environment_spec = psec_ingress_supported
+            .map(|ingress_supported| build_psec_spec(&request, ingress_supported));
         if let Some(psec_spec) = process_security_environment_spec.as_ref() {
             let _ = writeln!(
                 logger,
-                "process security environment spec built (PSEC 1.0, {} bytes)",
+                "process security environment spec built (PSEC 1.{}, {} bytes)",
+                u8::from(psec_ingress_supported.unwrap_or(false)),
                 psec_spec.len()
             );
         }
@@ -1530,7 +1567,11 @@ impl BaseContainerRunner {
         if use_process_security_environment {
             let psec_spec = process_security_environment_spec
                 .as_deref()
-                .expect("PSEC spec is initialized when the PSEC path is selected");
+                .ok_or_else(|| {
+                    ScriptResponse::error(
+                        "internal error: PSEC contract resolved without a specification",
+                    )
+                })?;
             if capture_denials.is_some() {
                 match self
                     .capture_factory
@@ -3147,7 +3188,6 @@ fn derive_sid_string_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_container_helpers::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
     use crate::job_object::to_job_object_uilimit_mask;
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
@@ -4061,22 +4101,59 @@ mod tests {
     }
 
     #[test]
-    fn build_process_security_environment_spec_enables_host_loopback() {
+    fn build_process_security_environment_spec_encodes_ingress() {
+        for (default, host_loopback, expected_default, expected_host_loopback) in [
+            (
+                NetworkAction::Deny,
+                NetworkAction::Allow,
+                psec_layout::FilterAction::deny,
+                psec_layout::FilterAction::allow,
+            ),
+            (
+                NetworkAction::Allow,
+                NetworkAction::Deny,
+                psec_layout::FilterAction::allow,
+                psec_layout::FilterAction::deny,
+            ),
+        ] {
+            let mut request = ExecutionRequest::default();
+            request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+                default,
+                host_loopback,
+            });
+
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let network = spec.network_policy().expect("network policy");
+            let ingress = network.ingress().expect("ingress policy");
+
+            assert_eq!(spec.version().minor(), 1);
+            assert!(spec.capabilities().is_none());
+            assert_eq!(ingress.default_action(), expected_default);
+            assert_eq!(ingress.host_loopback(), expected_host_loopback);
+        }
+    }
+
+    #[test]
+    fn psec_1_0_lowers_compatible_ingress_to_legacy_capability() {
         let mut request = ExecutionRequest::default();
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
-            default: NetworkAction::Deny,
-            host_loopback: NetworkAction::Allow,
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
         });
+        request.policy.allowed_proxy_peer = Some("S-1-15-2-1".into());
 
-        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let bytes = build_psec_spec(&request, false);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().expect("network policy");
 
-        assert_eq!(spec.capabilities(), Some(LOOPBACK_NETWORK_CAPABILITY));
+        assert_eq!(spec.version().minor(), 0);
         assert_eq!(
-            network.allowed_appcontainer_peer(),
-            Some(LOOPBACK_NETWORK_PEER)
+            spec.capabilities(),
+            Some(crate::network_policy_helpers::PRIVATE_NETWORK_CAPABILITY)
         );
+        assert_eq!(network.allowed_appcontainer_peer(), Some("S-1-15-2-1"));
+        assert!(network.ingress().is_none());
     }
 
     #[test]

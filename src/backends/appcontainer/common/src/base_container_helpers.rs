@@ -6,10 +6,10 @@
 use process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
     EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRuleT,
-    FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT,
-    NetworkPolicyT as PsecNetworkPolicy, PortRuleT as PsecPortRuleT,
-    ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
-    SchemaVersionT,
+    FilterAction as PsecFilterAction, IngressPolicyT as PsecIngressPolicy,
+    IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT, NetworkPolicyT as PsecNetworkPolicy,
+    PortRuleT as PsecPortRuleT, ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment,
+    ProxyInfoT as PsecProxyInfo, SchemaVersionT,
 };
 use sandbox_spec::base_container_layout::{
     endpoint_policyT, finish_sandbox_spec_buffer, proxy_infoT, FilterAction as SboxFilterAction,
@@ -20,11 +20,8 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy_helpers::{
-    add_default_network_capabilities, ensure_capability, uses_network_capabilities,
-};
+use crate::network_policy_helpers::{add_default_network_capabilities, PRIVATE_NETWORK_CAPABILITY};
 
-pub(super) const LOOPBACK_NETWORK_CAPABILITY: &str = "networkLoopback";
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
@@ -42,9 +39,13 @@ pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
-pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
+pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: bool) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let capabilities = effective_capabilities(&request.policy, true);
+    let mut capabilities = effective_capabilities(&request.policy);
+    if ingress_supported && request.policy.network_ingress.is_some() {
+        capabilities
+            .retain(|capability| !capability.eq_ignore_ascii_case(PRIVATE_NETWORK_CAPABILITY));
+    }
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -53,14 +54,20 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = SchemaVersionT { major: 1, minor: 0 };
+    spec.version = SchemaVersionT {
+        major: 1,
+        minor: u16::from(ingress_supported),
+    };
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
     spec.fs_read_write = non_empty_paths(&request.policy.readwrite_paths);
     spec.fs_read_only = non_empty_paths(&request.policy.readonly_paths);
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
-    spec.network_policy = Some(Box::new(build_psec_network_policy(&request.policy)));
+    spec.network_policy = Some(Box::new(build_psec_network_policy(
+        &request.policy,
+        ingress_supported,
+    )));
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
     builder.finished_data().to_vec()
@@ -68,7 +75,7 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
 
 pub(super) fn build_sbox_spec(request: &ExecutionRequest) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let capabilities = effective_capabilities(&request.policy, false);
+    let capabilities = effective_capabilities(&request.policy);
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -93,7 +100,7 @@ pub(super) fn build_sbox_spec(request: &ExecutionRequest) -> Vec<u8> {
     builder.finished_data().to_vec()
 }
 
-fn effective_capabilities(policy: &ContainerPolicy, include_host_loopback: bool) -> Vec<String> {
+fn effective_capabilities(policy: &ContainerPolicy) -> Vec<String> {
     let mut capabilities: Vec<_> = policy
         .capabilities
         .iter()
@@ -101,12 +108,6 @@ fn effective_capabilities(policy: &ContainerPolicy, include_host_loopback: bool)
         .cloned()
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
-    if include_host_loopback
-        && uses_network_capabilities(policy)
-        && unrestricted_host_loopback_allowed(policy)
-    {
-        ensure_capability(&mut capabilities, LOOPBACK_NETWORK_CAPABILITY);
-    }
     capabilities
 }
 
@@ -133,7 +134,10 @@ fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPoli
     network
 }
 
-fn build_psec_network_policy(policy: &ContainerPolicy) -> PsecNetworkPolicy {
+fn build_psec_network_policy(
+    policy: &ContainerPolicy,
+    ingress_supported: bool,
+) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
         // Proxy and direct egress are mutually exclusive PSEC policy forms.
@@ -158,8 +162,27 @@ fn build_psec_network_policy(policy: &ContainerPolicy) -> PsecNetworkPolicy {
         }
         network.egress = Some(Box::new(egress));
     }
-    network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
+    if let Some(ingress_policy) = policy
+        .network_ingress
+        .as_ref()
+        .filter(|_| ingress_supported)
+    {
+        network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
+        let mut ingress = PsecIngressPolicy::default();
+        ingress.default_action = psec_filter_action(ingress_policy.default);
+        ingress.host_loopback = psec_filter_action(ingress_policy.host_loopback);
+        network.ingress = Some(Box::new(ingress));
+    } else {
+        network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
+    }
     network
+}
+
+fn psec_filter_action(action: NetworkAction) -> PsecFilterAction {
+    match action {
+        NetworkAction::Allow => PsecFilterAction::allow,
+        NetworkAction::Deny => PsecFilterAction::deny,
+    }
 }
 
 fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {
