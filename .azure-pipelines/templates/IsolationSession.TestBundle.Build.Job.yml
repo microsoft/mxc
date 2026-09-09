@@ -90,9 +90,9 @@ jobs:
   # included in the test bundle.  The SDK has a native dep (node-pty)
   # that requires node-gyp; the windows-2022 image has VS build tools.
   - task: NodeTool@1
-    displayName: Use Node.js 20
+    displayName: Use Node.js 22
     inputs:
-      version: '20.x'
+      version: '22.x'
 
   # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
   # resolves its binary at runtime.  (build.bat does this; the pipeline
@@ -115,11 +115,22 @@ jobs:
   # Stage the test bundle for publishing as a pipeline artifact.
   - powershell: |
       $out = "$(outputDirectory)"
-      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/test_configs", "$out/test_scripts" | Out-Null
+      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
 
       # wxc-exec binary (isolation_session enabled)
       Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
       Write-Host "  -> bin/x64/wxc-exec.exe"
+
+      # Self-contained Node runtime for the SDK integration tests
+      $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+      $nodeLicense = Join-Path (Split-Path -Parent $nodeExe) "LICENSE"
+      if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+          throw "Node.js license not found alongside the NodeTool runtime: $nodeLicense"
+      }
+      Copy-Item $nodeExe "$out/node/node.exe"
+      Copy-Item $nodeLicense "$out/node/LICENSE"
+      Write-Host "  -> node/node.exe"
+      Write-Host "  -> node/LICENSE"
 
       # Test configs (isolation_session subset)
       $configs = @(Get-ChildItem "$(Build.SourcesDirectory)/tests/configs/isolation_session_*.json" -File)
@@ -241,6 +252,39 @@ jobs:
             "Parameters": {}
           }
         ]
+
+  # Load the packaged entry point with the packaged runtime and verify that
+  # its tests are discoverable. The tests themselves require an
+  # IsolationSession-capable OS test host, which the packaging pool is not.
+  - powershell: |
+      $bundleRoot = "$(outputDirectory)"
+      $nodeExe = "$bundleRoot/node/node.exe"
+      $nodeLicense = "$bundleRoot/node/LICENSE"
+      $testRoot = "$bundleRoot/sdk-integration"
+      $testEntry = "dist/isolation-session-state-aware.test.js"
+
+      foreach ($requiredFile in @($nodeExe, $nodeLicense, "$testRoot/$testEntry")) {
+          if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+              throw "Required packaged SDK test file not found: $requiredFile"
+          }
+      }
+
+      Push-Location $testRoot
+      try {
+          $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
+          $testOutput = @(& $nodeExe --test --test-force-exit $testEntry 2>&1)
+          $testOutput | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+              throw "Packaged SDK test discovery failed with exit code $LASTEXITCODE"
+          }
+          if (($testOutput -join "`n") -notmatch '(?m)^# tests [1-9][0-9]*\r?$') {
+              throw "Packaged SDK test discovery did not find any tests"
+          }
+      }
+      finally {
+          Pop-Location
+      }
+    displayName: 'Validate packaged SDK integration tests'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'
