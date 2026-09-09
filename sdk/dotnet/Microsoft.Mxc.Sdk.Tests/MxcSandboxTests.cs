@@ -137,15 +137,12 @@ public class MxcSandboxTests
             Experimental = true,
         };
 
-        if (OperatingSystem.IsWindows())
-        {
-            JsonAssert.MatchesGolden(
-                MxcSandbox.SerializeRequest(processContainer),
-                "request-process-container.json");
-            JsonAssert.MatchesGolden(
-                MxcSandbox.SerializeRequest(directionalNetwork),
-                "request-directional-network.json");
-        }
+        JsonAssert.MatchesGolden(
+            MxcSandbox.SerializeRequest(processContainer),
+            "request-process-container.json");
+        JsonAssert.MatchesGolden(
+            MxcSandbox.SerializeRequest(directionalNetwork),
+            "request-directional-network.json");
         JsonAssert.MatchesGolden(MxcSandbox.SerializeRequest(wslc), "request-wslc.json");
     }
 
@@ -176,10 +173,6 @@ public class MxcSandboxTests
         string fixtureName,
         Type expectedContainment)
     {
-        Assert.SkipUnless(
-            expectedContainment != typeof(ProcessContainerContainment)
-                || OperatingSystem.IsWindows(),
-            "ProcessContainer canonical fixtures are Windows-specific.");
         var request = JsonSerializer.Deserialize<SandboxRequest>(
             JsonAssert.ReadGolden(fixtureName));
 
@@ -264,11 +257,8 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void SandboxRequest_RejectsWindowsProcessSectionOnOtherPlatforms()
+    public void SandboxRequest_PreservesCanonicalProcessContainerForProcessContainment()
     {
-        Assert.SkipWhen(
-            OperatingSystem.IsWindows(),
-            "The processContainer section is canonical for process containment on Windows.");
         const string json = """
             {
               "version":"0.8.0-alpha",
@@ -278,38 +268,16 @@ public class MxcSandboxTests
             }
             """;
 
-        var exception = Assert.Throws<JsonException>(
-            () => JsonSerializer.Deserialize<SandboxRequest>(json));
+        var request = JsonSerializer.Deserialize<SandboxRequest>(json);
+        var serialized = JsonSerializer.Serialize(request);
 
-        Assert.Contains("only on Windows", exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void SandboxRequest_RejectsExplicitProcessContainerOnOtherPlatforms()
-    {
-        Assert.SkipWhen(
-            OperatingSystem.IsWindows(),
-            "ProcessContainer containment is supported on Windows.");
-        const string json = """
-            {
-              "version":"0.8.0-alpha",
-              "process":{"commandLine":"echo hi"},
-              "containment":"processcontainer",
-              "processContainer":{"leastPrivilege":false,"capabilities":[]}
-            }
-            """;
-
-        Assert.ThrowsAny<NotSupportedException>(
-            () => JsonSerializer.Deserialize<SandboxRequest>(json));
-
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
-            "echo hi")
-        {
-            Containment = new ProcessContainerContainment(),
-        };
-        Assert.ThrowsAny<NotSupportedException>(
-            () => JsonSerializer.Serialize(request));
+        Assert.NotNull(request);
+        Assert.IsType<ProcessContainment>(request.Containment);
+        using var document = JsonDocument.Parse(serialized);
+        Assert.Equal(
+            "process",
+            document.RootElement.GetProperty("containment").GetString());
+        Assert.True(document.RootElement.TryGetProperty("processContainer", out _));
     }
 
     [Theory]
