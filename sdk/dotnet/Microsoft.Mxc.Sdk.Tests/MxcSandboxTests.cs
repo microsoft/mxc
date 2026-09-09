@@ -280,6 +280,26 @@ public class MxcSandboxTests
         Assert.True(document.RootElement.TryGetProperty("processContainer", out _));
     }
 
+    [Fact]
+    public void SandboxRequest_AcceptsAndIgnoresCanonicalMetadata()
+    {
+        const string json = """
+            {
+              "$schema":"https://example.test/mxc.schema.json",
+              "_comment":{"purpose":"test"},
+              "version":"0.8.0-alpha",
+              "process":{"commandLine":"echo hi"}
+            }
+            """;
+
+        var request = JsonSerializer.Deserialize<SandboxRequest>(json);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(request));
+
+        Assert.NotNull(request);
+        Assert.False(document.RootElement.TryGetProperty("$schema", out _));
+        Assert.False(document.RootElement.TryGetProperty("_comment", out _));
+    }
+
     [Theory]
     [InlineData(
         """

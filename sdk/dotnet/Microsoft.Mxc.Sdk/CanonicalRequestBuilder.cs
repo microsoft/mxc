@@ -98,6 +98,8 @@ internal static class CanonicalRequestBuilder
         EnsureKnownProperties(
             root,
             "request",
+            "$schema",
+            "_comment",
             "version",
             "containerId",
             "lifecycle",
@@ -718,17 +720,27 @@ internal static class CanonicalRequestBuilder
         {
             case ProcessContainment process:
                 root["containment"] = "process";
-                if (OperatingSystem.IsWindows())
+                if (process.CanonicalProcessContainer is { } canonicalProcessContainer)
                 {
                     AddProcessContainer(
                         root,
-                        process.CanonicalProcessContainer ?? new ProcessContainerContainment(),
+                        canonicalProcessContainer,
                         network,
                         directional,
                         "process",
                         options);
                 }
-                else if (OperatingSystem.IsLinux())
+                else if (OperatingSystem.IsWindows())
+                {
+                    AddProcessContainer(
+                        root,
+                        new ProcessContainerContainment(),
+                        network,
+                        directional,
+                        "process",
+                        options);
+                }
+                if (OperatingSystem.IsLinux())
                 {
                     ApplyLinuxNetworkPolicy(root);
                 }
