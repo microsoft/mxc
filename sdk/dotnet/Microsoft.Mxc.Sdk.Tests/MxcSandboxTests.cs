@@ -146,6 +146,22 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxRequest_SerializesCanonically()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo canonical")
+        {
+            Containment = new WslcContainment { Image = "alpine:3.20" },
+            ContainerName = "canonical-request",
+        };
+
+        Assert.Equal(
+            MxcSandbox.SerializeRequest(request),
+            JsonSerializer.Serialize(request));
+    }
+
+    [Fact]
     public void NativeVersion_IsNotEmpty()
     {
         // Exercises the native load path + mxc_version() end-to-end.

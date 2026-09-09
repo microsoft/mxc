@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk;
@@ -9,6 +10,7 @@ namespace Microsoft.Mxc.Sdk;
 /// A complete one-shot sandbox request. This is the managed counterpart of the
 /// Rust SDK's request built by <c>build_request_with_containment</c>.
 /// </summary>
+[JsonConverter(typeof(SandboxRequestJsonConverter))]
 public sealed class SandboxRequest
 {
     /// <summary>Create a request for <paramref name="command"/> under <paramref name="policy"/>.</summary>
@@ -40,6 +42,24 @@ public sealed class SandboxRequest
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
     public bool Experimental { get; set; }
+}
+
+internal sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
+{
+    public override SandboxRequest Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options) =>
+        throw new NotSupportedException("Deserializing SandboxRequest is not supported.");
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        SandboxRequest value,
+        JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(value));
+        document.RootElement.WriteTo(writer);
+    }
 }
 
 /// <summary>
