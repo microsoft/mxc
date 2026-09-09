@@ -159,12 +159,10 @@ The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
 
-The developer grant is resolved from the `xcode-select` symlink, and only when
-root controls it — MXC checks that the link is a root-owned symlink and that
-every directory leading to it is root-owned and not group- or world-writable,
-so an unprivileged process cannot point the grant somewhere else. A link that
-fails the check is skipped. The `DEVELOPER_DIR` environment variable is ignored
-for the same reason: it is settable by any caller. When the link selects
+The developer grant resolves from the `xcode-select` symlink, and only when root
+owns both the link and every directory above it, so an unprivileged process
+cannot point it elsewhere. `DEVELOPER_DIR` is ignored for the same reason. When
+the link selects
 `<Xcode.app>/Contents/Developer`, MXC grants read-only access to the enclosing
 app bundle because dispatched tools load sibling frameworks; otherwise only the
 selected directory is granted. Many `/usr/bin` tools (`python3`, `git`) are

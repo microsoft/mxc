@@ -139,9 +139,8 @@ const SYSTEM_READ_ALLOW: &str = "\
     (literal \"/dev/urandom\"))
 ";
 
-/// Locations `xcode-select` uses to record the active developer directory.
-/// Both are symlinks owned by root; the first is what `xcode-select --switch`
-/// writes, the second is the older path some releases still populate.
+/// Where `xcode-select` records the active developer directory. The second
+/// entry is the older path some releases still populate.
 const DEVELOPER_DIR_LINKS: [&str; 2] = [
     "/private/var/db/xcode_select_link",
     "/private/var/select/developer_dir",
@@ -149,21 +148,13 @@ const DEVELOPER_DIR_LINKS: [&str; 2] = [
 
 /// Resolve the active Xcode / Command Line Tools developer directory.
 ///
-/// `/usr/bin/python3`, `/usr/bin/git` and the other `/usr/bin` stubs are
-/// `xcrun` shims: they `dlopen` `libxcrun.dylib` from this directory, so they
-/// cannot start unless it is readable. `SYSTEM_READ_ALLOW` covers the
-/// Command Line Tools install via its `/Library` grant, but an Xcode-selected
-/// host puts it under `/Applications`, where nothing in the baseline reaches.
+/// The `/usr/bin` stubs (`python3`, `git`) are `xcrun` shims that `dlopen`
+/// `libxcrun.dylib` from here, so they cannot start unless it is readable.
+/// `SYSTEM_READ_ALLOW` reaches a Command Line Tools install through its
+/// `/Library` grant, but an Xcode-selected host puts it under `/Applications`.
 ///
-/// Resolved only from the `xcode-select` symlinks, and only when root controls
-/// them (see `link_is_root_controlled`). The `DEVELOPER_DIR` override that
-/// `xcrun` honors is deliberately ignored: it is settable by any caller, so
-/// consulting it would let the environment choose what the profile grants.
-///
-/// An untrusted candidate is skipped rather than fatal, so resolution
-/// continues to the legacy link.
-///
-/// Returns `None` when no developer directory is installed
+/// `DEVELOPER_DIR` is ignored because any caller can set it. An untrusted link
+/// is skipped, so resolution continues to the legacy one.
 fn active_developer_dir() -> Option<PathBuf> {
     DEVELOPER_DIR_LINKS
         .iter()
@@ -175,16 +166,9 @@ fn active_developer_dir() -> Option<PathBuf> {
 
 /// Whether root alone decides what `link` resolves to.
 ///
-/// This grant widens the baseline sandbox, so the ownership the doc comment
-/// above claims is enforced rather than assumed. Two independent facts are
-/// required: the entry is a symlink owned by root, and every directory leading
-/// to it is root-controlled. Neither implies the other — replacing a symlink is
-/// a directory operation, so a root-owned link inside a group-writable
-/// directory is still swappable by an unprivileged process, and a
-/// non-symlink at these paths is not something `xcode-select` produced.
-///
-/// The whole ancestor chain is checked, not just the parent: a writable
-/// directory anywhere along it lets its subtree be replaced wholesale.
+/// Requires both a root-owned symlink and root-owned, non-group/world-writable
+/// directories above it: replacing a symlink is a directory operation, so the
+/// link's own ownership settles nothing by itself.
 #[cfg(unix)]
 fn link_is_root_controlled(link: &Path) -> bool {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -202,49 +186,35 @@ fn link_is_root_controlled(link: &Path) -> bool {
     })
 }
 
-/// Non-Unix hosts have no such ownership model to check against, so nothing is
-/// trusted there. Nothing is lost: the developer directory is a macOS concept,
-/// and this crate's profile builder is only compiled elsewhere for its tests.
+/// Nothing is trusted off Unix; the developer directory is a macOS concept.
 #[cfg(not(unix))]
 fn link_is_root_controlled(_link: &Path) -> bool {
     false
 }
 
-/// Whether a directory with this owner and mode can only be modified by root.
-///
-/// Split out as a pure function so the rule is testable without a root-owned
-/// fixture. A world-writable directory is rejected even when sticky: the sticky
-/// bit would in fact prevent replacing another user's entry, but none of the
-/// real `xcode-select` locations are sticky, so refusing is free.
+/// Pure so the rule is testable without a root-owned fixture. Sticky
+/// world-writable directories are rejected too — none of the real
+/// `xcode-select` locations are sticky, so refusing costs nothing.
 #[cfg(unix)]
 fn dir_is_root_controlled(uid: u32, mode: u32) -> bool {
-    /// Group- and other-write bits — the ones that let a non-root user create
-    /// or replace entries in a directory.
     const NON_OWNER_WRITE: u32 = 0o022;
 
     uid == 0 && mode & NON_OWNER_WRITE == 0
 }
 
 /// Emit the read-only grant for the active developer directory.
-///
-/// Read-only, and scoped to the smallest subtree that works: the developer
-/// directory itself for Command Line Tools, or the enclosing bundle when the
-/// developer directory lives inside an `Xcode.app`.
 fn write_developer_dir_rule(out: &mut String) {
     if let Some(dir) = active_developer_dir() {
         push_developer_dir_rule(out, &developer_dir_grant_root(&dir));
     }
 }
 
-/// Widen a developer directory to the `.app` bundle that contains it, if any.
+/// Widen a developer directory to the `.app` bundle containing it, if any.
 ///
-/// An Xcode developer directory is `<Xcode.app>/Contents/Developer`, but the
-/// tools `xcrun` dispatches to reach outside it: `xcodebuild` loads
-/// `DVTSystemPrerequisites` and friends from `<Xcode.app>/Contents/
-/// SharedFrameworks` and `Contents/Frameworks`. Granting only the developer
-/// directory lets `libxcrun` load and then fails at the next hop, so the
-/// bundle root is the smallest subtree that actually lets the tools run.
-/// A Command Line Tools install has no `.app` ancestor and is returned as-is.
+/// The tools `xcrun` dispatches load frameworks from
+/// `<Xcode.app>/Contents/SharedFrameworks`, outside `Contents/Developer`, so
+/// the bundle root is the smallest subtree that lets them run. A Command Line
+/// Tools install has no `.app` ancestor and is returned as-is.
 fn developer_dir_grant_root(dir: &Path) -> PathBuf {
     enclosing_app_bundle(dir).map_or_else(|| dir.to_path_buf(), Path::to_path_buf)
 }
@@ -265,9 +235,8 @@ fn enclosing_app_bundle(dir: &Path) -> Option<&Path> {
         .then_some(bundle)
 }
 
-/// Emit the grant for an already-resolved path. Split from
-/// `write_developer_dir_rule` so the emitted rule can be tested without
-/// depending on what is installed on the host running the tests.
+/// Emit the grant for an already-resolved path. Split out so it can be tested
+/// independently of what is installed on the test host.
 fn push_developer_dir_rule(out: &mut String, dir: &Path) {
     let Some(path) = dir.to_str() else {
         return;
@@ -1991,8 +1960,6 @@ mod tests {
 
     #[test]
     fn xcode_developer_dir_widens_to_the_app_bundle() {
-        // xcodebuild loads DVTSystemPrerequisites from Contents/SharedFrameworks,
-        // which sits outside Contents/Developer.
         let root =
             developer_dir_grant_root(Path::new("/Applications/Xcode_26.6.app/Contents/Developer"));
         assert_eq!(root, Path::new("/Applications/Xcode_26.6.app"));
@@ -2013,9 +1980,7 @@ mod tests {
 
     #[test]
     fn widening_accepts_any_bundle_name_and_install_location() {
-        // xcode-select fixes the Contents/Developer suffix, never the prefix:
-        // beta bundles, the per-version bundles on CI images, and custom
-        // install locations are all legitimate.
+        // xcode-select fixes the Contents/Developer suffix, never the prefix.
         for (dir, want) in [
             (
                 "/Applications/Xcode-beta.app/Contents/Developer",
@@ -2036,8 +2001,7 @@ mod tests {
 
     #[test]
     fn a_dir_deeper_inside_a_bundle_is_not_widened_to_it() {
-        // Only the exact Contents/Developer layout widens, so a developer
-        // directory pointed elsewhere inside a bundle grants just itself.
+        // Only the exact Contents/Developer layout widens.
         for dir in [
             "/Applications/Evil.app/Contents/Developer/usr/bin",
             "/Applications/Evil.app/a/b/Developer",
@@ -2049,8 +2013,7 @@ mod tests {
 
     #[test]
     fn widening_handles_non_normalized_paths_without_overreaching() {
-        // A trailing slash, a repeated separator, or a `.` component all
-        // normalize away, so these are the same directory and still widen.
+        // These all normalize to the same directory, so they still widen.
         for dir in [
             "/Applications/Xcode.app/Contents/Developer/",
             "/Applications/Xcode.app/Contents//Developer",
@@ -2061,8 +2024,7 @@ mod tests {
                 Path::new("/Applications/Xcode.app")
             );
         }
-        // `..` is not normalized away, so it fails the layout match and grants
-        // only the directory itself rather than resolving to somewhere higher.
+        // `..` is not normalized away, so it fails the layout match.
         let parent_ref = "/Applications/Xcode.app/Contents/Developer/..";
         assert_eq!(
             developer_dir_grant_root(Path::new(parent_ref)),
@@ -2072,8 +2034,6 @@ mod tests {
 
     #[test]
     fn developer_dir_absent_emits_nothing() {
-        // `write_developer_dir_rule` is a no-op when nothing is installed, so
-        // a host without developer tools still builds a valid profile.
         let mut out = String::new();
         if active_developer_dir().is_none() {
             write_developer_dir_rule(&mut out);
@@ -2084,9 +2044,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_a_root_owned_unwritable_dir_is_trusted() {
-        // Every directory on the way to the link has to be root's alone; a
-        // group- or world-writable one lets an unprivileged process swap the
-        // link out from under us.
         assert!(dir_is_root_controlled(0, 0o755));
         assert!(dir_is_root_controlled(0, 0o700));
         for mode in [0o775, 0o757, 0o777, 0o1777] {
@@ -2108,14 +2065,12 @@ mod tests {
 
         let link = dir.join("link");
         symlink(dir.join("target"), &link).expect("fixture symlink");
-        // Only decisive when the test user is not root: a root-owned fixture
-        // would legitimately satisfy the check this asserts rejects.
+        // Only decisive when the test user is not root.
         if fs::metadata(&dir).expect("fixture metadata").uid() != 0 {
             assert!(!link_is_root_controlled(&link));
         }
 
-        // These hold whoever runs the test: `xcode-select` writes a symlink,
-        // so anything else at that path is not something it produced.
+        // True for any user: `xcode-select` writes a symlink, nothing else.
         let plain = dir.join("plain");
         fs::write(&plain, "").expect("fixture file");
         assert!(!link_is_root_controlled(&plain));
@@ -2127,9 +2082,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_real_xcode_select_links_are_trusted_when_present() {
-        // Guards the other direction: on a stock macOS host the links and
-        // every directory above them are root-owned and unwritable, so the
-        // trust check has to accept them or the grant silently disappears.
+        // The check must accept a stock host, or the grant silently vanishes.
         for link in DEVELOPER_DIR_LINKS.iter().map(Path::new) {
             if fs::symlink_metadata(link).is_ok() {
                 assert!(
