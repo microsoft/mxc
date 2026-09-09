@@ -122,7 +122,7 @@ jobs:
       Write-Host "  -> bin/x64/wxc-exec.exe"
 
       # Self-contained Node runtime for the SDK integration tests
-      $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+      $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
       $nodeLicense = Join-Path (Split-Path -Parent $nodeExe) "LICENSE"
       if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
           throw "Node.js license not found alongside the NodeTool runtime: $nodeLicense"
