@@ -701,7 +701,7 @@ impl BaseContainerRunner {
         )
     }
 
-    fn supports_psec_ingress(request: &ExecutionRequest) -> Result<bool, ScriptResponse> {
+    fn resolve_psec_ingress_support(request: &ExecutionRequest) -> Result<bool, ScriptResponse> {
         let Some(ingress) = request.policy.network_ingress.as_ref() else {
             return Ok(false);
         };
@@ -1163,9 +1163,8 @@ impl BaseContainerRunner {
         );
 
         let use_process_security_environment = self.uses_process_security_environment(request);
-        Self::validate_resolved_network_contract(request, use_process_security_environment)?;
         let psec_ingress_supported = use_process_security_environment
-            .then(|| Self::supports_psec_ingress(request))
+            .then(|| Self::resolve_psec_ingress_support(request))
             .transpose()?;
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
@@ -1206,6 +1205,7 @@ impl BaseContainerRunner {
         }
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
         let capture_denials = request.policy.capture_denials.clone();
+        Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
             let bytes = build_sbox_spec(&request);

@@ -54,10 +54,7 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: boo
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = SchemaVersionT {
-        major: 1,
-        minor: u16::from(ingress_supported),
-    };
+    spec.version = psec_contract_version(ingress_supported);
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
@@ -71,6 +68,14 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: boo
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
     builder.finished_data().to_vec()
+}
+
+fn psec_contract_version(ingress_supported: bool) -> SchemaVersionT {
+    let mut minor = 0;
+    if ingress_supported {
+        minor = 1u16;
+    }
+    SchemaVersionT { major: 1, minor }
 }
 
 pub(super) fn build_sbox_spec(request: &ExecutionRequest) -> Vec<u8> {
