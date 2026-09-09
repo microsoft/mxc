@@ -2,12 +2,15 @@
 # Licensed under the MIT License.
 
 parameters:
-- name: archTag
-  type: string
 - name: monthId
   type: string
+- name: patch
+  type: number
 - name: dependsOnJob
   type: string
+- name: promotionSourceRunId
+  type: number
+  default: 0
 - name: ESRPInfo
   type: object
   default:
@@ -16,57 +19,201 @@ parameters:
     azureKeyVaultName: ''
     authCertName: ''
     signCertName: ''
-    clientId: ''
+    releaseClientId: ''
+    useManagedIdentity: false
     ApproversEmail: ''
     OwnersEmail: ''
+- name: WinGetInfo
+  type: object
+  default:
+    packageIdentifier: Microsoft.Windows.AI.IsolationSession
+    packageName: Microsoft Windows AI IsolationSession
+    publisher: Microsoft Corporation
+    packageUrl: https://github.com/microsoft/mxc
+    license: MIT
+    licenseUrl: https://github.com/microsoft/mxc/blob/main/LICENSE.md
+    shortDescription: Installs the monthly Windows AI IsolationSession runtime.
+    minimumOSVersion: 10.0.26100.0
 
 jobs:
-- job: release_isosession_${{ parameters.archTag }}
-  displayName: Release IsoSession MSI (${{ parameters.archTag }})
+- job: release_isosession_winget
+  displayName: Publish IsoSession installers to WinGet
   dependsOn: ${{ parameters.dependsOnJob }}
+  timeoutInMinutes: 300
   templateContext:
     type: releaseJob
     isProduction: true
-    inputs:
-    - input: pipelineArtifact
-      artifactName: isosession-installers-${{ parameters.archTag }}
-      targetPath: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
   variables:
-    releaseArtifactDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/artifact
-    releaseContentDirectory: $(Pipeline.Workspace)/isosession-release/${{ parameters.archTag }}/content
+    releaseRootDirectory: $(Pipeline.Workspace)/isosession-release
+    releaseArtifactDirectory: $(Pipeline.Workspace)/isosession-release/artifact
+    releaseContentDirectory: $(Pipeline.Workspace)/isosession-release/content
+    wingetDirectory: $(Pipeline.Workspace)/isosession-release/winget
 
   steps:
+  - checkout: self
+
+  - ${{ if eq(parameters.promotionSourceRunId, 0) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: Download aggregated IsoSession artifact
+      inputs:
+        artifact: isosession-artifacts
+        path: $(releaseArtifactDirectory)
+
+  - ${{ if ne(parameters.promotionSourceRunId, 0) }}:
+    - task: DownloadPipelineArtifact@2
+      displayName: Download qualified IsoSession artifact
+      inputs:
+        buildType: specific
+        project: Dart
+        definition: 199463
+        buildVersionToDownload: specific
+        pipelineId: ${{ parameters.promotionSourceRunId }}
+        artifactName: isosession-artifacts
+        targetPath: $(releaseArtifactDirectory)
+
   - powershell: |
       $ErrorActionPreference = 'Stop'
       $month = '${{ parameters.monthId }}'.Replace('.', '_')
-      $msiName = "IsoSession_${month}_${{ parameters.archTag }}.msi"
-      $msiPath = Join-Path '$(releaseArtifactDirectory)' $msiName
-      if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
-          throw "Signed MSI was not found in the build artifact: $msiPath"
+      $manifestPath = Join-Path '$(releaseArtifactDirectory)' 'artifact-manifest.json'
+      if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+          throw "Approved artifact manifest not found: $manifestPath"
       }
 
-      $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
-      if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-          throw "MSI signature verification failed for '$msiPath': $($signature.Status)"
+      $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+      if (-not $manifest.signing.productionReady) {
+          throw 'WinGet publication requires production-signed artifacts.'
+      }
+      if (-not $manifest.redistribution.publicReleaseReady) {
+          throw 'WinGet publication requires an artifact explicitly approved for public redistribution.'
+      }
+      if ($manifest.release.canonicalRelease -ne '${{ parameters.monthId }}.${{ parameters.patch }}') {
+          throw "Approved artifact release '$($manifest.release.canonicalRelease)' does not match the requested release."
       }
 
       New-Item -ItemType Directory -Force -Path '$(releaseContentDirectory)' | Out-Null
-      Copy-Item -LiteralPath $msiPath -Destination '$(releaseContentDirectory)' -Force
-    displayName: Stage approved signed MSI for release
+
+      foreach ($arch in @('x64', 'arm64')) {
+          $msiName = "IsoSession_${month}_${arch}.msi"
+          $msiPath = Join-Path '$(releaseArtifactDirectory)' $msiName
+          if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
+              throw "Signed MSI was not found in the build artifact: $msiPath"
+          }
+
+          $artifactRecord = @(
+              $manifest.artifacts |
+                  Where-Object { $_.relativePath -eq $msiName } |
+                  Select-Object -First 1
+          )
+          if ($artifactRecord.Count -ne 1) {
+              throw "Approved artifact manifest does not contain exactly one hash for '$msiName'."
+          }
+          $actualHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $artifactRecord[0].sha256) {
+              throw "Approved artifact hash mismatch for '$msiName'."
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "MSI signature verification failed for '$msiPath': $($signature.Status)"
+          }
+
+          Copy-Item -LiteralPath $msiPath -Destination '$(releaseContentDirectory)' -Force
+      }
+    displayName: Verify and stage approved signed installers
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $owners = @('${{ parameters.ESRPInfo.OwnersEmail }}'.Split(',') |
+          ForEach-Object { $_.Trim().ToLowerInvariant() } |
+          Where-Object { $_ })
+      $approvers = @('${{ parameters.ESRPInfo.ApproversEmail }}'.Split(',') |
+          ForEach-Object { $_.Trim().ToLowerInvariant() } |
+          Where-Object { $_ })
+      if ($owners.Count -eq 0 -or $approvers.Count -eq 0) {
+          throw 'ESRP owners and approvers must both contain individual Microsoft aliases.'
+      }
+
+      $overlap = @($owners | Where-Object { $approvers -contains $_ })
+      if ($overlap.Count -gt 0) {
+          throw "ESRP owners and approvers must be distinct. Overlap: $($overlap -join ', ')"
+      }
+
+      foreach ($alias in @($owners + $approvers)) {
+          if ($alias -notmatch '^[^@\s]+@microsoft\.com$') {
+              throw "ESRP owner/approver '$alias' is not an individual Microsoft alias."
+          }
+      }
+
+      if ([string]::IsNullOrWhiteSpace('${{ parameters.ESRPInfo.releaseClientId }}')) {
+          throw 'ESRPInfo.releaseClientId is required for WinGet publication.'
+      }
+    displayName: Validate ESRP release configuration
 
   - task: EsrpRelease@12
-    displayName: Publish MSI to ESRP CDN
+    name: EsrpWingetLinkGen
+    displayName: Generate ESRP CDN links
     inputs:
       connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-      usemanagedidentity: false
+      usemanagedidentity: ${{ parameters.ESRPInfo.useManagedIdentity }}
       keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-      authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      ${{ if eq(parameters.ESRPInfo.useManagedIdentity, false) }}:
+        authcertname: ${{ parameters.ESRPInfo.authCertName }}
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
-      clientid: ${{ parameters.ESRPInfo.clientId }}
+      clientid: ${{ parameters.ESRPInfo.releaseClientId }}
       intent: filedownloadlinkgeneration
       contenttype: binaries
       contentsource: Folder
       folderlocation: $(releaseContentDirectory)
+      owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+      approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+      waitforreleasecompletion: true
+      serviceendpointurl: https://api.esrp.microsoft.com
+      mainpublisher: ESRPRELPACMAN
+      domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      if ([string]::IsNullOrWhiteSpace($env:ESRP_RELEASE_DETAILS)) {
+          throw 'ESRP_RELEASE_DETAILS was not set by the CDN link generation release.'
+      }
+
+      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/New-IsoSessionWingetManifests.ps1' `
+          -InstallerDirectory '$(releaseContentDirectory)' `
+          -ReleaseDetailsJson $env:ESRP_RELEASE_DETAILS `
+          -OutDir '$(wingetDirectory)' `
+          -MonthId '${{ parameters.monthId }}' `
+          -Patch ${{ parameters.patch }} `
+          -PackageIdentifier '${{ parameters.WinGetInfo.packageIdentifier }}' `
+          -PackageName '${{ parameters.WinGetInfo.packageName }}' `
+          -Publisher '${{ parameters.WinGetInfo.publisher }}' `
+          -PackageUrl '${{ parameters.WinGetInfo.packageUrl }}' `
+          -License '${{ parameters.WinGetInfo.license }}' `
+          -LicenseUrl '${{ parameters.WinGetInfo.licenseUrl }}' `
+          -ShortDescription '${{ parameters.WinGetInfo.shortDescription }}' `
+          -MinimumOSVersion '${{ parameters.WinGetInfo.minimumOSVersion }}'
+    displayName: Build multi-architecture WinGet manifests
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: Publish WinGet submission evidence
+    inputs:
+      path: $(wingetDirectory)
+      artifactName: isosession-winget-submission
+
+  - task: EsrpRelease@12
+    name: EsrpWingetPublish
+    displayName: Publish WinGet manifests through ESRP
+    inputs:
+      connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+      usemanagedidentity: ${{ parameters.ESRPInfo.useManagedIdentity }}
+      keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      ${{ if eq(parameters.ESRPInfo.useManagedIdentity, false) }}:
+        authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      signcertname: ${{ parameters.ESRPInfo.signCertName }}
+      clientid: ${{ parameters.ESRPInfo.releaseClientId }}
+      intent: Winget
+      contenttype: manifest
+      contentsource: Folder
+      folderlocation: $(wingetDirectory)/manifests
       owners: ${{ parameters.ESRPInfo.OwnersEmail }}
       approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
       waitforreleasecompletion: true

@@ -58,7 +58,7 @@ parameters:
   type: boolean
   default: false
 - name: publishMsiToEsrp
-  displayName: Publish signed MSIs to ESRP CDN
+  displayName: Publish signed MSIs to WinGet through ESRP
   type: boolean
   default: false
 - name: publishFeedUrl
@@ -86,8 +86,22 @@ parameters:
     authCertName: 'mxc-esrp-auth-cert'
     signCertName: '37eb2314-6120-4418-93a3-fc4006e6d18a'
     clientId: '37eb2314-6120-4418-93a3-fc4006e6d18a'
+    releaseClientId: '37eb2314-6120-4418-93a3-fc4006e6d18a'
+    useManagedIdentity: false
     ApproversEmail: 'anisk@microsoft.com, sodas@microsoft.com, jwhites@microsoft.com'
-    OwnersEmail: 'bbonaby@microsoft.com, sodas@microsoft.com, jwhites@microsoft.com'
+    OwnersEmail: 'bbonaby@microsoft.com'
+- name: WinGetInfo
+  displayName: WinGet package metadata
+  type: object
+  default:
+    packageIdentifier: 'Microsoft.Windows.AI.IsolationSession'
+    packageName: 'Microsoft Windows AI IsolationSession'
+    publisher: 'Microsoft Corporation'
+    packageUrl: 'https://github.com/microsoft/mxc'
+    license: 'MIT'
+    licenseUrl: 'https://github.com/microsoft/mxc/blob/main/LICENSE.md'
+    shortDescription: 'Installs the monthly Windows AI IsolationSession runtime.'
+    minimumOSVersion: '10.0.26100.0'
 
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
@@ -163,7 +177,8 @@ extends:
                 -OutDir '$(artifactDirectory)' `
                 -MonthId '${{ parameters.monthId }}' `
                 -Patch ${{ parameters.patch }} `
-                -SigningMode '${{ parameters.signingMode }}'
+                -SigningMode '${{ parameters.signingMode }}' `
+                -RedistributionApproved:$${{ parameters.publishMsiToEsrp }}
           displayName: Build aggregate NuGet and manifests
 
         - task: 1ES.PublishPipelineArtifact@1
@@ -268,17 +283,12 @@ extends:
                     -FeedUrl '${{ parameters.publishFeedUrl }}'
               displayName: Publish the final SDK NuGet
 
-        - ${{ if and(eq(parameters.publishMsiToEsrp, true), eq(parameters.promotionSourceRunId, 0)) }}:
+        - ${{ if eq(parameters.publishMsiToEsrp, true) }}:
           - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
             parameters:
-              archTag: x64
               monthId: ${{ parameters.monthId }}
+              patch: ${{ parameters.patch }}
               dependsOnJob: validate_and_publish_isosession_sdk
+              promotionSourceRunId: ${{ parameters.promotionSourceRunId }}
               ESRPInfo: ${{ parameters.ESRPInfo }}
-
-          - template: /.azure-pipelines/templates/IsoSession.Artifacts.Release.Job.yml@self
-            parameters:
-              archTag: arm64
-              monthId: ${{ parameters.monthId }}
-              dependsOnJob: validate_and_publish_isosession_sdk
-              ESRPInfo: ${{ parameters.ESRPInfo }}
+              WinGetInfo: ${{ parameters.WinGetInfo }}
