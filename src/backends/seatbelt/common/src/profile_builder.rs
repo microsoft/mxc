@@ -186,7 +186,8 @@ fn link_is_root_controlled(link: &Path) -> bool {
     })
 }
 
-/// Nothing is trusted off Unix; the developer directory is a macOS concept.
+/// Windows only: this module compiles everywhere but `std::os::unix` does not.
+/// There is no `xcode-select` there, so nothing to trust.
 #[cfg(not(unix))]
 fn link_is_root_controlled(_link: &Path) -> bool {
     false
