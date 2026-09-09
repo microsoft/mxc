@@ -649,14 +649,20 @@ internal static class CanonicalRequestBuilder
 
     private static bool HasDirectionalNetwork(
         NetworkPolicy? network,
-        SandboxContainment containment) =>
-        containment is ProcessContainerContainment
+        SandboxContainment containment)
+    {
+        var processContainer = containment switch
         {
-            Network.AllowedProxyPeer: { } allowedProxyPeer,
-        } && !string.IsNullOrWhiteSpace(allowedProxyPeer)
-        || network?.Egress is not null
-        || network?.Ingress is not null
-        || network?.RuntimeConfig?.NetworkProxy is not null;
+            ProcessContainerContainment explicitContainment => explicitContainment,
+            ProcessContainment process => process.CanonicalProcessContainer,
+            _ => null,
+        };
+        return processContainer?.Network?.AllowedProxyPeer is { } allowedProxyPeer
+            && !string.IsNullOrWhiteSpace(allowedProxyPeer)
+            || network?.Egress is not null
+            || network?.Ingress is not null
+            || network?.RuntimeConfig?.NetworkProxy is not null;
+    }
 
     private static bool HasLegacyNetwork(NetworkPolicy? network) =>
         network is not null
