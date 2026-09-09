@@ -20,7 +20,7 @@ parameters:
     authCertName: ''
     signCertName: ''
     releaseClientId: ''
-    useManagedIdentity: false
+    useManagedIdentity: true
     ApproversEmail: ''
     OwnersEmail: ''
 - name: WinGetInfo
