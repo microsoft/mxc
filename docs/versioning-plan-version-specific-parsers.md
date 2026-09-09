@@ -3687,6 +3687,14 @@ though the override machinery itself is identical in both.
 | Legacy v0.8 release | Treat tag `v0.8.0` and stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` as immutable; reconstruct Rust types without regenerating the released schema |
 | Version progression | Phase 6.5 moves exact development to `0.9.0-alpha`; Phase 11 publishes v0.9 and opens `0.10.0-alpha` development |
 | v0.9 Network surface | Remove legacy Network fields from every v0.9 one-shot and state-aware root before publication; published v0.6/v0.7/v0.8 contracts retain their immutable syntax |
+| Phase 10a acknowledgment location | Backend-specific under `experimental.isolation_session`: directly on the one-shot section and inside `provision` for state-aware requests |
+| Phase 10a acknowledgment value | `acknowledgeUnrestrictedNetwork` is an optional true-only marker; omission does not acknowledge unrestricted networking, and the legacy acknowledgment remains available during 10a |
+| Phase 10a acknowledgment coexistence | Accept legacy-only, acknowledgment-only, and both consistent forms during 10a; reject an explicit empty network section, incompatible restrictions/proxies, or neither form |
+| Phase 10a acknowledgment validation | Preserve existing boundaries: conditional acknowledgment presence is structural for state-aware provision; one-shot retains its common/backend-policy failure path; invalid supplied values remain structural errors |
+| Phase 10a runtime representation | Keep the common policy model and pass typed acknowledgment separately through backend-specific runtime configuration; distinguish authored policy from implicit defaults using existing presence information |
+| Phase 10a SDK compatibility | Preserve shared SDK APIs while permitting documented source changes confined to IsolationSession's experimental API; design its post-cutover acknowledgment API in 10a so 10b-10d does not reshape it again |
+| Phase 10a SDK construction | Add explicit acknowledgment to existing pre-build authoring/configuration surfaces, preserve original network omission, and avoid post-normalization repair setters or unrelated backend-support expansion |
+| Phase 10a policy identity | Preserve existing hashes; acknowledgment-bearing requests add an explicit scoped acknowledgment/presence projection, with intentionally distinct identities for legacy-only, new-only, and combined forms |
 | Contract authority | Versioned Rust types own structure and local value rules; shared conversion and validators own cross-field and backend semantics |
 | Differential validation | Compare rolling and exact paths in tests rather than dual-running both parsers in production |
 | Programmatic policy construction | Prepare direct typed exact builders under tests in Phase 7, keep rolling construction authoritative, and promote the exact builders with the common Phase 9 cutover |
@@ -4046,3 +4054,265 @@ the atomic cutover: contract removal, producer migration, generated artifacts,
 backend behavior, tests, and documentation land together so no merged tree
 declares v0.9 fields that its SDKs still emit or removes fields its corpus still
 uses.
+
+#### Phase 10a design decisions
+
+The eight decisions below are adopted. Concrete implementation details must
+stay within these boundaries; a material departure requires an explicit
+revision rather than silently reopening the design.
+
+##### Decision 1: acknowledgment location
+
+**Adopted 2026-09-08:** use Option A, the backend-specific experimental
+location:
+
+| Surface | Acknowledgment path |
+| --- | --- |
+| One-shot | `experimental.isolation_session.acknowledgeUnrestrictedNetwork` |
+| State-aware provision | `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork` |
+
+The field name and value type are adopted in Decision 2 below. Add a closed
+IsolationSession section to the one-shot experimental contract and keep it
+distinct from the state-aware provision shape, so `appId` remains
+provision-only. Later lifecycle phases do not accept the acknowledgment.
+
+Do not introduce a shared acknowledgment section or place the field in
+`network`. Keeping it under `experimental` also keeps it outside published
+stable contracts while IsolationSession remains experimental. This decision
+does not settle coexistence rules, runtime representation, SDK compatibility,
+or policy hashing.
+
+##### Decision 2: acknowledgment name and value
+
+**Adopted 2026-09-08:** use Option A, the affirmative action spelling
+`acknowledgeUnrestrictedNetwork` with a true-only value:
+
+```json
+{
+  "acknowledgeUnrestrictedNetwork": true
+}
+```
+
+This object fragment belongs at the backend-specific locations chosen in
+Decision 1; it is not a new top-level request section. Model the wire field
+with the existing contract `True` marker, wrapped in `OptionalField` during
+10a. When supplied, only the JSON boolean `true` is valid; reject `false`,
+`null`, string spellings, and numeric values structurally.
+
+This is acknowledgment, not a Boolean network on/off control. Omission does
+not implicitly acknowledge unrestricted networking; it leaves the existing
+legacy acknowledgment path available during the additive phase. A supplied
+acknowledgment never overrides an authored restriction. Coexistence is adopted
+in Decision 3 below; Decision 4 specifies conditional-requirement enforcement
+and diagnostics.
+
+##### Decision 3: transitional coexistence
+
+**Adopted 2026-09-08:** use Option A, accepting consistent redundancy while
+preserving the distinction between an absent and an explicitly empty network
+section.
+
+Assuming the rest of the request is valid, apply this matrix during 10a:
+
+| Acknowledgment input | Result |
+| --- | --- |
+| Existing valid legacy acknowledgment only | Accept unchanged |
+| New true-only acknowledgment with no network section | Accept |
+| New acknowledgment plus the consistent legacy acknowledgment | Accept |
+| New acknowledgment plus `network: {}` | Reject |
+| New acknowledgment plus incompatible network restrictions or proxy configuration | Reject |
+| Neither acknowledgment form | Reject |
+
+"Legacy acknowledgment" means a form already accepted on the relevant
+surface. Do not widen the closed state-aware provision network shape merely
+because the one-shot surface accepts additional semantically neutral legacy
+fields. Invalid acknowledgment values remain structural errors under
+Decision 2, even when the legacy acknowledgment is also present.
+
+Consistent redundancy lets a caller add the acknowledgment before removing
+legacy fields, but only on an executor that supports the new field; it does
+not make that field acceptable to older closed exact contracts.
+Do not treat an explicit empty network section as an omitted section or erase
+an authored restriction to make a request pass. SDK default synthesis must not
+be confused with the caller's original omission.
+
+This decision defines acceptance and rejection, not the layer or diagnostic
+used for each rejection; those are adopted in Decision 4 below.
+
+##### Decision 4: validation ownership and diagnostics
+
+**Adopted 2026-09-08:** use Option A for 10a, preserving the existing validation
+boundaries rather than moving acknowledgment enforcement wholesale to an
+earlier or later layer.
+
+For state-aware IsolationSession provision, the exact contract conditionally
+requires the legacy acknowledgment or the new field. Supplying neither
+remains a structural `malformed_request` failure with source-aware diagnostics.
+Enforce the condition in the exact contract's typed validation/construction,
+not only in the CLI, and keep generated schema acceptance aligned. The
+requirement is at least one valid form, not exactly one: Decision 3 permits
+consistent redundancy.
+
+For one-shot execution, validate the new field's shape during exact parsing,
+but keep acknowledgment/policy enforcement in the existing common/backend
+validation path. Checks already performed before dispatch stay there;
+remaining backend-policy checks retain their established order and reporting.
+Do not change error categories or stdout/stderr routing for existing inputs
+as an incidental consequence of adding the alternative acknowledgment.
+Diagnostic wording may explain the new alternative.
+
+Invalid supplied acknowledgment values remain structural failures on both
+surfaces under Decision 2. Preserve source paths and coordinates where source
+text is available, and do not reintroduce successful-request source retention
+or raw-payload reparsing. Typed builders must enforce the same chosen
+requirements rather than bypassing checks that happen only during Serde input.
+
+Backend guards remain for lower-level callers. Broader migration of static
+backend-policy checks into exact contracts is deferred, not implicitly included
+in this choice; it can be reconsidered separately.
+
+##### Decision 5: runtime representation and preparation scope
+
+**Adopted 2026-09-08:** use Option A, keeping the existing common policy model
+and passing the typed acknowledgment separately to IsolationSession policy
+validation.
+
+Carry acknowledgment in the backend-specific runtime configuration for
+one-shot execution or state-aware provision. Both paths supply it explicitly
+to the shared IsolationSession validator. Preserve the current legacy
+acknowledgment path and accept the new form only under the absence/conflict
+rules adopted in Decision 3, at the validation boundaries adopted in Decision 4.
+
+Use existing presence information to distinguish authored policy from
+parser-generated defaults. In particular, an acknowledgment-only v0.9 request
+can contain implicit directional deny defaults in `ContainerPolicy` despite
+having no authored network section. Do not manufacture legacy `allow` fields
+to satisfy the old validator, clear an explicit policy to make the new form
+pass, or treat `network: {}` as omission. Runtime proxy and other independently
+supplied network settings must not be overlooked merely because the `network`
+section was absent.
+
+Common normalization and other backends retain their existing behavior.
+There is no new general network-policy model or separately stored normalized
+IsolationSession intent view in 10a. Runtime preparation is limited to typed
+acknowledgment transport and correct presence handling; the broader
+network-model migration stays in the atomic 10b-10d change.
+
+The generic policy fields alone do not describe effective IsolationSession
+networking for the new form: the backend and acknowledgment must also be
+considered. Policy-identity projection and old/new hash behavior are explicitly
+adopted in Decision 8, not an accidental consequence of serializing these
+defaults or adding the acknowledgment field.
+
+##### Decision 6: SDK compatibility boundary
+
+**Adopted 2026-09-08:** use Option B. Preserve shared SDK source compatibility,
+but permit narrowly scoped, documented source changes to IsolationSession's
+experimental API. This permits a break where useful; it does not require one.
+
+The planning assumption is that the two Phase 10 PRs merge at roughly the
+same time. Design the intended post-cutover acknowledgment API in 10a rather
+than introducing a temporary SDK shape that must change again in 10b-10d.
+Coordinate SDK release/adoption across those PRs while keeping each PR valid
+at its own boundary: existing valid native JSON requests remain accepted in
+10a, and the second PR performs the planned legacy-wire removal.
+
+The source-compatibility exception applies to code depending on
+IsolationSession-specific experimental types or members, including explicit
+pattern matches mentioning that backend variant. It does not authorize
+breaking shared `SandboxPolicy` or network types, adding mandatory parameters
+to general build/spawn/provision APIs, or changing the WSLC and Windows Sandbox
+APIs merely to carry IsolationSession's acknowledgment.
+
+Identify the affected SDK symbols and document their migrations. The SDK
+construction strategy is adopted in Decision 7 below. Choosing an experimental
+backend must not implicitly supply acknowledgment, and this source-compatibility
+choice does not override the accepted wire rules, validation boundaries, or
+backend behavior.
+
+Schema-version rollover remains a separate concern: this choice does not make
+an explicit v0.9 IsolationSession request valid after Phase 11 publishes the
+stable-only v0.9 contract and moves experimental requests to v0.10 development.
+
+##### Decision 7: SDK entry points and omission handling
+
+**Adopted 2026-09-08:** use Option A, extending existing authoring/configuration
+surfaces so acknowledgment is explicit before serialization and normalization.
+Keep general execution/lifecycle entry points and shared SDK usage intact,
+using the scoped IsolationSession API freedom adopted in Decision 6.
+
+| Surface | 10a construction path |
+| --- | --- |
+| Node state-aware | Expose acknowledgment in IsolationSession provision options without requiring the legacy network pair for the new form |
+| Node one-shot | Expose the backend-specific acknowledgment on the explicit configuration path used by `spawnSandboxFromConfig` |
+| C# state-aware | Allow acknowledgment-only `IsolationSessionProvisionOptions` to be constructed before envelope generation |
+| Rust state-aware | Carry the new field through the existing JSON entry point; no public signature change is required just to express it |
+| Native one-shot | Accept the new backend-specific field through the exact contract and adapter |
+
+The current public Rust and C# one-shot run/spawn APIs do not support
+IsolationSession. Do not add that capability incidentally in 10a. The new typed
+SDK acknowledgment form should target the intended post-cutover API, rather
+than requiring a temporary legacy-network argument. Native legacy-request
+acceptance during 10a remains governed by Decision 3.
+
+Builders must retain authored presence until the acknowledgment-aware emission
+decision. With acknowledgment and an originally omitted network section, omit
+the network key entirely: do not emit `null`, `{}`, or a synthesized deny.
+Explicit empty sections, restrictions, proxies, and consistent legacy
+acknowledgment data still follow Decisions 3 and 4; do not erase supplied policy
+to make a request pass.
+
+Setting a property on unprocessed options is permitted. Do not add an
+acknowledgment repair setter to an already-normalized request, where the
+distinction between original omission and authored defaults may be lost.
+Small factories may wrap the normal construction path where they improve a
+language's ergonomics, but no parallel generation pipeline or new mandatory
+builder framework is required.
+
+The resulting SDK output must continue to satisfy the exact contract, generated
+wire-type conformance, and end-to-end omission/presence cases. Policy-identity
+projection is adopted in Decision 8 below.
+
+##### Decision 8: policy identity and hashing
+
+**Adopted 2026-09-08:** use Option A, preserving existing hashes while
+explicitly distinguishing acknowledgment-bearing requests and the relevant
+presence information. This maintains existing audit/telemetry plumbing; it is
+not a new hashing system, runtime policy model, or authorization mechanism.
+
+Keep existing legacy-request and other-backend identities unchanged. When the
+new acknowledgment is present, add an explicit IsolationSession-scoped
+projection for the acknowledgment and the source-presence facts needed to
+distinguish authored policy from implicit defaults. These include
+`network_specified`, `network_mode_specified`, and
+`runtime_network_proxy_specified`; classify meaningful presence information
+explicitly rather than relying only on blanket policy serialization.
+Do not remove `serde(skip)` from common-policy flags and thereby change every
+backend's hash.
+
+In particular, an omitted network section, `network: {}`, and an explicitly
+authored directional deny can have the same normalized policy values but
+different acknowledgment semantics. For requests that reach hashing, the
+new projection must not collapse acknowledgment-only input with an authored
+empty or restrictive policy merely because those presence flags were skipped
+by the existing serialization.
+
+With all other projected inputs held constant, legacy-only, new-only, and
+both-consistent acknowledgment forms intentionally have distinct identities.
+Preserve existing non-acknowledgment distinctions, including absent versus
+present-empty state-aware provision configuration and `appId` presence/values.
+No equality is promised across schema versions, phases, or differing container
+names, working directories, timeouts, or other identity-bearing input.
+
+Describe the result as policy/acknowledgment configuration identity, not a
+guarantee that every behaviorally equivalent spelling hashes identically.
+Hashing may precede backend validation and can describe an attempt that is
+subsequently rejected. It must not decide authorization, invoke backend
+validation early, change diagnostic ordering, or canonicalize away an authored
+restriction. Credentials and sandbox IDs remain excluded.
+
+Apply this only in the hash projection: do not mutate the runtime request,
+synthesize legacy wire grants, introduce a stored normalized network-intent
+view, or perform a general identity-contract migration. Add regressions for
+unchanged legacy hashes, distinct new/combined forms, relevant presence
+differences, and continued exclusion of secret-bearing data and sandbox IDs.
