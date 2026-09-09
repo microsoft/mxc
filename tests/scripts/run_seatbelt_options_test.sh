@@ -27,14 +27,15 @@ run_config "$(render seatbelt_opt_nested_pty_off.json)"
 expect_ok "nestedPty=false denies pty allocation" "PTY_BLOCKED"
 
 # extraMachLookups: without opendirectoryd the sandbox cannot resolve a uid to
-# a name, so `id -un` degrades to the raw uid.
+# a name, so `id -un` degrades to the raw uid. The absent half needs its own
+# positive control, or a run that never started would look like a uid that
+# failed to resolve.
 run_config "$(render seatbelt_opt_mach_lookup_absent.json)"
-MACH_ABSENT="$(grep -v confstr <<<"$OUT" | head -1)"
+expect_ok "the baseline without extraMachLookups ran" "$(id -u)"
+expect_absent "without extraMachLookups the uid does not resolve to a name" "$(id -un)"
+
 run_config "$(render seatbelt_opt_mach_lookup_present.json)"
 expect_ok "extraMachLookups reaches opendirectoryd" "$(id -un)"
-[ "$MACH_ABSENT" != "$(id -un)" ] ||
-    fail "the baseline already resolved the user name, so extraMachLookups proves nothing"
-pass "the same config without extraMachLookups cannot resolve the user name"
 
 # keychainAccess: HOME must be set either way, or Security.framework fails for
 # an unrelated reason and both halves look identical.

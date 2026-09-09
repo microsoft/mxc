@@ -18,9 +18,20 @@ FAILED=0
 FAILURES=""
 
 check_line_endings() {
-    if grep -rPl '\r$' "$SCRIPT_DIR"/run_seatbelt_*.sh "$SCRIPT_DIR"/lib/seatbelt_common.sh >/dev/null 2>&1; then
-        echo "ERROR: Shell scripts have Windows line endings (CRLF)."
-        echo "Fix with: sed -i '' 's/\r\$//' $SCRIPT_DIR/run_seatbelt_*.sh $SCRIPT_DIR/lib/seatbelt_common.sh"
+    local files=("$SCRIPT_DIR"/run_seatbelt_*.sh "$SCRIPT_DIR"/lib/seatbelt_common.sh)
+    local offenders status
+    # Match a literal carriage return: BSD grep has no -P, and an unsupported
+    # option would otherwise exit 2 and read as "no CRLF found".
+    offenders="$(grep -l "$(printf '\r')\$" "${files[@]}")"
+    status=$?
+    if [ "$status" -gt 1 ]; then
+        echo "ERROR: could not check line endings (grep exited $status)."
+        exit 1
+    fi
+    if [ -n "$offenders" ]; then
+        echo "ERROR: Shell scripts have Windows line endings (CRLF):"
+        echo "$offenders"
+        echo "Fix with: sed -i '' 's/\r\$//' ${files[*]}"
         exit 1
     fi
 }

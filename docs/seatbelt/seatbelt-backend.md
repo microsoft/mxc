@@ -159,11 +159,12 @@ The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
 
-The developer directory is whatever the root-owned `xcode-select` symlink
-points at; the `DEVELOPER_DIR` environment variable is ignored.
-Many `/usr/bin` tools (`python3`, `git`) are `xcrun` shims
-that load `libxcrun.dylib` from there, so without it they fail to start on an
-Xcode-selected host. It is read-only, and `deniedPaths` still overrides it.
+The developer grant is resolved from the root-owned `xcode-select` symlink; the
+`DEVELOPER_DIR` environment variable is ignored. When it selects
+`<Xcode.app>/Contents/Developer`, MXC grants read-only access to the enclosing
+app bundle because dispatched tools load sibling frameworks; otherwise only the
+selected directory is granted. Many `/usr/bin` tools (`python3`, `git`) are
+`xcrun` shims that need this access. `deniedPaths` still overrides the grant.
 
 SIP-protected paths stay unwritable no matter what you put in
 `readwritePaths` — the kernel enforces that independently of the profile.
@@ -496,9 +497,7 @@ Apple credentials.
 Run with `--debug` to print the generated profile — most surprises are obvious
 once you can see the rules that were emitted.
 
-`--log-file <path>` captures the same block without `--debug`, which is the
-better option when the workload's own output is what you're reading on the
-console.
+`--log-file <path>` prints the generated profile to a file.
 
 ### Common symptoms
 

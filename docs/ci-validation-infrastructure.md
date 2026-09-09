@@ -169,7 +169,7 @@ backend **and** has a non-empty pool.
 
 | Plan | Wired to | Contents today |
 |------|----------|----------------|
-| `nightly` | scheduled Mon–Sun | 4 Windows platforms, 4 Linux platforms |
+| `nightly` | scheduled Mon–Sun | 4 Windows platforms, 4 Linux platforms, 2 MacOS platforms |
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
