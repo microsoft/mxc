@@ -21,39 +21,32 @@ public sealed class SandboxRequest
     }
 
     /// <summary>The cross-platform restrictions applied to the sandbox.</summary>
-    [JsonPropertyName("policy")]
     public SandboxPolicy Policy { get; }
 
     /// <summary>The command line to run.</summary>
-    [JsonPropertyName("command")]
     public string Command { get; }
 
     /// <summary>The containment backend and its backend-specific configuration.</summary>
-    [JsonPropertyName("containment")]
     public SandboxContainment Containment { get; set; } = new ProcessContainment();
 
     /// <summary>An optional caller-selected container name.</summary>
-    [JsonPropertyName("containerName")]
     public string? ContainerName { get; set; }
 
     /// <summary>An optional initial working directory.</summary>
-    [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables supplied to the sandboxed process.</summary>
-    [JsonPropertyName("environment")]
     public Dictionary<string, string> Environment { get; set; } = new();
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
-    [JsonPropertyName("experimental")]
     public bool Experimental { get; set; }
 }
 
-/// <summary>A containment backend selected by a <see cref="SandboxRequest"/>.</summary>
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
-[JsonDerivedType(typeof(ProcessContainment), "process")]
-[JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
-[JsonDerivedType(typeof(WslcContainment), "wslc")]
+/// <summary>
+/// A containment backend selected by a <see cref="SandboxRequest"/>.
+/// This is an authoring model; <see cref="MxcSandbox"/> performs its canonical
+/// wire projection.
+/// </summary>
 public abstract class SandboxContainment;
 
 /// <summary>

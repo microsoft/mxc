@@ -58,33 +58,6 @@ impl FailureReporter {
     }
 }
 
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-pub mod test_support {
-    use super::consent::test_support::LocalAppDataGuard;
-    use super::policy::test_support::PolicyKeyGuard;
-
-    /// Lock-order-safe redirect guard for tests that need both the consent
-    /// store and the policy key redirected away from real user/machine state.
-    pub struct TelemetryTestEnv {
-        _consent: LocalAppDataGuard,
-        policy: PolicyKeyGuard,
-    }
-
-    impl TelemetryTestEnv {
-        /// Redirect both telemetry globals for the lifetime of the guard.
-        pub fn new(store: &std::path::Path) -> Self {
-            let policy = PolicyKeyGuard::new();
-            let _consent = LocalAppDataGuard::set(store);
-            Self { _consent, policy }
-        }
-
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        pub fn set_policy_value(&self, value: u32) {
-            self.policy.set_value(value);
-        }
-    }
-}
-
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
 /// will not) produce a real [`ScriptResponse`].
@@ -1066,6 +1039,52 @@ pub fn emit_sdk_cancellation_with_kind(
             CANCELLED_EXIT_CODE,
         );
     });
+}
+
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// A fully isolated telemetry environment: both the administrative policy
+    /// key and the user consent store are redirected to throwaway, per-test
+    /// locations.
+    ///
+    /// This is the **only** supported way to hold both guards at once. They
+    /// protect separate process-global mutexes, so acquiring them in
+    /// inconsistent orders across tests would deadlock under `cargo test`'s
+    /// multithreaded runner. Constructing them here — policy first, then
+    /// consent — is what establishes the total order that makes the pair
+    /// deadlock-free, and a caller cannot get it wrong because a caller never
+    /// sees the individual acquisitions.
+    ///
+    /// Every test that reaches [`super::is_enabled`],
+    /// [`super::consent::needs_consent_prompt`], or [`super::policy::get_policy`]
+    /// must hold this — *including* tests that only care about consent.
+    /// Otherwise they read the real machine policy and fail on an
+    /// administratively managed device.
+    pub struct TelemetryTestEnv {
+        // Fields drop in declaration order, so consent is released before
+        // policy: the exact reverse of the acquisition order below.
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirects the consent store to `store` and the policy key to a
+        /// fresh, empty one (i.e. an unmanaged machine).
+        pub fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        /// Sets the administrative `AllowTelemetry` policy value.
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
 }
 
 #[cfg(test)]

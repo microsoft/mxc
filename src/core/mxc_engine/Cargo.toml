@@ -45,6 +45,9 @@ seatbelt_common = { workspace = true }
 
 [features]
 default = []
+# Enables the hidden policy-JSON bridge consumed by co-versioned language
+# bindings through mxc-sdk.
+ffi-internals = []
 # Enables constructing the run-to-completion runner for each experimental
 # backend. Mirrors the executor binaries' feature set so backend selection can
 # live in one place. The build-time binary-staging that some backends also need

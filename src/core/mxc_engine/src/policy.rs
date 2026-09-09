@@ -21,9 +21,13 @@ use crate::configs::process_container;
 use crate::configs::ProcessContainer;
 #[cfg(test)]
 use crate::configs::{CaptureDenials, CaptureDenialsMode};
+#[cfg(feature = "ffi-internals")]
+use crate::ErrorCode;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 use wxc_common::mxc_error::MxcError;
+#[cfg(feature = "ffi-internals")]
+use wxc_common::state_aware_request::MxcRequest;
 
 #[cfg(target_os = "linux")]
 use network::has_host_rules;
@@ -588,6 +592,11 @@ impl WslcSection {
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
 /// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
+///
+/// Telemetry is intentionally not a policy field. It is invocation
+/// instrumentation rather than a sandbox restriction, matching the global
+/// sandbox-policy design. Build the request first, then use
+/// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxPolicy {
@@ -703,12 +712,20 @@ impl SandboxRequest {
     /// Enabling this per-request switch is necessary but not sufficient:
     /// telemetry still requires persisted user consent and an administrative
     /// policy that permits collection. It is independent of experimental mode.
-    pub fn set_telemetry_enabled(&mut self, enabled: bool) -> &mut Self {
+    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
             requested_sandbox_kind: Some(self.requested_sandbox_kind),
         });
         self
+    }
+
+    /// Return the explicit per-request telemetry switch for this invocation.
+    pub fn telemetry_enabled(&self) -> Option<bool> {
+        self.inner
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.enabled)
     }
 }
 
@@ -762,11 +779,7 @@ pub fn build_request_with_containment(
     containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    // The shared parser tolerates an empty schema version (treats it as
-    // "unset"), but the SDK requires it; reject it here for parity.
-    if policy.version.is_empty() {
-        return Err(MxcError::malformed_request("Policy version is required").into());
-    }
+    require_sdk_policy_version(policy)?;
     let config = build_wire_config(policy, containment, container_name)?;
 
     let mut logger = Logger::new(Mode::Buffer);
@@ -781,6 +794,59 @@ pub fn build_request_with_containment(
     })
 }
 
+fn require_sdk_policy_version(policy: &SandboxPolicy) -> Result<(), crate::Error> {
+    // The config parser treats an empty version as "unset", but the public SDK
+    // policy contract requires one.
+    if policy.version.is_empty() {
+        return Err(MxcError::malformed_request("Policy version is required").into());
+    }
+    Ok(())
+}
+
+/// Build a request from a complete canonical MXC configuration document.
+#[cfg(feature = "ffi-internals")]
+#[doc(hidden)]
+pub fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, crate::Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = wxc_common::config_parser::load_mxc_request_from_json_with_options(
+        request_json,
+        &mut logger,
+        wxc_common::config_parser::LoadOptions {
+            is_base64: false,
+            allow_missing_command: false,
+        },
+    )
+    .map_err(|error| {
+        use wxc_common::config_parser::ParseError;
+
+        let message = match error {
+            ParseError::Decode(error)
+            | ParseError::OneShot(error)
+            | ParseError::OneShotMalformed(error) => error.to_string(),
+            ParseError::StateAware(error) => error.to_string(),
+        };
+        crate::Error::new(
+            ErrorCode::MalformedRequest,
+            format!("failed to parse request JSON: {message}"),
+        )
+    })?;
+    let MxcRequest::OneShot(inner) = parsed else {
+        return Err(crate::Error::new(
+            ErrorCode::MalformedRequest,
+            "failed to parse request JSON: expected a one-shot request",
+        ));
+    };
+    let requested_sandbox_kind = inner
+        .telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.requested_sandbox_kind)
+        .unwrap_or_else(|| inner.containment.wire_name());
+    Ok(SandboxRequest {
+        inner,
+        requested_sandbox_kind,
+    })
+}
+
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 pub(crate) fn build_wire_config(
@@ -788,6 +854,15 @@ pub(crate) fn build_wire_config(
     containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
+    build_wire_config_with_network_format(policy, containment, container_name)
+        .map(|(config, _)| config)
+}
+
+fn build_wire_config_with_network_format(
+    policy: &SandboxPolicy,
+    containment: &Containment,
+    container_name: Option<&str>,
+) -> Result<(serde_json::Value, NetworkFormat), MxcError> {
     use serde_json::json;
 
     let container_id = container_name
@@ -943,7 +1018,7 @@ pub(crate) fn build_wire_config(
             config["containment"] = serde_json::json!("isolation_session");
         }
     }
-    Ok(config)
+    Ok((config, network_format))
 }
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
@@ -1068,6 +1143,146 @@ mod tests {
             config.get("ui").is_some(),
             "wire config dropped a `ui` block the caller supplied: {config}"
         );
+    }
+
+    fn complete_one_shot_wire(
+        mut config: serde_json::Value,
+        command: &str,
+        cwd: Option<&str>,
+        env: &[&str],
+    ) -> serde_json::Value {
+        config["process"]["commandLine"] = serde_json::json!(command);
+        if let Some(cwd) = cwd {
+            config["process"]["cwd"] = serde_json::json!(cwd);
+        }
+        if !env.is_empty() {
+            config["process"]["env"] = serde_json::json!(env);
+        }
+        config
+    }
+
+    #[test]
+    fn rust_builder_matches_canonical_cross_language_fixtures() {
+        use crate::configs::{
+            CaptureDenials, ProcessContainer, ProcessContainerNetwork,
+            ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation,
+        };
+
+        let process_policy: super::SandboxPolicy = serde_json::from_value(serde_json::json!({
+            "version": "0.8.0-alpha",
+            "filesystem": {
+                "readwritePaths": ["C:\\work"],
+                "readonlyPaths": ["C:\\input"],
+                "deniedPaths": ["C:\\secret"],
+                "clearPolicyOnExit": true
+            },
+            "network": {
+                "egress": { "default": "deny" },
+                "ingress": { "default": "allow", "hostLoopback": "deny" },
+                "runtimeConfig": { "networkProxy": "http://127.0.0.1:8080" }
+            },
+            "ui": { "clipboard": "read" },
+            "timeoutMs": 30000
+        }))
+        .expect("process policy parses");
+        let process_containment = ProcessContainer {
+            least_privilege: true,
+            capabilities: vec!["internetClient".to_string()],
+            capture_denials: Some(CaptureDenials {
+                output_path: Some("C:\\denials.json".to_string()),
+                retain_etl: true,
+                ..Default::default()
+            }),
+            ui: Some(ProcessContainerUi {
+                isolation: ProcessContainerUiIsolation::Handles,
+                system_settings: ProcessContainerSystemSettings::Parameters,
+                ime: true,
+                ..Default::default()
+            }),
+            network: Some(ProcessContainerNetwork {
+                allowed_proxy_peer: Some("Contoso.App_123".to_string()),
+            }),
+            ..Default::default()
+        };
+        let process = super::build_wire_config(
+            &process_policy,
+            &super::Containment::ProcessContainer(process_containment),
+            Some("golden-process-container"),
+        )
+        .map(|config| {
+            complete_one_shot_wire(config, "echo parity", Some("C:\\work"), &["PARITY=true"])
+        })
+        .expect("process config builds");
+
+        let directional_policy: super::SandboxPolicy = serde_json::from_value(serde_json::json!({
+            "version": "0.8.0-alpha",
+            "network": {
+                "egress": {
+                    "default": "deny",
+                    "allow": [{
+                        "to": [{
+                            "cidr": "10.20.0.0/16",
+                            "except": ["10.20.30.0/24"]
+                        }],
+                        "ports": [{
+                            "protocol": "tcp",
+                            "port": 443,
+                            "endPort": 444
+                        }]
+                    }]
+                },
+                "ingress": {
+                    "default": "deny",
+                    "hostLoopback": "deny"
+                }
+            }
+        }))
+        .expect("directional policy parses");
+        let directional = super::build_wire_config(
+            &directional_policy,
+            &super::Containment::ProcessContainer(ProcessContainer::default()),
+            Some("golden-directional-network"),
+        )
+        .map(|config| complete_one_shot_wire(config, "echo network", None, &[]))
+        .expect("directional config builds");
+
+        let wslc_policy: super::SandboxPolicy =
+            serde_json::from_value(serde_json::json!({ "version": "0.8.0-alpha" }))
+                .expect("WSLC policy parses");
+        let wslc = super::build_wire_config(
+            &wslc_policy,
+            &super::Containment::Wslc(super::WslcSection {
+                image: "alpine:3.20".to_string(),
+                image_tar_path: Some("C:\\images\\alpine.tar".to_string()),
+                cpu_count: Some(2),
+                memory_mb: Some(1024),
+                gpu: true,
+                storage_path: Some("C:\\wslc".to_string()),
+                port_mappings: vec![(8080, 80)],
+            }),
+            Some("golden-wslc"),
+        )
+        .map(|config| complete_one_shot_wire(config, "printf parity", None, &[]))
+        .expect("WSLC config builds");
+
+        for (actual, fixture) in [
+            (
+                process,
+                include_str!("../../../../tests/policy/request-process-container.json"),
+            ),
+            (
+                directional,
+                include_str!("../../../../tests/policy/request-directional-network.json"),
+            ),
+            (
+                wslc,
+                include_str!("../../../../tests/policy/request-wslc.json"),
+            ),
+        ] {
+            let expected: serde_json::Value =
+                serde_json::from_str(fixture).expect("canonical fixture parses");
+            assert_eq!(actual, expected);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1635,15 +1850,8 @@ mod tests {
         assert!(request.inner.telemetry.is_none());
         assert!(!request.inner.experimental_enabled);
 
-        request.set_telemetry_enabled(true);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
+        request.set_telemetry_opt_in(true);
+        assert_eq!(request.telemetry_enabled(), Some(true));
         assert_eq!(
             request
                 .inner
@@ -1657,15 +1865,8 @@ mod tests {
             "stable telemetry enablement must not opt into experimental features"
         );
 
-        request.set_telemetry_enabled(false);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(false)
-        );
+        request.set_telemetry_opt_in(false);
+        assert_eq!(request.telemetry_enabled(), Some(false));
         assert!(!request.inner.experimental_enabled);
     }
 
@@ -1679,7 +1880,7 @@ mod tests {
         )
         .expect("build_request_with_containment");
 
-        request.set_telemetry_enabled(true);
+        request.set_telemetry_opt_in(true);
 
         assert_eq!(
             request

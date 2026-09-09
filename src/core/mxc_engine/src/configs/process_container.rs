@@ -173,19 +173,6 @@ pub(crate) fn apply(
 
     config["containment"] = json!(containment);
 
-    if wxc_common::directional_network_support(&policy.version) == Some(false) {
-        if process_container.learning_mode {
-            return Err(wxc_common::mxc_error::MxcError::malformed_request(
-                "processContainer.learningMode requires schema version 0.8 or later",
-            ));
-        }
-        if process_container.capture_denials.is_some() {
-            return Err(wxc_common::mxc_error::MxcError::malformed_request(
-                "processContainer.captureDenials requires schema version 0.8 or later",
-            ));
-        }
-    }
-
     let mut capabilities = process_container.capabilities.clone();
     if let Some(net) = &policy.network {
         let (allows_internet, allows_local_network) = match network_format {
@@ -458,7 +445,7 @@ mod tests {
                 "captureDenials",
             ),
         ] {
-            let error = build_wire_config(
+            let error = crate::policy::build_request_with_containment(
                 &policy_for_version("0.7.0-alpha", None),
                 &crate::policy::Containment::ProcessContainer(process_container),
                 None,

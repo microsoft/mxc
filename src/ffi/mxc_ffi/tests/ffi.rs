@@ -9,13 +9,13 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use mxc_ffi::{
-    mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run,
-    mxc_run_request, mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
+    mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_request,
+    mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
     mxc_sandbox_warnings_json, mxc_spawn_request, mxc_stream_closer_close, mxc_stream_closer_free,
     mxc_string_free, mxc_version, MxcErrorDetail, MxcRunResult, MxcSandbox,
 };
 
-/// An empty, all-null result to hand to `mxc_run`.
+/// An empty, all-null result to hand to `mxc_run_request`.
 fn zeroed_result() -> MxcRunResult {
     // SAFETY: `MxcRunResult` is `repr(C)` of `i32`s and nullable pointers, so an
     // all-zero value is valid (null pointers, zero status).
@@ -23,24 +23,23 @@ fn zeroed_result() -> MxcRunResult {
 }
 
 #[test]
-fn extern_run_rejects_malformed_policy() {
-    let policy = CString::new("not json").unwrap();
-    let command = CString::new("echo hi").unwrap();
+fn extern_run_rejects_malformed_request() {
+    let request = CString::new("not json").unwrap();
     let mut out = zeroed_result();
-    // SAFETY: valid C strings and a valid out pointer.
-    let status = unsafe { mxc_run(policy.as_ptr(), command.as_ptr(), &mut out) };
+    // SAFETY: valid C string and a valid out pointer.
+    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert_eq!(out.status, status);
     assert!(!out.error.message_utf8.is_null());
-    // SAFETY: the message is a valid C string filled by `mxc_run`.
+    // SAFETY: the message is a valid C string filled by `mxc_run_request`.
     let msg = unsafe { CStr::from_ptr(out.error.message_utf8) }
         .to_str()
         .unwrap();
-    assert!(msg.contains("policy"), "unexpected message: {msg}");
+    assert!(msg.contains("request"), "unexpected message: {msg}");
     assert!(out.stdout_utf8.is_null());
 
-    // SAFETY: `out` was filled by `mxc_run`; frees its owned strings.
+    // SAFETY: `out` was filled by `mxc_run_request`; frees its owned strings.
     unsafe { mxc_run_result_free(&mut out) };
     assert!(out.error.message_utf8.is_null());
 }
@@ -103,18 +102,16 @@ fn extern_streaming_warning_and_closer_preconditions_are_safe() {
 fn extern_run_request_maps_capture_denials_to_process_container() {
     let request = CString::new(
         r#"{
-            "policy": { "version": "0.7.0-alpha" },
-            "command": "echo hi",
-            "containment": {
-                "type": "processContainer",
-                "captureDenials": {}
-            }
+            "version": "0.7.0-alpha",
+            "process": { "commandLine": "echo hi" },
+            "containment": "processcontainer",
+            "processContainer": { "captureDenials": {} }
         }"#,
     )
     .unwrap();
     let mut out = zeroed_result();
     // SAFETY: a valid C string and writable result storage.
-    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
+    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     // SAFETY: the message is a valid C string filled by `mxc_run_request`.
@@ -136,7 +133,7 @@ fn extern_run_request_rejects_null_result_before_parsing() {
     // result pointer was checked.
     let invalid_utf8 = [0xff_u8, 0];
     // SAFETY: the byte buffer is NUL-terminated and the result pointer is null.
-    let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), ptr::null_mut()) };
+    let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), 0, ptr::null_mut()) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
 }
@@ -145,12 +142,10 @@ fn extern_run_request_rejects_null_result_before_parsing() {
 fn extern_spawn_request_maps_capture_denials_to_process_container() {
     let request = CString::new(
         r#"{
-            "policy": { "version": "0.7.0-alpha" },
-            "command": "echo hi",
-            "containment": {
-                "type": "processContainer",
-                "captureDenials": {}
-            }
+            "version": "0.7.0-alpha",
+            "process": { "commandLine": "echo hi" },
+            "containment": "processcontainer",
+            "processContainer": { "captureDenials": {} }
         }"#,
     )
     .unwrap();
@@ -158,7 +153,7 @@ fn extern_spawn_request_maps_capture_denials_to_process_container() {
     // SAFETY: `MxcErrorDetail` contains integers and nullable pointers.
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
     // SAFETY: valid request and writable fresh out-parameters.
-    let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut error) };
+    let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut error) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert!(handle.is_null());
@@ -181,14 +176,17 @@ fn extern_spawn_request_maps_capture_denials_to_process_container() {
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn extern_run_executes_command() {
-    let policy = CString::new(
-        r#"{"version":"0.7.0-alpha","filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}}"#,
+    let request = CString::new(
+        r#"{
+            "version":"0.7.0-alpha",
+            "process":{"commandLine":"cmd /c echo hello-ffi"},
+            "filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}
+        }"#,
     )
     .unwrap();
-    let command = CString::new("cmd /c echo hello-ffi").unwrap();
     let mut out = zeroed_result();
-    // SAFETY: valid C strings and a valid out pointer.
-    let status = unsafe { mxc_run(policy.as_ptr(), command.as_ptr(), &mut out) };
+    // SAFETY: valid C string and a valid out pointer.
+    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS, "status={status}");
     assert_eq!(out.exit_code, 0);
@@ -197,6 +195,6 @@ fn extern_run_executes_command() {
     let stdout = unsafe { CStr::from_ptr(out.stdout_utf8) }.to_str().unwrap();
     assert!(stdout.contains("hello-ffi"), "stdout={stdout}");
 
-    // SAFETY: `out` was filled by `mxc_run`.
+    // SAFETY: `out` was filled by `mxc_run_request`.
     unsafe { mxc_run_result_free(&mut out) };
 }

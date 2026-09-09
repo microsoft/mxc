@@ -60,6 +60,12 @@ pub use state_aware::{
     exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
 };
 
+#[cfg(feature = "ffi-internals")]
+#[doc(hidden)]
+pub mod ffi_internals {
+    pub use crate::policy::build_request_from_json;
+}
+
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};

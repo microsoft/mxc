@@ -66,6 +66,14 @@ function enumVariants(source, enumName, language) {
   return enumMembers(source, enumName, language).map((member) => member.name);
 }
 
+function managedDerivedTypes(source, baseType) {
+  return [
+    ...source.matchAll(
+      new RegExp(`public\\s+sealed\\s+class\\s+(\\w+)\\s*:\\s*${baseType}\\b`, "g")
+    ),
+  ].map((match) => match[1]);
+}
+
 function compare(label, actual, expected) {
   const actualSorted = [...new Set(actual)].sort();
   const expectedSorted = [...new Set(expected)].sort();
@@ -206,28 +214,22 @@ function managedJsonFields(source, className) {
     });
 }
 
-// `legacyManagedOnly` lists managed JSON fields that intentionally have no Rust
-// counterpart because they are deprecated compatibility aliases. They must stay
-// serializable so legacy JSON round-trips, but the managed request path strips
-// them before the native layer sees them.
-function compareStructFields(
-  label,
-  rustSource,
-  rustName,
-  managedSource,
-  managedName,
-  legacyManagedOnly = []
-) {
+function compareStructFields(label, rustSource, rustName, managedSource, managedName) {
   compare(
     `${label} fields`,
-    managedJsonFields(managedSource, managedName).filter(
-      (field) => !legacyManagedOnly.includes(field)
-    ),
+    managedJsonFields(managedSource, managedName),
     rustStructFields(rustSource, rustName)
   );
 }
 
 const rustPolicy = read("src", "core", "mxc_engine", "src", "policy.rs");
+const rustWire = read(
+  "src",
+  "core",
+  "wxc_common",
+  "src",
+  "wire.rs"
+);
 const rustNetworkPolicy = read(
   "src",
   "core",
@@ -235,13 +237,6 @@ const rustNetworkPolicy = read(
   "src",
   "policy",
   "network.rs"
-);
-const rustBindingRequest = read(
-  "src",
-  "ffi",
-  "mxc_ffi",
-  "src",
-  "request.rs"
 );
 const managedRequest = read(
   "sdk",
@@ -258,66 +253,94 @@ const managedPolicy = read(
 const rustOneShot = enumVariants(rustPolicy, "Containment", "rust").filter(
   (variant) => variant !== "IsolationSession"
 );
-const bindingContainment = enumMembers(
-  rustBindingRequest,
-  "RequestContainment",
-  "rust"
-);
 compare(
-  "Rust SDK vs binding containment variants",
-  bindingContainment.map((member) => member.name),
+  "Rust SDK vs managed containment variants",
+  managedDerivedTypes(managedRequest, "SandboxContainment").map((name) =>
+    name.replace(/Containment$/, "")
+  ),
   rustOneShot
 );
 compareStructFields(
-  "one-shot request",
-  rustBindingRequest,
-  "RequestSpec",
+  "process-container canonical fields",
+  rustWire,
+  "ProcessContainer",
   managedRequest,
-  "SandboxRequest"
-);
-compare(
-  "process-container request fields",
-  managedJsonFields(managedRequest, "ProcessContainerContainment"),
-  rustVariantFields(rustBindingRequest, "RequestContainment", "ProcessContainer")
-);
-compare(
-  "WSLC request fields",
-  managedJsonFields(managedRequest, "WslcContainment"),
-  rustVariantFields(rustBindingRequest, "RequestContainment", "Wslc")
+  "ProcessContainerContainment"
 );
 compareStructFields(
-  "process-container UI",
-  rustBindingRequest,
-  "ProcessContainerUiSpec",
+  "process-container UI canonical fields",
+  rustWire,
+  "BaseProcessUi",
   managedRequest,
   "ProcessContainerUiPolicy"
 );
 compareStructFields(
-  "process-container network",
-  rustBindingRequest,
-  "ProcessContainerNetworkSpec",
+  "process-container network canonical fields",
+  rustWire,
+  "ProcessContainerNetwork",
   managedRequest,
   "ProcessContainerNetworkPolicy"
 );
 compareStructFields(
-  "WSLC port mapping",
-  rustBindingRequest,
-  "WslcPortMappingSpec",
-  managedRequest,
-  "WslcPortMapping"
+  "capture-denials canonical fields",
+  rustWire,
+  "CaptureDenials",
+  managedPolicy,
+  "CaptureDenialsPolicy"
+);
+compare(
+  "WSLC one-shot canonical fields",
+  managedJsonFields(managedRequest, "WslcContainment"),
+  rustStructFields(rustWire, "Wslc").filter(
+    (field) => field !== "targetOs" && field !== "provision"
+  )
+);
+compare(
+  "WSLC port-mapping canonical fields",
+  [...managedJsonFields(managedRequest, "WslcPortMapping"), "protocol"],
+  rustStructFields(rustWire, "PortMapping")
 );
 
-for (const [
-  label,
-  rustSource,
-  rustName,
-  managedName,
-  legacyManagedOnly,
-] of [
-  // `captureDenials` is an obsolete managed-only alias (MXC0001, removed in
-  // 1.0). Rust only accepts it under `containment.captureDenials`, and
-  // MxcSandbox.PrepareRequest strips it from the policy before serialization.
-  ["sandbox policy", rustPolicy, "SandboxPolicy", "SandboxPolicy", ["captureDenials"]],
+const managedSandboxPolicyFields = managedJsonFields(
+  managedPolicy,
+  "SandboxPolicy"
+);
+
+// `captureDenials` is the one existing managed compatibility alias (MXC0001,
+// removed in 1.0). MxcSandbox.PrepareRequest migrates it to
+// containment.captureDenials and strips it before native serialization.
+compare(
+  "sandbox policy compatibility aliases",
+  managedSandboxPolicyFields.filter((field) => field === "captureDenials"),
+  ["captureDenials"]
+);
+compare(
+  "sandbox policy fields",
+  managedSandboxPolicyFields.filter(
+    (field) => field !== "captureDenials" && field !== "telemetry"
+  ),
+  rustStructFields(rustPolicy, "SandboxPolicy")
+);
+
+// Telemetry is execution metadata, not a containment restriction. Managed
+// request serialization emits the canonical wire section directly, so compare
+// its public shape with that central parser contract.
+compare(
+  "sandbox policy canonical telemetry field",
+  managedSandboxPolicyFields.filter((field) => field === "telemetry"),
+  rustStructFields(rustWire, "MxcConfig").filter(
+    (field) => field === "telemetry"
+  )
+);
+compareStructFields(
+  "telemetry settings",
+  rustWire,
+  "Telemetry",
+  managedPolicy,
+  "TelemetrySettings"
+);
+
+for (const [label, rustSource, rustName, managedName] of [
   ["filesystem policy", rustPolicy, "FilesystemSection", "FilesystemPolicy"],
   ["UI policy", rustPolicy, "UiSection", "UiPolicy"],
   ["network policy", rustNetworkPolicy, "NetworkSection", "NetworkPolicy"],
@@ -333,26 +356,10 @@ for (const [
     rustSource,
     rustName,
     managedPolicy,
-    managedName,
-    legacyManagedOnly
+    managedName
   );
 }
-const managedOneShot = [
-  ...managedRequest.matchAll(
-    /\[JsonDerivedType\(typeof\(\w+\),\s*"([^"]+)"\)\]/g
-  ),
-].map((match) => match[1]);
 const camelCase = (value) => value[0].toLowerCase() + value.slice(1);
-compare(
-  "one-shot containment discriminators",
-  managedOneShot,
-  bindingContainment.map((member) => {
-    const renamed = /#\[serde\([^]]*\brename\s*=\s*"([^"]+)"/s.exec(
-      member.source
-    );
-    return renamed?.[1] ?? camelCase(member.name);
-  })
-);
 
 const rustProbeFull = read("src", "core", "mxc_engine", "src", "probe.rs");
 const rustProbe = rustProbeFull.split("#[cfg(test)]")[0];

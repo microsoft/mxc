@@ -1,46 +1,45 @@
 {
-  "policy": {
-    "version": "0.8.0-alpha",
-    "filesystem": {
-      "readwritePaths": ["C:\\work"],
-      "readonlyPaths": ["C:\\input"],
-      "deniedPaths": ["C:\\secret"],
-      "clearPolicyOnExit": true
-    },
-    "network": {
-      "allowOutbound": false,
-      "allowLocalNetwork": false,
-      "allowedHosts": [],
-      "blockedHosts": [],
-      "egress": {
-        "default": "deny"
-      },
-      "ingress": {
-        "default": "allow",
-        "hostLoopback": "deny"
-      },
-      "runtimeConfig": {
-        "networkProxy": "http://127.0.0.1:8080"
-      }
-    },
-    "ui": {
-      "allowWindows": false,
-      "clipboard": "read",
-      "allowInputInjection": false
-    },
-    "timeoutMs": 30000
+  "version": "0.8.0-alpha",
+  "containerId": "golden-process-container",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
   },
-  "command": "echo parity",
-  "containment": {
-    "type": "processContainer",
-    "leastPrivilege": true,
-    "learningMode": false,
-    "capabilities": ["internetClient"],
-    "captureDenials": {
-      "mode": "block",
-      "outputPath": "C:\\logs\\denials.json",
-      "retainEtl": true
+  "process": {
+    "commandLine": "echo parity",
+    "timeout": 30000,
+    "cwd": "C:\\work",
+    "env": ["PARITY=true"]
+  },
+  "filesystem": {
+    "readwritePaths": ["C:\\work"],
+    "readonlyPaths": ["C:\\input"],
+    "deniedPaths": ["C:\\secret"]
+  },
+  "ui": {
+    "disable": true,
+    "clipboard": "read",
+    "injection": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
     },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  },
+  "containment": "processcontainer",
+  "processContainer": {
+    "leastPrivilege": true,
+    "capabilities": [
+      "internetClient",
+      "privateNetworkClientServer"
+    ],
     "ui": {
       "isolation": "handles",
       "desktopSystemControl": false,
@@ -49,12 +48,11 @@
     },
     "network": {
       "allowedProxyPeer": "Contoso.App_123"
+    },
+    "captureDenials": {
+      "mode": "block",
+      "outputPath": "C:\\denials.json",
+      "retainEtl": true
     }
-  },
-  "containerName": "golden-process-container",
-  "workingDirectory": "C:\\work",
-  "environment": {
-    "PARITY": "true"
-  },
-  "experimental": false
+  }
 }

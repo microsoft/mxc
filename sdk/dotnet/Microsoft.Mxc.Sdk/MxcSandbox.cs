@@ -121,7 +121,10 @@ public static class MxcSandbox
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcRunResult result = default;
-                var status = NativeMethods.mxc_run_request(requestPtr, &result);
+                var status = NativeMethods.mxc_run_request(
+                    requestPtr,
+                    request.Experimental ? 1 : 0,
+                    &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)
@@ -199,7 +202,11 @@ public static class MxcSandbox
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_request(requestPtr, &handle, &error);
+                var status = NativeMethods.mxc_spawn_request(
+                    requestPtr,
+                    request.Experimental ? 1 : 0,
+                    &handle,
+                    &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     // `finally`, not a straight-line free: marshalling the strings or
@@ -245,7 +252,7 @@ public static class MxcSandbox
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
+        return CanonicalRequestBuilder.Serialize(PrepareRequest(request), JsonOptions);
     }
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)
@@ -313,14 +320,7 @@ public static class MxcSandbox
     // obsolete CaptureDenials must be copied, or it is silently dropped from
     // any request that carries the legacy field.
     private static SandboxPolicy ClonePolicyWithoutCaptureDenials(SandboxPolicy policy) =>
-        new()
-        {
-            Version = policy.Version,
-            Filesystem = policy.Filesystem,
-            Network = policy.Network,
-            Ui = policy.Ui,
-            TimeoutMs = policy.TimeoutMs,
-        };
+        policy.WithoutLegacyCaptureDenials();
 
     private static bool CaptureDenialsEqual(
         CaptureDenialsPolicy left,
