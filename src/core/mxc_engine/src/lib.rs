@@ -255,8 +255,14 @@ impl TelemetryProcess {
         }
     }
 
-    fn completion_response(&self, result: &std::io::Result<i32>) -> ScriptResponse {
-        let output_metadata = self.inner.output_metadata().cloned().map(Box::new);
+    fn completion_response(
+        &self,
+        result: &std::io::Result<i32>,
+        include_output_metadata: bool,
+    ) -> ScriptResponse {
+        let output_metadata = include_output_metadata
+            .then(|| self.inner.output_metadata().cloned().map(Box::new))
+            .flatten();
         let mut response = match result {
             Ok(exit_code) => ScriptResponse {
                 exit_code: *exit_code,
@@ -289,19 +295,37 @@ impl TelemetryProcess {
     /// provider reference. Idempotent — subsequent calls (from another exit
     /// path or `Drop`) are silent no-ops.
     fn emit(&mut self, result: &std::io::Result<i32>) {
+        self.emit_inner(result, true);
+    }
+
+    /// Emit completion after a nonblocking terminal poll without forcing
+    /// backend teardown to finalize capture metadata.
+    fn emit_after_poll(&mut self, result: &std::io::Result<i32>) {
+        self.emit_inner(result, false);
+    }
+
+    fn emit_inner(&mut self, result: &std::io::Result<i32>, include_verbose: bool) {
         if !self.active {
             return;
         }
-        let response = self.completion_response(result);
+        let response = self.completion_response(result, include_verbose);
         let verbose_error = match &self.mode {
             TelemetryMode::OneShot {
                 containment,
                 requested_sandbox_kind,
             } => {
                 #[cfg(target_os = "windows")]
-                let verbose_error =
-                    emit_verbose_telemetry(true, containment, *requested_sandbox_kind, &response)
-                        .err();
+                let verbose_error = include_verbose
+                    .then(|| {
+                        emit_verbose_telemetry(
+                            true,
+                            containment,
+                            *requested_sandbox_kind,
+                            &response,
+                        )
+                        .err()
+                    })
+                    .flatten();
                 #[cfg(not(target_os = "windows"))]
                 let verbose_error: Option<String> = None;
                 telemetry::emit_sdk_completion_with_kind(
@@ -493,12 +517,11 @@ impl SandboxProcess for TelemetryProcess {
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         let result = self.inner.try_wait();
         match &result {
-            // Finalize backend-owned output metadata after observing exit,
-            // while preserving the nonblocking poll's terminal result.
+            // Preserve the nonblocking contract. Capture metadata is finalized
+            // only by backend teardown, so this path emits completion without
+            // attempting the optional verbose artifact.
             Ok(Some(exit_code)) => {
-                let exit_code = *exit_code;
-                let _ = self.inner.wait();
-                self.emit(&Ok(exit_code));
+                self.emit_after_poll(&Ok(*exit_code));
             }
             // Still running: leave the invariant to a later `wait` / `kill` / `Drop`.
             Ok(None) => {}
@@ -843,7 +866,7 @@ mod telemetry_process_tests {
     }
 
     #[test]
-    fn terminal_poll_finalizes_before_reading_output_metadata() {
+    fn terminal_poll_does_not_wait_or_read_output_metadata() {
         let finalized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let metadata_read_before_finalization =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -867,7 +890,7 @@ mod telemetry_process_tests {
         );
 
         assert_eq!(process.try_wait().unwrap(), Some(7));
-        assert!(finalized.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!finalized.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!metadata_read_before_finalization.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!process.active);
     }
@@ -909,7 +932,8 @@ mod telemetry_process_tests {
             std::time::Instant::now(),
         );
 
-        let response = process.completion_response(&Err(std::io::Error::other("retention failed")));
+        let response =
+            process.completion_response(&Err(std::io::Error::other("retention failed")), true);
         assert!(response
             .output_metadata
             .as_deref()

@@ -207,6 +207,9 @@ general logger text.
 One verbose document may require multiple ETW events. Every `mxc.content`
 value is an independently parseable compact JSON array of complete verbose
 signature objects; MXC never splits a JSON object or UTF-8 code point.
+Streaming callers must use `wait` to finalize capture metadata. A terminal
+result observed only through nonblocking `try_wait` emits completion telemetry
+but not the optional verbose artifact event.
 
 | Field | Type | Description |
 |-------|------|-------------|

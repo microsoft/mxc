@@ -237,7 +237,7 @@ fn write_capture_config(workdir: &Path) -> PathBuf {
     let config_path = workdir.join("capture-config.json");
     let output_path = workdir.join("denials.json");
     let config = serde_json::json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": "TelemetryVerboseDenialsE2E",
         "containment": "processcontainer",
         "process": {
@@ -270,8 +270,16 @@ fn run_traced_config(
         .arg("--config")
         .arg(config_path)
         .env("MXC_TEST_LOCALAPPDATA_OVERRIDE", local_app_data)
+        .env(
+            "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID",
+            std::process::id().to_string(),
+        )
         .output()
         .expect("failed to run wxc-exec capture config")
+}
+
+fn capture_denials_is_unavailable(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("captureDenials requires")
 }
 
 fn find_verbose_artifact(workdir: &Path) -> Option<PathBuf> {
@@ -447,11 +455,17 @@ fn test_verbose_denials_etw_payload_honors_consent() {
     let granted_run = run_traced_config(&exe, &granted_store, &config_path);
     session.stop();
     if !granted_run.status.success() {
-        skip(&format!(
-            "captureDenials is unavailable on this host: {}",
+        if capture_denials_is_unavailable(&granted_run.stderr) {
+            skip(&format!(
+                "captureDenials is unavailable on this host: {}",
+                String::from_utf8_lossy(&granted_run.stderr)
+            ));
+            return;
+        }
+        panic!(
+            "verbose telemetry execution failed: {}",
             String::from_utf8_lossy(&granted_run.stderr)
-        ));
-        return;
+        );
     }
 
     let verbose_path = find_verbose_artifact(&workdir)
