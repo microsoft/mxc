@@ -639,6 +639,15 @@ internal static class CanonicalRequestBuilder
         }
         if (request.Environment.Count != 0)
         {
+            foreach (var name in request.Environment.Keys)
+            {
+                if (string.IsNullOrEmpty(name) || name.Contains('='))
+                {
+                    throw new ArgumentException(
+                        "An environment variable name cannot be empty or contain '='.",
+                        nameof(request));
+                }
+            }
             process["env"] = JsonSerializer.SerializeToNode(
                 request.Environment.Select(pair => $"{pair.Key}={pair.Value}").ToArray());
         }

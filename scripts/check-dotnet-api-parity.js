@@ -308,7 +308,7 @@ const managedSandboxPolicyFields = managedJsonFields(
 
 // `captureDenials` is the one existing managed compatibility alias (MXC0001,
 // removed in 1.0). MxcSandbox.PrepareRequest migrates it to
-// containment.captureDenials and strips it before native serialization.
+// processContainer.captureDenials and strips it before native serialization.
 compare(
   "sandbox policy compatibility aliases",
   managedSandboxPolicyFields.filter((field) => field === "captureDenials"),

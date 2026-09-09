@@ -137,12 +137,15 @@ public class MxcSandboxTests
             Experimental = true,
         };
 
-        JsonAssert.MatchesGolden(
-            MxcSandbox.SerializeRequest(processContainer),
-            "request-process-container.json");
-        JsonAssert.MatchesGolden(
-            MxcSandbox.SerializeRequest(directionalNetwork),
-            "request-directional-network.json");
+        if (OperatingSystem.IsWindows())
+        {
+            JsonAssert.MatchesGolden(
+                MxcSandbox.SerializeRequest(processContainer),
+                "request-process-container.json");
+            JsonAssert.MatchesGolden(
+                MxcSandbox.SerializeRequest(directionalNetwork),
+                "request-directional-network.json");
+        }
         JsonAssert.MatchesGolden(MxcSandbox.SerializeRequest(wslc), "request-wslc.json");
     }
 
@@ -173,6 +176,10 @@ public class MxcSandboxTests
         string fixtureName,
         Type expectedContainment)
     {
+        Assert.SkipUnless(
+            expectedContainment != typeof(ProcessContainerContainment)
+                || OperatingSystem.IsWindows(),
+            "ProcessContainer canonical fixtures are Windows-specific.");
         var request = JsonSerializer.Deserialize<SandboxRequest>(
             JsonAssert.ReadGolden(fixtureName));
 
@@ -236,6 +243,24 @@ public class MxcSandboxTests
         Assert.True(
             JsonNode.DeepEquals(JsonNode.Parse(firstJson), JsonNode.Parse(secondJson)),
             $"Canonical request changed after round trip.{Environment.NewLine}{secondJson}");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("A=B")]
+    public void SandboxRequest_RejectsInvalidEnvironmentVariableNames(string name)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Environment = { [name] = "value" },
+        };
+
+        var exception = Assert.Throws<ArgumentException>(
+            () => JsonSerializer.Serialize(request));
+
+        Assert.Contains("environment variable name", exception.Message);
     }
 
     [Fact]
