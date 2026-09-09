@@ -497,6 +497,12 @@ as non-grants. See
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
+`RequestConsentAsync` cancellation is best-effort relative to persistence. It
+stops waiting for an unfinished presenter, but once a completed decision wins
+the race and native persistence begins, the persisted outcome is authoritative
+and is returned even if cancellation occurs concurrently. Cancellation does not
+cancel the host's presenter task.
+
 ### Administrative policy
 
 An IT administrator can still block MXC telemetry device-wide via MXC's own

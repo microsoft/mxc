@@ -44,7 +44,7 @@ public sealed class SandboxRequest
     public bool Experimental { get; set; }
 }
 
-/// <summary>Serializes requests through MXC's canonical wire projection.</summary>
+/// <summary>Reads and writes requests through MXC's canonical wire projection.</summary>
 public sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
 {
     /// <inheritdoc />
@@ -52,7 +52,7 @@ public sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
         ref Utf8JsonReader reader,
         Type typeToConvert,
         JsonSerializerOptions options) =>
-        throw new NotSupportedException("SandboxRequest deserialization is not supported.");
+        CanonicalRequestBuilder.Deserialize(ref reader);
 
     /// <inheritdoc />
     public override void Write(
@@ -76,7 +76,10 @@ public abstract class SandboxContainment;
 /// The host's native process-isolation backend: ProcessContainer on Windows,
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
-public sealed class ProcessContainment : SandboxContainment;
+public sealed class ProcessContainment : SandboxContainment
+{
+    internal ProcessContainerContainment? CanonicalProcessContainer { get; set; }
+}
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment

@@ -3,11 +3,23 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk;
 
 internal static class CanonicalRequestBuilder
 {
+    private static readonly JsonSerializerOptions CanonicalReadOptions = new()
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        Converters =
+        {
+            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
+            new NetworkProxyPolicyJsonConverter(),
+        },
+    };
+
     internal static string Serialize(SandboxRequest request, JsonSerializerOptions options)
     {
         if (string.IsNullOrEmpty(request.Policy.Version))
@@ -77,6 +89,526 @@ internal static class CanonicalRequestBuilder
         }
 
         return root.ToJsonString(options);
+    }
+
+    internal static SandboxRequest Deserialize(ref Utf8JsonReader reader)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = RequireObject(document.RootElement, "request");
+        EnsureKnownProperties(
+            root,
+            "request",
+            "version",
+            "containerId",
+            "lifecycle",
+            "process",
+            "filesystem",
+            "ui",
+            "network",
+            "runtimeConfig",
+            "telemetry",
+            "containment",
+            "processContainer",
+            "experimental");
+
+        var policy = new SandboxPolicy
+        {
+            Version = RequireString(root, "version", "request"),
+        };
+
+        var process = RequireObject(
+            RequireProperty(root, "process", "request"),
+            "process");
+        EnsureKnownProperties(process, "process", "commandLine", "timeout", "cwd", "env");
+        var request = new SandboxRequest(
+            policy,
+            RequireString(process, "commandLine", "process"));
+
+        if (process.TryGetProperty("timeout", out var timeout))
+        {
+            var timeoutMs = ReadUInt32(timeout, "process.timeout");
+            policy.TimeoutMs = timeoutMs == 0 ? null : timeoutMs;
+        }
+        if (process.TryGetProperty("cwd", out var cwd))
+        {
+            request.WorkingDirectory = ReadString(cwd, "process.cwd");
+        }
+        if (process.TryGetProperty("env", out var environment))
+        {
+            request.Environment = ReadEnvironment(environment);
+        }
+
+        if (root.TryGetProperty("containerId", out var containerId))
+        {
+            request.ContainerName = ReadString(containerId, "containerId");
+        }
+
+        ReadFilesystemAndLifecycle(root, policy);
+        if (root.TryGetProperty("ui", out var ui))
+        {
+            policy.Ui = ReadUiPolicy(ui);
+        }
+
+        if (root.TryGetProperty("network", out var network))
+        {
+            policy.Network = ReadNetworkPolicy(
+                network,
+                root.TryGetProperty("runtimeConfig", out var runtimeConfig)
+                    ? runtimeConfig
+                    : null);
+        }
+        else if (root.TryGetProperty("runtimeConfig", out var runtimeConfig))
+        {
+            policy.Network = new NetworkPolicy
+            {
+                RuntimeConfig = DeserializeElement<NetworkRuntimeConfig>(
+                    runtimeConfig,
+                    "runtimeConfig"),
+            };
+        }
+
+        if (root.TryGetProperty("telemetry", out var telemetry))
+        {
+            var telemetryObject = RequireObject(telemetry, "telemetry");
+            EnsureKnownProperties(telemetryObject, "telemetry", "enabled");
+            policy.Telemetry = new TelemetrySettings
+            {
+                Enabled = telemetryObject.TryGetProperty("enabled", out var enabled)
+                    && ReadBoolean(enabled, "telemetry.enabled"),
+            };
+        }
+
+        var containmentName = root.TryGetProperty("containment", out var containment)
+            ? ReadString(containment, "containment")
+            : "process";
+        request.Containment = containmentName switch
+        {
+            "process" => ReadProcessContainment(root),
+            "processcontainer" => ReadExplicitProcessContainer(root),
+            "wslc" => ReadWslcContainment(root, request),
+            _ => throw new JsonException(
+                $"Unsupported canonical containment '{containmentName}'."),
+        };
+
+        if (containmentName != "wslc" && root.TryGetProperty("experimental", out var experimental))
+        {
+            var experimentalObject = RequireObject(experimental, "experimental");
+            if (experimentalObject.EnumerateObject().Any())
+            {
+                throw new JsonException(
+                    "Only canonical experimental.wslc requests can be deserialized.");
+            }
+        }
+
+        return request;
+    }
+
+    private static void ReadFilesystemAndLifecycle(
+        JsonElement root,
+        SandboxPolicy policy)
+    {
+        var filesystem = new FilesystemPolicy();
+        if (root.TryGetProperty("filesystem", out var filesystemElement))
+        {
+            var filesystemObject = RequireObject(filesystemElement, "filesystem");
+            EnsureKnownProperties(
+                filesystemObject,
+                "filesystem",
+                "readwritePaths",
+                "readonlyPaths",
+                "deniedPaths");
+            filesystem.ReadwritePaths = ReadStringList(
+                filesystemObject,
+                "readwritePaths",
+                "filesystem.readwritePaths");
+            filesystem.ReadonlyPaths = ReadStringList(
+                filesystemObject,
+                "readonlyPaths",
+                "filesystem.readonlyPaths");
+            filesystem.DeniedPaths = ReadStringList(
+                filesystemObject,
+                "deniedPaths",
+                "filesystem.deniedPaths");
+        }
+
+        var preservePolicy = false;
+        if (root.TryGetProperty("lifecycle", out var lifecycleElement))
+        {
+            var lifecycle = RequireObject(lifecycleElement, "lifecycle");
+            EnsureKnownProperties(
+                lifecycle,
+                "lifecycle",
+                "destroyOnExit",
+                "preservePolicy");
+            if (lifecycle.TryGetProperty("destroyOnExit", out var destroyOnExit)
+                && !ReadBoolean(destroyOnExit, "lifecycle.destroyOnExit"))
+            {
+                throw new JsonException(
+                    "SandboxRequest cannot represent lifecycle.destroyOnExit=false.");
+            }
+            if (lifecycle.TryGetProperty("preservePolicy", out var preserve))
+            {
+                preservePolicy = ReadBoolean(preserve, "lifecycle.preservePolicy");
+            }
+        }
+        filesystem.ClearPolicyOnExit = !preservePolicy;
+        policy.Filesystem = filesystem;
+    }
+
+    private static UiPolicy ReadUiPolicy(JsonElement element)
+    {
+        var ui = RequireObject(element, "ui");
+        EnsureKnownProperties(ui, "ui", "disable", "clipboard", "injection");
+        return new UiPolicy
+        {
+            AllowWindows = ui.TryGetProperty("disable", out var disable)
+                && !ReadBoolean(disable, "ui.disable"),
+            Clipboard = ui.TryGetProperty("clipboard", out var clipboard)
+                ? ReadEnum<ClipboardPolicy>(clipboard, "ui.clipboard")
+                : ClipboardPolicy.None,
+            AllowInputInjection = ui.TryGetProperty("injection", out var injection)
+                && ReadBoolean(injection, "ui.injection"),
+        };
+    }
+
+    private static NetworkPolicy? ReadNetworkPolicy(
+        JsonElement element,
+        JsonElement? runtimeConfig)
+    {
+        var network = RequireObject(element, "network");
+        var directional = network.TryGetProperty("egress", out _)
+            || network.TryGetProperty("ingress", out _);
+        if (directional)
+        {
+            EnsureKnownProperties(network, "network", "egress", "ingress");
+            return new NetworkPolicy
+            {
+                Egress = network.TryGetProperty("egress", out var egress)
+                    ? DeserializeElement<NetworkEgressPolicy>(egress, "network.egress")
+                    : null,
+                Ingress = network.TryGetProperty("ingress", out var ingress)
+                    ? DeserializeElement<NetworkIngressPolicy>(ingress, "network.ingress")
+                    : null,
+                RuntimeConfig = runtimeConfig is { } directionalRuntime
+                    ? DeserializeElement<NetworkRuntimeConfig>(
+                        directionalRuntime,
+                        "runtimeConfig")
+                    : null,
+            };
+        }
+
+        EnsureKnownProperties(
+            network,
+            "network",
+            "defaultPolicy",
+            "allowLocalNetwork",
+            "allowedHosts",
+            "blockedHosts",
+            "proxy",
+            "enforcementMode");
+        if (runtimeConfig is null
+            && network.EnumerateObject().All(
+                property => property.Name == "defaultPolicy"
+                    && property.Value.ValueKind == JsonValueKind.String
+                    && property.Value.GetString() == "block"))
+        {
+            return null;
+        }
+        var policy = new NetworkPolicy
+        {
+            AllowOutbound = network.TryGetProperty("defaultPolicy", out var defaultPolicy)
+                && ReadString(defaultPolicy, "network.defaultPolicy") switch
+                {
+                    "allow" => true,
+                    "block" => false,
+                    var value => throw new JsonException(
+                        $"Unsupported network.defaultPolicy '{value}'."),
+                },
+            AllowLocalNetwork = network.TryGetProperty("allowLocalNetwork", out var local)
+                && ReadBoolean(local, "network.allowLocalNetwork"),
+            AllowedHosts = ReadStringList(network, "allowedHosts", "network.allowedHosts"),
+            BlockedHosts = ReadStringList(network, "blockedHosts", "network.blockedHosts"),
+            Proxy = network.TryGetProperty("proxy", out var proxy)
+                ? DeserializeElement<NetworkProxyPolicy>(proxy, "network.proxy")
+                : null,
+            RuntimeConfig = runtimeConfig is { } legacyRuntime
+                ? DeserializeElement<NetworkRuntimeConfig>(legacyRuntime, "runtimeConfig")
+                : null,
+        };
+        if (network.TryGetProperty("enforcementMode", out var enforcementMode))
+        {
+            _ = ReadString(enforcementMode, "network.enforcementMode") switch
+            {
+                "capabilities" or "firewall" or "both" => true,
+                var value => throw new JsonException(
+                    $"Unsupported network.enforcementMode '{value}'."),
+            };
+        }
+        return policy;
+    }
+
+    private static ProcessContainment ReadProcessContainment(JsonElement root)
+    {
+        var containment = new ProcessContainment();
+        if (root.TryGetProperty("processContainer", out var processContainer))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new JsonException(
+                    "A canonical processContainer section is supported only on Windows.");
+            }
+            containment.CanonicalProcessContainer = ReadProcessContainer(processContainer);
+        }
+        return containment;
+    }
+
+    private static ProcessContainerContainment ReadExplicitProcessContainer(JsonElement root) =>
+        root.TryGetProperty("processContainer", out var processContainer)
+            ? ReadProcessContainer(processContainer)
+            : new ProcessContainerContainment { Ui = null };
+
+    private static ProcessContainerContainment ReadProcessContainer(JsonElement element)
+    {
+        var section = RequireObject(element, "processContainer");
+        EnsureKnownProperties(
+            section,
+            "processContainer",
+            "leastPrivilege",
+            "learningMode",
+            "capabilities",
+            "captureDenials",
+            "ui",
+            "network");
+        return new ProcessContainerContainment
+        {
+            LeastPrivilege = section.TryGetProperty("leastPrivilege", out var leastPrivilege)
+                && ReadBoolean(leastPrivilege, "processContainer.leastPrivilege"),
+            LearningMode = section.TryGetProperty("learningMode", out var learningMode)
+                && ReadBoolean(learningMode, "processContainer.learningMode"),
+            Capabilities = ReadStringList(
+                section,
+                "capabilities",
+                "processContainer.capabilities"),
+            CaptureDenials = section.TryGetProperty("captureDenials", out var captureDenials)
+                ? DeserializeElement<CaptureDenialsPolicy>(
+                    captureDenials,
+                    "processContainer.captureDenials")
+                : null,
+            Ui = section.TryGetProperty("ui", out var ui)
+                ? DeserializeElement<ProcessContainerUiPolicy>(ui, "processContainer.ui")
+                : null,
+            Network = section.TryGetProperty("network", out var network)
+                ? DeserializeElement<ProcessContainerNetworkPolicy>(
+                    network,
+                    "processContainer.network")
+                : null,
+        };
+    }
+
+    private static WslcContainment ReadWslcContainment(
+        JsonElement root,
+        SandboxRequest request)
+    {
+        if (root.TryGetProperty("processContainer", out _))
+        {
+            throw new JsonException(
+                "A canonical WSLC request cannot contain processContainer.");
+        }
+        var experimental = RequireObject(
+            RequireProperty(root, "experimental", "request"),
+            "experimental");
+        EnsureKnownProperties(experimental, "experimental", "wslc");
+        var wslc = RequireObject(
+            RequireProperty(experimental, "wslc", "experimental"),
+            "experimental.wslc");
+        EnsureKnownProperties(
+            wslc,
+            "experimental.wslc",
+            "image",
+            "imageTarPath",
+            "cpuCount",
+            "memoryMb",
+            "gpu",
+            "storagePath",
+            "portMappings");
+
+        var containment = new WslcContainment
+        {
+            Image = wslc.TryGetProperty("image", out var image)
+                ? ReadString(image, "experimental.wslc.image")
+                : "alpine:latest",
+            ImageTarPath = wslc.TryGetProperty("imageTarPath", out var imageTarPath)
+                ? ReadString(imageTarPath, "experimental.wslc.imageTarPath")
+                : null,
+            CpuCount = wslc.TryGetProperty("cpuCount", out var cpuCount)
+                ? ReadUInt32(cpuCount, "experimental.wslc.cpuCount")
+                : null,
+            MemoryMb = wslc.TryGetProperty("memoryMb", out var memoryMb)
+                ? ReadUInt64(memoryMb, "experimental.wslc.memoryMb")
+                : null,
+            Gpu = wslc.TryGetProperty("gpu", out var gpu)
+                && ReadBoolean(gpu, "experimental.wslc.gpu"),
+            StoragePath = wslc.TryGetProperty("storagePath", out var storagePath)
+                ? ReadString(storagePath, "experimental.wslc.storagePath")
+                : null,
+        };
+        if (wslc.TryGetProperty("portMappings", out var mappings))
+        {
+            if (mappings.ValueKind != JsonValueKind.Array)
+            {
+                throw new JsonException("experimental.wslc.portMappings must be an array.");
+            }
+            foreach (var (mapping, index) in mappings.EnumerateArray().Select((value, index) => (value, index)))
+            {
+                var mappingObject = RequireObject(
+                    mapping,
+                    $"experimental.wslc.portMappings[{index}]");
+                EnsureKnownProperties(
+                    mappingObject,
+                    $"experimental.wslc.portMappings[{index}]",
+                    "windowsPort",
+                    "containerPort",
+                    "protocol");
+                if (mappingObject.TryGetProperty("protocol", out var protocol)
+                    && ReadString(
+                        protocol,
+                        $"experimental.wslc.portMappings[{index}].protocol") != "tcp")
+                {
+                    throw new JsonException(
+                        "SandboxRequest can represent only TCP WSLC port mappings.");
+                }
+                containment.PortMappings.Add(new WslcPortMapping(
+                    ReadUInt16(
+                        RequireProperty(
+                            mappingObject,
+                            "windowsPort",
+                            $"experimental.wslc.portMappings[{index}]"),
+                        $"experimental.wslc.portMappings[{index}].windowsPort"),
+                    ReadUInt16(
+                        RequireProperty(
+                            mappingObject,
+                            "containerPort",
+                            $"experimental.wslc.portMappings[{index}]"),
+                        $"experimental.wslc.portMappings[{index}].containerPort")));
+            }
+        }
+        request.Experimental = true;
+        return containment;
+    }
+
+    private static Dictionary<string, string> ReadEnvironment(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException("process.env must be an array.");
+        }
+        var environment = new Dictionary<string, string>();
+        foreach (var (entry, index) in element.EnumerateArray().Select((value, index) => (value, index)))
+        {
+            var pair = ReadString(entry, $"process.env[{index}]");
+            var separator = pair.IndexOf('=');
+            if (separator <= 0)
+            {
+                throw new JsonException(
+                    $"process.env[{index}] must have the form NAME=VALUE.");
+            }
+            if (!environment.TryAdd(pair[..separator], pair[(separator + 1)..]))
+            {
+                throw new JsonException(
+                    $"process.env contains duplicate variable '{pair[..separator]}'.");
+            }
+        }
+        return environment;
+    }
+
+    private static List<string> ReadStringList(
+        JsonElement parent,
+        string propertyName,
+        string location) =>
+        parent.TryGetProperty(propertyName, out var value)
+            ? DeserializeElement<List<string>>(value, location)
+            : [];
+
+    private static T DeserializeElement<T>(JsonElement element, string location)
+    {
+        try
+        {
+            return element.Deserialize<T>(CanonicalReadOptions)
+                ?? throw new JsonException($"{location} cannot be null.");
+        }
+        catch (JsonException error)
+        {
+            throw new JsonException($"Invalid {location}: {error.Message}", error);
+        }
+    }
+
+    private static T ReadEnum<T>(JsonElement element, string location)
+        where T : struct, Enum =>
+        DeserializeElement<T>(element, location);
+
+    private static JsonElement RequireObject(JsonElement element, string location) =>
+        element.ValueKind == JsonValueKind.Object
+            ? element
+            : throw new JsonException($"{location} must be an object.");
+
+    private static JsonElement RequireProperty(
+        JsonElement element,
+        string propertyName,
+        string location) =>
+        element.TryGetProperty(propertyName, out var value)
+            ? value
+            : throw new JsonException($"{location}.{propertyName} is required.");
+
+    private static string RequireString(
+        JsonElement element,
+        string propertyName,
+        string location) =>
+        ReadString(
+            RequireProperty(element, propertyName, location),
+            $"{location}.{propertyName}");
+
+    private static string ReadString(JsonElement element, string location) =>
+        element.ValueKind == JsonValueKind.String
+            ? element.GetString()!
+            : throw new JsonException($"{location} must be a string.");
+
+    private static bool ReadBoolean(JsonElement element, string location) =>
+        element.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? element.GetBoolean()
+            : throw new JsonException($"{location} must be a boolean.");
+
+    private static uint ReadUInt32(JsonElement element, string location) =>
+        element.ValueKind == JsonValueKind.Number && element.TryGetUInt32(out var value)
+            ? value
+            : throw new JsonException($"{location} must be an unsigned 32-bit integer.");
+
+    private static ulong ReadUInt64(JsonElement element, string location) =>
+        element.ValueKind == JsonValueKind.Number && element.TryGetUInt64(out var value)
+            ? value
+            : throw new JsonException($"{location} must be an unsigned 64-bit integer.");
+
+    private static ushort ReadUInt16(JsonElement element, string location)
+    {
+        var value = ReadUInt32(element, location);
+        return value is > 0 and <= ushort.MaxValue
+            ? (ushort)value
+            : throw new JsonException($"{location} must be between 1 and {ushort.MaxValue}.");
+    }
+
+    private static void EnsureKnownProperties(
+        JsonElement element,
+        string location,
+        params string[] propertyNames)
+    {
+        var known = new HashSet<string>(propertyNames, StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!known.Contains(property.Name))
+            {
+                throw new JsonException(
+                    $"Unknown canonical property '{location}.{property.Name}'.");
+            }
+        }
     }
 
     private static JsonObject BuildProcess(SandboxRequest request, SandboxPolicy policy)
@@ -177,13 +709,13 @@ internal static class CanonicalRequestBuilder
     {
         switch (containment)
         {
-            case ProcessContainment:
+            case ProcessContainment process:
                 root["containment"] = "process";
                 if (OperatingSystem.IsWindows())
                 {
                     AddProcessContainer(
                         root,
-                        new ProcessContainerContainment(),
+                        process.CanonicalProcessContainer ?? new ProcessContainerContainment(),
                         network,
                         directional,
                         "process",

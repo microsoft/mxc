@@ -593,7 +593,7 @@ public sealed class MxcTelemetryTests
     }
 
     [Fact]
-    public void FinalizeAsyncOutcome_PersistedDecisionWinsLateCancellation()
+    public void FinalizeAsyncOutcome_PersistedDecisionWinsConcurrentCancellation()
     {
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();

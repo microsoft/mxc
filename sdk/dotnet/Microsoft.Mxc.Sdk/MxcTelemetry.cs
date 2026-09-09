@@ -388,9 +388,14 @@ public static class MxcTelemetry
     /// Asynchronous wrapper over <see cref="RequestConsent(Func{TelemetryConsentPrompt, TelemetryConsentDecision}, string?)"/>.
     /// The native API is synchronous and blocking, so the native work runs on the thread pool while
     /// the presenter is dispatched to the caller's synchronization context when one is available.
-    /// Cancellation stops waiting for the presenter and prevents its decision from being accepted
-    /// when observed before native persistence. It does not cancel the presenter's underlying task.
     /// </summary>
+    /// <remarks>
+    /// Cancellation is best-effort relative to persistence. It stops waiting for an unfinished
+    /// presenter and returns a canceled task when native code observes the dismissal first. Once a
+    /// completed presenter decision wins the race and native persistence begins, the persisted
+    /// outcome is authoritative and is returned even if the token is canceled concurrently.
+    /// Cancellation does not cancel the presenter's underlying task.
+    /// </remarks>
     public static Task<TelemetryConsentOutcome> RequestConsentAsync(
         Func<TelemetryConsentPrompt, Task<TelemetryConsentDecision>> presenter,
         string? locale = null,

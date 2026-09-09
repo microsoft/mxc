@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
@@ -162,7 +163,144 @@ public class MxcSandboxTests
 
         var json = JsonSerializer.Serialize(request);
         Assert.Equal(MxcSandbox.SerializeRequest(request), json);
-        Assert.Equal(MxcSandbox.SerializeRequest(request), json);
+    }
+
+    [Theory]
+    [InlineData("request-process-container.json", typeof(ProcessContainerContainment))]
+    [InlineData("request-directional-network.json", typeof(ProcessContainerContainment))]
+    [InlineData("request-wslc.json", typeof(WslcContainment))]
+    public void SandboxRequest_DeserializesCanonicalGoldens(
+        string fixtureName,
+        Type expectedContainment)
+    {
+        var request = JsonSerializer.Deserialize<SandboxRequest>(
+            JsonAssert.ReadGolden(fixtureName));
+
+        Assert.NotNull(request);
+        Assert.IsType(expectedContainment, request.Containment);
+        JsonAssert.MatchesGolden(JsonSerializer.Serialize(request), fixtureName);
+    }
+
+    [Fact]
+    public void SandboxRequest_RoundTripsCanonicalProcessRequest()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Filesystem = new FilesystemPolicy
+                {
+                    ReadwritePaths = [@"C:\work"],
+                    ClearPolicyOnExit = false,
+                },
+                Network = new NetworkPolicy
+                {
+                    AllowOutbound = true,
+                    AllowLocalNetwork = true,
+                    AllowedHosts = ["example.com"],
+                    Proxy = new LocalhostNetworkProxyPolicy(8080),
+                },
+                Telemetry = new TelemetrySettings { Enabled = true },
+                Ui = new UiPolicy
+                {
+                    AllowWindows = true,
+                    Clipboard = ClipboardPolicy.Write,
+                    AllowInputInjection = true,
+                },
+                TimeoutMs = 1234,
+            },
+            "echo roundtrip")
+        {
+            ContainerName = "roundtrip",
+            WorkingDirectory = @"C:\work",
+            Environment =
+            {
+                ["EMPTY"] = string.Empty,
+                ["WITH_EQUALS"] = "left=right",
+            },
+        };
+
+        var firstJson = JsonSerializer.Serialize(request);
+        var deserialized = JsonSerializer.Deserialize<SandboxRequest>(firstJson);
+
+        Assert.NotNull(deserialized);
+        Assert.Equal("left=right", deserialized.Environment["WITH_EQUALS"]);
+        Assert.True(deserialized.Policy.Telemetry!.Enabled);
+        Assert.Null(deserialized.Policy.Network!.Egress);
+        Assert.Null(deserialized.Policy.Network.Ingress);
+        var secondJson = JsonSerializer.Serialize(deserialized);
+        Assert.True(
+            JsonNode.DeepEquals(JsonNode.Parse(firstJson), JsonNode.Parse(secondJson)),
+            $"Canonical request changed after round trip.{Environment.NewLine}{secondJson}");
+    }
+
+    [Fact]
+    public void SandboxRequest_RejectsWindowsProcessSectionOnOtherPlatforms()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsWindows(),
+            "The processContainer section is canonical for process containment on Windows.");
+        const string json = """
+            {
+              "version":"0.8.0-alpha",
+              "process":{"commandLine":"echo hi"},
+              "containment":"process",
+              "processContainer":{"leastPrivilege":false,"capabilities":[]}
+            }
+            """;
+
+        var exception = Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<SandboxRequest>(json));
+
+        Assert.Contains("only on Windows", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(
+        """{"policy":{"version":"0.8.0-alpha"},"command":"echo legacy"}""",
+        "Unknown canonical property")]
+    [InlineData(
+        """
+        {
+          "version":"0.8.0-alpha",
+          "lifecycle":{"destroyOnExit":false},
+          "process":{"commandLine":"echo hi"}
+        }
+        """,
+        "destroyOnExit=false")]
+    [InlineData(
+        """
+        {
+          "version":"0.8.0-alpha",
+          "process":{"commandLine":"echo hi","env":["INVALID"]},
+          "containment":"process"
+        }
+        """,
+        "NAME=VALUE")]
+    [InlineData(
+        """
+        {
+          "version":"0.8.0-alpha",
+          "process":{"commandLine":"echo hi"},
+          "containment":"wslc",
+          "experimental":{
+            "wslc":{
+              "portMappings":[
+                {"windowsPort":8080,"containerPort":80,"protocol":"udp"}
+              ]
+            }
+          }
+        }
+        """,
+        "only TCP")]
+    public void SandboxRequest_RejectsUnsupportedDeserialization(
+        string json,
+        string expectedMessage)
+    {
+        var exception = Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<SandboxRequest>(json));
+
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
