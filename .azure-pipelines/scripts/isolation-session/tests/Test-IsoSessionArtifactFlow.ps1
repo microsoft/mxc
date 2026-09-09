@@ -214,6 +214,7 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir $script:releaseInfo.nugetPackageFileName)) 'final multi-arch NuGet exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-metadata.json')) 'final release metadata exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'artifact-manifest.json')) 'aggregate artifact manifest exists'
+        Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-tools\New-IsoSessionWingetManifests.ps1')) 'qualified WinGet release tool is preserved'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'provenance\x64\source-manifest.json')) 'x64 provenance is preserved'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'provenance\arm64\source-manifest.json')) 'arm64 provenance is preserved'
 

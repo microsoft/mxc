@@ -32,8 +32,9 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $releaseInfoScript = Join-Path $repoRoot 'packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
 $packScript = Join-Path $repoRoot 'packaging\isolation-session\nuget\pack.ps1'
 $artifactManifestScript = Join-Path $PSScriptRoot 'New-IsoSessionArtifactManifest.ps1'
+$wingetManifestScript = Join-Path $PSScriptRoot 'New-IsoSessionWingetManifests.ps1'
 
-foreach ($path in @($releaseInfoScript, $packScript, $artifactManifestScript)) {
+foreach ($path in @($releaseInfoScript, $packScript, $artifactManifestScript, $wingetManifestScript)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required script not found: '$path'."
     }
@@ -319,6 +320,13 @@ foreach ($state in @($x64State, $arm64State)) {
     Copy-Item -LiteralPath $state.signatureVerificationPath -Destination (Join-Path $provenanceDirectory 'signature-verification.json') -Force
     Copy-Item -LiteralPath $state.releaseContractPath -Destination (Join-Path $provenanceDirectory 'release-contract.json') -Force
 }
+
+$releaseToolsDirectory = Join-Path $OutDir 'release-tools'
+New-Item -ItemType Directory -Force -Path $releaseToolsDirectory | Out-Null
+Copy-Item `
+    -LiteralPath $wingetManifestScript `
+    -Destination (Join-Path $releaseToolsDirectory 'New-IsoSessionWingetManifests.ps1') `
+    -Force
 
 & $artifactManifestScript `
     -ArtifactDirectory $OutDir `

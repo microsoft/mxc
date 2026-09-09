@@ -44,14 +44,11 @@ jobs:
     type: releaseJob
     isProduction: true
   variables:
-    releaseRootDirectory: $(Pipeline.Workspace)/isosession-release
     releaseArtifactDirectory: $(Pipeline.Workspace)/isosession-release/artifact
     releaseContentDirectory: $(Pipeline.Workspace)/isosession-release/content
     wingetDirectory: $(Pipeline.Workspace)/isosession-release/winget
 
   steps:
-  - checkout: self
-
   - ${{ if eq(parameters.promotionSourceRunId, 0) }}:
     - task: DownloadPipelineArtifact@2
       displayName: Download aggregated IsoSession artifact
@@ -177,7 +174,7 @@ jobs:
           throw 'ESRP_RELEASE_DETAILS was not set by the CDN link generation release.'
       }
 
-      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/New-IsoSessionWingetManifests.ps1' `
+      & '$(releaseArtifactDirectory)/release-tools/New-IsoSessionWingetManifests.ps1' `
           -InstallerDirectory '$(releaseContentDirectory)' `
           -ReleaseDetailsJson $env:ESRP_RELEASE_DETAILS `
           -OutDir '$(wingetDirectory)' `
