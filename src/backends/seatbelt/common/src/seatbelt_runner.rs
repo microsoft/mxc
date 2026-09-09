@@ -754,10 +754,8 @@ fn absolute_working_directory_with(
     Ok(launch_dir()?.join(candidate).to_string_lossy().into_owned())
 }
 
-/// Why the helper's `cd` into `path` would fail, or `None` if it will succeed.
-/// `chdir` needs search (`+x`) permission, which a stat check does not test and
-/// a read check over-tests — `access(X_OK)` is the exact bit.
-fn working_directory_error(path: &str) -> Option<String> {
+/// Returns the error message for when the resolved cwd isn't usable
+fn working_directory_ergror(path: &str) -> Option<String> {
     match fs::metadata(path) {
         Ok(meta) if !meta.is_dir() => Some(format!(
             "seatbelt working directory '{path}' is not a directory"
