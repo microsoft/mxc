@@ -19,8 +19,7 @@ parameters:
     azureKeyVaultName: ''
     authCertName: ''
     signCertName: ''
-    releaseClientId: ''
-    useManagedIdentity: true
+    clientId: ''
     ApproversEmail: ''
     OwnersEmail: ''
 - name: WinGetInfo
@@ -141,22 +140,21 @@ jobs:
           }
       }
 
-      if ([string]::IsNullOrWhiteSpace('${{ parameters.ESRPInfo.releaseClientId }}')) {
-          throw 'ESRPInfo.releaseClientId is required for WinGet publication.'
+      if ([string]::IsNullOrWhiteSpace('${{ parameters.ESRPInfo.clientId }}')) {
+          throw 'ESRPInfo.clientId is required for WinGet publication.'
       }
     displayName: Validate ESRP release configuration
 
-  - task: EsrpRelease@12
+  - task: EsrpRelease@10
     name: EsrpWingetLinkGen
     displayName: Generate ESRP CDN links
     inputs:
       connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-      usemanagedidentity: ${{ parameters.ESRPInfo.useManagedIdentity }}
+      usemanagedidentity: false
       keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-      ${{ if eq(parameters.ESRPInfo.useManagedIdentity, false) }}:
-        authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      authcertname: ${{ parameters.ESRPInfo.authCertName }}
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
-      clientid: ${{ parameters.ESRPInfo.releaseClientId }}
+      clientid: ${{ parameters.ESRPInfo.clientId }}
       intent: filedownloadlinkgeneration
       contenttype: binaries
       contentsource: Folder
@@ -190,17 +188,16 @@ jobs:
           -MinimumOSVersion '${{ parameters.WinGetInfo.minimumOSVersion }}'
     displayName: Build multi-architecture WinGet manifests
 
-  - task: EsrpRelease@12
+  - task: EsrpRelease@10
     name: EsrpWingetPublish
     displayName: Publish WinGet manifests through ESRP
     inputs:
       connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-      usemanagedidentity: ${{ parameters.ESRPInfo.useManagedIdentity }}
+      usemanagedidentity: false
       keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-      ${{ if eq(parameters.ESRPInfo.useManagedIdentity, false) }}:
-        authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      authcertname: ${{ parameters.ESRPInfo.authCertName }}
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
-      clientid: ${{ parameters.ESRPInfo.releaseClientId }}
+      clientid: ${{ parameters.ESRPInfo.clientId }}
       intent: Winget
       contenttype: manifest
       contentsource: Folder

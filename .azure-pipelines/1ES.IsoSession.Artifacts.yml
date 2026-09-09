@@ -86,8 +86,6 @@ parameters:
     authCertName: 'mxc-esrp-auth-cert'
     signCertName: '37eb2314-6120-4418-93a3-fc4006e6d18a'
     clientId: '37eb2314-6120-4418-93a3-fc4006e6d18a'
-    releaseClientId: '37eb2314-6120-4418-93a3-fc4006e6d18a'
-    useManagedIdentity: true
     ApproversEmail: 'anisk@microsoft.com, sodas@microsoft.com, jwhites@microsoft.com'
     OwnersEmail: 'bbonaby@microsoft.com'
 - name: WinGetInfo
