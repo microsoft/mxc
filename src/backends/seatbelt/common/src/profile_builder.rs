@@ -155,18 +155,74 @@ const DEVELOPER_DIR_LINKS: [&str; 2] = [
 /// Command Line Tools install via its `/Library` grant, but an Xcode-selected
 /// host puts it under `/Applications`, where nothing in the baseline reaches.
 ///
-/// Resolved only from the root-owned `xcode-select` symlinks. The
-/// `DEVELOPER_DIR` override that `xcrun` honors is deliberately ignored: it
-/// is settable by any caller, so consulting it would let the environment
-/// choose what the profile grants.
+/// Resolved only from the `xcode-select` symlinks, and only when root controls
+/// them (see `link_is_root_controlled`). The `DEVELOPER_DIR` override that
+/// `xcrun` honors is deliberately ignored: it is settable by any caller, so
+/// consulting it would let the environment choose what the profile grants.
+///
+/// An untrusted candidate is skipped rather than fatal, so resolution
+/// continues to the legacy link.
 ///
 /// Returns `None` when no developer directory is installed
 fn active_developer_dir() -> Option<PathBuf> {
     DEVELOPER_DIR_LINKS
         .iter()
         .map(Path::new)
+        .filter(|link| link_is_root_controlled(link))
         .filter_map(|link| fs::read_link(link).ok())
         .find(|target| target.is_absolute() && target.is_dir())
+}
+
+/// Whether root alone decides what `link` resolves to.
+///
+/// This grant widens the baseline sandbox, so the ownership the doc comment
+/// above claims is enforced rather than assumed. Two independent facts are
+/// required: the entry is a symlink owned by root, and every directory leading
+/// to it is root-controlled. Neither implies the other — replacing a symlink is
+/// a directory operation, so a root-owned link inside a group-writable
+/// directory is still swappable by an unprivileged process, and a
+/// non-symlink at these paths is not something `xcode-select` produced.
+///
+/// The whole ancestor chain is checked, not just the parent: a writable
+/// directory anywhere along it lets its subtree be replaced wholesale.
+#[cfg(unix)]
+fn link_is_root_controlled(link: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let Ok(link_meta) = fs::symlink_metadata(link) else {
+        return false;
+    };
+    if !link_meta.file_type().is_symlink() || link_meta.uid() != 0 {
+        return false;
+    }
+    // `ancestors()` starts at the link itself; the directories follow.
+    link.ancestors().skip(1).all(|dir| {
+        fs::metadata(dir)
+            .is_ok_and(|meta| dir_is_root_controlled(meta.uid(), meta.permissions().mode()))
+    })
+}
+
+/// Non-Unix hosts have no such ownership model to check against, so nothing is
+/// trusted there. Nothing is lost: the developer directory is a macOS concept,
+/// and this crate's profile builder is only compiled elsewhere for its tests.
+#[cfg(not(unix))]
+fn link_is_root_controlled(_link: &Path) -> bool {
+    false
+}
+
+/// Whether a directory with this owner and mode can only be modified by root.
+///
+/// Split out as a pure function so the rule is testable without a root-owned
+/// fixture. A world-writable directory is rejected even when sticky: the sticky
+/// bit would in fact prevent replacing another user's entry, but none of the
+/// real `xcode-select` locations are sticky, so refusing is free.
+#[cfg(unix)]
+fn dir_is_root_controlled(uid: u32, mode: u32) -> bool {
+    /// Group- and other-write bits — the ones that let a non-root user create
+    /// or replace entries in a directory.
+    const NON_OWNER_WRITE: u32 = 0o022;
+
+    uid == 0 && mode & NON_OWNER_WRITE == 0
 }
 
 /// Emit the read-only grant for the active developer directory.
@@ -2022,6 +2078,66 @@ mod tests {
         if active_developer_dir().is_none() {
             write_developer_dir_rule(&mut out);
             assert!(out.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_root_owned_unwritable_dir_is_trusted() {
+        // Every directory on the way to the link has to be root's alone; a
+        // group- or world-writable one lets an unprivileged process swap the
+        // link out from under us.
+        assert!(dir_is_root_controlled(0, 0o755));
+        assert!(dir_is_root_controlled(0, 0o700));
+        for mode in [0o775, 0o757, 0o777, 0o1777] {
+            assert!(!dir_is_root_controlled(0, mode), "mode {mode:o}");
+        }
+        for uid in [1, 501, 1000] {
+            assert!(!dir_is_root_controlled(uid, 0o755), "uid {uid}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_caller_controls_is_not_trusted() {
+        use std::os::unix::fs::{symlink, MetadataExt as _};
+
+        let dir = std::env::temp_dir().join(format!("mxc-devdir-trust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("target")).expect("fixture dir");
+
+        let link = dir.join("link");
+        symlink(dir.join("target"), &link).expect("fixture symlink");
+        // Only decisive when the test user is not root: a root-owned fixture
+        // would legitimately satisfy the check this asserts rejects.
+        if fs::metadata(&dir).expect("fixture metadata").uid() != 0 {
+            assert!(!link_is_root_controlled(&link));
+        }
+
+        // These hold whoever runs the test: `xcode-select` writes a symlink,
+        // so anything else at that path is not something it produced.
+        let plain = dir.join("plain");
+        fs::write(&plain, "").expect("fixture file");
+        assert!(!link_is_root_controlled(&plain));
+        assert!(!link_is_root_controlled(&dir.join("missing")));
+
+        fs::remove_dir_all(&dir).expect("fixture cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_real_xcode_select_links_are_trusted_when_present() {
+        // Guards the other direction: on a stock macOS host the links and
+        // every directory above them are root-owned and unwritable, so the
+        // trust check has to accept them or the grant silently disappears.
+        for link in DEVELOPER_DIR_LINKS.iter().map(Path::new) {
+            if fs::symlink_metadata(link).is_ok() {
+                assert!(
+                    link_is_root_controlled(link),
+                    "rejected a stock link: {}",
+                    link.display()
+                );
+            }
         }
     }
 
