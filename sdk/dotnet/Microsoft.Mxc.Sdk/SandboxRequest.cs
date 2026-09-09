@@ -44,14 +44,17 @@ public sealed class SandboxRequest
     public bool Experimental { get; set; }
 }
 
-internal sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
+/// <summary>Serializes requests through MXC's canonical wire projection.</summary>
+public sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
 {
+    /// <inheritdoc />
     public override SandboxRequest Read(
         ref Utf8JsonReader reader,
         Type typeToConvert,
         JsonSerializerOptions options) =>
-        throw new NotSupportedException("Deserializing SandboxRequest is not supported.");
+        throw new NotSupportedException("SandboxRequest deserialization is not supported.");
 
+    /// <inheritdoc />
     public override void Write(
         Utf8JsonWriter writer,
         SandboxRequest value,

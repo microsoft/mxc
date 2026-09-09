@@ -150,15 +150,19 @@ public class MxcSandboxTests
     {
         var request = new SandboxRequest(
             new SandboxPolicy { Version = "0.8.0-alpha" },
-            "echo canonical")
+            "printf compatibility")
         {
-            Containment = new WslcContainment { Image = "alpine:3.20" },
-            ContainerName = "canonical-request",
+            Containment = new WslcContainment
+            {
+                Image = "alpine:3.20",
+            },
+            ContainerName = "serialization-compatibility",
+            Experimental = true,
         };
 
-        Assert.Equal(
-            MxcSandbox.SerializeRequest(request),
-            JsonSerializer.Serialize(request));
+        var json = JsonSerializer.Serialize(request);
+        Assert.Equal(MxcSandbox.SerializeRequest(request), json);
+        Assert.Equal(MxcSandbox.SerializeRequest(request), json);
     }
 
     [Fact]
