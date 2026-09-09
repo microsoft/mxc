@@ -185,7 +185,7 @@ internal static class CanonicalRequestBuilder
         {
             "process" => ReadProcessContainment(root),
             "processcontainer" => ReadExplicitProcessContainer(root),
-            "wslc" => ReadWslcContainment(root, request),
+            "wslc" => ReadWslcContainment(root),
             _ => throw new JsonException(
                 $"Unsupported canonical containment '{containmentName}'."),
         };
@@ -405,9 +405,7 @@ internal static class CanonicalRequestBuilder
         };
     }
 
-    private static WslcContainment ReadWslcContainment(
-        JsonElement root,
-        SandboxRequest request)
+    private static WslcContainment ReadWslcContainment(JsonElement root)
     {
         if (root.TryGetProperty("processContainer", out _))
         {
@@ -492,7 +490,6 @@ internal static class CanonicalRequestBuilder
                         $"experimental.wslc.portMappings[{index}].containerPort")));
             }
         }
-        request.Experimental = true;
         return containment;
     }
 
@@ -601,12 +598,18 @@ internal static class CanonicalRequestBuilder
         params string[] propertyNames)
     {
         var known = new HashSet<string>(propertyNames, StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var property in element.EnumerateObject())
         {
             if (!known.Contains(property.Name))
             {
                 throw new JsonException(
                     $"Unknown canonical property '{location}.{property.Name}'.");
+            }
+            if (!seen.Add(property.Name))
+            {
+                throw new JsonException(
+                    $"Duplicate canonical property '{location}.{property.Name}'.");
             }
         }
     }
