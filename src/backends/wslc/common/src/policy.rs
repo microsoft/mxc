@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Policy validation for the state-aware WSLc backend.
+//! Policy validation for the WSLc backend.
 //!
 //! WSLc honours a richer policy surface than IsolationSession, and each field
 //! is bound to the phase where the daemon can actually apply it. Anything the
@@ -12,7 +12,10 @@
 //! |-----------------------------|------------------------------|----------------------------|----------------------------|
 //! | `readwrite` / `readonly`    | honoured (volume mounts)     | rejected (immutable)       | rejected (immutable)       |
 //! | `denied_paths`              | rejected if overlapping [^1] | rejected                   | rejected                   |
+//! | `ui`                        | rejected (no UI primitive)   | rejected                   | rejected                   |
 //! | `allowed` / `blocked` hosts | rejected (no host filtering) | rejected                   | rejected                   |
+//! | `allow_local_network`       | rejected if `true`           | rejected                   | rejected                   |
+//! | `network_enforcement_mode`  | rejected if not `capabilities` | rejected                 | rejected                   |
 //! | `default_network_policy`    | honoured (None / Bridged)    | rejected if non-default    | rejected if non-default    |
 //! | `network.proxy`             | rejected (applies at exec)   | rejected                   | honoured (cooperative env) |
 //!
@@ -20,8 +23,14 @@
 //! host paths are simply never mounted); only a denied path nested under a
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
+//!
+//! Checks run filesystem → ui → network, so a request that trips several gets a
+//! stable message rather than one that depends on field order (asserted by
+//! tests). [`reject_ui_policy`] and [`reject_unsupported_enforcement_mode`]
+//! describe the backend rather than a phase, so the one-shot `validate_runner`
+//! calls them too.
 
-use wxc_common::models::ExecutionRequest;
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode};
 use wxc_common::mxc_error::MxcError;
 
 use crate::policy_mapping::validate_denied_path_overlap;
@@ -40,13 +49,28 @@ const ERR_PROXY_AT_PHASE: &str =
     "network.proxy is only honoured on the exec phase by the WSLc backend";
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: network.proxy requires the 'url' form (a routable proxy URL); the localhost and \
-     builtinTestServer forms are not supported because a WSLc container runs in its own network \
+     builtinTestServer forms are not supported because a WSL container runs in its own network \
      namespace";
+const ERR_UI_POLICY: &str =
+    "WSLc: the ui section is not supported. The backend has no mechanism to enforce UI \
+     restrictions on a container, so no ui posture is truthful here. Omitting the ui section is \
+     accepted but applies no restriction — it is not the lockdown the schema's default implies. \
+     Use a backend that enforces UI policy if you need one";
+const ERR_ALLOW_LOCAL_NETWORK_STATE_AWARE: &str =
+    "WSLc: network.allowLocalNetwork=true is not supported by the state-aware WSLc backend. The \
+     container's network is all-or-nothing (defaultPolicy 'block' → isolated, 'allow' → bridged \
+     NAT), and the state-aware provision phase has no port-mapping primitive to expose an \
+     inbound port";
+const ERR_ENFORCEMENT_MODE: &str =
+    "WSLc: network.enforcementMode 'firewall' and 'both' are not supported. A WSL container has \
+     no CAP_NET_ADMIN for in-container firewall rules, and VM-level enforcement is not available \
+     without breaking other security guarantees (e.g. MDE). Remove the field or set it to \
+     'capabilities' — WSLc's network is all-or-nothing at the container level";
 
 /// Validate the request for the provision phase. `rw` / `ro` paths become
 /// volume mounts and `default_network_policy` selects the container network
-/// mode; both are honoured here. Overlapping denied paths, host filtering, and
-/// a provision-phase proxy are rejected.
+/// mode; both are honoured here. Everything else in the module table is
+/// rejected.
 pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     validate_denied_path_overlap(
         &request.policy.readwrite_paths,
@@ -54,7 +78,10 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
         &request.policy.denied_paths,
     )
     .map_err(MxcError::policy_validation)?;
+    reject_ui_policy(request)?;
     reject_host_filtering(request)?;
+    reject_provision_allow_local_network(request)?;
+    reject_unsupported_enforcement_mode(request)?;
     if request.policy.network_proxy.is_enabled() {
         return Err(MxcError::policy_validation(ERR_PROXY_AT_PROVISION));
     }
@@ -63,9 +90,10 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
 
 /// Validate the request for start / stop / deprovision. These phases carry no
 /// applicable policy: filesystem and network mode are fixed at provision and
-/// the proxy is an exec-time concern.
+/// the proxy is an exec-time concern. A UI policy is never supported.
 pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
+    reject_ui_policy(request)?;
     reject_host_filtering(request)?;
     reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() {
@@ -74,11 +102,12 @@ pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Resu
     Ok(())
 }
 
-/// Validate the request for the exec phase. Filesystem and network mode are
-/// fixed at provision (rejected here); the cooperative proxy is honoured and
-/// must be in `url` form so a routable value reaches the container.
+/// Validate the request for the exec phase. Filesystem, network mode and `ui`
+/// are rejected; the cooperative proxy is honoured and must be in `url` form so
+/// a routable value reaches the container.
 pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
+    reject_ui_policy(request)?;
     reject_host_filtering(request)?;
     reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() && exec_proxy_url(request).is_none() {
@@ -119,12 +148,43 @@ fn reject_host_filtering(request: &ExecutionRequest) -> Result<(), MxcError> {
     Ok(())
 }
 
-/// Reject any network *mode* field supplied after provision. The network
-/// posture (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host
-/// lists) is bound to the provision phase; presence — not value — is checked so
-/// an explicit `defaultPolicy: "block"` (indistinguishable from an omitted
-/// block by value) is rejected too. The cooperative proxy is a separate
-/// exec-time concern handled by the callers.
+/// Reject any supplied UI policy: WSLc cannot enforce UI restrictions.
+pub(crate) fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if request.policy.ui_specified {
+        return Err(MxcError::policy_validation(ERR_UI_POLICY));
+    }
+    Ok(())
+}
+
+/// Reject an enforcement mode WSLc cannot implement. Value-based: an explicit
+/// `capabilities` is accepted, since it describes what WSLc does.
+pub(crate) fn reject_unsupported_enforcement_mode(
+    request: &ExecutionRequest,
+) -> Result<(), MxcError> {
+    match request.policy.network_enforcement_mode {
+        NetworkEnforcementMode::Capabilities => Ok(()),
+        NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both => {
+            Err(MxcError::policy_validation(ERR_ENFORCEMENT_MODE))
+        }
+    }
+}
+
+/// Reject inbound local networking at provision. Separate from the one-shot
+/// message, which points at `experimental.wslc.portMappings` — a primitive the
+/// state-aware surface does not have.
+fn reject_provision_allow_local_network(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if request.policy.allow_local_network {
+        return Err(MxcError::policy_validation(
+            ERR_ALLOW_LOCAL_NETWORK_STATE_AWARE,
+        ));
+    }
+    Ok(())
+}
+
+/// Reject any network *mode* field supplied after provision: the posture is
+/// bound to the provision phase. Presence, not value — an explicit
+/// `defaultPolicy: "block"` is indistinguishable from an omitted one by value.
+/// The cooperative proxy is a separate exec-time concern handled by the callers.
 fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.network_mode_specified
         || request.policy.network_egress.is_some()
@@ -138,7 +198,7 @@ fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
+    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig, UiPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
@@ -329,5 +389,169 @@ mod tests {
     fn exec_accepts_empty_policy() {
         validate_exec_policy(&ExecutionRequest::default()).unwrap();
         assert!(exec_proxy_url(&ExecutionRequest::default()).is_none());
+    }
+
+    // ---- ui (rejected on every phase) ----
+
+    #[test]
+    fn every_phase_rejects_supplied_ui() {
+        let req = request_with_policy(ContainerPolicy {
+            ui_specified: true,
+            ..Default::default()
+        });
+        for (phase, result) in [
+            ("provision", validate_provision_policy(&req)),
+            ("post_provision", validate_post_provision_policy(&req)),
+            ("exec", validate_exec_policy(&req)),
+        ] {
+            let err = result.expect_err(&format!("{phase} must reject a supplied ui"));
+            assert_policy_validation(err, "ui section is not supported");
+        }
+    }
+
+    /// A value-based check would let the most restrictive request a caller can
+    /// write through unenforced, since that is also the default.
+    #[test]
+    fn provision_rejects_lockdown_equivalent_ui() {
+        let req = request_with_policy(ContainerPolicy {
+            ui: UiPolicy::default(),
+            ui_specified: true,
+            ..Default::default()
+        });
+        assert_policy_validation(
+            validate_provision_policy(&req).unwrap_err(),
+            "ui section is not supported",
+        );
+    }
+
+    #[test]
+    fn absent_ui_is_accepted_on_every_phase() {
+        let req = ExecutionRequest::default();
+        assert!(!req.policy.ui_specified);
+        validate_provision_policy(&req).unwrap();
+        validate_post_provision_policy(&req).unwrap();
+        validate_exec_policy(&req).unwrap();
+    }
+
+    // ---- allowLocalNetwork ----
+
+    #[test]
+    fn provision_rejects_allow_local_network() {
+        let req = request_with_policy(ContainerPolicy {
+            allow_local_network: true,
+            ..Default::default()
+        });
+        assert_policy_validation(
+            validate_provision_policy(&req).unwrap_err(),
+            "allowLocalNetwork",
+        );
+    }
+
+    /// Post-provision needs no dedicated `allowLocalNetwork` check: supplying
+    /// the field sets `network_mode_specified`, which immutability already
+    /// refuses. Pinned so both rejections can't be dropped as "redundant".
+    #[test]
+    fn post_provision_rejects_allow_local_network_as_a_mode_change() {
+        let req = request_with_policy(ContainerPolicy {
+            allow_local_network: true,
+            network_mode_specified: true,
+            ..Default::default()
+        });
+        assert_policy_validation(
+            validate_post_provision_policy(&req).unwrap_err(),
+            "network mode",
+        );
+        assert_policy_validation(validate_exec_policy(&req).unwrap_err(), "network mode");
+    }
+
+    // ---- enforcementMode ----
+
+    #[test]
+    fn provision_rejects_firewall_and_both_enforcement_modes() {
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
+            let req = request_with_policy(ContainerPolicy {
+                network_enforcement_mode: mode.clone(),
+                ..Default::default()
+            });
+            assert_policy_validation(
+                validate_provision_policy(&req).expect_err(&format!("{mode:?} must be rejected")),
+                "enforcementMode",
+            );
+        }
+    }
+
+    /// Guards against over-rejection: `capabilities` is honoured, so unlike
+    /// `ui` it must not be refused for merely being present.
+    #[test]
+    fn provision_accepts_explicit_capabilities_enforcement_mode() {
+        let req = request_with_policy(ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+            ..Default::default()
+        });
+        validate_provision_policy(&req).unwrap();
+    }
+
+    // ---- rejection ordering ----
+    //
+    // filesystem -> ui -> network. Pinned so reordering the validator bodies is
+    // caught.
+
+    #[test]
+    fn filesystem_error_takes_precedence_over_ui() {
+        let req = request_with_policy(ContainerPolicy {
+            readwrite_paths: vec!["C:\\src".to_string()],
+            ui_specified: true,
+            ..Default::default()
+        });
+        assert_policy_validation(
+            validate_post_provision_policy(&req).unwrap_err(),
+            "provision phase",
+        );
+        assert_policy_validation(validate_exec_policy(&req).unwrap_err(), "provision phase");
+    }
+
+    #[test]
+    fn ui_error_takes_precedence_over_network() {
+        let req = request_with_policy(ContainerPolicy {
+            ui_specified: true,
+            allowed_hosts: vec!["example.com".to_string()],
+            allow_local_network: true,
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            network_proxy: url_proxy(),
+            ..Default::default()
+        });
+        for (phase, result) in [
+            ("provision", validate_provision_policy(&req)),
+            ("post_provision", validate_post_provision_policy(&req)),
+            ("exec", validate_exec_policy(&req)),
+        ] {
+            let err = result.expect_err(&format!("{phase} must reject"));
+            assert_policy_validation(err, "ui section is not supported");
+        }
+    }
+
+    #[test]
+    fn every_new_rejection_maps_to_policy_validation() {
+        let cases = [
+            ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ContainerPolicy {
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ContainerPolicy {
+                network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                ..Default::default()
+            },
+        ];
+        for policy in cases {
+            let err = validate_provision_policy(&request_with_policy(policy)).unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        }
     }
 }

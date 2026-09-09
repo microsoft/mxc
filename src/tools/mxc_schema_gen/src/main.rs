@@ -57,7 +57,7 @@ fn target(args: &GenerateArgs) -> Result<Target, String> {
             .ok_or_else(|| format!("unsupported exact contract version: {version}")),
         (None, true) => Ok(Target::LegacyWire),
         (None, false) => Err("one of --version <exact> or --legacy-wire is required".to_string()),
-        (Some(_), true) => unreachable!("clap rejects conflicting target options"),
+        _ => unreachable!("clap rejects conflicting target options"),
     }
 }
 

@@ -187,6 +187,7 @@ public class MxcSandboxTests
     [InlineData("seatbelt", ContainmentBackend.Seatbelt)]
     [InlineData("isolation_session", ContainmentBackend.IsolationSession)]
     [InlineData("bubblewrap", ContainmentBackend.Bubblewrap)]
+    [InlineData("hyperlight", ContainmentBackend.Hyperlight)]
     public void Discovery_MapsEveryNativeBackend(
         string wireName,
         ContainmentBackend expected)

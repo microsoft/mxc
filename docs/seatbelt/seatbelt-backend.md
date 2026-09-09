@@ -181,7 +181,7 @@ This is the cross-backend
 
 | Field | Behavior |
 |---|---|
-| `egress.default` | `"deny"` → no outbound rule; baseline `(deny default)` blocks all IP sockets. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
+| `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
 | `egress.allow` / `egress.deny` | **Rejected** if non-empty — no CIDR/port/protocol primitive exists |
 | `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This is what permits `listen()` — `network-bind` alone is not enough. |
 | `ingress.hostLoopback` | Controls sandbox → host loopback. Must equal `ingress.default`. **Defaults to `"deny"`.** |
@@ -251,13 +251,13 @@ This distinction matters, and it's easy to get backwards.
 
 | Question | Enforced? |
 |---|---|
-| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced.** |
+| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
 | Will a client actually *speak to* the proxy? | Not enforced — cooperative. |
 | Is traffic transparently redirected into the proxy? | No. |
 
 **Egress confinement is real.** A proxy is only ever accepted alongside a deny
-egress default (proxy + `"allow"` is [rejected](#network)), so the profile
-always ends up as:
+egress default (proxy + `"allow"` is [rejected](#network)), so with the
+recommended `hostLoopback: "deny"` the profile ends up as:
 
 ```lisp
 (deny default)
@@ -267,6 +267,12 @@ always ends up as:
 That single port is the sandbox's entire outbound universe. The kernel enforces
 it. A client that opens raw sockets and ignores `HTTP_PROXY` **cannot** reach
 the internet or any other host-local service — it simply fails to connect.
+
+> ⚠️ **`ingress.hostLoopback: "allow"` widens outbound** to *every port on this
+> host*, not just the proxy port, and the confinement claim above no longer
+> holds. Keep `ingress: {"default": "deny", "hostLoopback": "deny"}` whenever
+> the proxy is meant to be the only way out. This won't prevent the proxy's 
+> TCP responses from reaching the sandbox.
 
 **Proxy usage is cooperative.** MXC injects `HTTP_PROXY` / `HTTPS_PROXY` /
 `ALL_PROXY` (and lowercase forms) and strips any caller-supplied proxy vars.

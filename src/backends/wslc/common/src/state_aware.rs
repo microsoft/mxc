@@ -19,7 +19,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult,
+    null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
@@ -139,13 +139,13 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
-        consumer: ExecConsumer,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        // Before any work: this backend relays to the executor's stdio, so it
+        // Before any work: this backend relays to the calling process's stdio, so it
         // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
-        if consumer == ExecConsumer::Library {
-            return Err(wxc_common::state_aware_backend::unsupported_library_exec(
+        if stdio == ExecStdio::Piped {
+            return Err(wxc_common::state_aware_backend::unsupported_piped_exec(
                 "WSLc",
             ));
         }
@@ -218,7 +218,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             // already run the workload to completion by the time it returns, so
             // `exit_code` is whatever the container reported — including for a
             // workload the daemon timed out. Reporting a timeout as such needs
-            // the `Library` path this backend does not have yet.
+            // the `Piped` path this backend does not have yet.
             waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
             // Nothing to terminate: the workload is already gone. `Ok(())` is
             // the truthful answer here, not a placeholder.
@@ -437,7 +437,7 @@ mod tests {
     use super::*;
     use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
 
-    /// A `Library` exec is refused before the backend touches the daemon.
+    /// A `Piped` exec is refused before the backend touches the daemon.
     ///
     /// This backend writes the workload's output to *this process's* stdout and
     /// stderr, so it cannot return exec streams to the caller. The refusal has to come
@@ -449,14 +449,14 @@ mod tests {
     /// to connect to. Any error other than the refusal means the guard ran too
     /// late — the code reached the daemon before checking who was asking.
     #[test]
-    fn a_library_exec_is_refused_before_the_workload_runs() {
+    fn a_piped_exec_is_refused_before_the_workload_runs() {
         let mut runner = WslcStateAwareRunner::new();
         let err = runner
             .exec(
                 "wslc:0123456789abcdef0123456789abcdef",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Library,
+                ExecStdio::Piped,
             )
             .expect_err("a streams-consuming caller must be refused");
         assert!(
@@ -542,6 +542,122 @@ mod tests {
         assert!(runner.validate_exec(id, &request, None).is_err());
         assert!(runner.validate_stop(id, &request, None).is_err());
         assert!(runner.validate_deprovision(id, &request, None).is_err());
+    }
+
+    /// Enumerating all five hooks (rather than testing the shared validator) is
+    /// what catches a hook that forgets to call its validator at all.
+    #[test]
+    fn every_validate_hook_rejects_supplied_ui() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        let results = [
+            ("provision", runner.validate_provision(&request, None)),
+            ("start", runner.validate_start(id, &request, None)),
+            ("exec", runner.validate_exec(id, &request, None)),
+            ("stop", runner.validate_stop(id, &request, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision(id, &request, None),
+            ),
+        ];
+        for (phase, result) in results {
+            let err = result.expect_err(&format!("{phase} must reject a supplied ui"));
+            assert_eq!(
+                err.code,
+                wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(
+                err.message.contains("ui section is not supported"),
+                "{phase}: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Refused at provision, the only phase where the network posture is
+    /// settable — so neither can be silently dropped into the daemon's
+    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
+    #[test]
+    fn validate_provision_rejects_unimplementable_network_posture() {
+        let runner = WslcStateAwareRunner::new();
+        for (policy, needle) in [
+            (
+                ContainerPolicy {
+                    allow_local_network: true,
+                    ..Default::default()
+                },
+                "allowLocalNetwork",
+            ),
+            (
+                ContainerPolicy {
+                    network_enforcement_mode: wxc_common::models::NetworkEnforcementMode::Firewall,
+                    ..Default::default()
+                },
+                "enforcementMode",
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            let err = runner
+                .validate_provision(&request, None)
+                .expect_err(&format!("provision must reject {needle}"));
+            assert_eq!(
+                err.code,
+                wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(err.message.contains(needle), "got: {}", err.message);
+        }
+    }
+
+    /// Guards against over-rejection. Each value is the near-miss of a rejected
+    /// one, so a gate that flipped between value- and presence-based would fail
+    /// here only.
+    #[test]
+    fn validate_provision_accepts_the_postures_wslc_can_honour() {
+        let runner = WslcStateAwareRunner::new();
+        for (label, policy) in [
+            (
+                "explicit capabilities enforcement mode",
+                ContainerPolicy {
+                    network_enforcement_mode:
+                        wxc_common::models::NetworkEnforcementMode::Capabilities,
+                    ..Default::default()
+                },
+            ),
+            (
+                "explicit allowLocalNetwork=false",
+                ContainerPolicy {
+                    allow_local_network: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "absent ui",
+                ContainerPolicy {
+                    ui_specified: false,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            assert!(
+                runner.validate_provision(&request, None).is_ok(),
+                "{label} is honoured by WSLc and must not be rejected"
+            );
+        }
     }
 
     #[test]

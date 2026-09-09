@@ -17,6 +17,16 @@ pub struct Lifecycle {
     pub preserve_policy: OptionalField<bool>,
 }
 
+/// Telemetry settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Telemetry {
+    /// Whether telemetry is enabled.
+    #[serde(default)]
+    pub enabled: OptionalField<bool>,
+}
+
 /// Process execution settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
