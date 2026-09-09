@@ -158,8 +158,8 @@ const DEVELOPER_DIR_LINKS: [&str; 2] = [
 /// Resolved only from the root-owned `xcode-select` symlinks. The
 /// `DEVELOPER_DIR` override that `xcrun` honors is deliberately ignored: it
 /// is settable by any caller, so consulting it would let the environment
-/// choose what the profile grants. 
-/// 
+/// choose what the profile grants.
+///
 /// Returns `None` when no developer directory is installed
 fn active_developer_dir() -> Option<PathBuf> {
     DEVELOPER_DIR_LINKS
