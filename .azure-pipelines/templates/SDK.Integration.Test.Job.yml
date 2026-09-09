@@ -102,6 +102,19 @@ jobs:
             sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
+        # A bridged veth reaches the LXC firewall chain only while br_netfilter
+        # delivers bridged packets to iptables, and the backend refuses to
+        # report success for a policy it cannot enforce.
+        - script: |
+            set -euo pipefail
+            # Nothing to insert when the module is builtin or already loaded.
+            # The sysctl writes are the real requirement, and they fail naming
+            # the exact key when br_netfilter is genuinely absent.
+            sudo modprobe br_netfilter || true
+            sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+            sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+          displayName: Enable bridge netfilter
+
         - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
