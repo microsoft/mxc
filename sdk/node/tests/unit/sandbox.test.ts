@@ -1648,6 +1648,19 @@ describe('createConfigFromPolicy', () => {
       );
     });
 
+    it('should reject inheritDefaultEnv before schema version 0.9 without a PTY', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, {
+          usePty: false,
+          inheritDefaultEnv: true,
+        }),
+        { message: /process\.inheritDefaultEnv requires policy version 0\.9\.0-alpha/ },
+      );
+    });
+
     it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';

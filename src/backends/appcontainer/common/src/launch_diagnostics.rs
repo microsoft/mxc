@@ -216,12 +216,12 @@ fn check_exe_heuristics(
         });
     }
 
-    if exit_code == Some(STATUS_DLL_INIT_FAILED.0 as u32) && is_powershell(exe_path) {
+    if exit_code == Some(STATUS_DLL_INIT_FAILED.0 as u32) {
         return Some(LaunchDiagnostic {
             kind: "dll_init_failed_ui_required",
-            message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
-                      This typically means the sandbox is blocking Win32k system calls \
-                      (UI subsystem access), which PowerShell requires to initialize. \
+            message: "The target executable exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
+                      This often means the sandbox is blocking Win32k system calls \
+                      (UI subsystem access), which is often required to initialize. \
                       Enable UI access in your sandbox policy: set `ui.disable: false` \
                       in the JSON config, or `ui.allowWindows: true` if you are using \
                       the SDK's SandboxPolicy."
@@ -359,15 +359,6 @@ pub fn extract_exe_from_command_line(command_line: &str) -> &str {
 fn is_packaged_app(exe_path: &Path) -> bool {
     let normalized = exe_path.to_string_lossy().to_lowercase();
     normalized.contains("\\windowsapps\\") || normalized.contains("/windowsapps/")
-}
-
-fn is_powershell(exe_path: &Path) -> bool {
-    let filename = exe_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    filename == "pwsh.exe" || filename == "powershell.exe"
 }
 
 fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
@@ -538,17 +529,6 @@ mod tests {
         );
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
-    }
-
-    #[test]
-    fn dll_init_failed_non_powershell_does_not_trigger() {
-        let diag = diagnose_process_exit(
-            r"C:\tools\myapp.exe",
-            &["C:\\".to_string()],
-            &[],
-            STATUS_DLL_INIT_FAILED.0 as u32,
-        );
-        assert!(diag.is_none());
     }
 
     #[test]

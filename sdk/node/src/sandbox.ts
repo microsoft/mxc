@@ -753,6 +753,7 @@ export function spawnSandboxFromConfig(
       injectEnvIntoConfig(config, env);
     }
     applyInheritDefaultEnv(config, options);
+    validateInheritDefaultEnvVersion(config);
 
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {
