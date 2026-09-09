@@ -755,7 +755,7 @@ fn absolute_working_directory_with(
 }
 
 /// Returns the error message for when the resolved cwd isn't usable
-fn working_directory_ergror(path: &str) -> Option<String> {
+fn working_directory_error(path: &str) -> Option<String> {
     match fs::metadata(path) {
         Ok(meta) if !meta.is_dir() => Some(format!(
             "seatbelt working directory '{path}' is not a directory"
