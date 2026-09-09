@@ -151,20 +151,13 @@ and standard tools work:
 
 | Access | Paths |
 |---|---|
-| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select`, the active developer directory |
+| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select` |
 | Read **+ write** | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` |
 | Read-data only | `/` itself — the loader can't resolve path lookups without it |
 
 The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
-
-The developer grant is resolved from the root-owned `xcode-select` symlink; the
-`DEVELOPER_DIR` environment variable is ignored. When it selects
-`<Xcode.app>/Contents/Developer`, MXC grants read-only access to the enclosing
-app bundle because dispatched tools load sibling frameworks; otherwise only the
-selected directory is granted. Many `/usr/bin` tools (`python3`, `git`) are
-`xcrun` shims that need this access. `deniedPaths` still overrides the grant.
 
 SIP-protected paths stay unwritable no matter what you put in
 `readwritePaths` — the kernel enforces that independently of the profile.
