@@ -478,11 +478,17 @@ impl SecurityEnvironmentApi {
         if self.cacheable {
             static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
             CACHE
-                .get_or_init(|| self.query_support(PSE_SUPPORT_FS_DENY))
+                .get_or_init(|| self.query_deny_paths_support())
                 .clone()
         } else {
-            self.query_support(PSE_SUPPORT_FS_DENY)
+            self.query_deny_paths_support()
         }
+    }
+
+    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
+    /// without consulting or populating the process-wide cache.
+    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
+        self.query_support(PSE_SUPPORT_FS_DENY)
     }
 
     /// Whether the official PSEC API supports the ingress policy table.

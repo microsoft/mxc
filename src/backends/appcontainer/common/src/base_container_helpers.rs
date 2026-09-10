@@ -20,7 +20,7 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy_helpers::{add_default_network_capabilities, PRIVATE_NETWORK_CAPABILITY};
+use crate::network_policy_helpers::add_default_network_capabilities;
 
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
@@ -39,13 +39,9 @@ pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
-pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: bool) -> Vec<u8> {
+pub(super) fn build_psec_spec(request: &ExecutionRequest, use_ingress_contract: bool) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let mut capabilities = effective_capabilities(&request.policy);
-    if ingress_supported && request.policy.network_ingress.is_some() {
-        capabilities
-            .retain(|capability| !capability.eq_ignore_ascii_case(PRIVATE_NETWORK_CAPABILITY));
-    }
+    let capabilities = effective_capabilities(&request.policy);
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -54,7 +50,7 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: boo
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = psec_contract_version(ingress_supported);
+    spec.version = psec_contract_version(use_ingress_contract);
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
@@ -63,16 +59,16 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, ingress_supported: boo
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
     spec.network_policy = Some(Box::new(build_psec_network_policy(
         &request.policy,
-        ingress_supported,
+        use_ingress_contract,
     )));
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
     builder.finished_data().to_vec()
 }
 
-fn psec_contract_version(ingress_supported: bool) -> SchemaVersionT {
+pub(super) fn psec_contract_version(use_ingress_contract: bool) -> SchemaVersionT {
     let mut minor = 0;
-    if ingress_supported {
+    if use_ingress_contract {
         minor = 1u16;
     }
     SchemaVersionT { major: 1, minor }
@@ -141,7 +137,7 @@ fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPoli
 
 fn build_psec_network_policy(
     policy: &ContainerPolicy,
-    ingress_supported: bool,
+    use_ingress_contract: bool,
 ) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
@@ -170,7 +166,7 @@ fn build_psec_network_policy(
     if let Some(ingress_policy) = policy
         .network_ingress
         .as_ref()
-        .filter(|_| ingress_supported)
+        .filter(|_| use_ingress_contract)
     {
         network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
         let mut ingress = PsecIngressPolicy::default();
