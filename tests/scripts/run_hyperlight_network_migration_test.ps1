@@ -43,7 +43,11 @@ foreach ($name in @('hyperlight_networking.json', 'hyperlight_networking_blocked
         $null = $process.Start()
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "$name did not finish exact-parser validation within 30 seconds"
+        }
         $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 1 -or
             -not $output.Contains('network.allowedHosts') -or
