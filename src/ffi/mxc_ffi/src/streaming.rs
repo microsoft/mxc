@@ -845,8 +845,8 @@ mod tests {
     fn request(command: &str) -> CString {
         CString::new(
             serde_json::json!({
-                "version": "0.8.0-alpha",
-                "process": { "commandLine": command }
+                "policy": { "version": "0.8.0-alpha" },
+                "command": command
             })
             .to_string(),
         )
