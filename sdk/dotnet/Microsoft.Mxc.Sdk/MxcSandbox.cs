@@ -40,7 +40,7 @@ public static class MxcSandbox
     };
 
     private static JsonSerializerOptions PolicyJsonOptions(string version) =>
-        version is "0.6.0-alpha" or "0.7.0-alpha" or "0.8.0-alpha"
+        SchemaVersions.IsPublished(version)
             ? PublishedPolicyJsonOptions
             : JsonOptions;
 
@@ -262,8 +262,21 @@ public static class MxcSandbox
 
     private static void ValidateNetworkVersion(SandboxPolicy policy)
     {
-        if (policy.Version == "0.9.0-alpha" && policy.Network is { } network
-            && network.LegacyFieldSpecified is { } field)
+        if (policy.Network?.LegacyFieldSpecified is not { } field)
+        {
+            return;
+        }
+
+        if (!SchemaVersions.IsSupported(policy.Version))
+        {
+            throw new ArgumentException(
+                $"Schema version '{policy.Version}' is not supported. "
+                    + $"Use a version from {SchemaVersions.Minimum} through "
+                    + $"{SchemaVersions.MaximumSupported}.",
+                nameof(policy));
+        }
+
+        if (policy.Version == SchemaVersions.MaximumSupported)
         {
             throw new ArgumentException(
                 $"Schema 0.9 no longer supports authored network.{field}, including null. Legacy network authoring "

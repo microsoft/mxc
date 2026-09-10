@@ -42,6 +42,28 @@ public class MxcSandboxTests
         }
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("0.9.0")]
+    [InlineData("0.10.0-alpha")]
+    [InlineData("invalid")]
+    public void Serialization_LegacyNetworkRejectsUnsupportedVersion(string version)
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = version,
+            Network = new NetworkPolicy { AllowOutbound = true },
+        };
+
+        var policyError = Assert.Throws<ArgumentException>(
+            () => MxcSandbox.SerializePolicy(policy));
+        Assert.Contains("is not supported", policyError.Message);
+
+        var requestError = Assert.Throws<ArgumentException>(
+            () => MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo test")));
+        Assert.Contains("is not supported", requestError.Message);
+    }
+
     [Fact]
     public void Serialization_V09PreservesDirectionalAndRuntimeAuthoring()
     {

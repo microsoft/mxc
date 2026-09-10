@@ -945,18 +945,8 @@ fn hyperlight_suite() {
             expected_exit: 42,
             output_contains: None,
         },
-        HyperlightCase {
-            config: "hyperlight_networking.json",
-            description: "HTTP GET with allowedHosts network policy",
-            expected_exit: 0,
-            output_contains: Some("200"),
-        },
-        HyperlightCase {
-            config: "hyperlight_networking_blocked.json",
-            description: "HTTP GET to unlisted host is blocked by allowedHosts",
-            expected_exit: 0,
-            output_contains: Some("BLOCKED"),
-        },
+        // The legacy hostname-policy fixtures are intentional v0.9 parser
+        // rejections covered by run_hyperlight_network_migration_test.ps1.
         HyperlightCase {
             config: "hyperlight_timeout.json",
             description: "time.sleep(120) killed by 1s timeout",

@@ -11,6 +11,8 @@ namespace Microsoft.Mxc.Sdk;
 /// </remarks>
 public static class SchemaVersions
 {
+    private const string V0_7_0Alpha = "0.7.0-alpha";
+
     /// <summary>Oldest accepted schema version.</summary>
     public const string Minimum = "0.6.0-alpha";
 
@@ -25,4 +27,10 @@ public static class SchemaVersions
 
     /// <summary>Default state-aware version for WSLC.</summary>
     public const string WslcStateAware = "0.9.0-alpha";
+
+    internal static bool IsPublished(string version) =>
+        version is Minimum or V0_7_0Alpha or LatestStable;
+
+    internal static bool IsSupported(string version) =>
+        IsPublished(version) || version == MaximumSupported;
 }
