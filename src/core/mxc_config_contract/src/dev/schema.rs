@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn no_legacy_network_property_is_reachable_from_any_request_root() {
+    fn no_legacy_network_property_is_reachable_from_exact_development_request_roots() {
         let schema = development_schema();
         let definitions = definitions(&schema);
         for root in ROOT_NAMES {
