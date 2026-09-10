@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::super::{contract, deprovision_into_wire, wire};
+use super::common::assert_config_matches_rolling_state_aware_wire_input;
 
 const MINIMAL_REQUEST_JSON: &str = r#"{
     "version": "0.9.0-alpha",
@@ -125,32 +126,27 @@ fn null_comment_maps_expected_wire_field() {
 }
 
 // Deserialization match tests
-pub(super) fn assert_matches_current_wire_deserialization(json: &str) {
-    let current: wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
+pub(super) fn assert_matches_rolling_state_aware_wire_input(json: &str) {
     let adapted = adapt(json);
-
-    assert_eq!(
-        serde_json::to_value(adapted).unwrap(),
-        serde_json::to_value(current).unwrap()
-    );
+    assert_config_matches_rolling_state_aware_wire_input(json, adapted);
 }
 
 #[test]
-fn minimal_request_matches_current_wire_deserialization() {
+fn minimal_request_matches_rolling_state_aware_wire_input() {
     let json = MINIMAL_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn request_with_all_fields_matches_current_wire_deserialization() {
+fn request_with_all_fields_matches_rolling_state_aware_wire_input() {
     let json = ALL_FIELDS_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
 fn empty_experimental_sections_match_current_wire_deserialization() {
     for fields in [r#""experimental": {}"#, r#""telemetry": {}"#] {
-        assert_matches_current_wire_deserialization(&request_with_fields(fields));
+        assert_matches_rolling_state_aware_wire_input(&request_with_fields(fields));
     }
 }
 
@@ -162,5 +158,5 @@ fn empty_identifier_strings_match_current_wire_deserialization() {
         "sandboxId": ""
     }"#;
 
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
