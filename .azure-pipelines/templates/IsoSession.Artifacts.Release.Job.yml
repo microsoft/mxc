@@ -172,7 +172,49 @@ jobs:
           throw 'ESRP_RELEASE_DETAILS was not set by the CDN link generation release.'
       }
 
-      & '$(releaseArtifactDirectory)/release-tools/New-IsoSessionWingetManifests.ps1' `
+      $manifestGenerator = '$(releaseArtifactDirectory)/release-tools/New-IsoSessionWingetManifests.ps1'
+      if (-not (Test-Path -LiteralPath $manifestGenerator -PathType Leaf)) {
+          throw "WinGet manifest generator not found: '$manifestGenerator'."
+      }
+
+      $releaseHelper = Join-Path (Split-Path -Parent $manifestGenerator) 'Get-IsoSessionReleaseInfo.ps1'
+      if (-not (Test-Path -LiteralPath $releaseHelper -PathType Leaf)) {
+          $releaseHelper = [System.IO.Path]::GetFullPath((
+              Join-Path (Split-Path -Parent $manifestGenerator) `
+                  '..\..\..\packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'))
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $releaseHelper) | Out-Null
+          $releaseHelperContent = @'
+      param(
+          [Parameter(Mandatory = $true)]
+          [string]$MonthId,
+          [Parameter(Mandatory = $true)]
+          [int]$Patch
+      )
+      $yearFull = [int]$MonthId.Substring(0, 4)
+      $month = [int]$MonthId.Substring(5, 2)
+      if ($month -lt 1 -or $month -gt 12) {
+          throw "MonthId '$MonthId' must contain a calendar month from 01 through 12."
+      }
+      $yearShort = $yearFull % 100
+      $packageId = 'Microsoft.Windows.AI.IsolationSession.SDK'
+      $strippedMonthId = $MonthId.Replace('.', '')
+      [pscustomobject][ordered]@{
+          monthId = $MonthId
+          monthUnderscore = $MonthId.Replace('.', '_')
+          patch = $Patch
+          canonicalRelease = "$MonthId.$Patch"
+          packageId = $packageId
+          nugetVersion = "0.$strippedMonthId.$Patch"
+          msiVersion = "$yearShort.$month.$Patch.0"
+      }
+      '@
+          [System.IO.File]::WriteAllText(
+              $releaseHelper,
+              $releaseHelperContent,
+              (New-Object System.Text.UTF8Encoding($false)))
+      }
+
+      & $manifestGenerator `
           -InstallerDirectory '$(releaseContentDirectory)' `
           -ReleaseDetailsJson $env:ESRP_RELEASE_DETAILS `
           -OutDir '$(wingetDirectory)' `

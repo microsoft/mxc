@@ -215,6 +215,7 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-metadata.json')) 'final release metadata exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'artifact-manifest.json')) 'aggregate artifact manifest exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-tools\New-IsoSessionWingetManifests.ps1')) 'qualified WinGet release tool is preserved'
+        Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-tools\Get-IsoSessionReleaseInfo.ps1')) 'qualified release contract helper is preserved'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'provenance\x64\source-manifest.json')) 'x64 provenance is preserved'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'provenance\arm64\source-manifest.json')) 'arm64 provenance is preserved'
 
@@ -223,6 +224,44 @@ try {
         Assert-True ($manifest.release.canonicalRelease -eq $script:releaseInfo.canonicalRelease) 'artifact manifest records the canonical release'
         Assert-True ($manifest.nuget.packageVersion -eq $script:releaseInfo.nugetVersion) 'artifact manifest records the patch-bearing NuGet version'
         Assert-True (@($manifest.source.winmds).Count -eq 2) 'artifact manifest records both WinMDs'
+
+        $x64MsiName = "IsoSession_$($script:releaseInfo.monthUnderscore)_x64.msi"
+        $arm64MsiName = "IsoSession_$($script:releaseInfo.monthUnderscore)_arm64.msi"
+        $releaseDetails = @{
+            status = 'pass'
+            files = @(
+                @{
+                    name = $x64MsiName
+                    fileDownloadDetails = @(
+                        @{ downloadUrl = "https://example.test/$x64MsiName" })
+                },
+                @{
+                    name = $arm64MsiName
+                    fileDownloadDetails = @(
+                        @{ downloadUrl = "https://example.test/$arm64MsiName" })
+                })
+        } | ConvertTo-Json -Depth 10
+        $wingetOutDir = Join-Path $caseRoot 'winget'
+        & (Join-Path $outDir 'release-tools\New-IsoSessionWingetManifests.ps1') `
+            -InstallerDirectory $outDir `
+            -ReleaseDetailsJson $releaseDetails `
+            -OutDir $wingetOutDir `
+            -MonthId $script:releaseInfo.monthId `
+            -Patch $script:releaseInfo.patch `
+            -PackageIdentifier 'Microsoft.Windows.AI.IsolationSession' `
+            -PackageName 'Microsoft Windows AI IsolationSession' `
+            -Publisher 'Microsoft Corporation' `
+            -PackageUrl 'https://github.com/microsoft/mxc' `
+            -License 'MIT' `
+            -LicenseUrl 'https://github.com/microsoft/mxc/blob/main/LICENSE.md' `
+            -ShortDescription 'Installs the monthly Windows AI IsolationSession runtime.'
+
+        $wingetManifestDirectory = Join-Path $wingetOutDir (
+            "manifests\m\Microsoft\Windows\AI\IsolationSession\$($script:releaseInfo.canonicalRelease)")
+        Assert-True (
+            Test-Path -LiteralPath (
+                Join-Path $wingetManifestDirectory 'Microsoft.Windows.AI.IsolationSession.installer.yaml') -PathType Leaf
+        ) 'qualified release tool executes without a repository checkout'
     }
 
     Test-Case 'Negative: aggregation fails when BuildGuid differs across architectures' {

@@ -327,6 +327,10 @@ Copy-Item `
     -LiteralPath $wingetManifestScript `
     -Destination (Join-Path $releaseToolsDirectory 'New-IsoSessionWingetManifests.ps1') `
     -Force
+Copy-Item `
+    -LiteralPath $releaseInfoScript `
+    -Destination (Join-Path $releaseToolsDirectory 'Get-IsoSessionReleaseInfo.ps1') `
+    -Force
 
 & $artifactManifestScript `
     -ArtifactDirectory $OutDir `

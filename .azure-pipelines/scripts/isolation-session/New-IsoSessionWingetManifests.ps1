@@ -59,8 +59,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$releaseInfoScript = Join-Path $PSScriptRoot '..\..\..\packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
-$releaseInfoScript = [System.IO.Path]::GetFullPath($releaseInfoScript)
+$releaseInfoScript = Join-Path $PSScriptRoot 'Get-IsoSessionReleaseInfo.ps1'
+if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
+    $releaseInfoScript = Join-Path $PSScriptRoot '..\..\..\packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
+    $releaseInfoScript = [System.IO.Path]::GetFullPath($releaseInfoScript)
+}
 if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
     throw "Release helper not found: '$releaseInfoScript'."
 }
