@@ -469,6 +469,7 @@ public class MxcLifecycleTests
                 {
                     WorkingDirectory = "/work",
                     Environment = new List<string> { "A=1", "B=two" },
+                    InheritDefaultEnvironment = true,
                     TimeoutMs = 1234,
                     Network = new WslcExecNetworkPolicy
                     {
@@ -479,11 +480,12 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
         Assert.Equal("B=two", process.GetProperty("env")[1].GetString());
+        Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.Equal(1234, process.GetProperty("timeout").GetInt32());
         var network = root.GetProperty("network");
         Assert.Equal(
@@ -491,6 +493,23 @@ public class MxcLifecycleTests
             network.GetProperty("proxy").GetProperty("url").GetString());
         Assert.False(network.TryGetProperty("defaultPolicy", out _));
         Assert.False(network.TryGetProperty("allowLocalNetwork", out _));
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_PreservesOlderVersionForNativeValidation()
+    {
+        var envelope = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+            "echo hi",
+            new WslcExecOptions
+            {
+                Version = "0.8.0-alpha",
+                InheritDefaultEnvironment = true,
+            });
+
+        Assert.Equal("0.8.0-alpha", envelope["version"]!.GetValue<string>());
+        Assert.True(
+            envelope["process"]!["inheritDefaultEnv"]!.GetValue<bool>());
     }
 
     [Fact]

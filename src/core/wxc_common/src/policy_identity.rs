@@ -154,6 +154,9 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         script_code: _excluded_command_line,
         // Environment variables are the classic secret carrier.
         env: _excluded_environment,
+        // Whether the default environment is merged is process launch
+        // behavior, not an enforcement decision.
+        inherit_default_env: _excluded_environment_mode,
         // Invocation modes, not policy.
         dry_run: _excluded_dry_run,
         testing_features_enabled: _excluded_testing_features,
@@ -600,12 +603,13 @@ mod tests {
 
         // Environment variables and the command line routinely carry secrets.
         let mut with_secrets = request();
-        with_secrets.env.push("API_KEY=hunter2".to_string());
+        with_secrets.env = Some(vec!["API_KEY=hunter2".to_string()]);
+        with_secrets.inherit_default_env = true;
         with_secrets.script_code = "curl -H 'Authorization: Bearer hunter2'".to_string();
         assert_eq!(
             baseline,
             policy_hash(&with_secrets),
-            "env and command line are excluded from the policy identity"
+            "env, environment mode, and command line are excluded from the policy identity"
         );
     }
 

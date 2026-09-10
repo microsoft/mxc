@@ -851,7 +851,7 @@ fn resolve_environment(
     proxy_address: Option<&ProxyAddress>,
 ) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for kv in &request.env {
+    for kv in request.env_entries() {
         if let Some((key, value)) = kv.split_once('=') {
             if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
                 continue;
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn resolve_environment_without_proxy_passes_through() {
         let mut request = base_request();
-        request.env = vec!["FOO=bar".into(), "BAZ=qux".into()];
+        request.env = Some(vec!["FOO=bar".into(), "BAZ=qux".into()]);
         let pairs = resolve_environment(&request, None);
         assert_eq!(env_value(&pairs, "FOO"), Some("bar"));
         assert_eq!(env_value(&pairs, "BAZ"), Some("qux"));
@@ -1125,13 +1125,13 @@ mod tests {
     #[test]
     fn resolve_environment_strips_caller_proxy_when_active() {
         let mut request = base_request();
-        request.env = vec![
+        request.env = Some(vec![
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
             "ALL_PROXY=http://attacker.example:9999".into(),
             "NO_PROXY=localhost".into(),
             "KEEP=me".into(),
-        ];
+        ]);
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let pairs = resolve_environment(&request, Some(&addr));
         // Legitimate non-proxy var is preserved.
@@ -1159,7 +1159,7 @@ mod tests {
         // With no proxy active the builder must not touch caller-supplied
         // vars whose keys happen to match PROXY_ENV_KEYS.
         let mut request = base_request();
-        request.env = vec!["HTTP_PROXY=http://caller.example:8080".into()];
+        request.env = Some(vec!["HTTP_PROXY=http://caller.example:8080".into()]);
         let pairs = resolve_environment(&request, None);
         assert_eq!(
             env_value(&pairs, "HTTP_PROXY"),

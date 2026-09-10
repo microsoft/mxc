@@ -205,8 +205,19 @@ function managedJsonFields(source, className) {
     /public\s+(?:required\s+)?[\w<>,?.\[\]\s]+\s+(\w+)\s*\{/y
   )
     .filter(
-      ({ attributes }) =>
-        !/\[\s*JsonIgnore(?:Attribute)?(?:\s*\]|\s*\()/.test(attributes)
+      ({ attributes }) => {
+        const ignored = /\[\s*JsonIgnore(?:Attribute)?\s*(?:\(\s*([^)]*)\s*\))?\s*\]/.exec(
+          attributes
+        );
+        if (!ignored) return true;
+
+        const arguments = ignored[1]?.trim();
+        return (
+          arguments !== undefined &&
+          arguments !== "" &&
+          !/\bCondition\s*=\s*JsonIgnoreCondition\.Always\b/.test(arguments)
+        );
+      }
     )
     .map(({ attributes, name }) => {
       const renamed = /JsonPropertyName\("([^"]+)"\)/.exec(attributes);

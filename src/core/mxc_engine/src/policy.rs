@@ -245,6 +245,28 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
     }
 }
 
+fn environment_keys_equal(existing_key: &str, override_key: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        existing_key.eq_ignore_ascii_case(override_key)
+    } else {
+        existing_key == override_key
+    }
+}
+
+fn apply_environment_overrides<K, V>(
+    entries: &mut Vec<(String, String)>,
+    overrides: impl IntoIterator<Item = (K, V)>,
+) where
+    K: Into<String>,
+    V: Into<String>,
+{
+    for (key, value) in overrides {
+        let key = key.into();
+        entries.retain(|(existing, _)| !environment_keys_equal(existing, &key));
+        entries.push((key, value.into()));
+    }
+}
+
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
 /// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
 /// enumerates the drive root on startup — plus the PSReadLine history directory
@@ -639,19 +661,93 @@ impl SandboxRequest {
     /// the same way), so behavior is identical across the SDK and this crate.
     /// Iteration order is preserved, so on a duplicate key the later entry wins,
     /// matching the SDK.
+    ///
+    /// The environment you set is used **verbatim**: MXC does not merge the
+    /// calling process's variables or the user's profile block into it. On the
+    /// Windows process container that includes the variables Windows requires
+    /// to be present, so a sparse environment fails the launch with a
+    /// diagnostic naming them — see [`Self::inherit_default_env`] and
+    /// [`Self::inherit_process_env`] for the supported ways to start from a
+    /// complete environment.
+    ///
+    /// Calling this with an empty iterator requests an *empty* environment,
+    /// which is distinct from never calling it at all (see [`Self::clear_env`]).
     pub fn set_env<K, V>(&mut self, env: impl IntoIterator<Item = (K, V)>) -> &mut Self
     where
         K: Into<String>,
         V: Into<String>,
     {
-        self.inner.env = env
-            .into_iter()
-            .map(|(k, v)| {
-                let (k, v): (String, String) = (k.into(), v.into());
-                format!("{k}={v}")
-            })
-            .collect();
+        self.inner.inherit_default_env = false;
+        self.inner.env = Some(
+            env.into_iter()
+                .map(|(k, v)| {
+                    let (k, v): (String, String) = (k.into(), v.into());
+                    format!("{k}={v}")
+                })
+                .collect(),
+        );
         self
+    }
+
+    /// The child's environment as `KEY=VALUE` entries, or `None` when none has
+    /// been set (in which case the backend supplies its default — on Windows,
+    /// the user's profile block).
+    pub fn env(&self) -> Option<&[String]> {
+        self.inner.env.as_deref()
+    }
+
+    /// Drop any environment set on this request, returning it to the backend
+    /// default.
+    ///
+    /// This is *not* the same as `set_env([])`: that asks for an empty
+    /// environment, whereas this asks for the backend's default one.
+    pub fn clear_env(&mut self) -> &mut Self {
+        self.inner.env = None;
+        self.inner.inherit_default_env = false;
+        self
+    }
+
+    /// Start from the backend's default environment and append `extra` on top,
+    /// so the child gets a complete environment plus your additions.
+    ///
+    /// This is the supported way to express "the usual environment, plus these"
+    /// on the Windows process container: the default block is the user's
+    /// profile block, obtainable only from the OS, so it cannot be assembled by
+    /// a caller. Entries in `extra` override same-named defaults.
+    ///
+    /// On backends whose default environment is empty (LXC, Bubblewrap,
+    /// Seatbelt, WSLc) this is equivalent to [`Self::set_env`].
+    pub fn inherit_default_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.set_env(extra);
+        self.inner.inherit_default_env = true;
+        self
+    }
+
+    /// Start from the *calling process's* environment and append `extra` on top.
+    ///
+    /// Note this is a different, generally larger and leakier set than
+    /// [`Self::inherit_default_env`]: it is whatever your process happens to be
+    /// running with, so anything you inherited — including secrets in the
+    /// ambient environment — is handed to the sandboxed child. Prefer
+    /// `inherit_default_env` unless you specifically need your own variables.
+    pub fn inherit_process_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut entries: Vec<(String, String)> = std::env::vars().collect();
+        apply_environment_overrides(&mut entries, extra);
+        self.set_env(entries)
     }
 
     /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
@@ -1274,7 +1370,95 @@ mod tests {
         let mut request =
             build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
         request.set_env([("FIRST", "1"), ("SECOND", "2")]);
-        assert_eq!(request.inner.env, vec!["FIRST=1", "SECOND=2"]);
+        assert_eq!(
+            env_of(&request),
+            Some(vec!["FIRST=1".to_string(), "SECOND=2".to_string()])
+        );
+    }
+
+    /// The request's environment as an owned value, so tests can compare it
+    /// against a literal without borrowing a temporary.
+    fn env_of(request: &super::SandboxRequest) -> Option<Vec<String>> {
+        request.env().map(<[String]>::to_vec)
+    }
+
+    #[test]
+    fn set_env_replaces_rather_than_merging() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
+
+        // No environment set yet: the backend supplies its default.
+        assert_eq!(env_of(&request), None::<Vec<String>>);
+
+        request.set_env([("ONLY", "me")]);
+        assert_eq!(env_of(&request), Some(vec!["ONLY=me".to_string()]));
+        assert!(!request.inner.inherit_default_env);
+
+        request.inherit_default_env([("EXTRA", "1")]);
+        request.set_env([("REPLACEMENT", "2")]);
+        assert_eq!(env_of(&request), Some(vec!["REPLACEMENT=2".to_string()]));
+        assert!(!request.inner.inherit_default_env);
+
+        // An empty iterator is a request for an empty environment, which is
+        // distinct from never having set one.
+        request.set_env(Vec::<(String, String)>::new());
+        assert_eq!(env_of(&request), Some(Vec::<String>::new()));
+
+        // clear_env goes back to the backend default.
+        request.inherit_default_env([("EXTRA", "1")]);
+        request.clear_env();
+        assert_eq!(env_of(&request), None::<Vec<String>>);
+        assert!(!request.inner.inherit_default_env);
+    }
+
+    #[test]
+    fn inherit_default_env_flags_the_request_and_keeps_the_extras() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
+        request.inherit_default_env([("EXTRA", "1")]);
+
+        assert!(request.inner.inherit_default_env);
+        assert_eq!(env_of(&request), Some(vec!["EXTRA=1".to_string()]));
+    }
+
+    #[test]
+    fn environment_overrides_replace_exact_duplicate_names() {
+        let mut entries = vec![
+            ("PATH".to_string(), "old".to_string()),
+            ("KEEP".to_string(), "value".to_string()),
+        ];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(
+            entries,
+            vec![
+                ("KEEP".to_string(), "value".to_string()),
+                ("PATH".to_string(), "new".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn environment_overrides_replace_windows_names_case_insensitively() {
+        let mut entries = vec![("Path".to_string(), "old".to_string())];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(entries, vec![("PATH".to_string(), "new".to_string())]);
     }
 
     #[test]

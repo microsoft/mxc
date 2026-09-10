@@ -15,8 +15,27 @@ export interface ProcessConfig {
   commandLine: string;
   /** Working directory for the process */
   cwd?: string;
-  /** Environment variables as KEY=VALUE strings */
+  /**
+   * Environment variables as KEY=VALUE strings.
+   *
+   * Omit this field to give the child the backend's default environment (on
+   * Windows, the user's profile block). Supply it -- including as an empty
+   * array -- and it is used **verbatim**: MXC adds nothing to it, so an
+   * environment missing what the platform requires will fail the launch.
+   * Set {@link ProcessConfig.inheritDefaultEnv} to layer these on the
+   * default environment instead of replacing it.
+   */
   env?: string[];
+  /**
+   * Start from the backend's default environment and layer {@link
+   * ProcessConfig.env} on top of it, rather than replacing it (default false).
+   *
+   * Use this when you want "the usual environment, plus these": on Windows the
+   * default is the user's profile block, which only the OS can produce, so it
+   * cannot be assembled by a caller. Note this is a different set from the
+   * calling process's `process.env`, which you can still pass explicitly.
+   */
+  inheritDefaultEnv?: boolean;
   /** Execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
 }

@@ -488,6 +488,25 @@ export interface SandboxSpawnOptions {
   allowTestingFeatures?: boolean;
 
   /**
+   * Start from the backend's default environment and layer the supplied
+   * environment variables on top of it, rather than replacing it
+   * (default false).
+   *
+   * Without this, an environment you supply is used verbatim — which on the
+   * Windows process container means a sparse environment is missing the
+   * variables Windows requires to be present, and the launch fails. Use this
+   * to express "the usual environment, plus these": the default is the user's
+   * profile block, which only the OS can produce.
+   *
+   * This is a different, smaller set than the calling process's `process.env`,
+   * which you can still pass explicitly as the `env` argument if you want your
+   * own variables handed to the child.
+   *
+   * Maps to `process.inheritDefaultEnv` in the JSON config.
+   */
+  inheritDefaultEnv?: boolean;
+
+  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
@@ -562,6 +581,28 @@ function injectEnvIntoConfig(
 }
 
 /**
+ * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
+ * environment is layered on the backend's default rather than replacing it.
+ * An option left unset does not clobber a value the caller already put in the
+ * config; an explicit boolean overrides it.
+ */
+function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
+  if (options.inheritDefaultEnv === undefined) {
+    return;
+  }
+  if (!options.inheritDefaultEnv) {
+    if (config.process) {
+      delete config.process.inheritDefaultEnv;
+    }
+    return;
+  }
+  if (!config.process) {
+    config.process = { commandLine: '' };
+  }
+  config.process.inheritDefaultEnv = true;
+}
+
+/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -575,6 +616,7 @@ function spawnWithConfig(
   if (env) {
     injectEnvIntoConfig(config, env);
   }
+  applyInheritDefaultEnv(config, options);
 
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
@@ -691,6 +733,7 @@ export function spawnSandboxFromConfig(
     if (env) {
       injectEnvIntoConfig(config, env);
     }
+    applyInheritDefaultEnv(config, options);
 
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {

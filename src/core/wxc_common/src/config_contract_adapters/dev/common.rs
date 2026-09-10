@@ -17,12 +17,14 @@ pub(super) fn convert_process(value: contract::Process) -> wire::Process {
         command_line,
         cwd,
         env,
+        inherit_default_env,
         timeout,
     } = value;
     wire::Process {
         command_line: Some(command_line.into_inner()),
         cwd: cwd.into_option(),
         env: env.into_option(),
+        inherit_default_env: inherit_default_env.into_option(),
         timeout: timeout.into_option(),
     }
 }

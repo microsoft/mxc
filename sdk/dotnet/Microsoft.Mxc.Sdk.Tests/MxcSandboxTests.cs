@@ -462,7 +462,8 @@ public class MxcSandboxTests
             ContainerName = "test-container",
             WorkingDirectory = @"C:\work",
             Experimental = true,
-            Environment =
+            InheritDefaultEnvironment = true,
+            Environment = new()
             {
                 ["GREETING"] = "hello",
             },
@@ -476,7 +477,31 @@ public class MxcSandboxTests
         Assert.Equal("test-container", root.GetProperty("containerName").GetString());
         Assert.Equal(@"C:\work", root.GetProperty("workingDirectory").GetString());
         Assert.Equal("hello", root.GetProperty("environment").GetProperty("GREETING").GetString());
+        Assert.True(root.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.True(root.GetProperty("experimental").GetBoolean());
+    }
+
+    [Fact]
+    public void SandboxRequest_DistinguishesOmittedAndExplicitlyEmptyEnvironment()
+    {
+        var omitted = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi");
+        using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("environment", out _));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("inheritDefaultEnv", out _));
+
+        var explicitlyEmpty = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Environment = new(),
+        };
+        using var explicitlyEmptyDoc =
+            JsonDocument.Parse(MxcSandbox.SerializeRequest(explicitlyEmpty));
+        var environment = explicitlyEmptyDoc.RootElement.GetProperty("environment");
+        Assert.Equal(JsonValueKind.Object, environment.ValueKind);
+        Assert.Empty(environment.EnumerateObject());
     }
 
     [Fact]

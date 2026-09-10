@@ -160,7 +160,8 @@ var request = new SandboxRequest(
 {
     ContainerName = "example",
     WorkingDirectory = @"C:\work",
-    Environment =
+    InheritDefaultEnvironment = true,
+    Environment = new()
     {
         ["GREETING"] = "hello",
     },
@@ -168,6 +169,12 @@ var request = new SandboxRequest(
 
 RunResult result = await MxcSandbox.RunAsync(request);
 ```
+
+By default, a non-null `Environment` dictionary replaces the child's
+environment, including when the dictionary is explicitly empty. Leave it null
+to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
+dictionary on the backend default instead; on Windows process containers, that
+default is the user profile environment block.
 
 `MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
 request through the co-versioned native FFI contract. The existing
@@ -697,8 +704,10 @@ var wslc = new WslcProvisionOptions
 IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
 defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
 override the inferred version. State-aware exec options expose working
-directory, `KEY=VALUE` environment entries, and timeout. WSLC also accepts a
-proxy-only per-exec override:
+directory, `KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and
+timeout. When `InheritDefaultEnvironment` is supplied without an explicit
+version, the SDK selects `0.9.0-alpha`; an explicitly older version is rejected.
+WSLC also accepts a proxy-only per-exec override:
 
 ```csharp
 var options = new WslcExecOptions

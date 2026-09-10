@@ -1625,6 +1625,58 @@ describe('createConfigFromPolicy', () => {
         { message: /experimental mode/ },
       );
     });
+
+    it('should apply inheritDefaultEnv without replacing the supplied environment', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      config.process!.env = ['GREETING=hello'];
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /experimental mode/ },
+      );
+      assert.deepStrictEqual(config.process!.env, ['GREETING=hello']);
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should leave inheritDefaultEnv version validation to the native engine', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /experimental mode/ },
+      );
+      assert.equal(config.version, '0.8.0-alpha');
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should leave non-PTY inheritDefaultEnv version validation to the native engine', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, {
+          usePty: false,
+          inheritDefaultEnv: true,
+        }),
+        { message: /experimental mode/ },
+      );
+      assert.equal(config.version, '0.8.0-alpha');
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
+      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      config.process!.inheritDefaultEnv = true;
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: false }),
+        { message: /experimental mode/ },
+      );
+      assert.strictEqual(config.process!.inheritDefaultEnv, undefined);
+    });
   });
 
   describe('Bubblewrap', () => {

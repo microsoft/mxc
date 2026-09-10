@@ -446,7 +446,8 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
 
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
-    validate_telemetry_field_version(config)
+    validate_telemetry_field_version(config)?;
+    validate_inherit_default_env_field_version(config)
 }
 
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
@@ -497,6 +498,35 @@ fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), Wx
         ));
     }
     Ok(())
+}
+
+fn validate_inherit_default_env_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    let has_inherit_default_env = config
+        .get("process")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|process| process.contains_key("inheritDefaultEnv"));
+    if !has_inherit_default_env {
+        return Ok(());
+    }
+
+    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
+        let Ok(version) = semver::Version::parse(version) else {
+            // The ordinary schema-version validator owns malformed-version
+            // diagnostics so this feature gate does not mask the more useful error.
+            return Ok(());
+        };
+        if version.major > 0 || version.minor >= 9 {
+            return Ok(());
+        }
+    }
+
+    Err(WxcError::ConfigParse(
+        "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha or later"
+            .to_string(),
+    ))
 }
 
 fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
@@ -970,45 +1000,47 @@ fn convert_wire_config(
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
-    // non-exec state-aware phases (require_process == false)
-    let (script_code, working_directory, script_timeout, env) = match cfg.process {
-        Some(process) => {
-            let script_code = match process.command_line {
-                Some(s) if !s.is_empty() => s,
-                Some(_) if require_process => {
-                    return Err(WxcError::ConfigParse(
-                        "process.commandLine cannot be empty".to_string(),
-                    ));
-                }
-                None if require_process => {
-                    return Err(WxcError::ConfigParse(
-                        "Missing required field: process.commandLine".to_string(),
-                    ));
-                }
-                _ => String::new(),
-            };
+    // non-exec state-aware phases (require_process == false).
+    let (script_code, working_directory, script_timeout, env, inherit_default_env) =
+        match cfg.process {
+            Some(process) => {
+                let script_code = match process.command_line {
+                    Some(s) if !s.is_empty() => s,
+                    Some(_) if require_process => {
+                        return Err(WxcError::ConfigParse(
+                            "process.commandLine cannot be empty".to_string(),
+                        ));
+                    }
+                    None if require_process => {
+                        return Err(WxcError::ConfigParse(
+                            "Missing required field: process.commandLine".to_string(),
+                        ));
+                    }
+                    _ => String::new(),
+                };
 
-            // Null bytes can hide malicious payloads from audit logs.
-            if script_code.contains('\0') {
+                // Null bytes can hide malicious payloads from audit logs.
+                if script_code.contains('\0') {
+                    return Err(WxcError::ConfigParse(
+                        "process.commandLine must not contain null bytes".to_string(),
+                    ));
+                }
+
+                (
+                    script_code,
+                    process.cwd.unwrap_or_default(),
+                    process.timeout.unwrap_or(0),
+                    process.env,
+                    process.inherit_default_env.unwrap_or(false),
+                )
+            }
+            None if require_process => {
                 return Err(WxcError::ConfigParse(
-                    "process.commandLine must not contain null bytes".to_string(),
+                    "'process' section is required".into(),
                 ));
             }
-
-            (
-                script_code,
-                process.cwd.unwrap_or_default(),
-                process.timeout.unwrap_or(0),
-                process.env.unwrap_or_default(),
-            )
-        }
-        None if require_process => {
-            return Err(WxcError::ConfigParse(
-                "'process' section is required".into(),
-            ));
-        }
-        None => (String::new(), String::new(), 0, Vec::new()),
-    };
+            None => (String::new(), String::new(), 0, None, false),
+        };
 
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
@@ -1569,6 +1601,7 @@ fn convert_wire_config(
         schema_version,
         container_id,
         env,
+        inherit_default_env,
         script_code,
         working_directory,
         script_timeout,
@@ -5723,7 +5756,10 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.env, vec!["FOO=bar", "BAZ=qux"]);
+        assert_eq!(
+            req.env,
+            Some(vec!["FOO=bar".to_string(), "BAZ=qux".to_string()])
+        );
     }
 
     #[test]
@@ -7653,6 +7689,65 @@ mod tests {
         let error =
             load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger).unwrap_err();
         assert!(error.to_string().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn inherit_default_env_rejects_pre_09_and_absent_versions() {
+        let expected = "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha";
+        for version in [Some("0.6.0-alpha"), Some("0.8.0-alpha"), None] {
+            let version = version
+                .map(|value| format!(r#""version":"{value}","#))
+                .unwrap_or_default();
+            let json = format!(
+                r#"{{{version}"process":{{"commandLine":"echo hi","inheritDefaultEnv":true}}}}"#
+            );
+
+            let mut logger = test_logger();
+            let error = load_request_from_json(&json, &mut logger).unwrap_err();
+            assert!(error.to_string().contains(expected), "got {error:?}");
+        }
+
+        let state_aware = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "process": {
+                "commandLine": "echo hi",
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        let error = load_mxc_request_from_json(state_aware, &mut logger).unwrap_err();
+        assert!(error.message().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn inherit_default_env_accepts_09_for_one_shot_and_state_aware() {
+        let one_shot = r#"{
+            "version": "0.9.0-alpha",
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["EXTRA=1"],
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        let request = load_request_from_json(one_shot, &mut logger).unwrap();
+        assert!(request.inherit_default_env);
+
+        let state_aware = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "iso:abc",
+            "process": {
+                "commandLine": "echo hi",
+                "env": ["EXTRA=1"],
+                "inheritDefaultEnv": true
+            }
+        }"#;
+        let mut logger = test_logger();
+        load_mxc_request_from_json(state_aware, &mut logger)
+            .expect("0.9 state-aware inheritance should parse");
     }
 
     #[test]

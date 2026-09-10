@@ -29,6 +29,8 @@ public static class MxcLifecycle
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
 
+    private const string InheritDefaultEnvironmentVersion = "0.9.0-alpha";
+
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
 
@@ -268,7 +270,12 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
-        var envelope = BuildIdEnvelope("exec", id, options?.Version);
+        var version = options?.Version;
+        if (options?.InheritDefaultEnvironment is not null && version is null)
+        {
+            version = InheritDefaultEnvironmentVersion;
+        }
+        var envelope = BuildIdEnvelope("exec", id, version);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -277,6 +284,10 @@ public static class MxcLifecycle
         if (options?.Environment is { } env)
         {
             process["env"] = SerializeToNode(env);
+        }
+        if (options?.InheritDefaultEnvironment is { } inheritDefaultEnv)
+        {
+            process["inheritDefaultEnv"] = inheritDefaultEnv;
         }
         if (options?.TimeoutMs is { } timeout)
         {

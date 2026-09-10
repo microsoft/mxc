@@ -91,7 +91,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -106,7 +106,8 @@ that can be executed independently.
                                            //  backend substitutes a granted directory rather
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
-        "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
+        "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
+        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 

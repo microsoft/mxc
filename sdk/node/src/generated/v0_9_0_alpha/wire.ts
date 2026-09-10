@@ -579,8 +579,14 @@ export interface Process {
   cwd?: string;
   /**
    * Optional environment entries encoded as `KEY=VALUE` strings.
+   * 
+   * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.
    */
   env?: string[];
+  /**
+   * Layer `env` on top of the backend's default environment rather than replacing it.
+   */
+  inheritDefaultEnv?: boolean;
   /**
    * Optional execution timeout in milliseconds.
    */

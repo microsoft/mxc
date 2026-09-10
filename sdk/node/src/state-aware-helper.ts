@@ -107,10 +107,18 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
-  const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
+  const suppliedVersion =
+    typeof backendSpecific.version === 'string' ? backendSpecific.version : undefined;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
   const hasTelemetry = telemetry !== undefined;
-  const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
+  const process = backendSpecific.process;
+  const hasInheritDefaultEnv =
+    typeof process === 'object' &&
+    process !== null &&
+    Object.prototype.hasOwnProperty.call(process, 'inheritDefaultEnv') &&
+    (process as Record<string, unknown>).inheritDefaultEnv !== undefined;
+  const requires09 = hasTelemetry || hasInheritDefaultEnv;
+  const version = suppliedVersion || (requires09 ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };

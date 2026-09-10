@@ -181,7 +181,18 @@ public class StateAwareExecOptions : StateAwarePhaseOptions
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>
+    /// <remarks>
+    /// <see langword="null"/> gives the child the backend's default
+    /// environment. A supplied list — including an empty one — is used
+    /// verbatim unless <see cref="InheritDefaultEnvironment"/> is set.
+    /// </remarks>
     public List<string>? Environment { get; set; }
+
+    /// <summary>
+    /// Layer <see cref="Environment"/> on top of the backend's default
+    /// environment rather than replacing it.
+    /// </summary>
+    public bool? InheritDefaultEnvironment { get; set; }
 
     /// <summary>Wall-clock timeout in milliseconds. Zero means no timeout.</summary>
     public uint? TimeoutMs { get; set; }

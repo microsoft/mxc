@@ -1475,9 +1475,9 @@ impl WSLContainerRunner {
                 "[WSLC] Cooperative network proxy configured: {}",
                 wxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
-            wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
+            wxc_common::proxy_env::apply_cooperative_proxy_env(request.env_entries(), &proxy_url)
         } else {
-            request.env.clone()
+            request.env_entries().to_vec()
         };
 
         // Env buffers must outlive WslcCreateContainer: the SDK stores the

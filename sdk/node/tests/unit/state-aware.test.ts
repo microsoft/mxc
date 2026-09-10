@@ -40,8 +40,59 @@ describe('buildStateAwareEnvelope', () => {
       sandboxId: 'wsb:01234567',
       config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
     });
-    assert.deepEqual(env.telemetry, { enabled: true });
     assert.equal(env.version, '0.8.0-alpha');
+    assert.deepEqual(env.telemetry, { enabled: true });
+  });
+
+  it('selects schema 0.9 when exec inherits the backend environment', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
+        },
+      },
+    });
+    assert.equal(env.version, '0.9.0-alpha');
+  });
+
+  it('does not select schema 0.9 when environment inheritance is undefined', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        version: '0.8.0-alpha',
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: undefined,
+        },
+      },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
+  });
+
+  it('preserves an older inherited-environment version for native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        version: '0.8.0-alpha',
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
+        },
+      },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
+    assert.deepEqual(env.process, {
+      commandLine: 'echo hi',
+      inheritDefaultEnv: true,
+    });
   });
 
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
