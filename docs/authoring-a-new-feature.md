@@ -112,9 +112,9 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model while it remains the current parser input |
-| `src/core/mxc_config_contract/src/dev/` | Add the field to the closed exact mutable development contract |
-| `src/core/mxc_engine/src/policy/exact/v0_9.rs` | If the Rust SDK exposes the field, keep the test-only exact development builder in parity |
+| `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
+| `src/core/wxc_common/src/wire.rs` | Mirror the field in the rolling differential model while that characterization oracle remains |
+| `src/core/mxc_engine/src/policy/exact/v0_9.rs` | If the Rust SDK exposes the field, update the production exact development builder |
 | `schemas/dev/mxc-config.schema.0.9.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
 | `schemas/dev/mxc-config.schema.0.9.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
@@ -122,13 +122,14 @@ Adding a feature may touch these files:
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
-## Step 1: Add the field to the wire model (the schema source of truth)
+## Step 1: Add the field to the exact contract and rolling oracle
 
-Until exact dispatch is authoritative, add the feature to both the rolling
-Rust wire model (`src/core/wxc_common/src/wire.rs`) and the matching closed
-request types under `src/core/mxc_config_contract/src/dev/`. The rolling
-experimental struct remains permissive; the exact development contract and
-every nested experimental object are recursively closed.
+Add the feature to the authoritative closed request types under
+`src/core/mxc_config_contract/src/dev/`, then mirror it in the rolling Rust wire
+model (`src/core/wxc_common/src/wire.rs`) while differential characterization
+remains. The rolling experimental struct remains permissive; the exact
+development contract and every nested experimental object are recursively
+closed.
 
 ```rust
 // in wire.rs

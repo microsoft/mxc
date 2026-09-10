@@ -258,8 +258,9 @@ the rationale for each disposition, and the error mapping live in
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
 typed policy error code: the envelope carries `error.code = "backend_error"` with
-the reason in the message, unlike the state-aware surface which emits
-`policy_validation`.
+the reason in the message. On the state-aware surface, structurally
+representable backend policy failures emit `policy_validation`; fields excluded
+by an exact phase root fail earlier as `malformed_request`.
 
 **Why every supplied `ui` is refused.** The `ui` section states intent about the
 contained code's relationship to the *user's* environment, and was modelled on a

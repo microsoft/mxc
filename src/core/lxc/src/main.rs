@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_one_shot_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::handle_dry_run_exit;
@@ -218,7 +218,7 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());

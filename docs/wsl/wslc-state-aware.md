@@ -81,39 +81,42 @@ rules do not apply — see the empirical finding in the plan history). Proxy is 
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|
-| `readwritePaths` / `readonlyPaths` | honored → container volumes | rejected | rejected |
-| `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
-| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network` host filtering (`allowedHosts` / `blockedHosts`) | rejected | rejected | rejected |
-| `network.allowLocalNetwork` | rejected if `true` — WSLc networking is all-or-nothing, and the state-aware surface has no port-mapping escape hatch | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network.enforcementMode` | rejected unless `capabilities` — `firewall` / `both` ask for per-rule enforcement the container cannot perform | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network.proxy` | rejected | rejected | honored — **`url` form only** (`localhost` / `builtinTestServer` forms → `policy_validation`); injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
-| `ui` | rejected | rejected | rejected |
-| `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
-| `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
+| `readwritePaths` / `readonlyPaths` | honored → container volumes | `malformed_request` | `malformed_request` |
+| `deniedPaths` | overlapping/nested under a mount → `policy_validation`; a standalone denied path is accepted because no Deny primitive is needed | `malformed_request` | `malformed_request` |
+| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | `malformed_request` | immutable mode change → `policy_validation` |
+| `network` host filtering (`allowedHosts` / `blockedHosts`) | `policy_validation` | `malformed_request` | `policy_validation` |
+| `network.allowLocalNetwork` | `true` → `policy_validation`; WSLc networking is all-or-nothing and provision has no port-mapping escape hatch | `malformed_request` | mode field → `policy_validation` |
+| `network.enforcementMode` | `capabilities` accepted; `firewall` / `both` → `policy_validation` | `malformed_request` | mode field → `policy_validation` |
+| `network.proxy` | `policy_validation` | `malformed_request` | honored in **`url` form only**; `localhost` / `builtinTestServer` → `policy_validation` |
+| `ui` | `malformed_request` | `malformed_request` | `malformed_request` |
+| `process.timeout` | `malformed_request` | `malformed_request` | honored → `ExecConfig.timeout_ms` |
+| `lifecycle` | `malformed_request` | `malformed_request` | `malformed_request` |
 
-`ui` is rejected by **presence, not value**, on every phase. WSLc has no mechanism to enforce UI
-restrictions on a container, so no phase could honor it. Presence is the only workable test because
-`UiPolicy`'s defaults are full lockdown — an explicitly supplied lockdown `ui` is indistinguishable
-*by value* from an absent one, so a value-based check would let the single most restrictive request
-a caller can write through unenforced. The parse-derived `ContainerPolicy::ui_specified` flag is
-what closes that gap.
+The exact `0.9.0-alpha` request root is selected before backend dispatch.
+Fields absent from that phase's closed root fail structurally with
+`malformed_request`: provision excludes `ui`, start / stop / deprovision admit
+no filesystem, network, UI, or process policy, and exec excludes filesystem and
+UI. These failures do not reach WSLc's presence checks.
 
-Every rejection above **aborts the phase before anything is created**: the dispatcher runs each
-`validate_*` hook ahead of the phase body, and `connect_daemon()` lives inside `provision()`, so a
-refused provision never even spawns the daemon — let alone a VM or container.
+Fields the exact root does admit still receive backend semantic validation.
+Every resulting `policy_validation` above aborts the phase before anything is
+created: the dispatcher runs each `validate_*` hook ahead of the phase body,
+and `connect_daemon()` lives inside `provision()`, so a refused provision never
+spawns the daemon, VM, or container.
 
 Filesystem policy is fixed at `provision` and immutable afterwards.
 
-The network **mode** (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host lists) is
-also fixed at `provision`. Post-provision phases reject the mode by **presence, not value**: any
-explicitly supplied network-mode field is rejected — including an explicit `defaultPolicy: "block"`
-whose value equals the default — because an explicit default is indistinguishable from an omitted
-one by value alone. Only the exec-phase cooperative `proxy` is accepted after provision; a
-proxy-only `network` block (no mode fields) is therefore honored at exec.
+The network **mode** (`defaultPolicy` / `enforcementMode` /
+`allowLocalNetwork` / host lists) is fixed at `provision`. Start, stop, and
+deprovision exclude the entire network section structurally. Exec admits
+`network` only for the cooperative proxy, so an explicit mode field reaches the
+backend and is rejected with `policy_validation` by presence, even when its
+value equals the provision default.
 
 ## Error mapping
 
+Exact-contract `malformed_request` failures occur before daemon connection and
+are not part of daemon error mapping. Once dispatch reaches the backend,
 `state_aware.rs::map_daemon_error` maps daemon errors to the cross-backend wire error codes:
 
 | Source | Wire error code |

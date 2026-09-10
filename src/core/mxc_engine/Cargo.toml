@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 wxc_common.workspace = true
+mxc_config_contract.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under

@@ -20,10 +20,12 @@ describe('buildSandboxPayload', () => {
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
 
-    const mockWindows = () => {
+    const mockPlatform = (platform: NodeJS.Platform) => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-      Object.defineProperty(process, 'platform', { value: 'win32' });
+      Object.defineProperty(process, 'platform', { value: platform });
     };
+
+    const mockWindows = () => mockPlatform('win32');
 
     const restore = () => {
       if (originalPlatform) {
@@ -122,6 +124,99 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.9.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject an unregistered version within the supported range', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.6.1-alpha' }),
+          { message: /not a registered schema contract/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should enforce the minimum schema for every development-only containment', () => {
+      mockWindows();
+      try {
+        for (const containment of [
+          'vm',
+          'microvm',
+          'windows_sandbox',
+          'wslc',
+          'hyperlight',
+          'isolation_session',
+        ] as const) {
+          assert.throws(
+            () => createConfigFromPolicy({ version: '0.8.0-alpha' }, containment),
+            {
+              message: new RegExp(
+                `does not support containment '${containment}'.*0\\.9\\.0-alpha`,
+              ),
+            },
+          );
+        }
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept the exact 0.9 boundary for every development containment', () => {
+      mockWindows();
+      try {
+        for (const containment of [
+          'vm',
+          'microvm',
+          'windows_sandbox',
+          'wslc',
+          'hyperlight',
+          'isolation_session',
+        ] as const) {
+          try {
+            createConfigFromPolicy({ version: '0.9.0-alpha' }, containment);
+          } catch (error) {
+            assert.doesNotMatch(
+              (error as Error).message,
+              /Schema .* does not support containment/,
+              `${containment} must pass the 0.9 schema floor before backend-specific validation`,
+            );
+          }
+        }
+      } finally {
+        restore();
+      }
+    });
+
+    it('should enforce and accept the macOS process-to-Seatbelt boundary', () => {
+      mockPlatform('darwin');
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }),
+          { message: /does not support containment 'process'.*0\.7\.0-alpha/ },
+        );
+        assert.doesNotThrow(
+          () => createConfigFromPolicy({ version: '0.7.0-alpha' }),
+        );
+        assert.throws(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }, 'seatbelt'),
+          { message: /does not support containment 'seatbelt'.*0\.7\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should retain the 0.6 boundary for stable process containment', () => {
+      mockWindows();
+      try {
+        assert.doesNotThrow(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }),
+        );
       } finally {
         restore();
       }
@@ -1111,7 +1206,7 @@ describe('createConfigFromPolicy', () => {
       // real bridge) must get the identical wire config.
       mockLinux();
       try {
-        const policy = {
+        const policy: SandboxPolicy = {
           version: '0.8.0-alpha',
           network: {
             egress: { default: 'deny' as const },
@@ -1641,19 +1736,19 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should leave inheritDefaultEnv version validation to the native engine', () => {
-      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
 
       assert.throws(
         () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
         { message: /experimental mode/ },
       );
-      assert.equal(config.version, '0.8.0-alpha');
+      assert.equal(config.version, '0.9.0-alpha');
       assert.strictEqual(config.process!.inheritDefaultEnv, true);
     });
 
     it('should leave non-PTY inheritDefaultEnv version validation to the native engine', () => {
-      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
 
       assert.throws(
@@ -1663,12 +1758,12 @@ describe('createConfigFromPolicy', () => {
         }),
         { message: /experimental mode/ },
       );
-      assert.equal(config.version, '0.8.0-alpha');
+      assert.equal(config.version, '0.9.0-alpha');
       assert.strictEqual(config.process!.inheritDefaultEnv, true);
     });
 
     it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
       config.process!.inheritDefaultEnv = true;
 
@@ -2005,6 +2100,21 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
       assert.deepStrictEqual(payload.telemetry, { enabled: true });
     });
+
+    for (const version of ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha']) {
+      it(`rejects SandboxPolicy telemetry with schema ${version}`, () => {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version,
+            telemetry: { enabled: true },
+          }),
+          {
+            message: `Schema ${version} does not support telemetry; ` +
+              `use schema 0.9.0-alpha or later.`,
+          },
+        );
+      });
+    }
 
     it('leaves config telemetry schema validation to the native parser', () => {
       const config = makeConfig('process');
