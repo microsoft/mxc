@@ -86,6 +86,38 @@ jobs:
       cargoFeatures: isolation_session
       enableTest: 'false'
 
+  - powershell: |
+      $messagesPath = Join-Path $env:AGENT_TEMPDIRECTORY "mxc-sdk-isolation-session-test-build.jsonl"
+      Push-Location "$(workingDirectory)"
+      try {
+          & cargo test --locked --release --target "$(triplet)" `
+              -p mxc-sdk --features isolation_session `
+              --test isolation_session --no-run --message-format=json `
+              > $messagesPath
+          if ($LASTEXITCODE -ne 0) {
+              throw "Building the mxc-sdk IsolationSession test executable failed with exit code $LASTEXITCODE"
+          }
+      }
+      finally {
+          Pop-Location
+      }
+
+      $testExe = Get-Content -LiteralPath $messagesPath | ForEach-Object {
+          try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { $null }
+      } | Where-Object {
+          $_.reason -eq 'compiler-artifact' -and
+          $_.target.name -eq 'isolation_session' -and
+          $_.executable
+      } | Select-Object -Last 1 -ExpandProperty executable
+
+      if (-not $testExe -or -not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+          throw "Cargo did not report the mxc-sdk IsolationSession test executable"
+      }
+
+      Write-Host "##vso[task.setvariable variable=mxcSdkIsolationSessionTestExe]$testExe"
+      Write-Host "  -> $testExe"
+    displayName: 'Build in-process IsolationSession tests'
+
   # Build the SDK and integration tests so the Node E2E suite can be
   # included in the test bundle.  The SDK has a native dep (node-pty)
   # that requires node-gyp; the windows-2022 image has VS build tools.
@@ -115,11 +147,16 @@ jobs:
   # Stage the test bundle for publishing as a pipeline artifact.
   - powershell: |
       $out = "$(outputDirectory)"
-      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
+      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/inproc", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
 
       # wxc-exec binary (isolation_session enabled)
       Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
       Write-Host "  -> bin/x64/wxc-exec.exe"
+
+      # Rust SDK test executable that calls the IsolationSession backend
+      # in-process rather than through wxc-exec.
+      Copy-Item "$(mxcSdkIsolationSessionTestExe)" "$out/inproc/mxc-sdk-isolation-session-tests.exe"
+      Write-Host "  -> inproc/mxc-sdk-isolation-session-tests.exe"
 
       # Self-contained Node runtime for the SDK integration tests
       $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -285,6 +322,22 @@ jobs:
           Pop-Location
       }
     displayName: 'Validate packaged SDK integration tests'
+
+  - powershell: |
+      $testExe = "$(outputDirectory)/inproc/mxc-sdk-isolation-session-tests.exe"
+      if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+          throw "Packaged in-process test executable not found: $testExe"
+      }
+
+      $testList = @(& $testExe --list)
+      $testList | ForEach-Object { Write-Host $_ }
+      if ($LASTEXITCODE -ne 0) {
+          throw "Packaged in-process test discovery failed with exit code $LASTEXITCODE"
+      }
+      if (($testList -join "`n") -notmatch '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$') {
+          throw "Packaged in-process test discovery did not find any tests"
+      }
+    displayName: 'Validate packaged in-process tests'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'

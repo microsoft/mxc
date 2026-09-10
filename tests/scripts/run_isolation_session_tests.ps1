@@ -111,6 +111,77 @@ Write-Host "==========================" -ForegroundColor Cyan
 Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
+# The vpack carries the Rust SDK tests that exercise the same backend
+# in-process. Run these before the availability probe so
+# MXC_ISO_TESTS_REQUIRED can turn an unsupported lab host into a failure.
+# Keep the executable optional in the source tree, where this script lives in
+# tests\scripts rather than the packaged test_scripts directory.
+$inProcFailed = $false
+$bundleRoot = Split-Path -Parent $PSScriptRoot
+$inProcExe = Join-Path $bundleRoot 'inproc\mxc-sdk-isolation-session-tests.exe'
+$inProcRequired = (Split-Path -Leaf $PSScriptRoot) -eq 'test_scripts'
+if (Test-Path -LiteralPath $inProcExe -PathType Leaf) {
+    Write-Host "IsolationSession In-Process SDK Tests" -ForegroundColor Cyan
+    Write-Host "=====================================" -ForegroundColor Cyan
+
+    $oldRequired = $env:MXC_ISO_TESTS_REQUIRED
+    $prevPref = $ErrorActionPreference
+    $inProcOutput = @()
+    $inProcExitCode = -1
+    try {
+        $env:MXC_ISO_TESTS_REQUIRED = '1'
+        $ErrorActionPreference = 'Continue'
+        $inProcOutput = @(& $inProcExe --test-threads=1 --nocapture 2>&1)
+        $inProcExitCode = $LASTEXITCODE
+    } catch {
+        $inProcOutput += "Failed to launch in-process tests: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $prevPref
+        $env:MXC_ISO_TESTS_REQUIRED = $oldRequired
+    }
+
+    $inProcOutput | ForEach-Object { Write-Host $_ }
+    $inProcText = $inProcOutput -join "`n"
+    $inProcSummary = [regex]::Match(
+        $inProcText,
+        'test result: \w+\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;')
+
+    if ($inProcSummary.Success) {
+        $inProcPassed = [int]$inProcSummary.Groups[1].Value
+        $inProcFailedCount = [int]$inProcSummary.Groups[2].Value
+        $inProcIgnored = [int]$inProcSummary.Groups[3].Value
+        $inProcExecuted = $inProcPassed + $inProcFailedCount
+
+        if ($inProcExitCode -eq 0 -and $inProcFailedCount -eq 0 -and
+            $inProcExecuted -gt 0) {
+            Write-Host (
+                "$inProcPassed/$inProcExecuted passed" +
+                $(if ($inProcIgnored -gt 0) { ", $inProcIgnored ignored" })) `
+                -ForegroundColor Green
+        } else {
+            $inProcFailed = $true
+            $reportedTotal = [Math]::Max(1, $inProcExecuted)
+            Write-Host (
+                "$inProcPassed/$reportedTotal passed, " +
+                "$inProcFailedCount FAILED, $inProcIgnored ignored") `
+                -ForegroundColor Red
+        }
+    } else {
+        $inProcFailed = $true
+        Write-Host "0/1 passed" -ForegroundColor Red
+        Write-Host (
+            "FAILED: in-process test executable did not emit a " +
+            "recognizable libtest summary (exit $inProcExitCode)") `
+            -ForegroundColor Red
+    }
+    Write-Host ""
+} elseif ($inProcRequired) {
+    $inProcFailed = $true
+    Write-Host "0/1 passed" -ForegroundColor Red
+    Write-Host "FAILED: packaged in-process test executable not found: $inProcExe" `
+        -ForegroundColor Red
+}
+
 # ---------------- Backend-availability probe ----------------
 #
 # Availability is decided by a single call to `wxc-exec --probe`, which reports
@@ -195,7 +266,7 @@ function Get-IsolationSessionProbe {
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
     Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
-    exit 0
+    exit $(if ($inProcFailed) { 1 } else { 0 })
 }
 if ($probeResult.Status -ne 'available') {
     Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
@@ -670,4 +741,4 @@ if ($failed -eq 0) {
     }
 }
 
-exit $(if ($failed -gt 0 -or $scratchLeft.Count -gt 0) { 1 } else { 0 })
+exit $(if ($failed -gt 0 -or $scratchLeft.Count -gt 0 -or $inProcFailed) { 1 } else { 0 })
