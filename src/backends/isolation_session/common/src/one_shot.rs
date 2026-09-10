@@ -22,11 +22,11 @@ use super::IsolationSessionRunner;
 ///
 /// Value-based rather than presence-based (unlike `ui`), because the defaults
 /// genuinely match the behavior: the in-proc API exposes no session-lifetime
-/// knob, so one-shot always stops the session and removes the agent user before
-/// returning — exactly what `destroyOnExit: true` asks for. Only the values the
+/// knob, so one-shot always stops the session and removes the agent user —
+/// exactly what `destroyOnExit: true` asks for. Only the values the
 /// backend cannot deliver are refused:
 ///
-/// * `destroyOnExit: false` asks the session to outlive the call. It cannot.
+/// * `destroyOnExit: false` asks the session to outlive the run. It cannot.
 /// * `preservePolicy: true` asks for filesystem/network policy to be retained
 ///   past the run. This backend installs no persistent filesystem or network
 ///   enforcement — filesystem policy is refused outright, and the accepted
@@ -36,7 +36,7 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
     if !request.lifecycle.destroy_on_exit {
         return Err(ScriptResponse::error(
             "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
-             the session is always stopped and the agent user removed before the call returns",
+             the session is always stopped and the agent user removed",
         ));
     }
     if request.lifecycle.preserve_policy {

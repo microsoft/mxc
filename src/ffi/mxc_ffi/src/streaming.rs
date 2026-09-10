@@ -579,10 +579,11 @@ pub unsafe extern "C" fn mxc_sandbox_warnings_json(
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &*handle };
-        if sandbox.inner.warnings().is_empty() {
+        let warnings = sandbox.inner.warnings();
+        if warnings.is_empty() {
             return MXC_STATUS_SUCCESS;
         }
-        let json = match serde_json::to_vec(sandbox.inner.warnings()) {
+        let json = match serde_json::to_vec(&warnings) {
             Ok(json) => json,
             Err(_) => return MXC_STATUS_BACKEND_ERROR,
         };

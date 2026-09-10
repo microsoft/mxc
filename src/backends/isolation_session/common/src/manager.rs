@@ -625,8 +625,9 @@ impl IsolationSessionManager {
     /// backend.
     ///
     /// `timeout_ms` is the caller's deadline, enforced by the waiter. Arm the
-    /// service-side timer with [`with_service_timeout_grace`] before calling,
-    /// or that timer fires first and a timeout arrives as an ordinary exit.
+    /// service-side timer with [`with_service_timeout_grace`] before calling:
+    /// without that margin the two deadlines coincide, and a timeout can arrive
+    /// as an ordinary exit.
     ///
     /// [`with_service_timeout_grace`]: super::process_options::with_service_timeout_grace
     pub(super) fn piped_exec_handle(

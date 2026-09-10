@@ -333,9 +333,6 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     request,
                     wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
                 );
-                // The caller's deadline, enforced by the waiter. The service
-                // timer is armed with a margin so it cannot fire first and turn
-                // a timeout into an ordinary exit we could not report.
                 let timeout_ms = options.timeout_ms;
                 let options = with_service_timeout_grace(options);
 

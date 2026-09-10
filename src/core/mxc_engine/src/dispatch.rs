@@ -13,10 +13,10 @@
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
-//! (Linux), Seatbelt (macOS), and WSLC (Windows, experimental, behind the
-//! `wslc` feature). Every other backend — including the remaining experimental
-//! ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight) and LXC (no
-//! streaming path suitable for the library) — returns
+//! (Linux), Seatbelt (macOS), WSLC and IsolationSession (Windows, experimental,
+//! behind the `wslc` and `isolation_session` features). Every other backend —
+//! including the remaining experimental ones (Windows Sandbox, MicroVM,
+//! Hyperlight) and LXC (no streaming path suitable for the library) — returns
 //! [`MxcError::unsupported_containment`]; callers that need those must drive the
 //! standalone executor binaries (whose run-to-completion path will, in a later
 //! increment, also route through this engine).
@@ -74,6 +74,7 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
+        ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -264,6 +265,52 @@ fn spawn_wslc(
     {
         Err(MxcError::unsupported_containment(
             "WSLC (WSL Container) is only available on Windows",
+        ))
+    }
+}
+
+/// Spawn the IsolationSession backend. Experimental, so it refuses to run
+/// unless the request opted in — the library-side equivalent of the executor's
+/// `--experimental` flag.
+///
+/// Serves piped stdio. Goes through the backend's own launch rather than the
+/// `SandboxBackend` trait so a lifecycle failure keeps the API call and status
+/// the trait's `ScriptResponse` cannot carry; a refusal has no such detail, so
+/// it maps the same way every other backend's does.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+fn spawn_isolation_session(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use isolation_session_common::OneShotSpawnFailure;
+
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "IsolationSession is an experimental backend; enable experimental features on the \
+             request (SandboxRequest::set_experimental(true)) to use it",
+        ));
+    }
+    isolation_session_common::spawn_one_shot(request, logger).map_err(|e| match e {
+        OneShotSpawnFailure::Refused(resp) => map_spawn_error(resp),
+        OneShotSpawnFailure::Launch(err) => err,
+    })
+}
+
+#[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
+fn spawn_isolation_session(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    #[cfg(target_os = "windows")]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession is only available on Windows",
         ))
     }
 }

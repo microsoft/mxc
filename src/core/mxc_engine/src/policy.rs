@@ -481,8 +481,9 @@ pub enum Containment {
     Wslc(WslcSection),
     /// IsolationSession backend: a Windows isolated user session.
     ///
-    /// Not served by [`crate::spawn`]; reach it through the state-aware
-    /// lifecycle.
+    /// Experimental — the request must opt in
+    /// ([`SandboxRequest::set_experimental`]). Served with piped stdio; the
+    /// multi-call lifecycle is reachable through the state-aware entry points.
     IsolationSession,
 }
 

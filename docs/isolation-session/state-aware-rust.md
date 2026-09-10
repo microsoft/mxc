@@ -52,8 +52,8 @@ Requirements on an in-process caller:
   drop. A UI application must marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
 
-The **one-shot** surface is not reachable in-process: `mxc_sdk::run` and
-`spawn_sandbox` return `unsupported_containment`.
+The **one-shot** surface is served in-process with piped stdio: `mxc_sdk::run`
+and `spawn_sandbox`, behind the experimental opt-in.
 
 ### Out of scope (for v1)
 
@@ -284,10 +284,10 @@ Notes on the rows that are not a simple accept/reject:
 
 - **`lifecycle`** is refused by *value* on one-shot and by *section* on
   state-aware. The in-proc API exposes no session-lifetime knob: one-shot always
-  stops the session and removes the agent user before returning, which is
+  stops the session and removes the agent user, which is
   exactly what `destroyOnExit: true` (the default) asks for — so the default is
   honest and accepted. `destroyOnExit: false` asks the session to outlive the
-  call and cannot be delivered; `preservePolicy: true` is meaningless because
+  run and cannot be delivered; `preservePolicy: true` is meaningless because
   filesystem and network policy are rejected outright, leaving nothing to
   preserve. On the state-aware path the parser rejects the whole `lifecycle`
   section for every backend, so no per-value handling applies.
@@ -326,11 +326,11 @@ Notes on the rows that are not a simple accept/reject:
   here. Nest the config under the request's own phase; the SDK already does.
 
 Rejection of `policy.*` fields surfaces on the **state-aware** surface as
-`error.code = "policy_validation"`. On the **one-shot** surface the typed variant
-is discarded (`ScriptResponse::error`) and the envelope carries
-`error.code = "backend_error"` with the reason in the message; one-shot has no
-typed policy code today. A structurally invalid `appId` likewise surfaces as
-`policy_validation`.
+`error.code = "policy_validation"`. The **one-shot** surface answers by consumer:
+the Rust SDK classifies it the same way, while `wxc-exec` discards the typed
+variant (`ScriptResponse::error`) and its envelope carries
+`error.code = "backend_error"` with the reason in the message. A structurally
+invalid `appId` likewise surfaces as `policy_validation`.
 
 One exception: a supplied `network.proxy` is refused during config parsing,
 before any backend validation runs, so it surfaces as `malformed_request` on

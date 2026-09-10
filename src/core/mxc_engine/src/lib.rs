@@ -494,8 +494,16 @@ impl Drop for TelemetryProcess {
 }
 
 impl SandboxProcess for TelemetryProcess {
-    fn warnings(&self) -> &[String] {
-        &self.warnings
+    /// Merged at the call rather than when this wrapper was built: the wrapped
+    /// process can report a cleanup failure long after that.
+    fn warnings(&self) -> Vec<String> {
+        let mut merged = self.inner.warnings();
+        for warning in &self.warnings {
+            if !merged.contains(warning) {
+                merged.push(warning.clone());
+            }
+        }
+        merged
     }
 
     fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
@@ -575,28 +583,33 @@ pub(crate) struct ProcessWithWarnings {
 impl ProcessWithWarnings {
     /// Wrap `inner` so its `warnings()` reports the union of its own warnings
     /// and `extra_warnings` (duplicates deduplicated). Returns `inner`
-    /// unchanged if the merged list is empty.
+    /// unchanged when `extra_warnings` is empty.
     pub(crate) fn wrap(
         inner: Box<dyn SandboxProcess>,
         extra_warnings: Vec<String>,
     ) -> Box<dyn SandboxProcess> {
-        let mut warnings = inner.warnings().to_vec();
-        for warning in extra_warnings {
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-        if warnings.is_empty() {
+        if extra_warnings.is_empty() {
             inner
         } else {
-            Box::new(ProcessWithWarnings { inner, warnings })
+            Box::new(ProcessWithWarnings {
+                inner,
+                warnings: extra_warnings,
+            })
         }
     }
 }
 
 impl SandboxProcess for ProcessWithWarnings {
-    fn warnings(&self) -> &[String] {
-        &self.warnings
+    /// Merged at the call rather than when this wrapper was built: the wrapped
+    /// process can report a cleanup failure long after that.
+    fn warnings(&self) -> Vec<String> {
+        let mut merged = self.inner.warnings();
+        for warning in &self.warnings {
+            if !merged.contains(warning) {
+                merged.push(warning.clone());
+            }
+        }
+        merged
     }
 
     fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {

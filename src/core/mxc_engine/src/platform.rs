@@ -56,9 +56,8 @@ where
 /// capabilities come from the in-process fallback probe rather than a
 /// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
 /// WSL Container runtime (requires the `wslc` feature). The broader
-/// host-capability set (backends the host can run but the SDK cannot launch,
-/// e.g. `lxc`, `windows_sandbox`, `isolation_session`) is reported separately by
-/// [`available_backends`](crate::available_backends).
+/// host-capability set (backends the host can run but the SDK cannot launch) is
+/// reported separately by [`available_backends`](crate::available_backends).
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -91,15 +90,16 @@ pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "windows")]
     {
         let mut available_methods = vec!["processcontainer".to_string()];
-        // `windows_sandbox` and `isolation_session` are host-capability backends
-        // the SDK can't launch, so they are reported by `available_backends()`
-        // rather than here.
+        // `windows_sandbox` is a host-capability backend the SDK can't launch,
+        // so it is reported by `available_backends()` rather than here.
         //
-        // WSLC is an additional, opt-in backend rather than a fallback: report
-        // it only when the host can actually run it (WSL2 + the WSLC runtime),
-        // which is the same preflight the runner performs.
+        // WSLC and IsolationSession are additional, opt-in backends rather than
+        // fallbacks: report each only when the host has it.
         if wslc_available() {
             available_methods.push("wslc".to_string());
+        }
+        if isolation_session_present() {
+            available_methods.push("isolation_session".to_string());
         }
         PlatformSupport {
             is_supported: true,
@@ -147,6 +147,20 @@ fn wslc_available() -> bool {
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub fn isolation_session_available() -> bool {
     isolation_session_common::availability::is_isolation_session_available()
+}
+
+/// Whether this host has the IsolationSession backend. Always `false` when the
+/// backend isn't compiled in, so the caller needs no `cfg` of its own.
+#[cfg(target_os = "windows")]
+fn isolation_session_present() -> bool {
+    #[cfg(feature = "isolation_session")]
+    {
+        isolation_session_available()
+    }
+    #[cfg(not(feature = "isolation_session"))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]

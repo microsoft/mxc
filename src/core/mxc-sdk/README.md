@@ -150,8 +150,8 @@ questions:
   decide whether `run` / `spawn_sandbox` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones this SDK cannot drive
-  one-shot — LXC, Windows Sandbox, and IsolationSession — each with its
-  effective isolation **tier**.
+  one-shot — LXC and Windows Sandbox — each with its effective isolation
+  **tier**.
 
 ```rust,no_run
 use mxc_sdk::{available_backends, platform_support, BackendCapability};
@@ -268,10 +268,11 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `warnings()` returns policy and operational warnings detected while spawning
-  the sandbox, such as `permissiveLearningMode` weakening deny-by-default, a
-  network rule that installs but cannot carry traffic, or telemetry being
-  unavailable/routed only to local ETW.
+- `warnings()` returns policy and operational warnings from the sandbox, such as
+  `permissiveLearningMode` weakening deny-by-default, a
+  network rule that installs but cannot carry traffic, telemetry being
+  unavailable/routed only to local ETW, or a cleanup step that failed after the
+  workload exited.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose
@@ -299,9 +300,10 @@ The handle is modelled on [`std::process::Child`]:
   plain `kill()` would also take that descendant down). Returns `None` for
   non-streamed stdio.
 
-Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
-**Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
-backend the library supports.
+Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
+**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
+features, and with the request's experimental opt-in — **WSLC** and
+**IsolationSession**.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -401,14 +403,18 @@ default):
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
+| Windows | IsolationSession                                | `Containment::IsolationSession`  |
 
 `Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 Constructing the listed variants is unaffected.
 
-`Containment::IsolationSession` names that backend, but no entry point taking a
-`Containment` serves it: `run` and `spawn_sandbox` both return
-[`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware
-lifecycle — `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+`Containment::IsolationSession` names the isolation-session backend, served by
+`run` and `spawn_sandbox` with piped stdio. It is experimental, so the request
+must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
+process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
+dropping the handle tears the session down synchronously rather than in the
+background. Reach its multi-call lifecycle through
+`run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
 Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
