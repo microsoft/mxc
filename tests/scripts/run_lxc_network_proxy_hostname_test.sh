@@ -21,20 +21,17 @@
 #          The *_LEAK and PIN_ABSENT counterparts mean the isolation or the pin
 #          failed.
 #
-# Why the proxy lives in a network namespace. The chain is hooked into FORWARD,
-# which sees only traffic the host *routes* for the container. Any address the
-# host itself owns is delivered locally through INPUT instead, so a proxy bound
-# anywhere on the host — the bridge gateway included — cannot exercise the
-# FORWARD ACCEPT rule no matter which address it picks. Putting the proxy behind
-# a veth pair in its own namespace makes the host route to it, which is the only
-# arrangement in which reaching the proxy is evidence that the ACCEPT rule
-# admitted the packet. 192.0.2.0/24 is TEST-NET-1 (RFC 5737) and is reserved for
-# exactly this.
+# Why the proxy lives in a network namespace. The chain is hooked into the
+# container's own OUTPUT chain, so a proxy bound anywhere — including on the
+# host — traverses it. The namespace is what makes this proxy genuinely remote:
+# the host must route to it, so the run covers the routed path end to end
+# rather than a loopback delivery. 192.0.2.0/24 is TEST-NET-1 (RFC 5737) and is
+# reserved for exactly this.
 #
 # What PROXY_OK proves here that it cannot prove in the sibling test:
-#   1. The FORWARD proxy ACCEPT rule fired. The packet was routed, so it entered
-#      the chain, and the chain's default is DROP -- DIRECT_IPV4_BLOCKED in the
-#      same run shows that default is live.
+#   1. The proxy ACCEPT rule admitted a packet that was actually routed off the
+#      host, and the chain's default is DROP -- DIRECT_IPV4_BLOCKED in the same
+#      run shows that default is live.
 #   2. The hosts pin worked. A proxied chain opens no port 53, so the container
 #      has no resolver at all; the only way "proxy.mxc.test" can become an
 #      address inside the container is the pin this run wrote.
@@ -291,6 +288,6 @@ reject_sentinel  "DIRECT_IPV4_LEAK"
 require_sentinel "FORWARDED_DNS_BLOCKED"
 reject_sentinel  "FORWARDED_DNS_LEAK"
 
-echo "PASS: LXC off-host hostname proxy — FORWARD ACCEPT admitted the proxy,"
+echo "PASS: LXC off-host hostname proxy — the proxy ACCEPT rule admitted the proxy,"
 echo "      the hosts pin resolved it, and direct egress stayed blocked."
 echo "LXC off-host hostname proxy test complete."

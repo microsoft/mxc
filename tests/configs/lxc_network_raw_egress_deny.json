@@ -1,0 +1,24 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Raw-Deny",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"/opt/mxc-raw-probe/raw_egress_probe eth0 00:16:3e:00:00:00 203.0.113.9 icmp; /opt/mxc-raw-probe/raw_egress_probe eth0 00:16:3e:00:00:00 203.0.113.9 tcp; /opt/mxc-raw-probe/raw_egress_probe eth0 00:16:3e:00:00:00 203.0.113.9 udp\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/opt/mxc-raw-probe"]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [],
+    "blockedHosts": []
+  }
+}

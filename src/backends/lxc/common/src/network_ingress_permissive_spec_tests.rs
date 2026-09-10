@@ -84,7 +84,7 @@ fn firewall_policy(allow_local: bool) -> ContainerPolicy {
 #[test]
 fn permissive_inbound_in_a_container_netns_is_refused_not_installed() {
     let policy = firewall_policy(true);
-    let mut mgr = IngressManager::new("test-container-refused", UNOCCUPIABLE_NETNS_PID, false);
+    let mut mgr = IngressManager::new("test-container-refused", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
@@ -125,7 +125,7 @@ fn permissive_inbound_in_both_mode_is_refused_not_installed() {
         network_enforcement_mode: NetworkEnforcementMode::Both,
         ..Default::default()
     };
-    let mut mgr = IngressManager::new("test-container-refused-both", UNOCCUPIABLE_NETNS_PID, false);
+    let mut mgr = IngressManager::new("test-container-refused-both", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
@@ -159,11 +159,7 @@ fn permissive_inbound_in_both_mode_is_refused_not_installed() {
 #[test]
 fn permissive_inbound_refusal_does_not_set_rules_applied() {
     let policy = firewall_policy(true);
-    let mut mgr = IngressManager::new(
-        "test-container-refused-state",
-        UNOCCUPIABLE_NETNS_PID,
-        false,
-    );
+    let mut mgr = IngressManager::new("test-container-refused-state", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
@@ -193,11 +189,7 @@ fn permissive_inbound_refusal_does_not_set_rules_applied() {
 #[test]
 fn default_deny_with_netns_is_not_the_permissive_refusal() {
     let policy = firewall_policy(false);
-    let mut mgr = IngressManager::new(
-        "test-container-deny-with-netns",
-        UNOCCUPIABLE_NETNS_PID,
-        false,
-    );
+    let mut mgr = IngressManager::new("test-container-deny-with-netns", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
@@ -221,28 +213,30 @@ fn default_deny_with_netns_is_not_the_permissive_refusal() {
     }
 }
 
-/// allow_local_network=true + NetworkEnforcementMode::Capabilities.
+/// allow_local_network=true under a 0.7 network section.
 ///
-/// Capabilities mode returns early before the firewall path is entered; the
-/// permissive guard is never reached.  This catches anyone who hoists the guard
-/// above the enforcement-mode gate, which would break every capabilities-mode
-/// config.
+/// The permissive guard is what refuses this, and it must not be reachable only
+/// through one enforcement mode -- LXC has a single inbound chain and no way to
+/// scope an accept, so the refusal holds for every 0.7 policy that asks for it.
 #[test]
-fn permissive_inbound_capabilities_mode_is_not_refused() {
-    let policy = ContainerPolicy {
-        allow_local_network: true,
-        network_enforcement_mode: NetworkEnforcementMode::Capabilities,
-        ..Default::default()
-    };
-    let mut mgr = IngressManager::new("test-container-perm-caps", UNOCCUPIABLE_NETNS_PID, false);
-    let mut logger = make_logger();
+fn permissive_inbound_is_refused_under_every_accepted_mode() {
+    for mode in [
+        NetworkEnforcementMode::Firewall,
+        NetworkEnforcementMode::Both,
+    ] {
+        let policy = ContainerPolicy {
+            allow_local_network: true,
+            network_enforcement_mode: mode.clone(),
+            ..Default::default()
+        };
+        let mut mgr = IngressManager::new("test-container-perm-modes", UNOCCUPIABLE_NETNS_PID);
+        let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, &mut logger);
+        let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
-    // Capabilities mode returns Ok(true) before the firewall path.
-    assert!(
-        result.is_ok(),
-        "allow_local_network=true, mode=Capabilities: expected early Ok, got {:?}",
-        result
-    );
+        assert!(
+            result.is_err(),
+            "allow_local_network=true, mode={mode:?}: expected refusal, got {result:?}"
+        );
+    }
 }

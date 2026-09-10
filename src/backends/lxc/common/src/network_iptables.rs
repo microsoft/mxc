@@ -4,50 +4,111 @@
 //! Network policy enforcement via iptables rules scoped to the LXC container.
 //!
 //! Maps the platform-agnostic `ContainerPolicy` network settings to iptables
-//! and ip6tables rules applied to the container's virtual ethernet (veth)
-//! interface.
+//! and ip6tables rules installed inside the container's own network namespace,
+//! where they govern every packet the container sends.
 
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
-use std::path::Path;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkEnforcementMode,
-    NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
-    ProxyHostPin,
+    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
+    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
 };
 
-/// True when this run installs firewall chains.
-///
-/// A run carries one schema. 0.8 states a posture with no mode to opt out of,
-/// so it always enforces; 0.7 enforces only where the config asked for it.
-pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    if uses_directional_schema {
-        true
-    } else {
-        NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode)
+/// The network topology this run gives the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkPlan {
+    /// Loopback only, with no veth to filter.
+    Isolated,
+
+    /// A veth, with chains governing what the container may send.
+    Filtered,
+}
+
+impl NetworkPlan {
+    /// True when the container starts with no network interface.
+    pub(crate) fn omits_interface(self) -> bool {
+        matches!(self, Self::Isolated)
+    }
+
+    /// True when this run installs firewall chains.
+    pub(crate) fn installs_firewall(self) -> bool {
+        matches!(self, Self::Filtered)
     }
 }
 
-/// True when the container needs a reachable network.
-///
-/// Wider than [`installs_firewall`]: host lists resolve names, and a proxy has
-/// to be reachable, even where the declared mode installs nothing.
-pub(crate) fn needs_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    installs_firewall(policy, uses_directional_schema)
-        || !policy.allowed_hosts.is_empty()
-        || !policy.blocked_hosts.is_empty()
-        || policy.network_proxy.is_enabled()
+/// True when the configuration stated its network posture in the 0.8 keys.
+pub(crate) fn uses_directional_keys(policy: &ContainerPolicy) -> bool {
+    policy.network_egress.is_some() || policy.network_ingress.is_some()
+}
+
+/// A 0.8.0 configuration file can carry 0.7.0 network fields.
+pub(crate) fn plan_network(policy: &ContainerPolicy) -> NetworkPlan {
+    if uses_directional_keys(policy) {
+        plan_directional(policy)
+    } else {
+        plan_legacy(policy)
+    }
+}
+
+/// Choose the network plan for a policy stated in the 0.8 directional fields.
+fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
+    if policy.network_proxy.is_enabled() {
+        return NetworkPlan::Filtered;
+    }
+
+    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+        return NetworkPlan::Filtered;
+    }
+
+    let egress_permits_nothing = match policy.network_egress.as_ref() {
+        Some(egress) => egress.default == NetworkAction::Deny && egress.allow.is_empty(),
+        None => matches!(policy.default_network_policy, NetworkPolicy::Block),
+    };
+
+    let ingress_permits_nothing = match policy.network_ingress.as_ref() {
+        Some(ingress) => {
+            ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
+        }
+        None => !policy.allow_local_network,
+    };
+
+    if egress_permits_nothing && ingress_permits_nothing {
+        NetworkPlan::Isolated
+    } else {
+        NetworkPlan::Filtered
+    }
+}
+
+/// Choose the network plan for a policy stated in the 0.7 legacy fields.
+fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
+    if policy.network_proxy.is_enabled() {
+        return NetworkPlan::Filtered;
+    }
+
+    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+        return NetworkPlan::Filtered;
+    }
+
+    if matches!(policy.default_network_policy, NetworkPolicy::Block) && !policy.allow_local_network
+    {
+        return NetworkPlan::Isolated;
+    }
+
+    NetworkPlan::Filtered
+}
+
+/// True when the container holds an interface, which is unusable until an
+/// address lands on it.
+pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
+    !plan_network(policy).omits_interface()
 }
 
 /// One destination the container is allowed to reach when the policy routes
 /// egress through a cooperative proxy: an address the proxy host resolved to,
 /// and the TCP port the proxy listens on.
-///
-/// The address is held as a string because that is what an iptables `-d`
-/// argument takes, matching [`ResolvedDestinations`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProxyEndpoint {
     ip: String,
@@ -60,19 +121,7 @@ enum IpFamily {
     V6,
 }
 
-/// Where the kernel reports per-interface attributes. Injectable in tests via
-/// the `_in` form of the lookup below.
-const SYSFS_NET_ROOT: &str = "/sys/class/net";
-
-/// Toggles that decide whether bridged packets are handed to iptables and
-/// ip6tables at all. A bridged container's chain is unreachable unless the
-/// matching one reads `1`.
-const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
-const BRIDGE_NF_CALL_IP6TABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-ip6tables";
-
-/// Whether a host-list entry produces an ACCEPT or a DROP rule. Local to this
-/// backend: it distinguishes `allowedHosts` from `blockedHosts` and is not a
-/// policy-schema type.
+/// Whether a host-list entry produces an ACCEPT or a DROP rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleAction {
     Allow,
@@ -84,27 +133,19 @@ enum RuleAction {
 /// precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EgressEntry {
-    /// Hostname, IP literal, or CIDR; owned because a 0.8 peer arrives as a
-    /// parsed [`NetworkCidr`] with no string to borrow.
+    /// Hostname, IP literal, or CIDR.
     destination: String,
     action: RuleAction,
     matching: RuleMatch,
 }
 
-/// The protocol and port a single iptables rule matches on: only matches
-/// iptables can express in one rule are representable.
-///
-/// Protocol `any` alongside a port has no `-p all --dport` form and lowers to
-/// separate TCP and UDP matches instead.
+/// The protocol and port a single iptables rule matches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleMatch {
-    /// Every protocol and every port — the match for a 0.8 rule with no
-    /// `ports` selector, and the only match a legacy host-list entry has.
+    /// Every protocol and every port.
     AnyTraffic,
 
-    /// ICMP, which carries no port and is rendered `icmp` under `iptables`
-    /// but `icmpv6` under `ip6tables` — naming it `icmp` on the IPv6 command
-    /// is rejected rather than silently ignored.
+    /// ICMP, rendered `icmp` under `iptables` but `icmpv6` under `ip6tables`.
     Icmp,
 
     /// TCP or UDP, optionally narrowed to an inclusive destination port range.
@@ -130,8 +171,7 @@ impl TransportProtocol {
     }
 }
 
-/// An inclusive destination port range. A single port is a range whose ends
-/// are equal, which keeps one representation for both schema forms.
+/// An inclusive destination port range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PortRange {
     start: u16,
@@ -163,16 +203,8 @@ impl FirewallRuleArgs {
     }
 }
 
-/// Records exactly which per-family chains and FORWARD hooks a single apply
-/// attempt created, so rollback and teardown remove only what this manager
-/// installed. Without this, a partial-failure rollback would tear down chains
-/// this attempt never created: the chain name is a pure function of the
-/// container name, so a chain already present under our name belongs to an
-/// earlier or concurrent run and is not ours to remove.
-///
-/// Visible to the crate (with private fields) purely so `signal_cleanup` can
-/// carry the value from the runner thread to the watchdog thread. The watchdog
-/// never inspects it; it only hands it back to [`NetworkIptablesManager::force_cleanup`].
+/// The per-family chains and OUTPUT hooks one apply attempt created.  Teardown
+/// and rollback remove only these, never a chain this attempt did not create.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CreatedResources {
     v4: FamilyResources,
@@ -180,41 +212,25 @@ pub(crate) struct CreatedResources {
 }
 
 /// What one address family's apply installed, and therefore owes a teardown.
-///
-/// The two families are symmetric in every path that reads this, so they are
-/// the same type rather than parallel fields with a `v4_`/`v6_` prefix. That
-/// symmetry is what lets setup, rollback, and teardown be written once.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FamilyResources {
     chain: bool,
     hook: bool,
-    physdev_hook: bool,
-    return_rule: bool,
-    physdev_return: bool,
 }
 
 impl FamilyResources {
     fn is_empty(&self) -> bool {
-        !self.chain && !self.hook && !self.physdev_hook && !self.return_rule && !self.physdev_return
-    }
-
-    /// Whether a FORWARD hook survived teardown and still references the chain.
-    fn hooks_remain(&self) -> bool {
-        self.hook || self.physdev_hook
+        !self.chain && !self.hook
     }
 }
 
 /// Flush and delete the chain, reporting whether it is still owned afterward.
 ///
-/// `hooks_remain` gates the entire step, flush included. That ordering is the
-/// point of the function: a hook that survived its own delete still jumps to
-/// this chain, and a flushed chain returns to the caller instead of reaching
-/// its closing DROP. Flushing first would therefore fail a still-running
-/// container open, and `-X` would fail anyway because iptables refuses to
-/// delete a referenced chain -- so the flush buys nothing and costs the
-/// container its filtering. Leaving the chain populated keeps the intermediate
-/// state fail closed, and returning `true` keeps it published so a later pass
-/// retries.
+/// `hooks_remain` gates the whole step, flush included: a flushed user chain
+/// returns to its caller instead of reaching its closing DROP, which would
+/// unfilter a still-running container, and iptables refuses to delete a chain
+/// a surviving hook still references.  Leaving the chain populated fails
+/// closed; returning `true` keeps it published for a later pass to retry.
 fn teardown_chain(
     created_chain: bool,
     hooks_remain: bool,
@@ -233,32 +249,24 @@ fn teardown_chain(
 }
 
 impl CreatedResources {
-    /// Whether nothing was created, in which case there is nothing to tear
-    /// down and teardown must not run a single iptables command.
-    ///
-    /// Only reachable from the signal path, which is Linux-only; kept
-    /// compiled on every target so Windows and macOS CI still type-check it.
+    /// Whether nothing was created, in which case teardown must run no
+    /// iptables command.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_empty(&self) -> bool {
         self.v4.is_empty() && self.v6.is_empty()
     }
 
-    /// Test-only constructor so `signal_cleanup`'s tests can build a
-    /// distinguishable, non-default ownership record without widening the
-    /// production API. Production code only ever obtains one of these by
-    /// creating the resources it names.
+    /// Test-only constructor that builds a non-default ownership record.
     #[cfg(test)]
     pub(crate) fn for_test(v4_chain: bool, v6_chain: bool, v4_hook: bool, v6_hook: bool) -> Self {
         Self {
             v4: FamilyResources {
                 chain: v4_chain,
                 hook: v4_hook,
-                ..Default::default()
             },
             v6: FamilyResources {
                 chain: v6_chain,
                 hook: v6_hook,
-                ..Default::default()
             },
         }
     }
@@ -270,9 +278,6 @@ impl CreatedResources {
         let all = FamilyResources {
             chain: true,
             hook: true,
-            physdev_hook: true,
-            return_rule: true,
-            physdev_return: true,
         };
 
         Self { v4: all, v6: all }
@@ -281,45 +286,53 @@ impl CreatedResources {
 
 /// Three-way classification of whether `ip6tables` can be used on this host.
 ///
-/// The old boolean probe collapsed two very different situations into "skip
-/// IPv6": a kernel with IPv6 disabled (nothing to filter, safe to skip) and an
-/// IPv6-capable host whose `ip6tables` userspace tool is missing or broken
-/// (IPv6 egress is live but unfiltered, which is a silent fail-open on a
-/// security control). They must be handled differently.
+/// An IPv6-capable host whose `ip6tables` tool is missing or broken has live
+/// IPv6 egress that would go unfiltered, a different situation from a kernel
+/// with IPv6 disabled where there is nothing to filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ip6tablesStatus {
     /// `ip6tables` works; program the parallel IPv6 chain.
     Available,
+
     /// The kernel has no active IPv6, so there is no IPv6 traffic to filter.
-    /// Skipping the IPv6 chain is safe.
     KernelIpv6Disabled,
-    /// The host has active IPv6 but `ip6tables` is missing or broken. Applying
-    /// only the IPv4 policy would leave IPv6 egress unfiltered, so setup must
-    /// fail closed instead.
+
+    /// The host has active IPv6 but `ip6tables` is missing or broken; setup
+    /// must fail closed rather than leave IPv6 egress unfiltered.
     UnusableButIpv6Active,
 }
 
 /// Whether the host has egress-capable IPv6, or whether that could not be
 /// determined.
 ///
-/// Distinguishing `Unknown` from `Inactive` keeps a failed read of
-/// `/proc/net/if_inet6` from being silently converted into a confirmed "IPv6
-/// is off". That conflation would fail open — proceeding with an IPv4-only
-/// policy that leaves IPv6 egress unfiltered — on a host whose IPv6 state we
-/// could not actually read.
+/// `Unknown` is kept distinct from `Inactive` because an unreadable
+/// `/proc/net/if_inet6` must not be converted into a confirmed "IPv6 is off",
+/// which would fail open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostIpv6State {
-    /// A non-loopback interface carries an IPv6 address, so IPv6 egress is
-    /// possible and must be filtered.
+    /// A non-loopback interface carries an IPv6 address.
     Active,
-    /// No IPv6 addresses beyond loopback (`::1` on `lo`), or the kernel never
-    /// created `/proc/net/if_inet6` at all (IPv6 disabled at boot). Either way
-    /// there is no IPv6 egress to filter.
+
+    /// No IPv6 addresses beyond loopback, or the kernel never created
+    /// `/proc/net/if_inet6` at all.
     Inactive,
-    /// The IPv6 state could not be read. This is deliberately **not** treated
-    /// as a confirmed negative: an unreadable `/proc/net/if_inet6` means "we
-    /// do not know", not "IPv6 is off".
+
+    /// The IPv6 state could not be read.
     Unknown,
+}
+
+/// Where the egress chain is hooked, which decides whether the policy it holds
+/// filters anything at all.
+///
+/// Unprivileged Bubblewrap owns no network namespace it can enforce inside,
+/// unlike LXC, which owns the container's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressHookPoint {
+    /// The container's own network namespace, entered by this PID.
+    ContainerNetns(u32),
+
+    /// Nowhere; the chain is built on the host and never hooked.
+    Unhooked,
 }
 
 /// Manages iptables rules for an LXC container's network policy.
@@ -330,22 +343,10 @@ pub struct NetworkIptablesManager {
     rules_applied: bool,
     /// Whether the caller asked for this policy to outlive the run.
     preserve_policy: bool,
-    /// The container's veth interface name on the host.
-    veth_interface: Option<String>,
-    /// Whether a caller that never supplies a veth is expected rather than
-    /// broken.
-    veth_scoping_optional: bool,
-    /// True when the request declared the directional (0.8) network schema.
-    /// Defaults to the legacy schema, so a caller that never sets it keeps the
-    /// 0.7 behavior.
-    uses_directional_schema: bool,
-    /// Topology the hook logic assumes, in place of the sysfs probe.
-    ///
-    /// Test-only. A build host has no `/sys/class/net`, so the probe's
-    /// honest answer there is [`VethTopology::Unknown`] for every container.
-    #[cfg(test)]
-    topology_override: Option<VethTopology>,
-    /// Chains and FORWARD hooks this manager successfully created, so teardown
+    /// Where this manager's chain is hooked, and therefore whether the
+    /// commands that build it enter a network namespace first.
+    hook_point: EgressHookPoint,
+    /// Chains and OUTPUT hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
     /// The hosts-file pin that resolves the proxy hostname to the one address
@@ -354,29 +355,24 @@ pub struct NetworkIptablesManager {
     proxy_pin: Option<ProxyHostPin>,
 }
 
-/// iptables rejects chain names of 29 characters or more, so 28 is the ceiling
-/// every generated name must respect.
+/// iptables rejects chain names of 29 characters or more.
 pub const CHAIN_NAME_MAX_LEN: usize = 28;
 
-/// SHA-256 bytes folded into the chain-name suffix. Ten bytes is 80 bits, and
-/// encodes to exactly 16 base32 characters with no padding.
+/// SHA-256 bytes folded into the chain-name suffix.  Ten bytes is 80 bits,
+/// which encodes to exactly 16 base32 characters with no padding.
 const CHAIN_HASH_BYTES: usize = 10;
 
 /// Characters of the original container name kept as a human-readable hint.
-/// This carries no identity; two containers may share a slug.
 const CHAIN_SLUG_LEN: usize = 7;
 
-/// Slug budget for the inbound (ingress) chain. The ingress prefix `MXCI-` is
-/// one byte longer than the egress `MXC-`, so the slug is shortened by one to
-/// keep `MXCI-<slug>-<hash>` within [`CHAIN_NAME_MAX_LEN`]
-/// (5 + 6 + 1 + 16 = 28).
+/// Slug budget for the inbound (ingress) chain.  The `MXCI-` prefix is one
+/// byte longer than the egress `MXC-`, so the slug is shortened by one to keep
+/// `MXCI-<slug>-<hash>` within [`CHAIN_NAME_MAX_LEN`].
 const INGRESS_CHAIN_SLUG_LEN: usize = 6;
 
-/// RFC 4648 base32 alphabet, lowercased. Base32 packs 5 bits per character
-/// against hex's 4, so 80 bits needs 16 characters here where hex would need
-/// 20. `MXC-`, the slug, and the slug's separator take 12 of the 28 bytes,
-/// leaving exactly 16 for the hash, so hex could not carry 80 bits without
-/// giving up the slug entirely.
+/// RFC 4648 base32 alphabet, lowercased.  Base32 packs 5 bits per character
+/// against hex's 4, so the 80-bit hash fits in 16 characters where hex would
+/// need 20 and overrun the name budget.
 const BASE32_LOWER: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// Encode bytes as lowercase base32 without padding.
@@ -406,43 +402,26 @@ fn base32_lower(bytes: &[u8]) -> String {
 /// Build the iptables chain name for a container.
 ///
 /// Produces `MXC-<slug>-<hash>`, or `MXC-<hash>` when the container name
-/// contains no characters a slug may keep. The result is always ASCII, always
-/// at most [`CHAIN_NAME_MAX_LEN`] bytes, and always the same for the same
-/// input.
-///
-/// The slug keeps the first [`CHAIN_SLUG_LEN`] ASCII alphanumeric, `-`, or `_`
-/// characters of the container name, in order, discarding everything else. It
-/// is a debugging hint only.
-///
-/// The hash is taken over the *original* container name, so container names
-/// that differ only in characters the slug drops, or only past the slug's
-/// length, still receive different chains. Two names collide only if their
-/// SHA-256 digests collide in the leading 80 bits.
-///
-/// This defends against accidental collision, not against an adversary who
-/// chooses container names; that requires a persisted ownership record rather
-/// than a longer name, because 28 characters caps the available entropy.
+/// contains no characters a slug may keep.  The hash is taken over the
+/// original container name, so names that differ only in slug-dropped
+/// characters still receive different chains; two names collide only if their
+/// SHA-256 digests collide in the leading 80 bits.  This defends against
+/// accidental collision, not against an adversary who chooses container names.
 pub fn chain_name_for(container_name: &str) -> String {
     chain_name_with_prefix("MXC-", CHAIN_SLUG_LEN, container_name)
 }
 
-/// Build the *inbound* (ingress) iptables chain name for a container.
+/// Build the inbound (ingress) iptables chain name for a container.
 ///
-/// Uses a distinct `MXCI-` prefix (vs [`chain_name_for`]'s `MXC-`) so the
-/// inbound `INPUT` chain and the egress `FORWARD` chain for the same container
-/// can never collide or be torn down for each other. Reuses the same base32
-/// hash machinery and stays within [`CHAIN_NAME_MAX_LEN`]; see
-/// [`INGRESS_CHAIN_SLUG_LEN`]. The hash is over the *original* container name,
-/// as in [`chain_name_for`].
+/// Uses a distinct `MXCI-` prefix so the inbound `INPUT` chain and the egress
+/// `OUTPUT` chain for the same container can never collide or be torn down for
+/// each other.
 pub fn ingress_chain_name_for(container_name: &str) -> String {
     chain_name_with_prefix("MXCI-", INGRESS_CHAIN_SLUG_LEN, container_name)
 }
 
 /// Shared chain-name builder: `<prefix><slug>-<hash>`, or `<prefix><hash>` when
-/// the container name yields no slug. The hash is the leading
-/// [`CHAIN_HASH_BYTES`] of the SHA-256 of the original container name, base32
-/// encoded, so names that differ only in slug-dropped characters still receive
-/// different chains.
+/// the container name yields no slug.
 fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -> String {
     let digest = Sha256::digest(container_name.as_bytes());
     let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
@@ -460,33 +439,22 @@ fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -
     }
 }
 
-/// What a sysfs lookup established about a veth's topology.
-///
-/// Failure to establish it is a third answer rather than a negative one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VethTopology {
-    /// The interface is attached to a bridge.
-    Bridged,
-    /// The interface is not attached to a bridge. Established, not assumed.
-    DirectlyRouted,
-    /// The topology could not be established.
-    Unknown,
-}
 impl NetworkIptablesManager {
-    /// Create a new manager for the given container name.
-    pub fn new(container_name: &str) -> Self {
+    /// Create a new manager that enforces at `hook_point`.
+    pub fn new(container_name: &str, hook_point: EgressHookPoint) -> Self {
         Self {
             chain_name: chain_name_for(container_name),
             rules_applied: false,
             preserve_policy: false,
-            veth_interface: None,
-            veth_scoping_optional: false,
-            uses_directional_schema: false,
-            #[cfg(test)]
-            topology_override: Some(VethTopology::DirectlyRouted),
+            hook_point,
             created: CreatedResources::default(),
             proxy_pin: None,
         }
+    }
+
+    /// Whether this manager has a namespace to enforce in.
+    pub fn is_hooked(&self) -> bool {
+        matches!(self.hook_point, EgressHookPoint::ContainerNetns(_))
     }
 
     /// The iptables chain name this manager owns.
@@ -499,356 +467,25 @@ impl NetworkIptablesManager {
         self.rules_applied
     }
 
-    /// Leave the chain and its FORWARD hooks installed when this manager is
+    /// Leave the chain and its OUTPUT hooks installed when this manager is
     /// dropped.
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
     }
 
-    /// Record which network schema the request declared.
-    pub fn set_directional_schema(&mut self, uses_directional_schema: bool) {
-        self.uses_directional_schema = uses_directional_schema;
-    }
-
     /// The hosts-file pin a proxied container must be given before it runs, or
     /// `None` when the policy needs no pin.
     ///
-    /// The pin is a record of a lookup rather than something recomputed on
-    /// demand, because round-robin and split-horizon DNS can answer one name
-    /// with a different address each time. A pin built from a second lookup
-    /// could name an address the chain never allowed.
+    /// The pin records the lookup the chain was built from because round-robin
+    /// and split-horizon DNS can answer one name with a different address each
+    /// time, and a pin from a second lookup could name an address the chain
+    /// never allowed.
     pub fn proxy_host_pin(&self) -> Option<&ProxyHostPin> {
         self.proxy_pin.as_ref()
     }
 
-    /// Whether this manager has been told a missing veth is expected.
-    pub fn veth_scoping_is_optional(&self) -> bool {
-        self.veth_scoping_optional
-    }
-
-    /// Discover the host-side veth interface name for a running container.
-    /// Parses the `Link:` line from `lxc-info -n <name>` output.
-    /// Returns the veth interface name (e.g., "vethXXXXXX") if found.
-    pub fn discover_veth_interface(container_name: &str) -> Option<String> {
-        // Use lxc-info without -i to get the full output including the Link: line.
-        // Output format includes: "Link:           vethXXXXXX"
-        let output = Command::new("lxc-info")
-            .arg("-n")
-            .arg(container_name)
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse the "Link:" line from lxc-info output
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if let Some(link_name) = trimmed.strip_prefix("Link:") {
-                let veth = link_name.trim();
-                if veth.starts_with("veth") {
-                    return Some(veth.to_string());
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Set the veth interface name for the container.
-    pub fn set_veth_interface(&mut self, iface: &str) {
-        self.veth_interface = Some(iface.to_string());
-    }
-
-    /// Declare the topology the hook logic should assume, in place of probing.
-    #[cfg(test)]
-    fn set_topology_override(&mut self, topology: VethTopology) {
-        self.topology_override = Some(topology);
-    }
-
-    /// Declare that this caller has no veth to scope the chain to, so a missing
-    /// one is a structural fact rather than a failed lookup.
-    ///
-    /// LXC always names a veth once the container is running, so a manager that
-    /// reaches rule installation without one has lost the interface it needed
-    /// and must fail fast. Unprivileged Bubblewrap has no veth at all — the
-    /// sandbox either shares the host network namespace or gets a private one,
-    /// and neither yields a host-side interface to match on. Failing there would
-    /// refuse to start every Bubblewrap sandbox that asks for firewall mode.
-    ///
-    /// The policy is **not** enforced for a caller that sets this: there is no
-    /// host-side interface to hook FORWARD on, so the chain exists and nothing
-    /// reaches it. That is why the declaration is opt-in and logged -- an
-    /// unenforced chain is indistinguishable from an enforced one otherwise.
-    pub fn allow_missing_veth_interface(&mut self) {
-        self.veth_scoping_optional = true;
-    }
-
-    /// Build one FORWARD hook rule matching the veth as the input interface.
-    ///
-    /// `op` is `-I` or `-D`. One builder serves both because iptables deletes
-    /// by full rule specification: a delete whose spec differs from the insert
-    /// by even one match removes nothing, reports nothing, and leaves the hook
-    /// in place.
-    fn build_forward_hook_iface_rule_args(op: &str, iface: &str, chain_name: &str) -> Vec<String> {
-        vec![
-            op.to_string(),
-            "FORWARD".to_string(),
-            "-i".to_string(),
-            iface.to_string(),
-            "-j".to_string(),
-            chain_name.to_string(),
-        ]
-    }
-
-    /// Build one FORWARD hook rule matching the veth as the *bridge port* the
-    /// packet entered on.
-    ///
-    /// On the default LXC topology the veth is attached to a bridge
-    /// (`lxc.net.0.link` set to `lxcbr0`). A packet leaving such a container is
-    /// bridged onto `lxcbr0` and then routed off it, so by the time FORWARD
-    /// sees the packet its input interface is the bridge and not the veth --
-    /// an `-i <veth>` rule matches nothing at all.
-    ///
-    /// `--physdev-in` still names one specific bridge port, so the chain stays
-    /// scoped to a single container. Matching the bridge itself would apply
-    /// one container's policy to every container sharing it.
-    fn build_forward_hook_physdev_rule_args(
-        op: &str,
-        iface: &str,
-        chain_name: &str,
-    ) -> Vec<String> {
-        vec![
-            op.to_string(),
-            "FORWARD".to_string(),
-            "-m".to_string(),
-            "physdev".to_string(),
-            "--physdev-in".to_string(),
-            iface.to_string(),
-            "-j".to_string(),
-            chain_name.to_string(),
-        ]
-    }
-
-    /// Determine whether `iface` is attached to a bridge, looked up under an
-    /// injectable sysfs root so this is testable without a live interface.
-    ///
-    /// `master` is a symlink, and `Path::exists` follows links, so it would
-    /// report a dangling `master` as absent -- a bridged interface read as
-    /// directly routed. Only `symlink_metadata` sees the link itself.
-    fn veth_topology_in(sysfs_net_root: &Path, iface: &str) -> VethTopology {
-        let iface_dir = sysfs_net_root.join(iface);
-        match std::fs::symlink_metadata(iface_dir.join("master")) {
-            Ok(_) => VethTopology::Bridged,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // `metadata` here, not `symlink_metadata`, and the asymmetry is
-                // deliberate. In real sysfs `/sys/class/net/<iface>` is itself a
-                // symlink into `/sys/devices`, and `symlink_metadata` succeeds
-                // on a dangling one -- which would report an interface whose
-                // target is unreachable as positively directly routed. Only a
-                // directory that actually resolves proves the absent `master`
-                // was observed rather than merely unreachable.
-                match std::fs::metadata(&iface_dir) {
-                    Ok(_) => VethTopology::DirectlyRouted,
-                    Err(_) => VethTopology::Unknown,
-                }
-            }
-            Err(_) => VethTopology::Unknown,
-        }
-    }
-
-    /// Whether bridged traffic is delivered to iptables at all, read from an
-    /// injectable path.
-    ///
-    /// The file exists only when `br_netfilter` is loaded, and a value of `1`
-    /// is what makes `--physdev-in` able to match. Absent or `0`, a bridged
-    /// container's packets bypass these chains entirely.
-    fn bridge_netfilter_active_at(path: &Path) -> bool {
-        std::fs::read_to_string(path)
-            .map(|contents| contents.trim() == "1")
-            .unwrap_or(false)
-    }
-
-    /// Probe the real sysfs, unless a test declared the topology outright.
-    fn veth_topology(&self, iface: &str) -> VethTopology {
-        #[cfg(test)]
-        if let Some(topology) = self.topology_override {
-            return topology;
-        }
-        Self::veth_topology_in(Path::new(SYSFS_NET_ROOT), iface)
-    }
-
-    /// Whether the hook logic must treat `topology` as bridged.
-    ///
-    /// Bridged is the conservative answer, so it is what an absence of
-    /// evidence reaches. Only a positive [`VethTopology::DirectlyRouted`]
-    /// finding earns the other one, which is why this tests for that finding
-    /// rather than for [`VethTopology::Bridged`].
-    fn treat_as_bridged(topology: VethTopology) -> bool {
-        topology != VethTopology::DirectlyRouted
-    }
-
-    /// Production wrapper over [`Self::bridge_netfilter_active_at`].
-    fn bridge_netfilter_active(path: &str) -> bool {
-        Self::bridge_netfilter_active_at(Path::new(path))
-    }
-
-    /// Install the `--physdev-in` FORWARD hook for one family.
-    ///
-    /// Whether a failure is fatal turns on the topology and not on the family,
-    /// which is why `bridged` is the only thing that decides it. The `physdev`
-    /// match is a separate kernel module a host may simply not have: where the
-    /// `-i` hook already carries the traffic its absence costs nothing, and
-    /// where it does not the chain is unreachable from FORWARD and the policy
-    /// is unenforced.
-    fn install_physdev_hook(
-        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
-        iface: &str,
-        chain_name: &str,
-        bridged: bool,
-        tool: &str,
-        logger: &mut Logger,
-    ) -> Result<bool, String> {
-        let rule = Self::build_forward_hook_physdev_rule_args("-I", iface, chain_name);
-        match run(&[rule], logger) {
-            Ok(()) => Ok(true),
-            Err(err) if bridged => Err(format!(
-                "Failed to install the physdev FORWARD hook on bridged veth {} for chain {} \
-                 ({}): {}. That rule is the only one a bridged container's packets can match, \
-                 so the policy would not be enforced. Refusing to report success for an \
-                 unenforceable policy.",
-                iface, chain_name, tool, err
-            )),
-            Err(err) => {
-                logger.log_line(&format!(
-                    "Warning: could not install the physdev FORWARD hook on {} for chain {} \
-                     ({}): {}. The veth is not bridged, so the interface hook already carries \
-                     this container's traffic.",
-                    iface, chain_name, tool, err
-                ));
-                Ok(false)
-            }
-        }
-    }
-
-    /// Build one FORWARD rule accepting reply traffic back to the container.
-    ///
-    /// The chain hooks traffic *leaving* the container (`-i` / `--physdev-in`),
-    /// so a reply -- which arrives with the container's port as the output
-    /// interface -- matches no MXC rule and falls through to the host's FORWARD
-    /// policy. Where that policy is DROP, which is what installing Docker sets
-    /// it to, an explicitly allowed destination is unreachable: the request
-    /// goes out and the answer never comes back.
-    ///
-    /// Accepting on connection state cannot widen the policy, because a packet
-    /// the chain drops never creates state. Conntrack attaches an *unconfirmed*
-    /// entry at PREROUTING, but only `nf_conntrack_confirm` inserts it into the
-    /// table, and that runs after the FORWARD verdict -- so a dropped packet is
-    /// freed and takes its unconfirmed entry with it. The reverse packet then
-    /// finds no state, is classified `NEW` rather than `ESTABLISHED`, matches
-    /// nothing here, and falls to the host policy.
-    ///
-    /// The flows it does carry include ones the *host* authorized inbound, not
-    /// only ones this chain authorized outbound: any connection whose first
-    /// packet already passed the host's own policy has state. Inbound `NEW`
-    /// connections match nothing here.
-    ///
-    /// It accepts rather than jumping to the chain, even though the chain
-    /// carries an `ESTABLISHED,RELATED` rule of its own that would match. The
-    /// chain's other rules are written against `-d <destination>` for egress,
-    /// so an inbound packet that is not established would be tested against
-    /// egress-shaped rules and, under an `allow` default, hit the chain's
-    /// closing ACCEPT -- making this an inbound enforcement surface carrying
-    /// egress semantics.
-    fn build_forward_return_iface_rule_args(op: &str, iface: &str) -> Vec<String> {
-        vec![
-            op.to_string(),
-            "FORWARD".to_string(),
-            "-o".to_string(),
-            iface.to_string(),
-            "-m".to_string(),
-            "state".to_string(),
-            "--state".to_string(),
-            "ESTABLISHED,RELATED".to_string(),
-            "-j".to_string(),
-            "ACCEPT".to_string(),
-        ]
-    }
-
-    /// The bridge-port form of [`Self::build_forward_return_iface_rule_args`].
-    ///
-    /// `--physdev-out` names a bridge port that has already been selected,
-    /// which happens for a packet being bridged. A reply from outside arrives
-    /// on the host's uplink and is routed toward `lxcbr0`, so on the default
-    /// bridged topology no port is selected while FORWARD runs and this rule
-    /// does not match -- nor does the interface form, whose output device is
-    /// `lxcbr0` rather than the veth. The ingress pair is not symmetric with
-    /// it: `--physdev-in` matches because the packet demonstrably arrived on
-    /// the veth.
-    fn build_forward_return_physdev_rule_args(op: &str, iface: &str) -> Vec<String> {
-        vec![
-            op.to_string(),
-            "FORWARD".to_string(),
-            "-m".to_string(),
-            "physdev".to_string(),
-            "--physdev-out".to_string(),
-            iface.to_string(),
-            "-m".to_string(),
-            "state".to_string(),
-            "--state".to_string(),
-            "ESTABLISHED,RELATED".to_string(),
-            "-j".to_string(),
-            "ACCEPT".to_string(),
-        ]
-    }
-
-    /// Install one return-path rule, downgrading any failure to a warning.
-    ///
-    /// Unlike the chain hooks, a missing rule here cannot fail open: the rule
-    /// only ever *accepts*, so failing to install it can leave the container
-    /// less connected but never less filtered. Refusing to run over it would
-    /// turn a connectivity limitation into an outage on hosts where the
-    /// forward policy is ACCEPT and nothing was broken to begin with.
-    ///
-    /// Takes the builder rather than a built rule so the removal it attempts on
-    /// failure cannot drift from the insert. `-I` reporting failure is only
-    /// nearly conclusive -- a command killed after the kernel accepted its rule
-    /// reports failure too -- and this returns `false`, which clears ownership.
-    /// Without the removal that combination strands an `ESTABLISHED,RELATED`
-    /// ACCEPT on a veth name the host is free to hand to another container.
-    fn install_return_rule(
-        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
-        build: fn(&str, &str) -> Vec<String>,
-        form: &str,
-        iface: &str,
-        tool: &str,
-        logger: &mut Logger,
-    ) -> bool {
-        match run(&[build("-I", iface)], logger) {
-            Ok(()) => true,
-            Err(err) => {
-                let _ = run(&[build("-D", iface)], logger);
-                logger.log_line(&format!(
-                    "Warning: could not install the {} return-path rule for {} ({}): {}. \
-                     Replies to allowed outbound connections will rely on the host's FORWARD \
-                     policy, so a DROP policy would make allowed destinations unreachable.",
-                    form, iface, tool, err
-                ));
-                false
-            }
-        }
-    }
-
-    /// Whether a programmed destination accepts every address in its family.
-    ///
-    /// The question is provable coverage, not likely coverage. A prefix length
-    /// of zero covers an unknown address without anyone having to know what
-    /// that address is; a literal or any longer prefix names a bounded set that
-    /// an unresolved host may or may not fall inside, and nothing available
-    /// here can decide which. Only the first is treated as coverage.
+    /// Whether a programmed destination provably accepts every address in its
+    /// family, which only a prefix length of zero does.
     fn covers_every_address(destination: &str) -> bool {
         destination
             .split_once('/')
@@ -858,24 +495,19 @@ impl NetworkIptablesManager {
 
     /// Resolve a destination string to IPv4 and IPv6 firewall destinations.
     ///
-    /// Bare IPv4/IPv6 literals are retained in their matching family. CIDR
-    /// strings are accepted after validating that the address parses and the
-    /// prefix length is within range for its family; the host bits are not
-    /// required to be zero, since `iptables`/`ip6tables` apply the prefix mask
-    /// themselves. Validated CIDRs are passed through unchanged. Hostnames are
-    /// resolved to both A and AAAA records so IPv4 destinations route to
-    /// `iptables` and IPv6 destinations route to `ip6tables`.
+    /// Bare literals are retained in their matching family.  CIDR strings pass
+    /// through after the address and prefix length are validated; host bits
+    /// need not be zero because `iptables` applies the prefix mask itself.
+    /// Hostnames are resolved to both A and AAAA records.
     fn resolve_host(host: &str) -> ResolvedDestinations {
-        // An empty entry is not a hostname. Without this guard the DNS branch
-        // below formats ":0", which Winsock resolves to every local interface
-        // address, so an empty policy entry would emit rules for the host's
-        // own addresses. glibc rejects ":0", so this only shows up on Windows.
+        // An empty entry formatted as ":0" is resolved by Winsock to every
+        // local interface address, which would emit rules for the host's own
+        // addresses.  glibc rejects ":0", so this only bites on Windows.
         if host.trim().is_empty() {
             return ResolvedDestinations::default();
         }
 
-        // Rewrite IPv4-mapped destinations to their embedded IPv4 form before
-        // the family split, so they are filed under IPv4 and programmed with
+        // An IPv4-mapped destination is filed under IPv4 and programmed with
         // `iptables`.
         let rewritten = Self::ipv4_mapped_destination(host);
         let host = rewritten.as_deref().unwrap_or(host);
@@ -894,7 +526,6 @@ impl NetworkIptablesManager {
             };
         }
 
-        // Try as IP address first.
         if let Ok(addr) = host.parse::<IpAddr>() {
             return match addr {
                 IpAddr::V4(_) => ResolvedDestinations {
@@ -908,9 +539,6 @@ impl NetworkIptablesManager {
             };
         }
 
-        // Try DNS resolution. The family split is factored into
-        // `bucket_resolved_addrs` so it can be exercised with injected
-        // addresses, independent of whether this host has live IPv6 DNS.
         if let Ok(addrs) = format!("{}:0", host).to_socket_addrs() {
             return Self::bucket_resolved_addrs(addrs.map(|addr| addr.ip()));
         }
@@ -928,9 +556,8 @@ impl NetworkIptablesManager {
         for ip in addrs {
             match ip {
                 IpAddr::V4(ip) => resolved.ipv4.push(ip.to_string()),
-                // A resolver can return a AAAA record in mapped form. It
-                // travels as IPv4 on the wire, so it belongs in the IPv4
-                // bucket — see `ipv4_mapped_destination`.
+                // A resolver can return a AAAA record in mapped form; it
+                // travels as IPv4 on the wire and belongs in the IPv4 bucket.
                 IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
                     Some(v4) => resolved.ipv4.push(v4.to_string()),
                     None => resolved.ipv6.push(ip.to_string()),
@@ -945,17 +572,13 @@ impl NetworkIptablesManager {
     ///
     /// Linux puts a genuine IPv4 packet on the wire for a mapped destination,
     /// so an `ip6tables -d ::ffff:a.b.c.d` rule names traffic that never
-    /// reaches the IPv6 table and therefore never matches. Under a
-    /// `defaultPolicy: allow` policy a mapped `blockedHosts` entry would fail
-    /// open: the operator sees a rule programmed, and the traffic is allowed
-    /// anyway. Rewriting to `a.b.c.d` files the entry under `iptables`, where
-    /// it matches.
+    /// reaches the IPv6 table.  Rewriting to `a.b.c.d` files the entry under
+    /// `iptables`, where it matches.
     ///
-    /// Handles CIDRs inside `::ffff:0:0/96` as well. Because the mapped range
-    /// is the final 32 bits of that /96, an IPv6 prefix of `96 + n` is exactly
-    /// an IPv4 prefix of `n`. A prefix shorter than 96 covers addresses
-    /// outside the mapped range and cannot be expressed as one IPv4 CIDR, so
-    /// it is left as IPv6.
+    /// CIDRs inside `::ffff:0:0/96` are handled too: the mapped range is the
+    /// final 32 bits of that /96, so an IPv6 prefix of `96 + n` is an IPv4
+    /// prefix of `n`.  A prefix shorter than 96 covers addresses outside the
+    /// mapped range and stays IPv6.
     fn ipv4_mapped_destination(destination: &str) -> Option<String> {
         let Some((network, prefix)) = destination.split_once('/') else {
             return destination
@@ -965,8 +588,8 @@ impl NetworkIptablesManager {
                 .map(|v4| v4.to_string());
         };
 
-        // Match `destination_family`'s digits-only rule so this rewrite cannot
-        // launder a malformed prefix (`/+120`) into a well-formed IPv4 CIDR.
+        // Digits-only, matching `destination_family`, so a malformed prefix
+        // (`/+120`) cannot be laundered into a well-formed IPv4 CIDR.
         if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
@@ -980,12 +603,10 @@ impl NetworkIptablesManager {
 
     fn destination_family(destination: &str) -> Option<IpFamily> {
         if let Some((network, prefix)) = destination.split_once('/') {
-            // The prefix must be digits only. `u8::from_str` would otherwise
-            // accept a leading `+`, so `10.0.0.0/+24` would be forwarded to
-            // iptables, which silently canonicalizes it to `10.0.0.0/24`. A
-            // typo in a policy file would then be applied instead of being
-            // reported by the unresolved-host warning. Also subsumes the
-            // embedded-slash case, e.g. `10.0.0.0/20/8`.
+            // Digits only.  `u8::from_str` accepts a leading `+`, so
+            // `10.0.0.0/+24` would reach iptables, which canonicalizes it to
+            // `10.0.0.0/24` and applies a policy typo instead of reporting it.
+            // Also subsumes the embedded-slash case, e.g. `10.0.0.0/20/8`.
             if network.is_empty()
                 || prefix.is_empty()
                 || !prefix.bytes().all(|b| b.is_ascii_digit())
@@ -1015,10 +636,24 @@ impl NetworkIptablesManager {
         }
     }
 
+    /// The rule keeping a container's traffic to its own loopback out of the
+    /// policy.
+    ///
+    /// The selector is `-o`, the outgoing interface: this chain hangs off
+    /// OUTPUT, and `iptables` refuses `-i` on OUTPUT while accepting it into a
+    /// user chain without complaint, where `-i lo` would install clean and
+    /// match nothing.
+    fn build_loopback_accept_rule_args(chain_name: &str) -> Vec<String> {
+        ["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
     fn build_base_chain_rule_args(chain_name: &str) -> Vec<Vec<String>> {
         vec![
-            vec!["-A", chain_name, "-i", "lo", "-j", "ACCEPT"],
-            vec![
+            Self::build_loopback_accept_rule_args(chain_name),
+            [
                 "-A",
                 chain_name,
                 "-m",
@@ -1027,20 +662,51 @@ impl NetworkIptablesManager {
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
-            ],
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         ]
-        .into_iter()
-        .map(|args| args.into_iter().map(String::from).collect())
-        .collect()
     }
 
-    /// The unconditional port 53 accept that only the legacy host-list path
-    /// carries.
+    /// The exemption keeping a container's own DHCP client alive.
     ///
-    /// A directional policy governs DNS like any other destination; applying
-    /// this pair there would leave a standing bypass out of an
-    /// `egress.default: "deny"` container.
-    fn build_legacy_dns_exemption_rule_args(chain_name: &str) -> Vec<Vec<String>> {
+    /// Most clients never reach this chain: `dhcpcd` and `udhcpc` drive the
+    /// exchange over an `AF_PACKET` raw socket, which bypasses netfilter
+    /// entirely.
+    fn build_dhcp_client_exemption_rule_args(
+        chain_name: &str,
+        family: IpFamily,
+    ) -> Vec<Vec<String>> {
+        let (destination, client_port, server_port) = match family {
+            IpFamily::V4 => ("255.255.255.255", "68", "67"),
+            IpFamily::V6 => ("ff02::1:2", "546", "547"),
+        };
+        vec![vec![
+            "-A",
+            chain_name,
+            "-d",
+            destination,
+            "-p",
+            "udp",
+            "--sport",
+            client_port,
+            "--dport",
+            server_port,
+            "-j",
+            "ACCEPT",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()]
+    }
+
+    /// Accept UDP and TCP port 53 to any destination.
+    ///
+    /// The accept names no destination because the resolver's address is not
+    /// known when a closed chain's allow list is written, and the container
+    /// reaches nothing until it can resolve names.
+    fn build_dns_resolution_rule_args(chain_name: &str) -> Vec<Vec<String>> {
         vec![
             vec![
                 "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
@@ -1054,9 +720,8 @@ impl NetworkIptablesManager {
         .collect()
     }
 
-    /// The catch-all action for a chain. Proxy mode is "deny all except the
-    /// proxy", so it always closes with DROP regardless of the configured
-    /// default policy.
+    /// The catch-all action for a chain.  Proxy mode is "deny all except the
+    /// proxy" and always closes with DROP regardless of the default policy.
     fn default_policy_action(default_policy: NetworkPolicy, proxy_enabled: bool) -> &'static str {
         if proxy_enabled {
             return "DROP";
@@ -1081,12 +746,9 @@ impl NetworkIptablesManager {
 
     /// Build the ACCEPT rules that open the proxy endpoints, and nothing else.
     ///
-    /// These are the only allow rules a proxied chain carries; every other
-    /// destination is left to the chain's closing DROP.
-    ///
-    /// The rules are IPv4 only, so they must not be run through `ip6tables`. A
-    /// proxied IPv6 chain therefore holds its closing DROP alone, which is the
-    /// fail-closed outcome -- IPv6 egress is denied rather than left open.
+    /// The rules are IPv4 only and must not run through `ip6tables`.  A proxied
+    /// IPv6 chain reaches its closing DROP with only loopback allowed, which is
+    /// the fail-closed outcome.
     fn build_proxy_chain_rule_args(
         chain_name: &str,
         endpoints: &[ProxyEndpoint],
@@ -1113,10 +775,8 @@ impl NetworkIptablesManager {
     /// Whether `host` is an IPv6 literal (bracketed `[..]` or bare).
     ///
     /// An IPv6 proxy endpoint cannot be enforced, since the proxy rules are
-    /// installed with IPv4 `iptables` only. It needs naming as its own case
-    /// because the failure would otherwise be silent: an IPv6 literal yields
-    /// no IPv4 endpoint, and a proxied chain with no endpoints is a deny-all
-    /// container whose proxy was discarded.
+    /// installed with IPv4 `iptables` only, and a proxied chain with no IPv4
+    /// endpoints becomes a silent deny-all.
     fn host_is_ipv6_literal(host: &str) -> bool {
         let candidate = wxc_common::models::unbracket_host(host);
         matches!(candidate.parse::<IpAddr>(), Ok(IpAddr::V6(_)))
@@ -1136,9 +796,8 @@ impl NetworkIptablesManager {
     /// Cap on how many resolved proxy addresses the chain will open.
     ///
     /// A round-robin or CDN answer is unbounded, and every address becomes its
-    /// own ACCEPT rule and its own `iptables` process on the container-start
-    /// path. Trimming fails closed, and the pinned address is always the first
-    /// one, so the container can still reach the proxy it was pinned to.
+    /// own ACCEPT rule and `iptables` process on the container-start path.
+    /// Trimming fails closed, and the pinned address is always the first.
     const MAX_PROXY_ENDPOINTS: usize = 16;
 
     /// Trim a resolved proxy answer to the addresses the chain will accept.
@@ -1165,17 +824,12 @@ impl NetworkIptablesManager {
     /// Resolve the policy's proxy into the destinations the chain will allow,
     /// and the hosts-file pin the container needs to agree with them.
     ///
-    /// Both come out of a single lookup. Two lookups of one name can disagree
-    /// -- DNS round-robin returns a different order, or a TTL expires between
-    /// the calls -- and a container pinned to an address this chain did not
-    /// authorize cannot reach its proxy at all. A pin of `None` means the
-    /// configured address is already an IP literal, which needs no pinning.
-    ///
-    /// The chain opens every resolved IPv4 address rather than the pinned one
-    /// alone. They are all addresses of the same configured host, so the
-    /// posture is unchanged, and a client that resolves the name through
-    /// something other than the pin still reaches the proxy instead of being
-    /// dropped.
+    /// Both come out of a single lookup: two lookups of one name can disagree
+    /// under DNS round-robin or a TTL expiry, and a container pinned to an
+    /// address this chain did not authorize cannot reach its proxy.  A pin of
+    /// `None` means the configured address is already an IP literal.  Every
+    /// resolved IPv4 address is opened, not the pinned one alone, so a client
+    /// resolving the name differently still reaches the proxy.
     fn resolve_proxy_endpoints(
         policy: &ContainerPolicy,
         logger: &mut Logger,
@@ -1192,19 +846,17 @@ impl NetworkIptablesManager {
             return Err("Network proxy port must be between 1 and 65535".to_string());
         }
 
-        // Reject an IPv6 literal explicitly. Selecting the IPv4 bucket below
-        // would leave it empty, which the emptiness check would then report as
-        // an unresolvable host -- a misleading error for a perfectly valid
-        // literal we simply cannot enforce.
+        // An IPv6 literal would leave the IPv4 bucket empty, which the
+        // emptiness check reports as an unresolvable host -- misleading for a
+        // valid literal we simply cannot enforce.
         if Self::host_is_ipv6_literal(address.host()) {
             return Err(Self::ipv6_proxy_unsupported(address.host()));
         }
 
         let resolved = Self::resolve_host(address.host());
         if resolved.ipv4.is_empty() {
-            // A name with AAAA records and no A records is the same
-            // unenforceable case as the literal above, so say so rather than
-            // claiming the name does not resolve.
+            // A name with AAAA but no A records is the same unenforceable case
+            // as the literal above.
             if !resolved.ipv6.is_empty() {
                 return Err(Self::ipv6_proxy_unsupported(address.host()));
             }
@@ -1347,9 +999,6 @@ impl NetworkIptablesManager {
     }
 
     /// Build the allow/deny rule args for a single host by resolving it once.
-    /// Test-only: production goes through [`Self::build_policy_rules_logged`],
-    /// which resolves every entry exactly once and reuses that result for both
-    /// the unresolved-host warning and rule construction.
     #[cfg(test)]
     fn build_host_rule_args(chain_name: &str, host: &str, action: &RuleAction) -> FirewallRuleArgs {
         let destinations = Self::resolve_host(host);
@@ -1363,25 +1012,18 @@ impl NetworkIptablesManager {
 
     /// Build the allow/deny rule args for a container policy.
     ///
-    /// Test-only shim over the shipping path [`Self::build_policy_rules_logged`]
-    /// so the rulegen spec assertions — including the deny-before-allow
-    /// ordering that is a security-semantics contract (AB#62830341) — bind to
-    /// the code that actually runs, not to a duplicate iteration. The
-    /// unresolved-host warning is irrelevant to rule generation, so it is
-    /// discarded to a buffer logger. Production must never call this: it takes
-    /// no logger and would resolve entries a second time relative to the
-    /// warning pass.
-    ///
-    /// This shim panics on the unresolvable-block-entry error so that the many
-    /// rulegen assertions over well-formed policies keep a plain return type.
+    /// A test-only shim over [`Self::build_policy_rules_logged`] that discards
+    /// the unresolved-host warning to a buffer logger and panics on an
+    /// unresolvable block entry, keeping a plain return type for the rulegen
+    /// assertions.
     #[cfg(test)]
     fn build_policy_rule_args(
         chain_name: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> FirewallRuleArgs {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        Self::build_policy_rules_logged(chain_name, policy, uses_directional_schema, &mut logger)
+        Self::build_policy_rules_logged(chain_name, policy, uses_directional_keys, &mut logger)
             .expect(
                 "test policy should not pair an accepting default with an unresolvable block entry",
             )
@@ -1391,9 +1033,9 @@ impl NetworkIptablesManager {
     /// legacy schema.
     fn stated_egress(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&NetworkEgressPolicy> {
-        if uses_directional_schema {
+        if uses_directional_keys {
             policy.network_egress.as_ref()
         } else {
             None
@@ -1403,13 +1045,13 @@ impl NetworkIptablesManager {
     /// The default policy the chain's closing rule must express.
     ///
     /// The parser leaves the legacy `network.defaultPolicy` field at `Block`
-    /// for every 0.8 config; reading it alone closes every 0.8 chain with
-    /// DROP regardless of `network.egress.default`.
+    /// for every 0.8 config.  A directional run reads `network.egress.default`
+    /// instead.
     fn effective_default_policy(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> NetworkPolicy {
-        match Self::stated_egress(policy, uses_directional_schema) {
+        match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => match egress.default {
                 NetworkAction::Allow => NetworkPolicy::Allow,
                 NetworkAction::Deny => NetworkPolicy::Block,
@@ -1422,10 +1064,9 @@ impl NetworkIptablesManager {
     /// chain's entries, in the order they must keep.
     ///
     /// The two schema shapes are alternatives, never a union: the parser
-    /// rejects a config mixing them, and the directional path never writes
-    /// the legacy host lists.
-    fn lower_egress(policy: &ContainerPolicy, uses_directional_schema: bool) -> Vec<EgressEntry> {
-        match Self::stated_egress(policy, uses_directional_schema) {
+    /// rejects a config mixing them.
+    fn lower_egress(policy: &ContainerPolicy, uses_directional_keys: bool) -> Vec<EgressEntry> {
+        match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => Self::lower_directional_egress(egress),
             None => Self::lower_legacy_hosts(policy),
         }
@@ -1434,9 +1075,9 @@ impl NetworkIptablesManager {
     /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the chain's
     /// entries, in the order they must keep.
     ///
-    /// Block entries come first: deny-precedence (AB#62830341) is rule order
-    /// and nothing else, and exchanging the two halves reverses the
-    /// security semantics of every policy whose lists overlap.
+    /// Block entries come first: under first-match-wins, exchanging the two
+    /// halves reverses the security semantics of every policy whose lists
+    /// overlap.
     fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry> {
         policy
             .blocked_hosts
@@ -1501,10 +1142,9 @@ impl NetworkIptablesManager {
 
         for peer in peers {
             for matching in &matches {
-                // The carve-out takes the direction's default verdict rather
-                // than the rule's own — `except` excludes the range from the
-                // rule; it does not reverse it. Nothing is pushed when the
-                // two verdicts already agree.
+                // A carve-out takes the direction's default verdict, not the
+                // rule's: `except` excludes the range from the rule rather
+                // than reversing it, and agreeing verdicts push nothing.
                 if default_action != action {
                     for excluded in &peer.except {
                         entries.push(EgressEntry {
@@ -1546,8 +1186,7 @@ impl NetworkIptablesManager {
     }
 
     /// Render a parsed CIDR back into the destination string `resolve_host`
-    /// reads, letting a 0.8 peer and a legacy CIDR entry reach it by the same
-    /// path.
+    /// reads.
     fn cidr_destination(cidr: &NetworkCidr) -> String {
         format!("{}/{}", cidr.address, cidr.prefix_length)
     }
@@ -1603,38 +1242,32 @@ impl NetworkIptablesManager {
     }
 
     /// Resolve every lowered entry exactly once and build the rule args from
-    /// that single resolution, logging a warning for any entry that resolved
-    /// to nothing. This is the shipping rule-generation path.
+    /// that single resolution, warning for any entry that resolved to nothing.
     ///
-    /// Resolving once is a correctness requirement, not just an optimization:
-    /// the previous apply path resolved each host once for the warning pass
-    /// and again inside rule construction, and two lookups of the same name
-    /// can disagree — DNS round-robin returns a different address, or a TTL
-    /// expires between the calls — so the rule installed would not match the
-    /// rule that was validated and logged.
+    /// Resolving once is a correctness requirement: two lookups of one name
+    /// can disagree under DNS round-robin or a TTL expiry, and the installed
+    /// rule would not match the rule that was validated and logged.  Entries
+    /// keep the order the lowering produced, which carries the deny-precedence
+    /// guarantee.
     ///
-    /// Entries are added in the order the lowering produced them, which is
-    /// the whole of this backend's deny-precedence guarantee. See
-    /// [`Self::lower_legacy_hosts`] for why that order is load-bearing.
-    ///
-    /// An entry that resolves to nothing programs no rule, and the two
-    /// directions are not symmetric. An unwritten deny leaves reachable a
-    /// destination the operator named as unreachable, so it is a hard error
-    /// wherever something else in the chain would accept that destination.
-    /// An unwritten allow only withholds traffic that was meant to be
-    /// permitted, which costs availability and can never widen what the
-    /// container reaches, so it is always a warning.
+    /// An unresolved entry programs no rule, and the two directions differ: an
+    /// unwritten deny leaves a named-unreachable destination reachable and is
+    /// a hard error wherever an ACCEPT could match it, while an unwritten allow
+    /// only withholds permitted traffic and is always a warning.
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         logger: &mut Logger,
     ) -> Result<FirewallRuleArgs, String> {
-        let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+        let default_permits = matches!(
+            Self::effective_default_policy(policy, uses_directional_keys),
+            NetworkPolicy::Allow
+        );
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy, uses_directional_schema);
+        let entries = Self::lower_egress(policy, uses_directional_keys);
         for entry in &entries {
             let host = entry.destination.as_str();
             let action = entry.action;
@@ -1673,12 +1306,7 @@ impl NetworkIptablesManager {
                 &action,
                 entry.matching,
             );
-            // Log each destination rule that will be programmed, derived from
-            // the built args rather than from `destinations`, so that removing
-            // destination-rule emission also removes these lines. This is the
-            // observable surface the end-to-end scripts assert on to prove a
-            // rule for a specific destination was actually generated while the
-            // chain is live (a warning-only or chain-only run would not).
+            // Log each programmed rule, derived from the built args.
             for rule in &rule_args.ipv4 {
                 logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
             }
@@ -1687,24 +1315,13 @@ impl NetworkIptablesManager {
             }
             args.extend(rule_args);
         }
-        // Under a denying default an unresolvable deny is tolerable on the
-        // grounds that the chain's closing DROP covers whatever the missing
-        // rule would have covered. That holds only while no ACCEPT can match
-        // first. `resolve_host` passes validated CIDRs through untouched, so
-        // `0.0.0.0/0` is a legal allow entry, and it accepts every address --
-        // including whatever the blocked host would have resolved to. There
-        // the deny is *provably* defeated, and no evidence could rescue it,
-        // so fail closed.
-        //
-        // A narrower allow is left as a warning on purpose. Its destinations
-        // are a finite set the operator named and vouched for, the closing
-        // DROP still covers everything outside that set, and nothing here can
-        // show the missing deny falls inside it. Rejecting that case too
-        // would make an ordinary policy -- an allowlist plus a blocked host
-        // that no longer exists -- a hard failure, and the cheapest way out
-        // of it is to delete the blocklist entry. Trading a recorded warning
-        // for a silently shortened blocklist is a worse security outcome than
-        // the residual risk it removes.
+        // Under a denying default the closing DROP normally covers whatever an
+        // unresolvable deny would have covered.  That fails only when a
+        // catch-all allow (`0.0.0.0/0`, which `resolve_host` passes through)
+        // accepts every address first, provably defeating the deny.  A
+        // narrower allow names a finite vouched-for set and stays a warning,
+        // rather than turning an allowlist plus a stale blocked host into a
+        // hard failure whose cheapest fix is deleting the blocklist entry.
         if !unresolved_denies.is_empty() && !catch_all_allows.is_empty() {
             return Err(format!(
                 "blocked host(s) {} resolved to no address, so no rule can be programmed \
@@ -1728,30 +1345,40 @@ impl NetworkIptablesManager {
         Ok(args)
     }
 
-    /// Run an iptables command and return success/failure.
-    fn run_iptables(args: &[&str], logger: &mut Logger) -> Result<bool, String> {
-        Self::run_firewall_command("iptables", args, logger)
+    /// Run an iptables command in the container's network namespace.
+    fn run_iptables(&self, args: &[&str], logger: &mut Logger) -> Result<bool, String> {
+        self.run_firewall_command("iptables", args, logger)
     }
 
-    /// Run an ip6tables command and return success/failure.
-    fn run_ip6tables(args: &[&str], logger: &mut Logger) -> Result<bool, String> {
-        Self::run_firewall_command("ip6tables", args, logger)
+    /// Run an ip6tables command in the container's network namespace.
+    fn run_ip6tables(&self, args: &[&str], logger: &mut Logger) -> Result<bool, String> {
+        self.run_firewall_command("ip6tables", args, logger)
+    }
+
+    /// Build the argv for `binary`, entering the container's network namespace
+    /// first when there is one to enter: `["nsenter", "-t", <pid>, "-n",
+    /// binary, args...]`.
+    fn command_argv(&self, binary: &str, args: &[&str]) -> Vec<String> {
+        let mut argv = match self.hook_point {
+            EgressHookPoint::ContainerNetns(pid) => vec![
+                "nsenter".to_string(),
+                "-t".to_string(),
+                pid.to_string(),
+                "-n".to_string(),
+                binary.to_string(),
+            ],
+            EgressHookPoint::Unhooked => vec![binary.to_string()],
+        };
+        argv.extend(args.iter().map(|a| (*a).to_string()));
+        argv
     }
 
     /// Classify whether `ip6tables` is usable, given whether the read-only
-    /// probe succeeded and whether the host currently has active IPv6. Pure so
-    /// the fail-open-vs-fail-closed decision can be unit-tested without a
-    /// privileged Linux host.
+    /// probe succeeded and whether the host currently has active IPv6.
     ///
-    /// A working probe means the tool is usable regardless of address state.
-    /// A failed probe splits on whether IPv6 is live: if the kernel has no
-    /// active IPv6 there is nothing to filter and skipping is safe, but if
-    /// IPv6 is live the tool is genuinely missing or broken and setup must
-    /// fail closed rather than leave IPv6 egress unfiltered.
-    ///
-    /// Exposed to the crate so the inbound (ingress) chain in
-    /// [`crate::network_ingress`] reuses this pure fail-open-vs-fail-closed
-    /// decision while feeding it a *container-namespace*-scoped probe.
+    /// A working probe means the tool is usable.  A failed probe on a host
+    /// with live IPv6 means the tool is missing or broken and setup must fail
+    /// closed; a failed probe with no active IPv6 has nothing to filter.
     pub(crate) fn classify_ip6tables_status(
         probe_succeeded: bool,
         host_ipv6_active: bool,
@@ -1766,11 +1393,8 @@ impl NetworkIptablesManager {
     /// Whether the host has an active, egress-capable IPv6 stack, independent
     /// of `ip6tables`.
     ///
-    /// Reads `/proc/net/if_inet6` and defers the parse/classify decision to
-    /// [`Self::classify_host_ipv6_state`] so the file-content → state mapping
-    /// is unit-testable without a privileged Linux host. Also reports whether
-    /// `/proc/net` exists, which is what separates "the kernel has IPv6 off"
-    /// from "`/proc` is not mounted here".
+    /// Also reports whether `/proc/net` exists, which separates "the kernel
+    /// has IPv6 off" from "`/proc` is not mounted here".
     fn host_ipv6_state() -> HostIpv6State {
         Self::classify_host_ipv6_state(
             std::fs::read_to_string("/proc/net/if_inet6"),
@@ -1779,33 +1403,17 @@ impl NetworkIptablesManager {
     }
 
     /// Classify host IPv6 activity from the result of reading
-    /// `/proc/net/if_inet6`. Pure so every branch — including the read-error
-    /// case — can be exercised with injected input.
+    /// `/proc/net/if_inet6`.
     ///
-    /// `/proc/net/if_inet6` is populated by the kernel only when the IPv6
-    /// module is loaded, and lists one interface IPv6 address per line with
-    /// the device name in the final whitespace-delimited field. Loopback
-    /// (`::1` on `lo`) is present even on IPv4-only hosts and is not
-    /// egress-capable, so a line is treated as evidence of active IPv6 only
-    /// when its device is something other than `lo`.
+    /// The kernel populates `/proc/net/if_inet6` only when the IPv6 module is
+    /// loaded, one interface address per line with the device name in the
+    /// final field.  Loopback (`::1` on `lo`) is present even on IPv4-only
+    /// hosts and is not egress-capable, so only a non-`lo` device counts as
+    /// active IPv6.
     ///
-    /// The error handling is deliberate:
-    /// - A `NotFound` error **while `/proc/net` exists** means the kernel
-    ///   never created the file (IPv6 disabled at boot via `ipv6.disable=1`,
-    ///   or the module is not loaded). That is a genuine, confirmed negative
-    ///   → `Inactive`.
-    /// - A `NotFound` error when `/proc/net` is *also* absent says nothing
-    ///   about IPv6: `/proc` is not mounted, so the probe never ran. Both
-    ///   cases surface as the same `ErrorKind`, so without the directory
-    ///   check an unmounted `/proc` would be read as a confirmed "IPv6 is
-    ///   off" → `Unknown`.
-    /// - Any other read error (permission denied, I/O error) likewise leaves
-    ///   the state `Unknown` rather than asserting IPv6 is off. Converting
-    ///   such an error into `Inactive` would fail open.
-    ///
-    /// Exposed to the crate so [`crate::network_ingress`] can classify a
-    /// *container-namespace* `/proc/<pid>/net/if_inet6` read with the same
-    /// pure logic.
+    /// A `NotFound` error means `Inactive` only when `/proc/net` itself exists;
+    /// an IPv6-disabled kernel and an unmounted `/proc` both report `NotFound`,
+    /// and any other read error stays `Unknown` rather than failing open.
     pub(crate) fn classify_host_ipv6_state(
         read_result: std::io::Result<String>,
         proc_net_present: bool,
@@ -1830,11 +1438,9 @@ impl NetworkIptablesManager {
                     HostIpv6State::Inactive
                 }
             }
-            // A missing `/proc/net/if_inet6` is only evidence that IPv6 is off
-            // when `/proc/net` itself is there. Both an IPv6-disabled kernel
-            // and an unmounted `/proc` report `NotFound` for the file, and
-            // treating the second as "IPv6 is off" would fail open on a host
-            // whose IPv6 state was never actually read.
+            // A missing `/proc/net/if_inet6` is evidence that IPv6 is off only
+            // when `/proc/net` itself is present; an unmounted `/proc` reports
+            // the same `NotFound`.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if proc_net_present {
                     HostIpv6State::Inactive
@@ -1846,29 +1452,80 @@ impl NetworkIptablesManager {
         }
     }
 
-    /// Whether the IPv6 status probe should treat the host as capable of IPv6
-    /// egress. Reads the host state, logs the `Unknown` case distinctly so the
-    /// uncertainty is visible in the run output, then defers the mapping to the
-    /// pure [`Self::ipv6_state_treated_as_active`].
-    fn host_ipv6_egress_possible(logger: &mut Logger) -> bool {
-        let state = Self::host_ipv6_state();
+    /// Whether the namespace this manager programs has a live IPv6 stack.
+    ///
+    /// The answer must describe the same place the rules land: hooked into a
+    /// container, that is the container's namespace, and the host's IPv6 state
+    /// says nothing about it.
+    fn namespace_ipv6_state(&self) -> HostIpv6State {
+        match self.hook_point {
+            EgressHookPoint::ContainerNetns(pid) => {
+                let if_inet6 = format!("/proc/{}/net/if_inet6", pid);
+                let proc_net = format!("/proc/{}/net", pid);
+                Self::classify_container_ipv6_state(
+                    std::fs::read_to_string(&if_inet6),
+                    std::path::Path::new(&proc_net).is_dir(),
+                )
+            }
+            EgressHookPoint::Unhooked => Self::host_ipv6_state(),
+        }
+    }
+
+    /// Classify a container namespace's IPv6 state from a
+    /// `/proc/<pid>/net/if_inet6` read.
+    ///
+    /// Unlike [`Self::classify_host_ipv6_state`], which reads the address
+    /// list, this treats the file's mere existence as active IPv6.  A
+    /// container's address may still be arriving, presenting the same
+    /// address-less file as a stack switched off, and reading that as
+    /// `Inactive` would leave the address that arrives a moment later
+    /// unfiltered.  The kernel never creates `if_inet6` when IPv6 is disabled
+    /// at boot, so only absence is evidence of "off".
+    pub(crate) fn classify_container_ipv6_state(
+        read_result: std::io::Result<String>,
+        proc_net_present: bool,
+    ) -> HostIpv6State {
+        match read_result {
+            // Present at all means the IPv6 stack exists in this namespace; the
+            // current address list cannot demote that to "off".
+            Ok(_) => HostIpv6State::Active,
+
+            // Absent while `/proc/<pid>/net` is present means IPv6 is off here.
+            // Absent along with `/proc/<pid>/net` means the process is gone or
+            // `/proc` is not visible, which is `Unknown`.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if proc_net_present {
+                    HostIpv6State::Inactive
+                } else {
+                    HostIpv6State::Unknown
+                }
+            }
+            Err(_) => HostIpv6State::Unknown,
+        }
+    }
+
+    /// Whether the IPv6 status probe should treat the namespace being
+    /// programmed as capable of IPv6 egress, logging the `Unknown` case
+    /// distinctly.
+    fn ipv6_egress_possible(&self, logger: &mut Logger) -> bool {
+        let state = self.namespace_ipv6_state();
         if state == HostIpv6State::Unknown {
             logger.log_line(
-                "Could not read /proc/net/if_inet6 to determine host IPv6 state; \
-                 treating IPv6 as potentially active and refusing to fail open.",
+                "Could not read if_inet6 to determine the IPv6 state of the namespace \
+                 being filtered; treating IPv6 as potentially active and refusing to \
+                 fail open.",
             );
         }
         Self::ipv6_state_treated_as_active(state)
     }
 
     /// Map a host IPv6 state to whether the `ip6tables` probe should treat IPv6
-    /// as active. `Active` obviously counts; `Unknown` also counts, because an
-    /// unreadable IPv6 state must not be silently downgraded to "IPv6 is off" —
-    /// under a drop-required stance the safe reaction to "we do not know" is to
-    /// keep filtering (and, if `ip6tables` is then unusable, to fail closed)
-    /// rather than to leave IPv6 egress unfiltered. Pure so the decision is
-    /// unit-testable. Exposed to the crate for reuse by
-    /// [`crate::network_ingress`].
+    /// as active.
+    ///
+    /// `Unknown` counts as active: an unreadable IPv6 state must not be
+    /// downgraded to "off", and under a drop-required stance the safe reaction
+    /// to "we do not know" is to keep filtering and, if `ip6tables` is then
+    /// unusable, to fail closed.
     pub(crate) fn ipv6_state_treated_as_active(state: HostIpv6State) -> bool {
         match state {
             HostIpv6State::Active | HostIpv6State::Unknown => true,
@@ -1877,18 +1534,16 @@ impl NetworkIptablesManager {
     }
 
     /// Probe whether `ip6tables` can be used on this host and classify the
-    /// result. Runs a harmless, read-only `ip6tables -S` (list the filter
-    /// table), then distinguishes a kernel with IPv6 disabled (safe to skip
-    /// the parallel v6 chain) from an IPv6-capable host whose `ip6tables` is
-    /// missing or broken (must fail setup, since applying only the v4 policy
-    /// would silently leave IPv6 egress unfiltered).
-    fn ip6tables_status(logger: &mut Logger) -> Ip6tablesStatus {
-        let probe_succeeded = Self::ip6tables_probe_succeeded(logger);
+    /// result.
+    ///
+    /// Runs a harmless, read-only `ip6tables -S`, then distinguishes a kernel
+    /// with IPv6 disabled from an IPv6-capable host whose `ip6tables` is
+    /// missing or broken, which must fail setup.
+    fn ip6tables_status(&self, logger: &mut Logger) -> Ip6tablesStatus {
+        let probe_succeeded = self.ip6tables_probe_succeeded(logger);
 
-        let status = Self::classify_ip6tables_status(
-            probe_succeeded,
-            Self::host_ipv6_egress_possible(logger),
-        );
+        let status =
+            Self::classify_ip6tables_status(probe_succeeded, self.ipv6_egress_possible(logger));
         match status {
             Ip6tablesStatus::Available => {}
             Ip6tablesStatus::KernelIpv6Disabled => {
@@ -1909,18 +1564,16 @@ impl NetworkIptablesManager {
 
     /// Run the read-only `ip6tables -S` probe, reporting whether the tool is
     /// usable.
-    ///
-    /// Split out from [`Self::ip6tables_status`] because it is the second of
-    /// this file's two process spawns and the apply path reaches it before any
-    /// chain exists, so a test that does not intercept it takes a different
-    /// branch depending on the host's `ip6tables`.
-    fn ip6tables_probe_succeeded(logger: &mut Logger) -> bool {
+    fn ip6tables_probe_succeeded(&self, logger: &mut Logger) -> bool {
         #[cfg(test)]
         if let Some(succeeded) = test_firewall::intercept_ip6tables_probe() {
             return succeeded;
         }
 
-        match Command::new("ip6tables").arg("-S").output() {
+        // Probed where the rules will land, so the answer describes the
+        // namespace this manager is about to program.
+        let argv = self.command_argv("ip6tables", &["-S"]);
+        match Command::new(&argv[0]).args(&argv[1..]).output() {
             Ok(output) if output.status.success() => true,
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1935,15 +1588,11 @@ impl NetworkIptablesManager {
     }
 
     fn run_firewall_command(
+        &self,
         command: &str,
         args: &[&str],
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // A unit test may install a fake to record this command and supply its
-        // outcome, so the test states its own precondition instead of
-        // inheriting one from whatever `iptables` the host happens to have.
-        // Interception is opt-in: with no fake installed the real binary runs
-        // exactly as it did before, so tests that do not opt in are unaffected.
         #[cfg(test)]
         if let Some(outcome) = test_firewall::intercept(command, args) {
             return match outcome {
@@ -1952,8 +1601,9 @@ impl NetworkIptablesManager {
             };
         }
 
-        let output = Command::new(command)
-            .args(args)
+        let argv = self.command_argv(command, args);
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
             .output()
             .map_err(|e| format!("Failed to run {}: {}", command, e))?;
 
@@ -1966,9 +1616,7 @@ impl NetworkIptablesManager {
     }
 
     /// Log a failed firewall command and return the message that becomes the
-    /// error. Shared by the real path and the test fake so a scripted failure
-    /// produces the same log line and error text as a genuine one, rather than
-    /// the fake reimplementing the format and drifting from it.
+    /// error.
     fn log_command_failure(
         command: &str,
         args: &[&str],
@@ -1980,77 +1628,51 @@ impl NetworkIptablesManager {
         msg
     }
 
-    fn run_iptables_rule_args(args: &[Vec<String>], logger: &mut Logger) -> Result<(), String> {
+    fn run_iptables_rule_args(
+        &self,
+        args: &[Vec<String>],
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         for rule in args {
             let rule_args: Vec<&str> = rule.iter().map(String::as_str).collect();
-            Self::run_iptables(&rule_args, logger)?;
+            self.run_iptables(&rule_args, logger)?;
         }
         Ok(())
     }
 
-    fn run_ip6tables_rule_args(args: &[Vec<String>], logger: &mut Logger) -> Result<(), String> {
+    fn run_ip6tables_rule_args(
+        &self,
+        args: &[Vec<String>],
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         for rule in args {
             let rule_args: Vec<&str> = rule.iter().map(String::as_str).collect();
-            Self::run_ip6tables(&rule_args, logger)?;
+            self.run_ip6tables(&rule_args, logger)?;
         }
         Ok(())
-    }
-
-    /// Whether the given enforcement mode is served by the iptables firewall
-    /// backend. Pure and side-effect-free so the gate can be exercised without
-    /// invoking the host firewall.
-    fn enforcement_mode_uses_firewall(mode: &NetworkEnforcementMode) -> bool {
-        matches!(
-            mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        )
     }
 
     /// Apply network firewall rules based on the container policy.
     ///
-    /// On any failure after resources are created, the inner call rolls back
-    /// exactly the per-family chains and FORWARD hooks this attempt installed
-    /// before the error is returned, so a retry does not trip over a leftover
-    /// `MXC-<name>` chain ("chain already exists") and a partial failure never
-    /// tears down a chain this attempt did not create.
-    ///
     /// A proxied policy whose proxy is named rather than an IP literal also
     /// produces [`Self::proxy_host_pin`], which the caller must give the
-    /// container before it runs. A proxied chain opens no port 53, so a
+    /// container before it runs.  A proxied chain opens no port 53, so a
     /// container started without that pin cannot resolve the proxy name and
     /// reaches nothing at all.
-    pub fn apply_firewall_rules(
+    fn apply_rules_in_dialect(
         &mut self,
         policy: &ContainerPolicy,
+        uses_directional_keys: bool,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_schema = self.uses_directional_schema;
-        if !installs_firewall(policy, uses_directional_schema) {
-            // The runner injects HTTP(S)_PROXY from this same policy whatever
-            // happens here, so reporting success would leave a container that
-            // advertises a proxy and restricts nothing: any client ignoring the
-            // environment reaches the network directly.
-            if policy.network_proxy.is_enabled() {
-                return Err(
-                    "network.proxy requires network.enforcementMode='firewall' or 'both'. \
-                     This policy enables a proxy under 'capabilities', where no iptables \
-                     rules are installed, so the proxy environment would be injected while \
-                     direct egress stayed unrestricted -- any client that ignores HTTP_PROXY \
-                     would bypass the proxy entirely. Refusing to apply rather than reporting \
-                     success for an enforcement that did not happen."
-                        .to_string(),
-                );
-            }
+        let plan = plan_network(policy);
+        if !plan.installs_firewall() {
             logger.log_line("Network policy requests no firewall; skipping iptables.");
             return Ok(true);
         }
 
-        // Both arms below replace `self.created` with this attempt's set, so a
-        // second apply on a manager that still owns resources would drop the
-        // earlier record and strand whatever it named. Every caller builds a
-        // manager immediately before its single apply, so refusing here costs
-        // nothing and makes the hazard unreachable rather than leaving it to
-        // callers to avoid.
+        // A second apply would replace `self.created` and strand whatever the
+        // earlier attempt left behind.
         if self.rules_applied {
             return Err(format!(
                 "Firewall rules are already applied for chain {}; remove them before applying \
@@ -2065,21 +1687,43 @@ impl NetworkIptablesManager {
 
         let outcome = self.apply_firewall_rules_inner(
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             &proxy_endpoints,
             logger,
         );
         self.record_apply_outcome(outcome, logger)
     }
 
+    /// Program the chain from a 0.7 host-list policy.
+    pub fn apply_legacy_rules(
+        &mut self,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<bool, String> {
+        self.apply_rules_in_dialect(policy, false, logger)
+    }
+
+    /// Program the chain from a 0.8 directional policy.
+    pub fn apply_directional_rules(
+        &mut self,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<bool, String> {
+        self.apply_rules_in_dialect(policy, true, logger)
+    }
+
+    /// Test-only shim that reads the dialect back off the policy.
+    pub fn apply_firewall_rules(
+        &mut self,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<bool, String> {
+        let dialect = uses_directional_keys(policy);
+        self.apply_rules_in_dialect(policy, dialect, logger)
+    }
+
     /// Record what an apply attempt left behind and turn it into the public
     /// result.
-    ///
-    /// Split out from [`Self::apply_firewall_rules`] so a test can drive the
-    /// failure arm directly. On a real host the inner call fails on its very
-    /// first command, which rolls back nothing and so never produces the
-    /// residual this arm exists to adopt -- the branch that matters is the one
-    /// that is hardest to reach by accident.
     fn record_apply_outcome(
         &mut self,
         outcome: Result<CreatedResources, (String, CreatedResources)>,
@@ -2092,11 +1736,10 @@ impl NetworkIptablesManager {
                 Ok(true)
             }
             Err((e, residual)) => {
-                // The inner call rolled back exactly what it created, but a
-                // removal command can itself fail. Whatever survived is still
-                // ours, so adopt it rather than reporting a clean failure:
-                // otherwise `remove_firewall_rules` and `Drop` are both gated
-                // off and the leaked chain is never retried.
+                // Rollback removes what this attempt created, but a removal
+                // command can itself fail.  Whatever survived is still ours;
+                // adopt it so teardown retries rather than leaving the leaked
+                // chain gated off.
                 if self.retain_residual_ownership(residual) {
                     logger.log_line(&format!(
                         "Firewall setup failed: {}. Rollback left iptables state behind; \
@@ -2117,61 +1760,51 @@ impl NetworkIptablesManager {
     /// Take ownership of whatever a teardown could not remove, so the
     /// remaining cleanup paths retry it.
     ///
-    /// Returns whether anything was retained. `rules_applied` is the gate on
-    /// both [`Self::remove_firewall_rules`] and `Drop`, so clearing it after a
-    /// teardown that only partly succeeded strands the survivors: no later path
-    /// would know they were ours to remove.  This is shared by the failed-apply
-    /// rollback and the ordinary removal path, which have the same obligation.
+    /// Returns whether anything was retained.  `rules_applied` gates both
+    /// [`Self::remove_firewall_rules`] and `Drop`; clearing it after a partial
+    /// teardown would strand the survivors.
     fn retain_residual_ownership(&mut self, residual: CreatedResources) -> bool {
         self.created = residual;
         self.rules_applied = !residual.is_empty();
         self.rules_applied
     }
 
-    /// Fallible body of [`Self::apply_firewall_rules`]. Tracks the chains and
-    /// hooks it creates, rolls back exactly those on the error path, and
-    /// returns the created set on success so the manager can tear down only
-    /// what it installed.
+    /// Fallible body of the apply path.  Tracks the chains and hooks it
+    /// creates and rolls back exactly those on the error path.
     ///
-    /// On failure it returns the error alongside the **residual** set: the
-    /// resources whose rollback command itself failed and which therefore may
-    /// still exist. A failed rollback is not a clean failure, so the caller
-    /// must adopt the residual instead of discarding it.
+    /// On failure it returns the error alongside the residual set: resources
+    /// whose rollback command itself failed and may still exist, which the
+    /// caller must adopt rather than discard.
     fn apply_firewall_rules_inner(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
     ) -> Result<CreatedResources, (String, CreatedResources)> {
         let mut created = CreatedResources::default();
         match self.install_firewall_rules(
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             proxy_endpoints,
             logger,
             &mut created,
         ) {
             Ok(()) => Ok(created),
             Err(e) => {
-                let residual = Self::teardown_created(
-                    &self.chain_name,
-                    self.veth_interface.as_deref(),
-                    &created,
-                    logger,
-                );
+                let residual = self.teardown_created(&self.chain_name, &created, logger);
                 Err((e, residual))
             }
         }
     }
 
-    /// Install the per-family chains, rules, and FORWARD hooks, recording each
+    /// Install the per-family chains, rules, and OUTPUT hooks, recording each
     /// resource in `created` immediately after it is successfully installed so
     /// the caller can roll back precisely on any later failure.
     fn install_firewall_rules(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
         created: &mut CreatedResources,
@@ -2181,9 +1814,8 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
-        // A blocked destination stays reachable through the proxy, which MXC
-        // does not configure, so programming the rest would report success for
-        // a control that is not in effect.
+        // A proxy can fetch a blocked destination on the container's behalf,
+        // leaving the block list unenforced.
         if !proxy_endpoints.is_empty() && !policy.blocked_hosts.is_empty() {
             return Err(
                 "network.proxy cannot be combined with blockedHosts: the proxy can fetch a \
@@ -2193,29 +1825,24 @@ impl NetworkIptablesManager {
             );
         }
 
-        // Probe ip6tables once. Skip the v6 chain when the kernel has no
-        // active IPv6 (nothing to filter), but fail closed when IPv6 is live
-        // and ip6tables is missing or broken rather than silently leaving
-        // IPv6 egress unfiltered.
-        let ipv6_enabled = match Self::ip6tables_status(logger) {
+        let ipv6_enabled = match self.ip6tables_status(logger) {
             Ip6tablesStatus::Available => true,
             Ip6tablesStatus::KernelIpv6Disabled => false,
             Ip6tablesStatus::UnusableButIpv6Active => {
                 return Err(
-                    "ip6tables is unusable but the host has active IPv6; refusing to \
-                     apply an IPv4-only policy that would leave IPv6 egress unfiltered"
+                    "ip6tables is unusable but the namespace being filtered has active \
+                     IPv6; refusing to apply an IPv4-only policy that would leave IPv6 \
+                     egress unfiltered"
                         .to_string(),
                 );
             }
         };
 
-        // Create custom chains, recording each family as created so rollback
-        // removes only the chains this attempt installed.
-        Self::run_iptables(&["-N", &self.chain_name], logger)?;
+        self.run_iptables(&["-N", &self.chain_name], logger)?;
         created.v4.chain = true;
         Self::publish_created(created);
         if ipv6_enabled {
-            Self::run_ip6tables(&["-N", &self.chain_name], logger)?;
+            self.run_ip6tables(&["-N", &self.chain_name], logger)?;
             created.v6.chain = true;
             Self::publish_created(created);
         }
@@ -2223,27 +1850,21 @@ impl NetworkIptablesManager {
         let proxy_mode = !proxy_endpoints.is_empty();
 
         if proxy_mode {
-            // Proxy mode is "deny all except the proxy", so the chain carries
-            // the proxy ACCEPTs and its closing DROP and nothing else.
-            //
-            // None of the base exemptions belong here. There is no port 53
-            // accept because the container resolves the proxy through the
-            // hosts-file pin instead, and an unscoped one would be a standing
-            // DNS-tunnel exfil path through a posture whose whole point is
-            // that the proxy is the only reachable destination. There is no
-            // `-i lo` accept because every packet reaching this chain arrived
-            // on the container's veth by construction, and no
-            // ESTABLISHED,RELATED accept because return traffic flows toward
-            // the container and never traverses it -- such a rule would only
-            // let flows opened before the chain existed keep running straight
+            // The chain carries only the loopback accept, the proxy ACCEPTs,
+            // and its closing DROP.  No port 53 accept: the container resolves
+            // the proxy through the hosts-file pin, and an unscoped one would
+            // be a standing DNS-tunnel exfil path.  No ESTABLISHED,RELATED
+            // accept: every packet to the proxy already matches an endpoint
+            // ACCEPT, and such a rule would only let pre-existing flows run
             // through the deny-all posture.
-            //
-            // The allow list is not programmed either: an entry naming
-            // anything but the proxy contradicts the model, and one naming the
-            // proxy is already covered. A block list never reaches here.
+            let loopback_rules = vec![Self::build_loopback_accept_rule_args(&self.chain_name)];
+            self.run_iptables_rule_args(&loopback_rules, logger)?;
+            if ipv6_enabled {
+                self.run_ip6tables_rule_args(&loopback_rules, logger)?;
+            }
             let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
-            Self::run_iptables_rule_args(&proxy_rules, logger)?;
-            for rule in &proxy_rules {
+            self.run_iptables_rule_args(&proxy_rules, logger)?;
+            for rule in loopback_rules.iter().chain(proxy_rules.iter()) {
                 logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
             }
             if !policy.allowed_hosts.is_empty() {
@@ -2255,37 +1876,60 @@ impl NetworkIptablesManager {
             if ipv6_enabled {
                 logger.log_line(
                     "IPv6 egress is denied outright while a proxy is configured: the proxy \
-                     endpoint is IPv4, so the IPv6 chain carries only its closing DROP.",
+                     endpoint is IPv4, so the IPv6 chain carries its loopback accept and \
+                     its closing DROP.",
                 );
             }
         } else {
-            let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+            let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
 
-            // Only the legacy schema carries the unconditional port 53 accept.
-            if !uses_directional_schema {
-                base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
+            // Lease maintenance keeps the address every other rule is written
+            // against, so both schemas carry it.  It is emitted per family:
+            // the IPv4 chain has no business carrying DHCPv6 ports.
+            let mut tail_rules: Vec<Vec<String>> = Vec::new();
+
+            // Only a closed chain naming hosts to allow gets DNS: an open chain
+            // needs no grant, and the accept would sit ahead of the deny rules
+            // and defeat them.
+            let closed_with_named_hosts = matches!(
+                Self::effective_default_policy(policy, uses_directional_keys),
+                NetworkPolicy::Block
+            ) && !policy.allowed_hosts.is_empty();
+            if !uses_directional_keys && closed_with_named_hosts {
+                tail_rules.extend(Self::build_dns_resolution_rule_args(&self.chain_name));
             }
-            Self::run_iptables_rule_args(&base_rules, logger)?;
+
+            self.run_iptables_rule_args(&base_rules, logger)?;
+            self.run_iptables_rule_args(
+                &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V4),
+                logger,
+            )?;
+            if !tail_rules.is_empty() {
+                self.run_iptables_rule_args(&tail_rules, logger)?;
+            }
             if ipv6_enabled {
-                Self::run_ip6tables_rule_args(&base_rules, logger)?;
+                self.run_ip6tables_rule_args(&base_rules, logger)?;
+                self.run_ip6tables_rule_args(
+                    &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V6),
+                    logger,
+                )?;
+                if !tail_rules.is_empty() {
+                    self.run_ip6tables_rule_args(&tail_rules, logger)?;
+                }
             }
 
-            // Resolve every allow/block entry exactly once and reuse that single
-            // resolution for both the unresolved-host warning and rule
-            // construction, so the rule installed matches the entry that was
-            // validated and logged. A block entry that resolves to nothing is an
-            // error here rather than a warning, and propagating it aborts the
-            // apply so the caller rolls back the chains created above instead of
-            // leaving a chain that is missing one of its deny rules.
+            // A block entry that resolves to nothing is an error here, not a
+            // warning, and aborting rolls back the chains created above rather
+            // than leaving a chain missing one of its deny rules.
             let policy_rules = Self::build_policy_rules_logged(
                 &self.chain_name,
                 policy,
-                uses_directional_schema,
+                uses_directional_keys,
                 logger,
             )?;
-            Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
+            self.run_iptables_rule_args(&policy_rules.ipv4, logger)?;
             if ipv6_enabled {
-                Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
+                self.run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
             } else if !policy_rules.ipv6.is_empty() {
                 logger.log_line(&format!(
                     "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
@@ -2295,115 +1939,66 @@ impl NetworkIptablesManager {
             }
         }
 
-        // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
-            Self::effective_default_policy(policy, uses_directional_schema),
+            Self::effective_default_policy(policy, uses_directional_keys),
             proxy_mode,
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
         let default_action = default_args.last().copied().unwrap_or("ACCEPT");
         logger.log_line(&format!("Default network policy: {}", default_action));
-        Self::run_iptables(&default_args, logger)?;
+        self.run_iptables(&default_args, logger)?;
         if ipv6_enabled {
-            Self::run_ip6tables(&default_args, logger)?;
+            self.run_ip6tables(&default_args, logger)?;
         }
 
-        // Hook the chains into FORWARD for the container's egress traffic.
+        // Hook the chain into the container's own OUTPUT chain.
         //
-        // Two rules per family, because the input interface FORWARD sees
-        // depends on how the veth is attached. A veth routed directly by the
-        // host arrives as `-i <veth>`. A veth attached to a bridge -- the
-        // default LXC topology -- arrives as `-i <bridge>`, and only
-        // `--physdev-in <veth>` still identifies the container. Installing
-        // only the first is what let a fully populated deny-all chain sit in
-        // the ruleset filtering nothing.
-        //
-        // The two are mutually exclusive for any given packet, so no packet is
-        // counted twice.
-        //
-        // `-o` matches the reply direction rather than egress, which is why it
-        // has no place in the hooks -- and why the return-path rules installed
-        // alongside them below use it instead. Those are scoped to this same
-        // block: a caller with no veth has no port to name, and an unscoped
-        // ACCEPT would carry traffic for every container on the host.
-        if let Some(ref iface) = self.veth_interface {
-            let topology = self.veth_topology(iface);
-            // Only a positive "directly routed" finding earns the relaxed
-            // treatment. An unreadable sysfs establishes nothing, and the
-            // relaxed branch is the one that downgrades a failed physdev hook
-            // to a warning -- so an unknown topology is handled as bridged.
-            let bridged = Self::treat_as_bridged(topology);
-            if topology == VethTopology::Unknown {
-                logger.log_line(&format!(
-                    "Warning: could not determine whether container veth {} is bridged \
-                     ({} is unreadable). Treating it as bridged, which keeps a failed \
-                     physdev hook fatal rather than silently unenforced.",
-                    iface, SYSFS_NET_ROOT
-                ));
-            }
-            let chain_name = self.chain_name.clone();
-
-            Self::install_family_hooks(
-                created,
-                |created| &mut created.v4,
-                Self::run_iptables_rule_args,
-                "iptables",
-                BRIDGE_NF_CALL_IPTABLES,
-                iface,
-                &chain_name,
-                bridged,
-                logger,
-            )?;
-
-            if ipv6_enabled {
-                Self::install_family_hooks(
-                    created,
-                    |created| &mut created.v6,
-                    Self::run_ip6tables_rule_args,
-                    "ip6tables",
-                    BRIDGE_NF_CALL_IP6TABLES,
-                    iface,
-                    &chain_name,
-                    bridged,
-                    logger,
-                )?;
-            }
-        } else {
-            // Without a veth interface there is nothing to hook the chain to,
-            // and an unhooked chain is never traversed: FORWARD reaches it only
-            // via a rule naming the veth, whether as the input interface or as
-            // the bridge port. Reporting success here would hand the caller a
-            // fully populated deny-all chain that filters nothing, which is
-            // strictly worse than no firewall at all because it looks enforced.
-            //
-            // The alternative -- installing the rules host-wide so they do take
-            // effect -- is not acceptable either: unscoped they would apply to
-            // every container and to the host's own traffic.
-            //
-            // So the only honest outcome is to fail. `apply_firewall_rules_inner`
-            // rolls back the chains recorded in `created`, and `lxc_runner`
-            // destroys the container rather than starting a workload that
-            // believes it is confined.
-            //
-            // A caller that has declared it never had a veth to begin with is
-            // the one exception. For it a missing veth is not a lost lookup, so
-            // failing would only refuse to start a sandbox that was never going
-            // to be scopable. It keeps the pre-existing skip, which leaves the
-            // policy unenforced -- see `allow_missing_veth_interface`.
-            if !self.veth_scoping_optional {
-                return Err(format!(
-                    "No veth interface for container; cannot scope iptables rules to chain {}. \
-                     The chain would never be reached from FORWARD, so the network policy would \
-                     not be enforced. Refusing to report success for an unenforceable policy.",
-                    self.chain_name
-                ));
-            }
-
+        // Every command runs inside the container's network namespace, so
+        // OUTPUT sees each packet the workload originates however its veth is
+        // attached.  Each hook is claimed before its `-I` runs, so a fatal
+        // signal landing between the command returning and the record being
+        // written still finds the hook in the published snapshot.
+        if !self.is_hooked() {
             logger.log_line(
-                "Warning: No veth interface set for container. \
-                 Cannot scope iptables rules. Skipping FORWARD hook.",
+                "Warning: no container network namespace to enforce in. \
+                 Skipping the OUTPUT hook; this policy is not enforced.",
             );
+            return Ok(());
+        }
+
+        let hook_args = ["-I", "OUTPUT", "1", "-j", self.chain_name.as_str()];
+        let unhook_args = ["-D", "OUTPUT", "-j", self.chain_name.as_str()];
+
+        created.v4.hook = true;
+        Self::publish_created(created);
+        if let Err(e) = self.run_iptables(&hook_args, logger) {
+            // iptables can apply the rule and still report failure; the unhook
+            // keeps the released claim describing an OUTPUT chain this hook is
+            // absent from.
+            let _ = self.run_iptables(&unhook_args, logger);
+            created.v4.hook = false;
+            Self::publish_created(created);
+            return Err(e);
+        }
+        logger.log_line(&format!(
+            "OUTPUT hook installed in the container namespace for chain {} (iptables).",
+            self.chain_name
+        ));
+
+        if ipv6_enabled {
+            created.v6.hook = true;
+            Self::publish_created(created);
+            if let Err(e) = self.run_ip6tables(&hook_args, logger) {
+                let _ = self.run_ip6tables(&unhook_args, logger);
+                created.v6.hook = false;
+                Self::publish_created(created);
+                return Err(e);
+            }
+            logger.log_line(&format!(
+                "OUTPUT hook installed in the container namespace for chain {} (ip6tables).",
+                self.chain_name
+            ));
         }
 
         Ok(())
@@ -2412,311 +2007,73 @@ impl NetworkIptablesManager {
     /// Publish the set of resources created so far to the signal-cleanup
     /// registry, so a fatal signal tears down exactly what exists.
     ///
-    /// Called after **each** individual resource is installed rather than once
-    /// at the end of a successful apply. Publishing only on success would mean
-    /// a signal arriving mid-apply sees an empty set, removes nothing, and
-    /// leaks the partially created chain.
+    /// Publish the ownership record after each individual resource is
+    /// installed, not once at the end.
     ///
-    /// FORWARD hooks are claimed *before* their `-I` runs, and chains are
-    /// deliberately not claimed before their `-N`. The asymmetry is in the two
-    /// iptables commands. A hook that was never inserted can be disowned again
-    /// the moment its `-I` reports failure, so claiming early costs nothing
-    /// that [`Self::install_claimed_hook`] cannot give back. `-N` fails when
-    /// the name is already taken, and the chain holding that name belongs to
-    /// someone else, so claiming early would let the rollback of a failed
-    /// create delete a live chain -- trading a leak for the removal of another
-    /// container's enforcement.
-    ///
-    /// The window an early claim closes is between the command returning and
-    /// the record being written: a signal landing there leaves an installed
-    /// hook absent from the snapshot, cleanup skips it, and the surviving hook
-    /// holds a reference that keeps the chain undeletable.
+    /// A signal arriving mid-apply would otherwise see an empty set and leak
+    /// the partially created chain.  Hooks are claimed before their `-I` runs
+    /// because a hook that never inserted can be disowned again the moment the
+    /// `-I` fails; chains are not claimed before their `-N`, because `-N` fails
+    /// when the name is already taken by someone else's live chain and an early
+    /// claim would let rollback delete it.
     fn publish_created(created: &CreatedResources) {
         crate::signal_cleanup::set_active_created(*created);
     }
 
-    /// Install one family's FORWARD hooks and return-path rules, recording
-    /// ownership as each one lands.
+    /// Best-effort removal of the OUTPUT hooks and per-container chains
+    /// `created` records, in both tables.  Only resources marked as created are
+    /// touched, which matters because the chain name is derived solely from the
+    /// container name and every run of that name shares it.
     ///
-    /// The families differ only in the tool that programs them, the sysctl
-    /// that governs bridged delivery, and which half of `created` they own.
-    /// Sharing one body is what stops a fix reaching one family and silently
-    /// missing the other.
-    #[allow(clippy::too_many_arguments)]
-    fn install_family_hooks(
-        created: &mut CreatedResources,
-        family: fn(&mut CreatedResources) -> &mut FamilyResources,
-        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
-        tool: &str,
-        bridge_nf_path: &str,
-        iface: &str,
-        chain_name: &str,
-        bridged: bool,
-        logger: &mut Logger,
-    ) -> Result<(), String> {
-        // On a bridged veth the physdev rule is the only one that can match,
-        // and it can only match while br_netfilter is delivering bridged
-        // packets to the filter tables. Without that, both rules install
-        // cleanly and neither ever fires, which is the exact failure this
-        // change exists to remove: a chain that looks enforced and is not.
-        if bridged && !Self::bridge_netfilter_active(bridge_nf_path) {
-            return Err(format!(
-                "Container veth {} is attached to a bridge but bridged packets are not \
-                 delivered to {} ({} is absent or 0), so chain {} could never be reached \
-                 from FORWARD. Refusing to report success for an unenforceable policy.",
-                iface, tool, bridge_nf_path, chain_name
-            ));
-        }
-
-        Self::install_claimed_hook(
-            created,
-            |created, claimed| family(created).hook = claimed,
-            |logger| {
-                run(
-                    &[Self::build_forward_hook_iface_rule_args(
-                        "-I", iface, chain_name,
-                    )],
-                    logger,
-                )
-            },
-            |logger| {
-                let _ = run(
-                    &[Self::build_forward_hook_iface_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                );
-            },
-            logger,
-        )?;
-
-        let physdev_installed = Self::install_claimed_hook(
-            created,
-            |created, claimed| family(created).physdev_hook = claimed,
-            |logger| Self::install_physdev_hook(run, iface, chain_name, bridged, tool, logger),
-            |logger| {
-                let _ = run(
-                    &[Self::build_forward_hook_physdev_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                );
-            },
-            logger,
-        )?;
-        family(created).physdev_hook = physdev_installed;
-        Self::publish_created(created);
-
-        // Claimed before insertion for the same reason the hooks are: a fatal
-        // signal between the call and the record would leave the rule
-        // installed and absent from the cleanup snapshot.
-        let claimed = family(created);
-        claimed.return_rule = true;
-        claimed.physdev_return = true;
-        Self::publish_created(created);
-
-        let return_installed = Self::install_return_rule(
-            run,
-            Self::build_forward_return_iface_rule_args,
-            "interface",
-            iface,
-            tool,
-            logger,
-        );
-        let physdev_return_installed = Self::install_return_rule(
-            run,
-            Self::build_forward_return_physdev_rule_args,
-            "physdev",
-            iface,
-            tool,
-            logger,
-        );
-        let installed = family(created);
-        installed.return_rule = return_installed;
-        installed.physdev_return = physdev_return_installed;
-        Self::publish_created(created);
-
-        logger.log_line(&format!(
-            "FORWARD hook installed on {} for chain {} ({}).",
-            iface, chain_name, tool
-        ));
-
-        Ok(())
-    }
-
-    /// Claim a FORWARD hook, install it, and hand the claim back if the install
-    /// reports that it never landed.
-    ///
-    /// The claim has to be made first, because the window it closes is the one
-    /// between the command returning and the record being written -- see
-    /// [`Self::publish_created`]. Holding it after a *failed* install is a
-    /// different matter: `-D` removes by full rule specification and reports a
-    /// specification that matches nothing as an error, so the rollback of a
-    /// hook that was never inserted cannot clear its own claim. A hook still
-    /// recorded as present is what [`teardown_chain`] reads as a live
-    /// reference, and it leaves the chain unflushed and undeleted rather than
-    /// orphan a jump target. The chain then outlives the apply that failed, and
-    /// the next run for the same container dies at `-N` because the name is
-    /// taken -- one failed setup, and that container name never starts again
-    /// without a human clearing it.
-    ///
-    /// `undo` still runs before the claim is released, and runs even though the
-    /// install just said it failed. The exit status of `-I` is only *nearly*
-    /// conclusive: a command killed after the kernel accepted its rule also
-    /// reports failure, and releasing a claim on a rule that is really there
-    /// would strand it where nothing knows to remove it. Attempting the removal
-    /// costs one no-op command on a path that has already failed, and it makes
-    /// the release safe whichever way the ambiguity fell.
-    fn install_claimed_hook<T>(
-        created: &mut CreatedResources,
-        mut claim: impl FnMut(&mut CreatedResources, bool),
-        install: impl FnOnce(&mut Logger) -> Result<T, String>,
-        undo: impl FnOnce(&mut Logger),
-        logger: &mut Logger,
-    ) -> Result<T, String> {
-        claim(created, true);
-        Self::publish_created(created);
-        let outcome = install(logger);
-        if outcome.is_err() {
-            undo(logger);
-            claim(created, false);
-            Self::publish_created(created);
-        }
-        outcome
-    }
-
-    /// Best-effort removal of the FORWARD hooks and per-container chains that
-    /// `created` records were installed, in both tables. Only resources marked
-    /// as created are touched, so a partial-failure rollback never tears down
-    /// a chain this attempt did not create — which matters because the chain
-    /// name is derived solely from the container name, so every run of that
-    /// name shares it. A missing rule/chain still makes an individual
-    /// `-D`/`-F`/`-X` call a no-op, so it doubles as the rollback path for a
-    /// failed apply.
-    ///
-    /// Returns the **residual** set: the resources whose removal command
-    /// failed and which therefore may still exist. Clearing ownership for a
-    /// deletion that failed would strand the resource, because nothing would
-    /// then know it was ours to remove. The residual is published before
-    /// returning, so signal-time cleanup retries exactly the leftovers.
+    /// Returns the residual set: resources whose removal command failed and may
+    /// still exist.  Clearing ownership for a failed deletion would strand the
+    /// resource.  The residual is published before returning, so signal-time
+    /// cleanup retries exactly the leftovers.
     fn teardown_created(
+        &self,
         chain_name: &str,
-        veth_interface: Option<&str>,
         created: &CreatedResources,
         logger: &mut Logger,
     ) -> CreatedResources {
         let mut residual = *created;
 
-        // Remove from FORWARD only for families this attempt hooked, and only
-        // the hook forms it actually installed. Both specs come from the same
-        // builders used at insertion, because iptables deletes by full rule
-        // specification: a spec that differs by even one match -- `-o` instead
-        // of `-i`, or the interface rule standing in for the physdev one --
-        // finds nothing and leaks the hook.
-        if let Some(iface) = veth_interface {
-            Self::teardown_family_forward(
-                Self::run_iptables_rule_args,
-                chain_name,
-                iface,
-                &created.v4,
-                &mut residual.v4,
-                logger,
-            );
-            Self::teardown_family_forward(
-                Self::run_ip6tables_rule_args,
-                chain_name,
-                iface,
-                &created.v6,
-                &mut residual.v6,
-                logger,
-            );
+        // iptables deletes by full rule specification: this mirrors the `-I`
+        // that installed the hook because the insertion index is not stable
+        // once anything else touches the container's OUTPUT chain.
+        let hook_args = ["-D", "OUTPUT", "-j", chain_name];
+
+        if created.v4.hook && self.run_iptables(&hook_args, logger).is_ok() {
+            residual.v4.hook = false;
+        }
+        if created.v6.hook && self.run_ip6tables(&hook_args, logger).is_ok() {
+            residual.v6.hook = false;
         }
 
-        // Flush and delete only the chains this attempt created, and only once
-        // every FORWARD hook for that family is confirmed gone. `-X` is the
-        // command that actually relinquishes the chain, so ownership is only
-        // cleared when it succeeds. Either surviving hook still references the
-        // chain, so both gate the delete. The gate is per family because the
-        // two chains live in different tables and are referenced independently.
+        // Flush and delete each family's chain only once its OUTPUT hook is
+        // confirmed gone, since a surviving hook references the chain and
+        // iptables refuses to delete a referenced chain.  The two chains live
+        // in different tables and are gated independently.
         residual.v4.chain = teardown_chain(
             created.v4.chain,
-            residual.v4.hooks_remain(),
+            residual.v4.hook,
             logger,
             |logger| {
-                let _ = Self::run_iptables(&["-F", chain_name], logger);
+                let _ = self.run_iptables(&["-F", chain_name], logger);
             },
-            |logger| Self::run_iptables(&["-X", chain_name], logger).is_ok(),
+            |logger| self.run_iptables(&["-X", chain_name], logger).is_ok(),
         );
         residual.v6.chain = teardown_chain(
             created.v6.chain,
-            residual.v6.hooks_remain(),
+            residual.v6.hook,
             logger,
             |logger| {
-                let _ = Self::run_ip6tables(&["-F", chain_name], logger);
+                let _ = self.run_ip6tables(&["-F", chain_name], logger);
             },
-            |logger| Self::run_ip6tables(&["-X", chain_name], logger).is_ok(),
+            |logger| self.run_ip6tables(&["-X", chain_name], logger).is_ok(),
         );
 
         Self::publish_created(&residual);
         residual
-    }
-
-    /// Remove one family's FORWARD rules, clearing ownership only where the
-    /// removal succeeded.
-    fn teardown_family_forward(
-        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
-        chain_name: &str,
-        iface: &str,
-        created: &FamilyResources,
-        residual: &mut FamilyResources,
-        logger: &mut Logger,
-    ) {
-        if created.hook
-            && run(
-                &[Self::build_forward_hook_iface_rule_args(
-                    "-D", iface, chain_name,
-                )],
-                logger,
-            )
-            .is_ok()
-        {
-            residual.hook = false;
-        }
-        if created.physdev_hook
-            && run(
-                &[Self::build_forward_hook_physdev_rule_args(
-                    "-D", iface, chain_name,
-                )],
-                logger,
-            )
-            .is_ok()
-        {
-            residual.physdev_hook = false;
-        }
-
-        // The return-path rules jump to ACCEPT rather than to the chain, so
-        // unlike the hooks above they hold no reference to it and do not gate
-        // the delete. They are still this attempt's to remove: left behind,
-        // they would accept established traffic for a veth name the kernel may
-        // later hand to a different container.
-        if created.return_rule
-            && run(
-                &[Self::build_forward_return_iface_rule_args("-D", iface)],
-                logger,
-            )
-            .is_ok()
-        {
-            residual.return_rule = false;
-        }
-        if created.physdev_return
-            && run(
-                &[Self::build_forward_return_physdev_rule_args("-D", iface)],
-                logger,
-            )
-            .is_ok()
-        {
-            residual.physdev_return = false;
-        }
     }
 
     /// Remove all iptables/ip6tables rules created by this manager.
@@ -2730,16 +2087,10 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
-        let residual = Self::teardown_created(
-            &self.chain_name,
-            self.veth_interface.as_deref(),
-            &self.created,
-            logger,
-        );
+        let residual = self.teardown_created(&self.chain_name, &self.created, logger);
 
-        // A removal command can fail, and what survived is still ours. Clearing
-        // the gate here regardless would strand it: Drop would then skip the
-        // retry that is the last chance to remove it.
+        // A removal command can fail, and what survived is still ours; clearing
+        // the gate would let Drop skip the retry.
         self.retain_residual_ownership(residual);
         Ok(())
     }
@@ -2749,32 +2100,25 @@ impl NetworkIptablesManager {
     /// isn't reachable (e.g. signal-time cleanup from the watchdog thread).
     ///
     /// `created` is the ownership record the runner published as it installed
-    /// each resource, carried across the thread boundary by `signal_cleanup`.
-    /// Using it — rather than assuming every chain and hook exists — is what
-    /// keeps this path from flushing a live chain we do not own: the chain
-    /// name is a pure function of the container name, so a signal delivered
-    /// to one run would otherwise empty the chain belonging to a later run of
-    /// the same name, silently failing it open.
-    ///
-    /// The sole caller (`signal_cleanup::run_watchdog`) is Linux-only, so this
-    /// is dead code elsewhere. It stays compiled on every target rather than
-    /// being `cfg`-gated so Windows and macOS CI still type-check it.
+    /// each resource.  Using it, rather than assuming every chain and hook
+    /// exists, keeps this path from flushing a live chain we do not own: the
+    /// chain name is a pure function of the container name, and a signal
+    /// delivered to one run would otherwise empty a later run's chain and fail
+    /// it open.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn force_cleanup(
         container_name: &str,
-        veth_interface: Option<&str>,
+        hook_point: EgressHookPoint,
         created: CreatedResources,
         logger: &mut Logger,
     ) {
-        // This process created nothing, so there is nothing of ours to remove.
-        // Anything present under this chain name belongs to someone else.
+        // This process created nothing; anything present under this chain name
+        // belongs to someone else.
         if created.is_empty() {
             return;
         }
-        let mut mgr = Self::new(container_name);
-        if let Some(v) = veth_interface {
-            mgr.set_veth_interface(v);
-        }
+        let mut mgr = Self::new(container_name, hook_point);
+
         // Bypass the rules_applied gate: the manager that set it is on another
         // thread and unreachable from here.
         mgr.rules_applied = true;
@@ -2792,53 +2136,18 @@ impl Drop for NetworkIptablesManager {
     }
 }
 
-/// Test-only interception of this file's two process spawns.
-///
-/// Unit tests must not reach the real `iptables` binary. As root it would
-/// flush and delete whatever live chain answers to a colliding `MXC-<name>`,
-/// and a test that needs a command to *fail* would otherwise inherit that
-/// outcome from the host rather than arranging it -- so the same test passes
-/// on a machine without `iptables` and fails on one with it.
-///
-/// Interception is opt-in. A test that installs no fake behaves exactly as it
-/// did before this seam existed, so the ~70 tests in this file that never
-/// reach a firewall command are untouched.
-///
-/// The installed fake lives in thread-local storage because the firewall entry
-/// points are associated functions with no `self` to carry a runner, and
-/// because `cargo test` runs tests in parallel -- a process-global fake would
-/// have to be serialized behind a lock and would let one test observe
-/// another's commands.
-/// Spec for the fail-closed behavior when rules cannot be scoped to the
-/// container. Attached as a child module rather than a `tests/` integration
-/// test because the `test_firewall` seam below is `#[cfg(test)]`, which an
-/// integration test -- a separate crate -- can never see. Kept in its own file
-/// so this one does not grow further.
-#[cfg(test)]
-#[path = "network_iptables_veth_spec.rs"]
-mod veth_spec;
-
-/// Black-box specification for the FORWARD hook wiring, kept in its own file
-/// for the same reason as `veth_spec`.
-#[cfg(test)]
-#[path = "network_iptables_forward_hook_spec.rs"]
-mod forward_hook_spec;
-
 /// Black-box specification for deny-precedence ordering and the fail-closed
-/// response to an unresolvable block entry, kept in its own file for the same
-/// reason as `veth_spec`.
+/// response to an unresolvable block entry.
 #[cfg(test)]
 #[path = "network_iptables_deny_precedence_spec.rs"]
 mod deny_precedence_spec;
 
-/// Black-box specification for cooperative-proxy egress enforcement, kept in
-/// its own file for the same reason as `veth_spec`.
+/// Black-box specification for cooperative-proxy egress enforcement.
 #[cfg(test)]
 #[path = "network_iptables_proxy_spec.rs"]
 mod proxy_spec;
 
-/// Black-box specification for schema 0.8 `network.egress` lowering, kept in
-/// its own file for the same reason as `veth_spec`.
+/// Black-box specification for schema 0.8 `network.egress` lowering.
 #[cfg(test)]
 #[path = "network_iptables_ga_egress_spec.rs"]
 mod ga_egress_spec;
@@ -2865,14 +2174,12 @@ mod test_firewall {
 
     /// Installs the fake for the current thread and uninstalls it on drop.
     ///
-    /// Declare the guard **before** any manager whose `Drop` tears down: locals
-    /// drop in reverse declaration order, so a guard declared first is still
-    /// installed while the manager runs its teardown.
+    /// Declare the guard before any manager whose `Drop` tears down, or that
+    /// teardown reaches the real binary.
     pub(super) struct FakeFirewall;
 
-    /// Intercept every firewall command on this thread. Commands succeed and
-    /// the `ip6tables` probe reports the tool available, so a test that cares
-    /// about neither gets a deterministic dual-stack host.
+    /// Intercept every firewall command on this thread; commands succeed and
+    /// the `ip6tables` probe reports the tool available.
     pub(super) fn install() -> FakeFirewall {
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(State {
@@ -2899,9 +2206,7 @@ mod test_firewall {
         }
 
         /// Every command containing `needle` in its argument vector fails with
-        /// `stderr`; every other command succeeds. Lets a test fail one
-        /// specific step of an apply without having to count the commands that
-        /// precede it.
+        /// `stderr`; every other command succeeds.
         pub(super) fn fail_commands_matching(&self, needle: &str, stderr: &str) -> &Self {
             Self::with_state(|state| {
                 state.fail_matching = Some((needle.to_string(), stderr.to_string()));
@@ -2958,17 +2263,6 @@ mod test_firewall {
 
     /// The scripted result of the `ip6tables -S` probe, or `None` when no fake
     /// is installed so the caller runs the real probe.
-    ///
-    /// A fake always reports the tool available. `classify_ip6tables_status`
-    /// maps `(true, _)` to `Available` without consulting the host's IPv6
-    /// state, so this is the one answer that makes the apply path independent
-    /// of the machine the test runs on. Reporting the probe as *failed* would
-    /// not be: the classification then turns on `/proc/net/if_inet6`, which
-    /// this seam does not fake. Those branches are covered by the pure-function
-    /// tests of `classify_ip6tables_status` instead.
-    ///
-    /// The probe is recorded like any other command so `issued` stays a
-    /// complete account of what the code under test would have run.
     pub(super) fn intercept_ip6tables_probe() -> Option<bool> {
         STATE.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -2993,20 +2287,17 @@ mod tests {
     fn policy_requesting_mode(mode: NetworkEnforcementMode) -> ContainerPolicy {
         ContainerPolicy {
             network_enforcement_mode: mode,
+            allowed_hosts: vec!["203.0.113.7".to_string()],
             ..Default::default()
         }
     }
 
-    // Bubblewrap has no veth at all, so the fail-closed path that protects LXC
-    // would refuse to start every Bubblewrap sandbox asking for firewall mode.
-    // A caller that declares the absence up front must still get its chain
-    // built. `Firewall` and `Both` are covered separately so a fix scoped to
-    // one enforcement mode cannot pass the pair.
+    // Bubblewrap has no container network namespace to enforce in, so its
+    // chain is built and never hooked.
     #[test]
-    fn a_caller_that_declared_it_has_no_veth_is_not_refused_in_firewall_mode() {
+    fn an_unhooked_caller_is_not_refused_in_firewall_mode() {
         let _fake = super::test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("bwrap-noveth");
-        manager.allow_missing_veth_interface();
+        let mut manager = NetworkIptablesManager::new("bwrap-nonetns", EgressHookPoint::Unhooked);
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
@@ -3014,16 +2305,16 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "a caller that declared it has no veth must not be failed closed, got {:?}",
+            "a caller with no namespace to enforce in must not be failed closed, got {:?}",
             result
         );
     }
 
     #[test]
-    fn a_caller_that_declared_it_has_no_veth_is_not_refused_in_both_mode() {
+    fn an_unhooked_caller_is_not_refused_in_both_mode() {
         let _fake = super::test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("bwrap-noveth-both");
-        manager.allow_missing_veth_interface();
+        let mut manager =
+            NetworkIptablesManager::new("bwrap-nonetns-both", EgressHookPoint::Unhooked);
         let policy = policy_requesting_mode(NetworkEnforcementMode::Both);
         let mut logger = Logger::new(Mode::Buffer);
 
@@ -3031,41 +2322,98 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "a caller that declared it has no veth must not be failed closed, got {:?}",
+            "a caller with no namespace to enforce in must not be failed closed, got {:?}",
             result
         );
     }
 
-    // The accessor is what the Bubblewrap suite asserts on, so it has to be
-    // able to say "no". An accessor stuck at true would let that suite pass
-    // even if the declaration were never made.
+    // The chain only filters what reaches it; the hook is the whole difference
+    // between an enforced policy and a decorative one.
     #[test]
-    fn a_fresh_manager_has_not_declared_a_missing_veth_as_expected() {
-        let manager = NetworkIptablesManager::new("fresh");
-
-        assert!(
-            !manager.veth_scoping_is_optional(),
-            "a manager that was never told otherwise must report that a missing \
-             veth is not expected"
-        );
-    }
-
-    // The declaration is opt-in precisely because it leaves the policy
-    // unenforced. A manager that never made it must keep failing closed, so
-    // the two behaviors cannot quietly collapse into one.
-    #[test]
-    fn a_manager_that_never_declared_a_missing_veth_still_fails_closed() {
-        let _fake = super::test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("lxc-lost-veth");
+    fn a_namespaced_manager_hooks_its_chain_into_output() {
+        let fake = super::test_firewall::install();
+        let mut manager =
+            NetworkIptablesManager::new("lxc-hooked", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("apply must succeed");
+
+        let chain = manager.chain_name().to_string();
+        let issued = fake.issued();
+        let hooks: Vec<&Vec<String>> = issued
+            .iter()
+            .filter(|argv| argv.get(1).map(String::as_str) == Some("-I"))
+            .filter(|argv| argv.get(2).map(String::as_str) == Some("OUTPUT"))
+            .collect();
 
         assert!(
-            result.is_err(),
-            "a manager with no veth and no declaration must fail closed, got {:?}",
-            result
+            !hooks.is_empty(),
+            "a manager with a namespace must hook its chain into OUTPUT; issued: {issued:?}"
+        );
+        for argv in hooks {
+            assert_eq!(
+                argv.last().map(String::as_str),
+                Some(chain.as_str()),
+                "the OUTPUT hook must jump to this manager's own chain, got {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unhooked_manager_installs_no_output_hook() {
+        let fake = super::test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("bwrap-nohook", EgressHookPoint::Unhooked);
+        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("apply must succeed");
+
+        let issued = fake.issued();
+        assert!(
+            !issued
+                .iter()
+                .any(|argv| argv.iter().any(|arg| arg == "OUTPUT")),
+            "a manager with nowhere to enforce must touch no OUTPUT chain; issued: {issued:?}"
+        );
+    }
+
+    // The namespace wrapping is asserted on the pure builder; without it every
+    // rule would land in the host's own ruleset.
+    #[test]
+    fn a_namespaced_manager_runs_every_command_inside_the_namespace() {
+        let manager = NetworkIptablesManager::new("lxc-ns", EgressHookPoint::ContainerNetns(4242));
+
+        assert_eq!(
+            manager.command_argv("iptables", &["-N", "chain"]),
+            vec!["nsenter", "-t", "4242", "-n", "iptables", "-N", "chain"],
+        );
+    }
+
+    #[test]
+    fn an_unhooked_manager_enters_no_namespace() {
+        let manager = NetworkIptablesManager::new("bwrap-ns", EgressHookPoint::Unhooked);
+
+        assert_eq!(
+            manager.command_argv("iptables", &["-N", "chain"]),
+            vec!["iptables", "-N", "chain"],
+        );
+    }
+
+    // The ip6tables probe decides whether a v6 chain is built at all; asking
+    // the host while programming a container leaves the container's IPv6 egress
+    // unfiltered whenever the host has no IPv6.
+    #[test]
+    fn the_ipv6_probe_asks_the_namespace_the_rules_land_in() {
+        let manager = NetworkIptablesManager::new("lxc-v6", EgressHookPoint::ContainerNetns(909));
+
+        assert_eq!(
+            manager.command_argv("ip6tables", &["-S"]),
+            vec!["nsenter", "-t", "909", "-n", "ip6tables", "-S"],
         );
     }
 
@@ -3091,16 +2439,14 @@ mod tests {
     #[test]
     fn a_signal_arriving_before_anything_was_created_removes_nothing() {
         // force_cleanup is ownership-blind once it starts: it rebuilds the
-        // chain name and removes whatever answers to it. The empty-record guard
-        // is the only thing standing between a process that created nothing and
-        // the chain of a concurrent start that did. Asserting the guard's
-        // predicate in isolation would not catch its deletion, so this drives
-        // force_cleanup itself and observes the commands it issued.
+        // chain name and removes whatever answers to it.  The empty-record
+        // guard is the only thing standing between a process that created
+        // nothing and a concurrent start's chain.
         let fake = test_firewall::install();
         let mut quiet = Logger::new(Mode::Buffer);
         NetworkIptablesManager::force_cleanup(
             "racer-that-lost",
-            Some("mxcv-loser"),
+            EgressHookPoint::ContainerNetns(4242),
             CreatedResources::default(),
             &mut quiet,
         );
@@ -3115,13 +2461,10 @@ mod tests {
             fake.issued()
         );
 
-        // Positive control: the same call with one resource published does
-        // reach the teardown, so the assertion above discriminates between the
-        // two cases rather than observing a permanently silent function.
         let mut noisy = Logger::new(Mode::Buffer);
         NetworkIptablesManager::force_cleanup(
             "racer-that-won",
-            Some("mxcv-winner"),
+            EgressHookPoint::ContainerNetns(4242),
             CreatedResources::for_test(true, false, false, false),
             &mut noisy,
         );
@@ -3134,16 +2477,12 @@ mod tests {
 
     #[test]
     fn a_signal_removes_every_resource_the_run_published() {
-        // The ownership record grew physdev and return fields, but every other
-        // force_cleanup test constructs the original chain-and-hook shape, so a
-        // teardown that skipped one of the newer fields would leak a rule into
-        // FORWARD and still pass the suite.
         let fake = test_firewall::install();
         let mut logger = Logger::new(Mode::Buffer);
 
         NetworkIptablesManager::force_cleanup(
             "all-resources",
-            Some("mxcv-all"),
+            EgressHookPoint::ContainerNetns(4242),
             CreatedResources::for_test_all(),
             &mut logger,
         );
@@ -3152,15 +2491,9 @@ mod tests {
         let issued: Vec<String> = fake.issued().iter().map(|c| c.join(" ")).collect();
 
         for tool in ["iptables", "ip6tables"] {
-            let deletes = issued
-                .iter()
-                .filter(|c| c.starts_with(&format!("{tool} -D FORWARD")))
-                .count();
-            assert_eq!(
-                deletes, 4,
-                "{tool} published an interface hook, a physdev hook, a return \
-                 rule and a physdev return rule, so all four must be deleted; \
-                 issued: {issued:?}"
+            assert!(
+                issued.contains(&format!("{tool} -D OUTPUT -j {chain}")),
+                "{tool} must remove the hook it published, issued: {issued:?}"
             );
             assert!(
                 issued.contains(&format!("{tool} -F {chain}")),
@@ -3175,19 +2508,11 @@ mod tests {
 
     #[test]
     fn a_rollback_that_could_not_finish_keeps_ownership_of_what_survived() {
-        // A failed apply is not automatically a clean failure: teardown_created
-        // reports a residual when its own removal commands fail, and those
-        // survivors are still this manager's to remove. rules_applied gates
-        // both remove_firewall_rules and Drop, so dropping the residual on the
-        // floor strands the chain -- nothing afterward knows it was ours.
-        //
-        // Asserting rules_applied directly would only restate the assignment.
-        // This drives the downstream path instead and observes the commands it
-        // issued, since removing the chain is what the ownership is for.
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: chain is not empty");
 
-        let mut manager = NetworkIptablesManager::new("survivor");
+        let mut manager =
+            NetworkIptablesManager::new("survivor", EgressHookPoint::ContainerNetns(4242));
         let retained = manager
             .retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
         assert!(retained, "a non-empty residual must be retained");
@@ -3201,12 +2526,10 @@ mod tests {
         );
 
         // Negative control: a rollback that removed everything leaves nothing
-        // owned, so teardown must not run at all. Without this the assertion
-        // above would pass even if ownership were retained unconditionally,
-        // which would resurrect the collision the ownership record exists to
-        // prevent.
+        // owned, and teardown must not run at all.
         fake.forget_issued();
-        let mut clean = NetworkIptablesManager::new("fully-rolled-back");
+        let mut clean =
+            NetworkIptablesManager::new("fully-rolled-back", EgressHookPoint::ContainerNetns(4242));
         let retained_clean = clean.retain_residual_ownership(CreatedResources::default());
         assert!(!retained_clean, "an empty residual must not be retained");
 
@@ -3226,17 +2549,11 @@ mod tests {
 
     #[test]
     fn a_failed_apply_adopts_the_residual_its_rollback_left_behind() {
-        // The test above starts from an already-retained residual, so it proves
-        // only that ownership works once held -- it would still pass if the
-        // failure arm threw the residual away before getting there. This one
-        // drives that arm: it hands the recording step exactly what a rollback
-        // whose own removal command failed reports, and asserts the manager
-        // adopts it. The observable is the same downstream one, because
-        // teardown is what the ownership is for.
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: chain is not empty");
 
-        let mut manager = NetworkIptablesManager::new("adopted");
+        let mut manager =
+            NetworkIptablesManager::new("adopted", EgressHookPoint::ContainerNetns(4242));
         let mut apply_log = Logger::new(Mode::Buffer);
         let outcome = Err((
             "append failed".to_string(),
@@ -3260,10 +2577,10 @@ mod tests {
         );
 
         // Negative control: a rollback that removed everything must leave the
-        // manager owning nothing, so the assertion above cannot be satisfied by
-        // retaining unconditionally.
+        // manager owning nothing.
         fake.forget_issued();
-        let mut clean = NetworkIptablesManager::new("clean-failure");
+        let mut clean =
+            NetworkIptablesManager::new("clean-failure", EgressHookPoint::ContainerNetns(4242));
         let mut clean_log = Logger::new(Mode::Buffer);
         let clean_result = clean.record_apply_outcome(
             Err(("boom".to_string(), CreatedResources::default())),
@@ -3295,10 +2612,8 @@ mod tests {
     fn a_flush_is_withheld_while_the_chain_is_still_hooked() {
         // -F succeeds no matter who references the chain, and an emptied user
         // chain returns to its caller instead of reaching its own closing DROP.
-        // So flushing a chain FORWARD still jumps to unfilters a container that
-        // may still be running -- a fail-open.  -X would fail anyway on a
-        // referenced chain, so the flush buys nothing and costs the filtering.
-        // The whole step is gated on the hook being confirmed gone.
+        // Flushing a chain a FORWARD hook still jumps to unfilters a container
+        // that may still be running -- a fail-open.
         let mut logger = Logger::new(Mode::Buffer);
         let mut flushed = false;
         let mut deleted = false;
@@ -3323,9 +2638,8 @@ mod tests {
             "a chain left populated is still ours, so a later pass retries it"
         );
 
-        // Negative control: once the hook is gone the step must actually run
-        // and must release ownership, so the assertions above cannot be
-        // satisfied by never flushing at all.
+        // Negative control: once the hook is gone the step must run and release
+        // ownership.
         let mut logger = Logger::new(Mode::Buffer);
         let mut flushed = false;
         let still_owned = teardown_chain(true, false, &mut logger, |_| flushed = true, |_| true);
@@ -3333,9 +2647,9 @@ mod tests {
         assert!(flushed, "an unreferenced chain must be flushed");
         assert!(!still_owned, "a chain whose -X succeeded is no longer ours");
 
-        // A chain this attempt never created is not ours to touch at all --
-        // the name is shared by every run of the same container name, so it
-        // may belong to a run that is still live.
+        // A chain this attempt never created is not ours to touch: the name is
+        // shared by every run of the same container name and may belong to a
+        // run that is still live.
         let mut logger = Logger::new(Mode::Buffer);
         let mut flushed = false;
         let still_owned = teardown_chain(false, false, &mut logger, |_| flushed = true, |_| true);
@@ -3346,17 +2660,11 @@ mod tests {
 
     #[test]
     fn a_removal_whose_commands_failed_stays_owned_for_the_drop_retry() {
-        // remove_firewall_rules used to clear rules_applied unconditionally, so
-        // a teardown whose commands failed reported itself done while the chain
-        // was still installed.  Drop is gated on the same flag, so that threw
-        // away the last retry.  The fake scripts the failure, so the test states
-        // its own precondition rather than depending on the host's iptables
-        // refusing the command -- which is what made this pass on a machine
-        // without iptables and fail on one with it.
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: permission denied");
 
-        let mut manager = NetworkIptablesManager::new("stubborn");
+        let mut manager =
+            NetworkIptablesManager::new("stubborn", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let mut first = Logger::new(Mode::Buffer);
@@ -3367,9 +2675,6 @@ mod tests {
             "the first removal must attempt the teardown"
         );
 
-        // The observable for "still owned" is that a second removal still
-        // issues the commands rather than short-circuiting on the gate.  That
-        // second call is what Drop makes.
         fake.forget_issued();
         let mut second = Logger::new(Mode::Buffer);
         let _ = manager.remove_firewall_rules(&mut second);
@@ -3382,13 +2687,9 @@ mod tests {
 
     #[test]
     fn a_removal_whose_commands_all_succeeded_releases_ownership() {
-        // The mirror of the test above, and the arm that could not be reached
-        // before the fake existed: `-X` is what actually relinquishes the
-        // chain, so a teardown whose commands all succeed must clear the gate
-        // and leave Drop nothing to retry.  Without it, "still owned after a
-        // failure" would be satisfied by never releasing ownership at all.
         let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("released");
+        let mut manager =
+            NetworkIptablesManager::new("released", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let mut first = Logger::new(Mode::Buffer);
@@ -3411,17 +2712,11 @@ mod tests {
 
     #[test]
     fn a_second_apply_is_refused_while_the_first_still_owns_resources() {
-        // Both arms of apply_firewall_rules replace self.created with the new
-        // attempt's set, so a second apply on a manager that still owns
-        // something would drop the earlier record and strand whatever it named.
-        // Refusing makes that unreachable instead of relying on callers to
-        // build a fresh manager each time.
-        //
-        // The fake is declared first so it outlives `manager`: locals drop in
-        // reverse declaration order, and this manager still owns a chain, so
-        // its Drop runs a teardown that must not reach the real binary.
+        // The fake is declared before `manager` so it outlives the Drop that
+        // tears this chain down.
         let _fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("already-owned");
+        let mut manager =
+            NetworkIptablesManager::new("already-owned", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
@@ -3442,13 +2737,11 @@ mod tests {
     #[test]
     fn a_manager_that_owns_nothing_still_reaches_the_apply_path() {
         // Negative control for the guard above: it must key on live ownership,
-        // not refuse every apply.  The observable is that the apply actually
-        // issued its chain-creation commands rather than short-circuiting.
-        //
-        // The fake is declared first so it outlives `manager`, whose Drop tears
-        // down the chains this apply creates.
+        // not refuse every apply.  The fake is declared before `manager`, whose
+        // Drop tears down the chains this apply creates.
         let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("fresh");
+        let mut manager =
+            NetworkIptablesManager::new("fresh", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
         let result = manager.apply_firewall_rules(&policy, &mut logger);
@@ -3488,7 +2781,8 @@ mod tests {
 
     #[test]
     fn chain_name_sanitization() {
-        let mgr = NetworkIptablesManager::new("my-container_123");
+        let mgr =
+            NetworkIptablesManager::new("my-container_123", EgressHookPoint::ContainerNetns(4242));
         assert_eq!(mgr.chain_name, chain_name_for("my-container_123"));
         assert!(mgr.chain_name.starts_with("MXC-my-cont-"));
     }
@@ -3496,7 +2790,7 @@ mod tests {
     #[test]
     fn chain_name_respects_the_length_ceiling() {
         let long_name = "a".repeat(50);
-        let mgr = NetworkIptablesManager::new(&long_name);
+        let mgr = NetworkIptablesManager::new(&long_name, EgressHookPoint::ContainerNetns(4242));
         assert!(mgr.chain_name.len() <= CHAIN_NAME_MAX_LEN);
     }
 
@@ -3516,8 +2810,8 @@ mod tests {
 
     #[test]
     fn resolve_host_rewrites_ipv4_mapped_ipv6_literal_to_ipv4() {
-        // A mapped destination is emitted as an IPv4 packet, so it must be
-        // programmed with iptables; an ip6tables rule would never match it.
+        // A mapped destination is emitted as an IPv4 packet; an ip6tables rule
+        // would never match it.
         let ips = NetworkIptablesManager::resolve_host("::ffff:127.0.0.1");
         assert_eq!(ips.ipv4, vec!["127.0.0.1"]);
         assert!(ips.ipv6.is_empty());
@@ -3525,7 +2819,6 @@ mod tests {
 
     #[test]
     fn resolve_host_keeps_ipv4_literal_unchanged() {
-        // Round-trip: v4 literals must pass through verbatim.
         let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
         assert_eq!(ips.ipv4, vec!["10.0.0.1"]);
         assert!(ips.ipv6.is_empty());
@@ -3544,8 +2837,6 @@ mod tests {
 
     #[test]
     fn resolve_host_rejects_invalid_cidr_prefix() {
-        // Out-of-range prefixes and non-numeric prefixes are dropped rather
-        // than passed to iptables, which would reject them at apply time.
         assert!(NetworkIptablesManager::resolve_host("140.82.112.0/33").is_empty());
         assert!(NetworkIptablesManager::resolve_host("2606:50c0::/129").is_empty());
         assert!(NetworkIptablesManager::resolve_host("140.82.112.0/not-a-prefix").is_empty());
@@ -3604,7 +2895,7 @@ mod tests {
 
     #[test]
     fn host_rule_args_pass_cidr_through_unchanged() {
-        // iptables/ip6tables apply the prefix mask themselves, so the CIDR is
+        // iptables/ip6tables apply the prefix mask themselves; the CIDR is
         // forwarded verbatim rather than expanded or normalized.
         let v4 = NetworkIptablesManager::build_host_rule_args(
             "MXC-test",
@@ -3665,9 +2956,6 @@ mod tests {
 
         let args = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, false);
 
-        // Membership rather than sequence: this test owns the family split, and
-        // the order the two lists are emitted in is the deny-precedence
-        // contract, asserted by the deny_precedence_spec module.
         let expected_v4 = vec![
             strings(&["-A", "MXC-test", "-d", "140.82.112.0/20", "-j", "ACCEPT"]),
             strings(&["-A", "MXC-test", "-d", "10.0.0.0/8", "-j", "DROP"]),
@@ -3700,12 +2988,80 @@ mod tests {
         // The same rules are fed to both iptables and ip6tables; neither
         // builder may name an address family or a v4-only protocol.
         let base = NetworkIptablesManager::build_base_chain_rule_args("MXC-test");
-        let dns = NetworkIptablesManager::build_legacy_dns_exemption_rule_args("MXC-test");
+        let dns = NetworkIptablesManager::build_dns_resolution_rule_args("MXC-test");
 
         assert_eq!(base.len(), 2);
         assert_eq!(dns.len(), 2);
         for rule in base.iter().chain(dns.iter()) {
             assert!(!rule.iter().any(|arg| arg == "icmp"));
+            assert!(!rule.iter().any(|arg| arg == "icmpv6"));
+        }
+    }
+
+    #[test]
+    fn the_dhcp_exemption_is_scoped_by_family_destination_and_port_pair() {
+        let v4 =
+            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V4);
+        let v6 =
+            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V6);
+
+        assert_eq!(
+            v4,
+            vec![strings(&[
+                "-A",
+                "MXC-dhcp",
+                "-d",
+                "255.255.255.255",
+                "-p",
+                "udp",
+                "--sport",
+                "68",
+                "--dport",
+                "67",
+                "-j",
+                "ACCEPT",
+            ])],
+            "IPv4 opens the link-scoped broadcast and the client port pair only"
+        );
+        assert_eq!(
+            v6,
+            vec![strings(&[
+                "-A",
+                "MXC-dhcp",
+                "-d",
+                "ff02::1:2",
+                "-p",
+                "udp",
+                "--sport",
+                "546",
+                "--dport",
+                "547",
+                "-j",
+                "ACCEPT",
+            ])],
+            "IPv6 opens the all-servers multicast group and the client port pair only"
+        );
+    }
+
+    #[test]
+    fn the_dhcp_exemption_never_names_an_unscoped_destination() {
+        // The bypass this guards: an ACCEPT matching the DHCP port pair with no
+        // destination lets container root send UDP from port 68 to *any*
+        // off-box host on port 67, straight through a default-deny policy.
+        for family in [IpFamily::V4, IpFamily::V6] {
+            for rule in
+                NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", family)
+            {
+                let destination = rule
+                    .iter()
+                    .position(|arg| arg == "-d")
+                    .and_then(|i| rule.get(i + 1))
+                    .unwrap_or_else(|| panic!("every DHCP rule must name a destination: {rule:?}"));
+                assert!(
+                    !NetworkIptablesManager::covers_every_address(destination),
+                    "a DHCP rule must not match every address: {rule:?}"
+                );
+            }
         }
     }
 
@@ -3763,30 +3119,29 @@ mod tests {
 
     #[test]
     fn ipv4_mapped_ipv6_literal_is_filed_as_ipv4() {
-        // An IPv4-mapped destination travels as an IPv4 packet, so an ip6tables
-        // rule naming it would never match and a blocked entry would fail open
-        // under default-allow. It must be programmed with iptables instead.
+        // An IPv4-mapped destination travels as an IPv4 packet.  An ip6tables
+        // rule naming it would never match, and a blocked entry would fail open
+        // under default-allow.
         assert_resolved_exact("::ffff:127.0.0.1", &["127.0.0.1"], &[]);
     }
 
     #[test]
     fn ipv4_mapped_cidr_is_translated_to_its_ipv4_prefix() {
-        // The mapped range is the last 32 bits of ::ffff:0:0/96, so an IPv6
-        // prefix of 96 + n is exactly an IPv4 prefix of n.
+        // The mapped range is the last 32 bits of ::ffff:0:0/96: an IPv6 prefix
+        // of 96 + n is exactly an IPv4 prefix of n.
         assert_resolved_exact("::ffff:192.0.2.0/120", &["192.0.2.0/24"], &[]);
         assert_resolved_exact("::ffff:198.51.100.42/128", &["198.51.100.42/32"], &[]);
     }
 
     #[test]
     fn an_ipv6_prefix_shorter_than_the_mapped_range_stays_ipv6() {
-        // A /95 covers addresses outside ::ffff:0:0/96, so it cannot be expressed
+        // A /95 covers addresses outside ::ffff:0:0/96.  It cannot be expressed
         // as a single IPv4 CIDR and must not be rewritten.
         assert_resolved_exact("::ffff:0:0/95", &[], &["::ffff:0:0/95"]);
     }
 
     #[test]
     fn valid_cidrs_are_passed_through_unchanged_in_their_matching_family() {
-        // SPEC_BRIEF §3 requires validated CIDRs to be passed through unchanged.
         let cases = [
             ("140.82.112.0/20", &["140.82.112.0/20"][..], &[][..]),
             ("2606:50c0::/32", &[][..], &["2606:50c0::/32"][..]),
@@ -3799,7 +3154,7 @@ mod tests {
 
     #[test]
     fn v4_cidr_with_host_bits_set_is_passed_through_unchanged() {
-        // SPEC_BRIEF §3 says host bits are not required to be zero because iptables applies the mask.
+        // iptables applies the mask itself; host bits are not required to be zero.
         assert_resolved_exact("140.82.112.5/20", &["140.82.112.5/20"], &[]);
     }
 
@@ -3870,8 +3225,6 @@ mod tests {
         assert_destination_family(input, None);
     }
 
-    // Independent of the leading-`+` rejection above, the family range check must
-    // still reject an out-of-range prefix.
     #[test]
     fn leading_plus_does_not_smuggle_an_out_of_range_prefix_past_validation() {
         let input = "10.0.0.0/+33";
@@ -3894,10 +3247,6 @@ mod tests {
     }
 
     /// Every string in a bucket must be a destination of that bucket's family.
-    ///
-    /// This is the invariant that keeps an AAAA record from being handed to
-    /// `iptables` (and an A record to `ip6tables`). It is asserted as a property so
-    /// it holds whatever the resolver happens to return.
     fn assert_buckets_are_family_pure(input: &str, resolved: &ResolvedDestinations) {
         for destination in &resolved.ipv4 {
             assert_eq!(
@@ -3915,14 +3264,6 @@ mod tests {
         }
     }
 
-    // The dual-stack bypass lived in the DNS family split: an AAAA record must land
-    // in the v6 bucket and must never leak into the v4 bucket. The split is a pure
-    // function (`bucket_resolved_addrs`), so it is exercised here with injected A
-    // and AAAA addresses -- no dependency on the host having live IPv6 DNS -- and
-    // the presence of a v6 destination is asserted **hard**. If the split routed
-    // AAAA records into the v4 bucket, `resolved.ipv6` would be empty (failing the
-    // non-empty assertion) and the v4 bucket would hold a value that does not parse
-    // as IPv4 (failing family purity).
     #[test]
     fn aaaa_records_land_in_the_v6_bucket_and_never_in_the_v4_bucket() {
         let injected: Vec<IpAddr> = [
@@ -3961,13 +3302,6 @@ mod tests {
         assert_buckets_are_family_pure("injected A/AAAA mix", &resolved);
     }
 
-    // Live characterization: over whatever the host's resolver returns for
-    // well-known dual-stack names, the buckets must stay family-pure. This does not
-    // depend on the host having IPv6 DNS -- the purity invariant holds for any
-    // result -- and it does not paper over a missing v6 arm with a warning that
-    // still passes. The deterministic proof that AAAA records reach the v6 bucket
-    // lives in `aaaa_records_land_in_the_v6_bucket_and_never_in_the_v4_bucket`, and
-    // end-to-end IPv6 rule coverage lives in run_lxc_network_dualstack_test.sh.
     #[test]
     fn live_dual_stack_resolution_keeps_buckets_family_pure() {
         for host in ["dns.google", "one.one.one.one", "localhost"] {
@@ -3980,9 +3314,9 @@ mod tests {
     fn localhost_resolution_populates_available_loopback_families() {
         let resolved = NetworkIptablesManager::resolve_host("localhost");
 
-        // SPEC_BRIEF §3 requires hostnames to resolve to both A and AAAA. Some
-        // minimal hosts can have a degenerate /etc/hosts, so this accepts whichever
-        // localhost family is configured while checking that no other address leaks in.
+        // A minimal host can have a degenerate /etc/hosts.  This accepts
+        // whichever localhost family is configured while checking that no other
+        // address leaks in.
         assert!(
             !resolved.is_empty(),
             "localhost should resolve to at least one loopback family"
@@ -4077,15 +3411,14 @@ mod tests {
         }
     }
 
-    /// `.invalid` is reserved by RFC 2606 and never resolves, so it is a stable
-    /// way to exercise the unresolvable path without depending on the network.
+    /// `.invalid` is reserved by RFC 2606 and never resolves.
     const UNRESOLVABLE_HOST: &str = "blocked.invalid";
 
     #[test]
     fn an_unresolvable_deny_under_a_blocking_default_is_fatal_beside_a_catch_all_allow() {
         // The allow is evaluated before the chain's closing DROP and accepts
-        // every address, so it accepts the blocked host whatever it resolves
-        // to for the container.
+        // every address; it accepts the blocked host whatever it resolves to
+        // for the container.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["0.0.0.0/0"], &[UNRESOLVABLE_HOST])
@@ -4104,8 +3437,6 @@ mod tests {
 
     #[test]
     fn an_ipv6_catch_all_allow_also_arms_the_deny_precedence_failure() {
-        // The proof is per family and neither family may be overlooked, so a
-        // v4-only check would leave the identical v6 hole open.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["::/0"], &[UNRESOLVABLE_HOST])
@@ -4118,10 +3449,9 @@ mod tests {
 
     #[test]
     fn an_unresolvable_deny_beside_a_bounded_allow_stays_a_warning() {
-        // An allowlist next to a blocked host that no longer exists is the
-        // ordinary case. The allow names one address, the closing DROP still
-        // covers every other, and nothing shows the missing deny is that
-        // address -- so this must not become a hard failure.
+        // The allow names one address, and the closing DROP still covers every
+        // other; a missing deny that could be any of them must not become a
+        // hard failure.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["192.0.2.10"], &[UNRESOLVABLE_HOST])
@@ -4134,9 +3464,6 @@ mod tests {
 
     #[test]
     fn a_bounded_cidr_allow_is_not_mistaken_for_a_catch_all() {
-        // Guards the prefix length specifically: a check that only looked for
-        // a '/' would reject every CIDR allow, and one that only compared the
-        // address would reject `0.0.0.0/8`.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["192.0.2.0/24"], &[UNRESOLVABLE_HOST])
@@ -4149,8 +3476,8 @@ mod tests {
 
     #[test]
     fn an_unresolvable_allow_does_not_arm_the_deny_precedence_failure() {
-        // An allow that resolved to nothing programs no ACCEPT, so it cannot
-        // preempt the closing DROP and must not be counted as one that did.
+        // An allow that resolved to nothing programs no ACCEPT; it cannot
+        // preempt the closing DROP.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["allowed.invalid"], &[UNRESOLVABLE_HOST])
@@ -4159,78 +3486,6 @@ mod tests {
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
-    }
-
-    #[test]
-    fn an_unknown_topology_reaches_the_call_site_and_says_so() {
-        // The probe states three things, but only the call site decides. This
-        // pins the join: an unreadable sysfs must arrive as Unknown, be handled
-        // as bridged, and leave a diagnosable trace. Without the log line the
-        // fail-closed choice is invisible in the field, which is how the
-        // original fail-open behavior survived review in the first place.
-        //
-        // The apply's Result is deliberately not asserted: whether the bridged
-        // branch then errors depends on whether the host has br_netfilter
-        // active, which is not what this test is about.
-        let _fake = test_firewall::install();
-
-        let mut manager = NetworkIptablesManager::new("unknown-topology");
-        manager.set_veth_interface("mxcv-unknown");
-        manager.set_topology_override(VethTopology::Unknown);
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let _ = manager.apply_firewall_rules(&policy, &mut logger);
-
-        let logged = logger.get_buffer();
-        assert!(
-            logged.contains("could not determine whether container veth mxcv-unknown is bridged"),
-            "an unknown topology must be reported, or the fail-closed choice is \
-             undiagnosable in the field; logged: {logged}"
-        );
-        assert!(
-            logged.contains("Treating it as bridged"),
-            "the log must say which way the ambiguity was resolved; logged: {logged}"
-        );
-    }
-
-    #[test]
-    fn a_forward_hook_is_owned_even_when_its_insert_command_never_completed() {
-        // The signal race this guards: the kernel accepts `-I`, and the process
-        // dies before recording it. Ownership must already cover the hook at
-        // that point, or cleanup skips it and the surviving rule keeps the
-        // chain referenced and undeletable.
-        //
-        // A signal cannot be delivered mid-apply in a unit test, so this uses
-        // the observable that distinguishes the two orderings: a hook insert
-        // that does not complete successfully. Claiming after the command would
-        // leave it unowned and the rollback silent; claiming before means the
-        // rollback still tries to remove it.
-        let fake = test_firewall::install();
-        fake.fail_commands_matching("FORWARD", "simulated interruption");
-
-        let mut manager = NetworkIptablesManager::new("hook-race");
-        manager.set_veth_interface("mxcv-race");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
-        assert!(
-            result.is_err(),
-            "a failed FORWARD hook insert must fail the apply, got {:?}",
-            result
-        );
-
-        let issued = fake.issued();
-        let attempted_hook_removal = issued
-            .iter()
-            .any(|cmd| cmd.iter().any(|arg| arg == "-D") && cmd.iter().any(|arg| arg == "FORWARD"));
-        assert!(
-            attempted_hook_removal,
-            "the rollback must try to remove a hook whose insert did not complete, \
-             otherwise a signal in that same window would leak it; issued: {:?}",
-            issued
-        );
     }
 
     #[test]
@@ -4398,11 +3653,54 @@ mod tests {
     }
 
     #[test]
+    fn no_egress_rule_selects_an_incoming_interface() {
+        let chain_name = "MXC-sel";
+        let endpoints = vec![ProxyEndpoint {
+            ip: "10.0.3.1".to_string(),
+            port: 3128,
+        }];
+        let mut rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
+        rules.extend(NetworkIptablesManager::build_dns_resolution_rule_args(
+            chain_name,
+        ));
+        rules.extend(NetworkIptablesManager::build_proxy_chain_rule_args(
+            chain_name, &endpoints,
+        ));
+        rules.push(NetworkIptablesManager::build_loopback_accept_rule_args(
+            chain_name,
+        ));
+
+        for rule in &rules {
+            assert!(
+                !rule.iter().any(|arg| arg == "-i"),
+                "these chains are reached from OUTPUT, where iptables refuses -i outright; \
+                 into a user chain it is accepted and then matches nothing: {rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_chain_body_permits_traffic_to_the_containers_own_loopback() {
+        let chain_name = "MXC-lo";
+        let expected = strings(&["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]);
+
+        assert!(
+            NetworkIptablesManager::build_base_chain_rule_args(chain_name).contains(&expected),
+            "an ordinary chain must leave intra-container loopback alone"
+        );
+        assert_eq!(
+            NetworkIptablesManager::build_loopback_accept_rule_args(chain_name),
+            expected,
+            "the proxy path installs this rule directly, on both families"
+        );
+    }
+
+    #[test]
     fn base_chain_rules_are_two_family_agnostic_rules_in_documented_order() {
         let chain_name = "MXC-base";
         let rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
         let expected = vec![
-            strings(&["-A", chain_name, "-i", "lo", "-j", "ACCEPT"]),
+            strings(&["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]),
             strings(&[
                 "-A",
                 chain_name,
@@ -4429,9 +3727,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dns_exemption_is_the_documented_udp_then_tcp_pair() {
+    fn dns_resolution_is_the_documented_udp_then_tcp_pair() {
         let chain_name = "MXC-base";
-        let rules = NetworkIptablesManager::build_legacy_dns_exemption_rule_args(chain_name);
+        let rules = NetworkIptablesManager::build_dns_resolution_rule_args(chain_name);
         let expected = vec![
             strings(&[
                 "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
@@ -4443,7 +3741,7 @@ mod tests {
 
         assert_eq!(
             rules, expected,
-            "the legacy DNS exemption should be the documented udp/tcp pair"
+            "the DNS resolution grant should be the documented udp/tcp pair"
         );
         for (index, rule) in rules.iter().enumerate() {
             assert_rule_omits(rule, "-d", &format!("dns rule {index}"));
@@ -4476,7 +3774,8 @@ mod tests {
 
     #[test]
     fn chain_names_carry_the_mxc_prefix_within_the_iptables_length_ceiling() {
-        let short_manager = NetworkIptablesManager::new("short");
+        let short_manager =
+            NetworkIptablesManager::new("short", EgressHookPoint::ContainerNetns(4242));
         assert!(
             short_manager.chain_name.starts_with("MXC-short-"),
             "a short ASCII name should stay legible in the slug; actual: {}",
@@ -4484,7 +3783,8 @@ mod tests {
         );
 
         let long_name = "abcdefghijklmnopqrstuvwxyz";
-        let long_manager = NetworkIptablesManager::new(long_name);
+        let long_manager =
+            NetworkIptablesManager::new(long_name, EgressHookPoint::ContainerNetns(4242));
         assert!(
             long_manager.chain_name.len() <= CHAIN_NAME_MAX_LEN,
             "chain name must fit the iptables ceiling; actual: {}",
@@ -4534,7 +3834,7 @@ mod tests {
 
     #[test]
     fn a_new_manager_reports_no_rules_applied() {
-        let manager = NetworkIptablesManager::new("fresh");
+        let manager = NetworkIptablesManager::new("fresh", EgressHookPoint::ContainerNetns(4242));
 
         assert!(
             !manager.rules_applied(),
@@ -4542,11 +3842,17 @@ mod tests {
         );
     }
 
+    // A policy that permits nothing is answered by withholding the interface;
+    // there is nothing for a chain to filter and the apply path skips.
     #[test]
-    fn a_non_firewall_policy_is_a_successful_no_op() {
-        let mut manager = NetworkIptablesManager::new("skip-noop");
-        manager.set_veth_interface("veth-skip");
-        let policy = policy_requiring_no_firewall();
+    fn a_policy_permitting_nothing_is_a_successful_no_op() {
+        let mut manager =
+            NetworkIptablesManager::new("skip-noop", EgressHookPoint::ContainerNetns(4242));
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            default_network_policy: NetworkPolicy::Block,
+            ..Default::default()
+        };
         let mut logger = Logger::new(Mode::Buffer);
 
         let result = manager.apply_firewall_rules(&policy, &mut logger);
@@ -4554,7 +3860,7 @@ mod tests {
         assert_eq!(
             result,
             Ok(true),
-            "a policy that does not use firewall enforcement must be reported as a successful no-op"
+            "a policy given no interface must be reported as a successful no-op"
         );
         assert!(
             !manager.rules_applied(),
@@ -4562,163 +3868,283 @@ mod tests {
         );
     }
 
-    // A 0.7 config decides the firewall the way it always has: by the mode it
-    // names. Judging it by its contents instead installs chains on configs
-    // that never asked for one.
+    // A 0.7 config that names hosts it may reach permits something, and the
+    // firewall is what holds it to that list.
     #[test]
-    fn a_legacy_policy_installs_the_firewall_only_for_the_modes_that_ask_for_it() {
-        for (mode, expected) in enforcement_modes_with_firewall_contract() {
+    fn a_legacy_policy_naming_reachable_hosts_installs_the_firewall() {
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
             let label = format!("{mode:?}");
             let policy = ContainerPolicy {
                 network_enforcement_mode: mode,
-                blocked_hosts: vec!["example.com".to_string()],
+                allowed_hosts: vec!["example.com".to_string()],
                 ..Default::default()
             };
 
-            assert_eq!(
-                installs_firewall(&policy, false),
-                expected,
-                "{label}: a 0.7 policy is answered by the mode it names, not by the \
-                 hosts it happens to list"
+            assert!(
+                plan_network(&policy).installs_firewall(),
+                "{label}: a 0.7 policy naming hosts it may reach must install the chain"
             );
         }
     }
 
+    // A named host list is a restriction the caller stated; the chain that
+    // holds the container to it always installs, whatever the default policy.
     #[test]
-    fn every_enforcement_mode_takes_the_contractual_firewall_gate() {
-        for (mode, uses_firewall) in enforcement_modes_with_firewall_contract() {
-            assert_eq!(
-                NetworkIptablesManager::enforcement_mode_uses_firewall(&mode),
-                uses_firewall,
-                "{mode:?} firewall-gate predicate mismatch"
-            );
+    fn a_named_host_list_always_installs_the_chain() {
+        for (allowed, blocked) in [
+            (&["140.82.112.0/20"][..], &[][..]),
+            (&[][..], &["140.82.112.0/20"][..]),
+        ] {
+            for default_policy in [NetworkPolicy::Block, NetworkPolicy::Allow] {
+                let policy = ContainerPolicy {
+                    default_network_policy: default_policy.clone(),
+                    ..policy_with_hosts(allowed, blocked)
+                };
+
+                let plan = plan_network(&policy);
+
+                assert!(
+                    plan.installs_firewall(),
+                    "a policy naming hosts to allow or block states a restriction, and \
+                     the default enforcement mode must not discard it; \
+                     allowed={allowed:?} blocked={blocked:?} default={default_policy:?} \
+                     gave {plan:?}"
+                );
+            }
         }
     }
 
-    // 0.8 cannot carry `enforcementMode` and always defaults to
-    // `Capabilities`; reading the mode there would leave a stated posture
-    // unenforced.
+    // The 0.7 keys can say "permit nothing" just as the 0.8 keys can, and the
+    // answer to that has to be the same either way: no interface at all.
+    #[test]
+    fn a_legacy_policy_that_permits_nothing_is_given_no_interface() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            network_mode_specified: true,
+            default_network_policy: NetworkPolicy::Block,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            plan_network(&policy),
+            NetworkPlan::Isolated,
+            "a policy that blocks outbound, allows no local network, and names no \
+             proxy permits nothing, so the container is given no interface rather \
+             than an unfiltered one"
+        );
+    }
+
     #[test]
     fn a_directional_policy_installs_the_firewall_under_the_capabilities_default() {
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
-            network_egress: Some(NetworkEgressPolicy::default()),
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
         assert!(
-            installs_firewall(&policy, true),
+            plan_network(&policy).installs_firewall(),
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
     }
 
-    // Resolving a host name and reaching a proxy both need the interface up,
-    // whatever the mode decides about installing rules.
+    // The parser fills both directional sections for a 0.8 request even when it
+    // names no network block, and their defaults deny everything.
     #[test]
-    fn a_legacy_policy_that_installs_nothing_can_still_need_the_network() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
-        policy.blocked_hosts = vec!["example.com".to_string()];
+    fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(wxc_common::models::NetworkIngressPolicy::default()),
+            ..Default::default()
+        };
 
-        assert!(!installs_firewall(&policy, false));
-        assert!(needs_network(&policy, false));
+        let plan = plan_network(&policy);
+        assert!(plan.omits_interface());
+        assert!(!plan.installs_firewall());
     }
 
-    // The JSON parser rejects proxy-under-capabilities, but it is not the only
-    // way in: `LxcScriptRunner::execute` and `mxc_engine::run` take an
-    // already-built `ExecutionRequest`. Skipping here would report success for
-    // an enforcement that never happened, while the runner still injects the
-    // proxy environment -- a container that advertises a proxy and restricts
-    // nothing.
     #[test]
-    fn a_proxy_under_a_non_firewall_mode_is_refused_rather_than_skipped() {
-        // `Capabilities` is the only mode the firewall gate rejects, and it is
-        // also `NetworkEnforcementMode`'s `Default` -- so this is what a policy
-        // built in code gets when nobody sets the field at all.
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
+    fn a_stated_allow_entry_keeps_the_interface() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule::default()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!plan_network(&policy).omits_interface());
+    }
+
+    #[test]
+    fn an_admitted_inbound_peer_keeps_the_interface() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(wxc_common::models::NetworkIngressPolicy {
+                host_loopback: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!plan_network(&policy).omits_interface());
+    }
+
+    // A proxy is a peer the container has to reach; a proxied policy is given
+    // an interface and the chain that confines it to the proxy.
+    #[test]
+    fn a_legacy_proxy_policy_installs_the_chain_and_needs_the_network() {
+        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        policy.allowed_hosts.clear();
         policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
             builtin_test_server: false,
         };
-        let mut manager = NetworkIptablesManager::new("proxy-gate");
-        let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        assert!(plan_network(&policy).installs_firewall());
+        assert!(needs_network(&policy));
+    }
 
-        let error = result.expect_err(
-            "a proxy under an enforcement mode that installs no rules must not report success",
+    // Alpine's DHCP lease arrives around ten seconds after LXC marks the
+    // container running.
+    #[test]
+    fn a_plan_that_starts_an_interface_demands_an_address() {
+        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        policy.default_network_policy = NetworkPolicy::Allow;
+
+        assert!(
+            !plan_network(&policy).omits_interface(),
+            "a policy that allows everything is given an interface"
         );
         assert!(
-            error.contains("enforcementMode"),
-            "the error must name the setting that has to change; got: {error}"
-        );
-        assert!(
-            !manager.rules_applied(),
-            "a refused apply must leave no rules marked as applied"
+            needs_network(&policy),
+            "a container given an interface waits for its address; running the \
+             script first points it at a network that is not up yet"
         );
     }
 
-    // `builtin_test_server` enables the proxy without an address, and it takes
-    // the same injection path, so the gate cannot key on the address alone.
+    // A container with no interface never receives an address; a policy that
+    // both omits the interface and treats a missing address as fatal would be
+    // destroyed instead of running its script.
     #[test]
-    fn the_builtin_test_server_proxy_is_gated_the_same_way() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
+    fn a_plan_that_omits_the_interface_never_demands_an_address() {
+        let egress_options = [None, Some(NetworkAction::Deny), Some(NetworkAction::Allow)];
+        let ingress_options = [
+            None,
+            Some((NetworkAction::Deny, NetworkAction::Deny)),
+            Some((NetworkAction::Deny, NetworkAction::Allow)),
+            Some((NetworkAction::Allow, NetworkAction::Deny)),
+            Some((NetworkAction::Allow, NetworkAction::Allow)),
+        ];
+        let mut omitted = 0;
+
+        for directional in [false, true] {
+            for egress in egress_options {
+                for ingress in ingress_options {
+                    for bits in 0u8..32 {
+                        let policy = ContainerPolicy {
+                            network_proxy: ProxyConfig {
+                                builtin_test_server: bits & 1 != 0,
+                                ..Default::default()
+                            },
+                            allowed_hosts: if bits & 2 != 0 {
+                                vec!["allowed.example".to_string()]
+                            } else {
+                                Vec::new()
+                            },
+                            blocked_hosts: if bits & 4 != 0 {
+                                vec!["blocked.example".to_string()]
+                            } else {
+                                Vec::new()
+                            },
+                            default_network_policy: if bits & 8 != 0 {
+                                NetworkPolicy::Block
+                            } else {
+                                NetworkPolicy::Allow
+                            },
+                            allow_local_network: bits & 16 != 0,
+                            network_egress: egress.map(|default| NetworkEgressPolicy {
+                                default,
+                                ..Default::default()
+                            }),
+                            network_ingress: ingress.map(|(default, host_loopback)| {
+                                wxc_common::models::NetworkIngressPolicy {
+                                    default,
+                                    host_loopback,
+                                }
+                            }),
+                            ..Default::default()
+                        };
+
+                        if plan_network(&policy).omits_interface() {
+                            omitted += 1;
+                            assert!(
+                                !needs_network(&policy),
+                                "no interface means no address, yet this policy would treat a \
+                                 missing address as fatal: directional={directional}, \
+                                 egress={egress:?}, ingress={ingress:?}, bits={bits:05b}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            omitted > 0,
+            "the sweep never produced a no-interface plan and proved nothing"
+        );
+    }
+
+    // A proxy names a peer the container must reach; the chain is what confines
+    // it to that peer.
+    #[test]
+    fn a_proxied_policy_installs_the_chain() {
+        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        policy.allowed_hosts.clear();
+        policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
+
+        assert!(plan_network(&policy).installs_firewall());
+    }
+
+    // `builtin_test_server` enables the proxy without an address, and it takes
+    // the same injection path, so the plan cannot key on the address alone.
+    #[test]
+    fn the_builtin_test_server_proxy_installs_the_chain_the_same_way() {
+        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        policy.allowed_hosts.clear();
         policy.network_proxy = ProxyConfig {
             address: None,
             builtin_test_server: true,
         };
-        let mut manager = NetworkIptablesManager::new("builtin-gate");
-        let mut logger = Logger::new(Mode::Buffer);
 
         assert!(
-            manager.apply_firewall_rules(&policy, &mut logger).is_err(),
-            "an address-free proxy is still a proxy and must not be silently unenforced"
+            plan_network(&policy).installs_firewall(),
+            "an address-free proxy is still a proxy and must not go unenforced"
         );
     }
 
-    // The refusal must be narrow: without a proxy there is nothing to leave
-    // unenforced, so `capabilities` remains an ordinary supported mode.
-    #[test]
-    fn a_proxy_free_policy_still_skips_cleanly_under_capabilities() {
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
-        let mut manager = NetworkIptablesManager::new("no-proxy-skip");
-        let mut logger = Logger::new(Mode::Buffer);
-
-        assert_eq!(
-            manager.apply_firewall_rules(&policy, &mut logger),
-            Ok(true),
-            "capabilities mode without a proxy must stay a successful no-op"
-        );
-    }
-
-    /// The expected answers are written out as literals rather than derived from
-    /// a second copy of the predicate. A test that recomputes the contract it is
-    /// checking passes even when both copies are wrong in the same way.
-    fn enforcement_modes_with_firewall_contract() -> [(NetworkEnforcementMode, bool); 3] {
-        use NetworkEnforcementMode::{Both, Capabilities, Firewall};
-
-        [(Capabilities, false), (Firewall, true), (Both, true)]
-    }
-
-    /// A policy whose only distinguishing feature is its enforcement mode.
-    /// Restrictive by default: `default_network_policy` is `Block`, keeping
-    /// the firewall owed and the apply path running.
+    /// A 0.7 policy that permits something: it is given an interface and the
+    /// chain that holds it to the list.
     fn policy_with_enforcement_mode(
         network_enforcement_mode: NetworkEnforcementMode,
     ) -> ContainerPolicy {
         ContainerPolicy {
             network_enforcement_mode,
-            ..Default::default()
-        }
-    }
-
-    /// A policy that restricts nothing at all: the only shape the firewall
-    /// gate skips.
-    fn policy_requiring_no_firewall() -> ContainerPolicy {
-        ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
+            allowed_hosts: vec!["203.0.113.7".to_string()],
             ..Default::default()
         }
     }
@@ -4727,13 +4153,8 @@ mod tests {
     // Spec-derived tests: ip6tables status
     // -----------------------------------------------------------------------
 
-    // -----------------------------------------------------------------------
-    // Truth table — all four input combinations are enumerated and pinned.
-    // -----------------------------------------------------------------------
-
     #[test]
     fn working_probe_with_active_ipv6_reports_available() {
-        // "A working probe means the tool is usable regardless of address state."
         let result = NetworkIptablesManager::classify_ip6tables_status(true, true);
         assert_eq!(
             result,
@@ -4744,7 +4165,6 @@ mod tests {
 
     #[test]
     fn working_probe_without_active_ipv6_still_reports_available() {
-        // "A working probe means the tool is usable regardless of address state."
         let result = NetworkIptablesManager::classify_ip6tables_status(true, false);
         assert_eq!(
             result,
@@ -4755,7 +4175,6 @@ mod tests {
 
     #[test]
     fn failed_probe_with_no_active_ipv6_reports_kernel_ipv6_disabled() {
-        // "if the kernel has no active IPv6 there is nothing to filter and skipping is safe"
         let result = NetworkIptablesManager::classify_ip6tables_status(false, false);
         assert_eq!(
             result,
@@ -4766,8 +4185,6 @@ mod tests {
 
     #[test]
     fn live_ipv6_with_a_broken_tool_must_fail_closed_not_skip() {
-        // "if IPv6 is live the tool is genuinely missing or broken and setup must
-        // fail closed rather than leave IPv6 egress unfiltered"
         let result = NetworkIptablesManager::classify_ip6tables_status(false, true);
         assert_eq!(
             result,
@@ -4780,7 +4197,6 @@ mod tests {
     // Invariants — properties that must hold across the whole domain.
     // -----------------------------------------------------------------------
 
-    /// A working probe always yields Available, regardless of IPv6 address state.
     #[test]
     fn working_probe_always_yields_available_regardless_of_ipv6_state() {
         for ipv6_active in [false, true] {
@@ -4793,8 +4209,6 @@ mod tests {
         }
     }
 
-    /// A failed probe must never return Available — it can only be KernelIpv6Disabled
-    /// or UnusableButIpv6Active.
     #[test]
     fn failed_probe_never_reports_available() {
         for ipv6_active in [false, true] {
@@ -4807,12 +4221,8 @@ mod tests {
         }
     }
 
-    /// UnusableButIpv6Active is ONLY reachable when the probe failed AND IPv6 is
-    /// live.  If a mutation makes the fail-closed branch unreachable (silent
-    /// fail-open), this test catches it.
     #[test]
     fn fail_closed_outcome_is_reachable_only_when_probe_failed_and_ipv6_is_live() {
-        // The one combination that MUST produce UnusableButIpv6Active.
         let fail_closed = NetworkIptablesManager::classify_ip6tables_status(false, true);
         assert_eq!(
             fail_closed,
@@ -4820,7 +4230,6 @@ mod tests {
             "classify_ip6tables_status(probe=false, ipv6_active=true) must be UnusableButIpv6Active; got {fail_closed:?}"
         );
 
-        // All other combinations must NOT produce UnusableButIpv6Active.
         let other_pairs = [(true, true), (true, false), (false, false)];
         for (probe, active) in other_pairs {
             let result = NetworkIptablesManager::classify_ip6tables_status(probe, active);
@@ -4832,11 +4241,8 @@ mod tests {
         }
     }
 
-    /// KernelIpv6Disabled is ONLY reachable when the probe failed AND IPv6 is
-    /// inactive.  It must not surface as a safe-skip when IPv6 is actually live.
     #[test]
     fn safe_skip_outcome_is_reachable_only_when_probe_failed_and_ipv6_is_inactive() {
-        // The one combination that MUST produce KernelIpv6Disabled.
         let safe_skip = NetworkIptablesManager::classify_ip6tables_status(false, false);
         assert_eq!(
             safe_skip,
@@ -4844,7 +4250,6 @@ mod tests {
             "classify_ip6tables_status(probe=false, ipv6_active=false) must be KernelIpv6Disabled; got {safe_skip:?}"
         );
 
-        // All other combinations must NOT produce KernelIpv6Disabled.
         let other_pairs = [(true, true), (true, false), (false, true)];
         for (probe, active) in other_pairs {
             let result = NetworkIptablesManager::classify_ip6tables_status(probe, active);
@@ -4857,8 +4262,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Discriminant distinctness — a mutation that collapses two variants must
-    // be caught before PartialEq-based assertions below would silently accept it.
+    // Discriminant distinctness
     // -----------------------------------------------------------------------
 
     #[test]
@@ -4884,24 +4288,21 @@ mod tests {
     // Spec-derived tests: host IPv6 state
     // -----------------------------------------------------------------------
 
-    /// `/proc/net` exists, which is the ordinary case on any Linux host and the
-    /// precondition that makes a missing `if_inet6` mean "IPv6 is off".
+    /// `/proc/net` is mounted: a missing `if_inet6` then means IPv6 is off.
     const PROC_NET_MOUNTED: bool = true;
 
-    /// `/proc` is not mounted, so no IPv6 probe ever ran.
+    /// `/proc` is not mounted; no IPv6 probe ever ran.
     const PROC_NET_ABSENT: bool = false;
 
-    // A real `/proc/net/if_inet6` line: 32-hex-char address, if_index, prefix_len,
-    // scope, flags, and the device name in the final field. These samples mirror
-    // the kernel's actual formatting (space-separated fields).
+    // A real `/proc/net/if_inet6` line: 32-hex-char address, if_index,
+    // prefix_len, scope, flags, and the device name in the final field.
     const LOOPBACK_LINE: &str = "00000000000000000000000000000001 01 80 10 80         lo";
     const ETH0_GLOBAL_LINE: &str = "2606280002200001024818932c5c1946 03 40 00 80         eth0";
     const ETH0_LINKLOCAL_LINE: &str = "fe80000000000000020000fffe000001 03 40 20 80         eth0";
 
     #[test]
     fn a_real_interface_address_is_classified_active() {
-        // "a line is treated as evidence of active IPv6 only when its device is
-        // something other than `lo`" -- a global address on eth0 is egress-capable.
+        // A global address on a non-`lo` device is egress-capable IPv6.
         let contents = format!("{LOOPBACK_LINE}\n{ETH0_GLOBAL_LINE}\n");
         let state =
             NetworkIptablesManager::classify_host_ipv6_state(Ok(contents), PROC_NET_MOUNTED);
@@ -4914,8 +4315,8 @@ mod tests {
 
     #[test]
     fn a_link_local_address_on_a_real_interface_is_still_active() {
-        // The kernel lists the link-local `fe80::` address on any interface with
-        // IPv6 up; its device is not `lo`, so the host has an IPv6 stack to filter.
+        // The kernel lists the link-local `fe80::` address on any interface
+        // with IPv6 up, and its device is not `lo`.
         let contents = format!("{ETH0_LINKLOCAL_LINE}\n");
         let state =
             NetworkIptablesManager::classify_host_ipv6_state(Ok(contents), PROC_NET_MOUNTED);
@@ -4928,8 +4329,8 @@ mod tests {
 
     #[test]
     fn loopback_only_is_not_a_basis_for_claiming_egress_capable_ipv6() {
-        // An IPv4-only host commonly still lists `::1` on `lo`. Loopback is not
-        // egress-capable, so it must NOT be treated as active IPv6.
+        // An IPv4-only host commonly still lists `::1` on `lo`, and loopback is
+        // not egress-capable.
         let contents = format!("{LOOPBACK_LINE}\n");
         let state =
             NetworkIptablesManager::classify_host_ipv6_state(Ok(contents), PROC_NET_MOUNTED);
@@ -4971,9 +4372,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_a_confirmed_negative() {
-        // A `NotFound` read *while `/proc/net` exists* means the kernel never
-        // created the file (IPv6 disabled at boot), which IS a genuine
-        // "IPv6 is off" -> Inactive.
+        // A `NotFound` read while `/proc/net` exists means the kernel never
+        // created the file, IPv6 disabled at boot -- a genuine "IPv6 is off".
         let state = NetworkIptablesManager::classify_host_ipv6_state(
             Err(Error::from(ErrorKind::NotFound)),
             PROC_NET_MOUNTED,
@@ -5009,9 +4409,8 @@ mod tests {
 
     #[test]
     fn an_unreadable_file_is_unknown_not_a_confirmed_negative() {
-        // Any read error other than NotFound (permission denied, I/O error, /proc
-        // not mounted) means "we could not determine the state", which must NOT be
-        // silently converted into "IPv6 is off". This is the fail-open guard.
+        // A read error other than NotFound means the state could not be
+        // determined, and must not be converted into "IPv6 is off".
         let state = NetworkIptablesManager::classify_host_ipv6_state(
             Err(Error::from(ErrorKind::PermissionDenied)),
             PROC_NET_MOUNTED,
@@ -5041,8 +4440,6 @@ mod tests {
         );
     }
 
-    // The three states must be distinct, or the PartialEq-based assertions above
-    // could silently accept a mutation that collapses two of them.
     #[test]
     fn host_ipv6_states_are_all_distinct() {
         assert_ne!(HostIpv6State::Active, HostIpv6State::Inactive);
@@ -5051,9 +4448,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // State -> "treat as active" mapping. This is the fail-open guard: Unknown
-    // must be treated as active so an unreadable IPv6 state fails closed rather
-    // than leaving IPv6 egress unfiltered.
+    // State -> "treat as active" mapping
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5074,296 +4469,32 @@ mod tests {
 
     #[test]
     fn unknown_state_is_treated_as_active_to_fail_closed() {
-        // The fail-open guard: "we could not determine IPv6 state" must NOT become
-        // "IPv6 is off". Treating Unknown as active means a failed ip6tables probe
-        // then fails setup closed instead of leaving IPv6 egress unfiltered.
+        // Treating Unknown as active means a failed ip6tables probe fails setup
+        // closed instead of leaving IPv6 egress unfiltered.
         assert!(
             NetworkIptablesManager::ipv6_state_treated_as_active(HostIpv6State::Unknown),
             "Unknown must be treated as active so an unreadable IPv6 state fails closed"
         );
     }
     #[test]
-    fn an_ownership_record_naming_only_a_return_rule_is_not_treated_as_empty() {
-        // is_empty gates the whole teardown. A return rule missing from it
-        // would leave an ACCEPT in FORWARD naming a veth the kernel is free to
-        // reassign, so a later container would inherit it.
-        for created in [
-            CreatedResources {
-                v4: FamilyResources {
-                    return_rule: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            CreatedResources {
-                v6: FamilyResources {
-                    return_rule: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            CreatedResources {
-                v4: FamilyResources {
-                    physdev_return: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            CreatedResources {
-                v6: FamilyResources {
-                    physdev_return: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        ] {
-            assert!(
-                !created.is_empty(),
-                "{created:?} names an installed rule and must not be treated as empty"
-            );
-        }
-    }
-
-    #[test]
-    fn an_apply_installs_a_return_path_rule_in_both_directions_of_the_bridge() {
-        // Without these, a reply to an allowed destination matches neither
-        // ingress hook and falls through to the host's FORWARD policy; under
-        // Docker's DROP default the allowed destination is unreachable.
+    fn a_chain_is_still_deleted_when_its_output_hook_never_installed() {
+        // The hook is claimed before its `-I` runs, and a signal landing
+        // between the command returning and the record being written still
+        // finds it.  Rollback deletes by full specification: iptables reads a
+        // hook still on the books as a live reference and refuses to flush or
+        // delete the chain, stranding it under a name the next run cannot reuse.
         let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("return-install");
-        manager.set_veth_interface("mxcv-ret");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
+        fake.fail_commands_matching("OUTPUT", "iptables: No chain/target/match by that name");
 
-        manager
-            .apply_firewall_rules(&policy, &mut logger)
-            .expect("the apply must succeed against the fake");
-
-        // Pinned to the binary on purpose: the builders are family-agnostic, so
-        // an IPv4 rule and an IPv6 rule differ only by which tool issued them.
-        // An assertion that ignored the binary would be satisfied by whichever
-        // family still worked, and would pass with the other one deleted.
-        let issued = fake.issued();
-        for tool in ["iptables", "ip6tables"] {
-            for (form, expected) in [
-                (
-                    "interface",
-                    NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "mxcv-ret"),
-                ),
-                (
-                    "physdev",
-                    NetworkIptablesManager::build_forward_return_physdev_rule_args(
-                        "-I", "mxcv-ret",
-                    ),
-                ),
-            ] {
-                assert!(
-                    issued
-                        .iter()
-                        .any(|cmd| cmd[0] == tool && cmd[1..] == expected[..]),
-                    "the apply must install the {form} return rule via {tool}; issued: {issued:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_teardown_removes_every_return_rule_the_apply_installed() {
-        // iptables deletes by full specification, so a return rule the teardown
-        // does not name outlives the container in the host's FORWARD chain.
-        let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("return-teardown");
-        manager.set_veth_interface("mxcv-down");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut apply_logger = Logger::new(Mode::Buffer);
-        manager
-            .apply_firewall_rules(&policy, &mut apply_logger)
-            .expect("the apply must succeed against the fake");
-
-        fake.forget_issued();
-        let mut remove_logger = Logger::new(Mode::Buffer);
-        let _ = manager.remove_firewall_rules(&mut remove_logger);
-
-        // Pinned to the binary for the same reason the install test is: a
-        // family-blind assertion would let one family's delete stand in for the
-        // other's, and the missed rule would outlive the container.
-        let issued = fake.issued();
-        for tool in ["iptables", "ip6tables"] {
-            for (form, expected) in [
-                (
-                    "interface",
-                    NetworkIptablesManager::build_forward_return_iface_rule_args("-D", "mxcv-down"),
-                ),
-                (
-                    "physdev",
-                    NetworkIptablesManager::build_forward_return_physdev_rule_args(
-                        "-D",
-                        "mxcv-down",
-                    ),
-                ),
-            ] {
-                assert!(
-                    issued
-                        .iter()
-                        .any(|cmd| cmd[0] == tool && cmd[1..] == expected[..]),
-                    "the teardown must remove the {form} return rule via {tool}; issued: {issued:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_return_rule_that_could_not_be_installed_warns_instead_of_failing_the_apply() {
-        // The asymmetry that justifies this: the ingress hook is what confines
-        // traffic to the chain, so losing it fails open and must be fatal. A
-        // return rule only ever ACCEPTs, so losing it can only leave the
-        // container less connected -- never less enforced. Failing the apply
-        // there would refuse to start a container whose policy is fully
-        // installed.
-        let fake = test_firewall::install();
-        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
-
-        let mut manager = NetworkIptablesManager::new("return-warn");
-        manager.set_veth_interface("mxcv-warn");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
-
-        assert!(
-            result.is_ok(),
-            "a failed return rule must not fail the apply, got {result:?}"
-        );
-        assert!(
-            logger.get_buffer().contains("return-path rule"),
-            "the failure must be reported, not swallowed; log: {}",
-            logger.get_buffer()
-        );
-    }
-
-    #[test]
-    fn a_return_rule_whose_install_failed_is_deleted_before_its_claim_is_released() {
-        // `-I` reporting failure is only nearly conclusive: a command killed
-        // after the kernel accepted its rule reports failure too. Releasing the
-        // claim without attempting the removal strands an ESTABLISHED,RELATED
-        // ACCEPT on a veth name the host can hand to a different container
-        // later. The hooks already close this window through
-        // `install_claimed_hook`; the return rules did not.
-        let fake = test_firewall::install();
-        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
-
-        let mut manager = NetworkIptablesManager::new("return-undo");
-        manager.set_veth_interface("mxcv-undo");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        manager
-            .apply_firewall_rules(&policy, &mut logger)
-            .expect("a failed return rule must not fail the apply");
-
-        let issued = fake.issued();
-        let undo =
-            NetworkIptablesManager::build_forward_return_physdev_rule_args("-D", "mxcv-undo");
-        for tool in ["iptables", "ip6tables"] {
-            assert!(
-                issued
-                    .iter()
-                    .any(|cmd| cmd[0] == tool && cmd[1..] == undo[..]),
-                "{tool} must try to remove the return rule whose insert failed; issued: {issued:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_caller_with_no_veth_installs_no_return_path_rule() {
-        // The return rules are only safe because they name one container's
-        // port. A caller that declared it has no veth -- Bubblewrap -- has no
-        // port to name, and a rule installed without one would accept
-        // established traffic for every container on the host.
-        let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("noveth-return");
-        manager.allow_missing_veth_interface();
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        manager
-            .apply_firewall_rules(&policy, &mut logger)
-            .expect("a caller with no veth must not be refused");
-
-        let issued = fake.issued();
-        assert!(
-            !issued
-                .iter()
-                .any(|cmd| cmd.iter().any(|arg| arg == "ESTABLISHED,RELATED")
-                    && cmd.iter().any(|arg| arg == "FORWARD")),
-            "no return rule may be installed without a veth to scope it to; issued: {issued:?}"
-        );
-    }
-
-    #[test]
-    fn a_return_rule_whose_install_failed_is_not_deleted_on_teardown() {
-        // The teardown deletes by full specification and a delete that matches
-        // nothing is reported as a failure, which would keep residual ownership
-        // for a rule that never existed and make Drop retry it forever.
-        let fake = test_firewall::install();
-        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
-
-        let mut manager = NetworkIptablesManager::new("return-nodelete");
-        manager.set_veth_interface("mxcv-nodel");
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        let mut apply_logger = Logger::new(Mode::Buffer);
-        manager
-            .apply_firewall_rules(&policy, &mut apply_logger)
-            .expect("the apply must succeed against the fake");
-
-        fake.forget_issued();
-        let mut remove_logger = Logger::new(Mode::Buffer);
-        let _ = manager.remove_firewall_rules(&mut remove_logger);
-
-        let issued = fake.issued();
-        let deleted =
-            NetworkIptablesManager::build_forward_return_physdev_rule_args("-D", "mxcv-nodel");
-        for tool in ["iptables", "ip6tables"] {
-            assert!(
-                !issued
-                    .iter()
-                    .any(|cmd| cmd[0] == tool && cmd[1..] == deleted[..]),
-                "a rule whose install failed must not be deleted by {tool}; issued: {issued:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_chain_is_still_deleted_when_its_forward_hook_never_installed() {
-        // The hook is claimed before its `-I` runs, so a signal landing between
-        // the command returning and the record being written still finds it.
-        // Keeping that claim after a *failed* insert is what used to strand the
-        // chain: rollback deletes by full specification, iptables reports a
-        // specification matching nothing as an error, and a hook still on the
-        // books is read as a live reference to the chain -- so the chain was
-        // neither flushed nor deleted. It outlived the apply that failed, and
-        // the next run for the same container died at `-N` with the name
-        // already taken, which meant one failed setup retired that container
-        // name until a human cleared it by hand.
-        //
-        // The observable here is the chain delete rather than the ownership
-        // flag, because the flag is only the mechanism -- a chain nobody can
-        // remove is the harm.
-        let fake = test_firewall::install();
-        fake.fail_commands_matching(
-            "mxcv-strand",
-            "iptables: No chain/target/match by that name",
-        );
-
-        let mut manager = NetworkIptablesManager::new("stranded");
-        manager.set_veth_interface("mxcv-strand");
+        let mut manager =
+            NetworkIptablesManager::new("stranded", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
         let outcome = manager.apply_firewall_rules(&policy, &mut logger);
         assert!(
             outcome.is_err(),
-            "an apply whose FORWARD hook could not be installed must fail"
+            "an apply whose OUTPUT hook could not be installed must fail"
         );
 
         let chain = chain_name_for("stranded");
@@ -5377,18 +4508,45 @@ mod tests {
     }
 
     #[test]
+    fn a_hook_the_kernel_may_have_applied_is_removed_before_the_claim_is_released() {
+        // A failure report is not proof the kernel refused the insert, and a
+        // hook it may have applied must be taken back out before the claim is
+        // released.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("OUTPUT", "iptables: Resource temporarily unavailable");
+
+        let mut manager =
+            NetworkIptablesManager::new("maybe-applied", EgressHookPoint::ContainerNetns(4242));
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let outcome = manager.apply_firewall_rules(&policy, &mut logger);
+        assert!(
+            outcome.is_err(),
+            "an apply whose OUTPUT hook could not be installed must fail"
+        );
+
+        let chain = chain_name_for("maybe-applied");
+        let issued = fake.issued();
+        assert!(
+            issued.iter().any(|cmd| {
+                cmd[1] == "-D" && cmd[2] == "OUTPUT" && cmd.iter().any(|arg| arg == &chain)
+            }),
+            "the failed hook must be removed from OUTPUT before its claim is \
+             released, or a rule the kernel did apply is left with nothing \
+             recorded to remove it; issued: {issued:?}"
+        );
+    }
+
+    #[test]
     fn a_chain_whose_hook_did_install_is_not_deleted_while_the_hook_survives() {
-        // The negative control for the test above. Releasing the claim on a
-        // failed insert must not decay into releasing it whenever removal is
-        // hard: a hook that really is in FORWARD still points at this chain,
-        // and flushing a chain that is still hooked drops it back into FORWARD
-        // with nothing to stop the packet -- the fail-open outcome this module
-        // exists to prevent. Here every install succeeds and only the deletes
-        // fail, which is the shape of a busy or half-broken host.
+        // A hook that really is in OUTPUT still points at this chain, and
+        // flushing a chain that is still hooked lets the packet fall past it --
+        // a fail-open.  Here every install succeeds and only the deletes fail.
         let fake = test_firewall::install();
 
-        let mut manager = NetworkIptablesManager::new("still-hooked");
-        manager.set_veth_interface("mxcv-hooked");
+        let mut manager =
+            NetworkIptablesManager::new("still-hooked", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
@@ -5412,17 +4570,14 @@ mod tests {
             );
         }
 
-        // The claim must also survive the install that succeeded, or the
-        // teardown would have nothing recorded to remove and would walk past
-        // the hook it put in FORWARD. Asserting the attempt rather than the
-        // result is the point: these deletes are the ones being failed, and a
-        // release on success shows up as the command never being issued.
-        let removal =
-            NetworkIptablesManager::build_forward_hook_iface_rule_args("-D", "mxcv-hooked", &chain);
+        // The claim must also survive the install that succeeded, or teardown
+        // would have nothing recorded to remove and would walk past the hook it
+        // put in OUTPUT.
         assert!(
-            issued
-                .iter()
-                .any(|cmd| cmd[0] == "iptables" && cmd[1..] == removal[..]),
+            issued.iter().any(|cmd| cmd[0] == "iptables"
+                && cmd[1] == "-D"
+                && cmd[2] == "OUTPUT"
+                && cmd.last() == Some(&chain)),
             "a hook that installed must still be owned, and so still be removed; \
              issued: {issued:?}"
         );

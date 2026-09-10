@@ -207,6 +207,7 @@ pub fn configure_filesystem_mounts(
     logger: &mut Logger,
 ) -> Result<(), String> {
     let mounts = resolve_mount_order(policy);
+    let mut entries: Vec<String> = Vec::new();
 
     // Container-side paths of every re-bound (rw/ro) mount, used to decide
     // whether a denied *directory* must be masked with a writable tmpfs so a
@@ -236,7 +237,7 @@ pub fn configure_filesystem_mounts(
                     "Adding rw bind mount: {} -> /{}",
                     host_path, container_path
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
             FsIntent::ReadOnly => {
                 let mount_entry = format!(
@@ -247,7 +248,7 @@ pub fn configure_filesystem_mounts(
                     "Adding ro bind mount: {} -> /{}",
                     host_path, container_path
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
             FsIntent::Denied => {
                 // Resolve the denied path through symlinks to its real host
@@ -301,10 +302,15 @@ pub fn configure_filesystem_mounts(
                     "Masking denied path: /{} ({})",
                     container_path, create_type
                 ));
-                container.set_config_item("lxc.mount.entry", &mount_entry)?;
+                entries.push(mount_entry);
             }
         }
     }
+
+    // Write the whole set at once, replacing whatever an earlier run left
+    // behind. A reused container must carry this run's grants and no others,
+    // including when this run grants nothing at all.
+    container.set_managed_mount_entries(&entries)?;
 
     Ok(())
 }

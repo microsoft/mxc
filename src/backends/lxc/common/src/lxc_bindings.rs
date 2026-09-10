@@ -2,24 +2,14 @@
 // Licensed under the MIT License.
 
 //! Safe Rust wrappers around the liblxc C API.
-//!
-//! liblxc exposes container management through a `struct lxc_container` with
-//! function pointer fields. This module provides an RAII `LxcContainer` wrapper
-//! that calls the appropriate function pointers and handles cleanup.
+
+/// Fences the `lxc.mount.entry` lines this backend owns.  A reused container's
+/// block can be rewritten without disturbing entries a template or an operator
+/// added by hand.
+const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
+const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
 
 /// Resolve the default LXC storage path the way liblxc does.
-///
-/// Replicates the algorithm liblxc applies when no explicit `-P <lxcpath>` is
-/// provided to its CLI tools, using the supplied environment lookup and
-/// effective-uid hooks. Extracted into a free function so unit tests can
-/// exercise every branch deterministically.
-///
-/// Resolution order:
-///  1. `LXC_PATH` env var (if non-empty).
-///  2. `/var/lib/lxc` when running as root (EUID 0).
-///  3. `$XDG_DATA_HOME/lxc` if `XDG_DATA_HOME` is set and non-empty.
-///  4. `$HOME/.local/share/lxc` if `HOME` is set and non-empty.
-///  5. `/var/lib/lxc` as a last-resort fallback.
 fn resolve_lxcpath_with_env<F, G>(get_env: F, geteuid: G) -> String
 where
     F: Fn(&str) -> Option<String>,
@@ -47,14 +37,9 @@ where
 }
 
 /// Resolve the default LXC storage path for the current process.
-///
-/// See [`resolve_lxcpath_with_env`] for the exact algorithm. This wrapper
-/// reads the real environment and effective UID.
 pub fn resolve_default_lxcpath() -> String {
-    // lxc-exec is Linux-only at runtime, but the crate has to compile
-    // workspace-wide (clippy runs on windows-latest, and macOS dev builds
-    // pull lxc_common in transitively). On non-Linux targets the function
-    // is never invoked in production, so fall back to a non-root EUID.
+    // The crate compiles workspace-wide (the clippy lane runs on
+    // windows-latest), where this is never called; a non-root EUID stands in.
     #[cfg(target_os = "linux")]
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
     fn current_euid() -> u32 {
@@ -69,29 +54,20 @@ pub fn resolve_default_lxcpath() -> String {
 }
 
 /// The keep-env argv shape, for tests that do not exercise env control.
-///
-/// No production caller wants it, so outside `cfg(test)` this is dead code,
-/// and the workspace clippy lane runs with `-D warnings`.
 #[cfg(test)]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
     build_attach_args_with_env_control(env, working_directory, command, false)
 }
 
-/// Build the post-binary argv for `lxc-attach` (the args that follow the
-/// `-n NAME -P lxcpath` flags already appended by `lxc_command`).
+/// Build the post-binary argv for `lxc-attach` (the args after the
+/// `-n NAME -P lxcpath` flags `lxc_command` already appended).
 ///
-/// Extracted so the env / cwd / command layering is unit-testable without
-/// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
-/// the full contract.
+/// An empty `env` is ambiguous: the caller expressed no opinion, or a scrub
+/// removed every entry there was.  `force_clear_env` distinguishes them; only
+/// the second must still shut the host environment out.
 ///
-/// An empty `env` is ambiguous: it is both "the caller expressed no opinion"
-/// and "a scrub removed every entry there was". `force_clear_env` is how a
-/// caller says which one it means, because only the second still has to shut
-/// the host environment out.
-///
-/// Gated to Linux + test builds because `attach_run` is a Windows stub
-/// that never calls this helper, and the workspace clippy lane on
-/// `windows-latest` would otherwise flag it as dead code.
+/// Gated to `test` and Linux: `attach_run` is a Windows stub that never calls
+/// this, and the windows-latest clippy lane would otherwise flag it dead.
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args_with_env_control(
     env: &[String],
@@ -99,19 +75,11 @@ fn build_attach_args_with_env_control(
     command: &str,
     force_clear_env: bool,
 ) -> Vec<String> {
-    // Loose upper bound; realloc-avoidance hint only.
     let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
-    // Replace semantics: any non-empty env opts the caller into a clean
-    // slate, even if every entry is malformed. Matches Seatbelt exactly
-    // and is the posture lxc-attach(1) recommends for sandbox callers.
-    // See `attach_run` doc for the full contract.
     if force_clear_env || !env.is_empty() {
         args.push("--clear-env".to_string());
         for kv in env {
-            // Well-formed = "KEY=VAL" with a non-empty KEY. `"=foo"` and
-            // `"BADENTRY"` are both silently skipped; embedded `=` in
-            // VAL is fine because split_once stops at the first one.
             if let Some((key, _)) = kv.split_once('=') {
                 if !key.is_empty() {
                     args.push(format!("--set-var={}", kv));
@@ -127,11 +95,10 @@ fn build_attach_args_with_env_control(
     if working_directory.is_empty() {
         args.push(command.to_string());
     } else {
-        // Positional-arg trick: cwd and command travel through sh as $1/$2
-        // verbatim, so neither needs shell-escaping; `_` fills sh's $0 slot.
-        // `cd --` guards a leading-dash cwd; `exec` is required so signals
-        // and timeout delivery hit the user process instead of the wrapper
-        // sh. Bad-cwd surfaces as cd's exit status (see `attach_run` doc).
+        // cwd and command travel through sh as positional `$1`/`$2`, needing
+        // no shell-escaping; `_` fills sh's `$0`.  `cd --` guards a
+        // leading-dash cwd.  `exec` makes signals and timeout delivery reach
+        // the user process, not this wrapper sh.
         args.push("cd -- \"$1\" && exec /bin/sh -c \"$2\"".to_string());
         args.push("_".to_string());
         args.push(working_directory.to_string());
@@ -141,22 +108,57 @@ fn build_attach_args_with_env_control(
     args
 }
 
+/// Permanently drops network-admin capability from the workload; a capability
+/// given up here cannot return for this process tree.
+#[cfg(target_os = "linux")]
+fn confine_network_capabilities(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // `libc` does not export this; the value is from linux/capability.h.
+    const CAP_NET_ADMIN: libc::c_ulong = 12;
+
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `prctl` is a bare syscall and this
+    // closure allocates nothing and captures nothing.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Whether to start the container with its configured network or with none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartNetwork {
+    FromContainerConfig,
+    NoInterface,
+}
+
+impl StartNetwork {
+    fn to_start_args(self) -> &'static [&'static str] {
+        match self {
+            StartNetwork::FromContainerConfig => &[],
+            // `up` keeps 127.0.0.1 available to a workload that binds it.
+            StartNetwork::NoInterface => {
+                &["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"]
+            }
+        }
+    }
+}
+
 /// Safe wrapper around an LXC container.
 pub struct LxcContainer {
     name: String,
-    /// Resolved LXC storage path (the "lxcpath"). Always populated — either
-    /// from an explicit caller override or from [`resolve_default_lxcpath`].
-    /// Passed via `-P <path>` to every `lxc-*` shell-out so behavior is
-    /// identical regardless of how the binary is launched (e.g. cron, systemd
-    /// units with non-default `HOME`).
+
+    /// Resolved LXC storage path, passed via `-P` to every `lxc-*` invocation.
     lxc_path: String,
 }
 
 impl LxcContainer {
     /// Create a new LXC container handle.
-    ///
-    /// `lxc_path`, when `Some`, overrides liblxc's default path resolution.
-    /// When `None`, the default is resolved via [`resolve_default_lxcpath`].
     pub fn new(name: &str, lxc_path: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
@@ -177,8 +179,7 @@ impl LxcContainer {
     }
 
     /// Build a `Command` for an `lxc-*` tool with `-P <lxc_path> -n <name>`
-    /// already populated. Centralizes the argv prefix so we can't accidentally
-    /// drop `-P` again (see #274).
+    /// already populated.
     fn lxc_command(&self, tool: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new(tool);
         cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
@@ -187,7 +188,8 @@ impl LxcContainer {
 
     /// Run a prepared `lxc-*` command, mapping spawn / non-zero-exit failures
     /// to a `String` error tagged with the tool name.
-    fn run_status(mut cmd: std::process::Command, tool: &str) -> Result<(), String> {
+    fn run_tool(mut cmd: std::process::Command) -> Result<(), String> {
+        let tool = cmd.get_program().to_string_lossy().into_owned();
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
@@ -217,13 +219,17 @@ impl LxcContainer {
     }
 
     /// Return the PID of the container's init process, or `None` if the
-    /// container isn't running or the PID can't be parsed. Used to enter the
-    /// container's network namespace (`nsenter -t <pid> -n`) for inbound
-    /// iptables enforcement.
+    /// container is not running or the PID cannot be parsed.
     ///
-    /// `lxc-info -p` prints "just the container's pid"; depending on the LXC
-    /// version this is either a bare number or a `PID: <n>` line, so both
-    /// forms are accepted.
+    /// The firewall rules are enforced inside the container's network namespace
+    /// via `nsenter -t <pid> -n`; each network namespace carries its own
+    /// complete firewall ruleset.
+    ///
+    /// The kernel's only handle to a namespace is a process already inside it,
+    /// and a PID names one.
+    ///
+    /// `lxc-info -p` prints the container's PID as either a bare number or a
+    /// `PID: <n>` line depending on the LXC version; both forms are accepted.
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -251,15 +257,15 @@ impl LxcContainer {
             .arg(release)
             .arg("-a")
             .arg(Self::current_arch());
-        Self::run_status(cmd, "lxc-create")
+        Self::run_tool(cmd)
     }
 
     /// Set a configuration item on the container.
     ///
-    /// Appends `key = value` to the container's config file. The error
-    /// message includes the key, value, and target path so users can tell at
-    /// a glance whether the failure is about the entry contents (e.g. a
-    /// nonexistent mount source) or about the config file itself.
+    /// This appends and never replaces.  It is the wrong primitive for per-run
+    /// policy a reused container must not accumulate; a container preserved by
+    /// `destroyOnExit = false` keeps every item earlier runs wrote.  Use
+    /// [`Self::set_managed_mount_entries`] for a replaceable block.
     pub fn set_config_item(&self, key: &str, value: &str) -> Result<(), String> {
         let config_path = self.config_file_path();
         let entry = format!("{} = {}\n", key, value);
@@ -279,13 +285,91 @@ impl LxcContainer {
             })
     }
 
-    /// Start the container.
-    pub fn start(&self) -> Result<(), String> {
-        Self::run_status(self.lxc_command("lxc-start"), "lxc-start")
+    /// Replace the block of `lxc.mount.entry` items this backend owns.
+    ///
+    /// A container preserved by `destroyOnExit = false` is reused, and
+    /// `set_config_item` only appends; without this replace step a later run
+    /// granted no filesystem policy could still read a directory an earlier run
+    /// was handed.
+    ///
+    /// Only the marker-fenced lines this backend wrote are touched.  Entries a
+    /// template or operator added by hand, and entries in files the config
+    /// `lxc.include`s, are left untouched.
+    pub fn set_managed_mount_entries(&self, entries: &[String]) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let existing = std::fs::read_to_string(&config_path).map_err(|e| {
+            format!(
+                "Failed to read container config to replace its mount entries: {} (config file: {})",
+                e, config_path
+            )
+        })?;
+
+        let mut out = Self::strip_managed_mount_entries(&existing);
+        if !entries.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(MANAGED_MOUNTS_BEGIN);
+            out.push('\n');
+            for entry in entries {
+                out.push_str("lxc.mount.entry = ");
+                out.push_str(entry);
+                out.push('\n');
+            }
+            out.push_str(MANAGED_MOUNTS_END);
+            out.push('\n');
+        }
+
+        let temp_path = format!("{}.mxc-tmp", config_path);
+        std::fs::write(&temp_path, out.as_bytes()).map_err(|e| {
+            format!(
+                "Failed to stage rewritten container config: {} (temp file: {})",
+                e, temp_path
+            )
+        })?;
+        std::fs::rename(&temp_path, &config_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!(
+                "Failed to install rewritten container config: {} (config file: {})",
+                e, config_path
+            )
+        })
+    }
+
+    /// Drop the marker-fenced managed block from a container config body.
+    ///
+    /// An opening marker with no closing one -- the shape an interrupted
+    /// rewrite leaves -- is treated as fenced to end of file, clearing the
+    /// leftovers rather than inheriting them.
+    fn strip_managed_mount_entries(config: &str) -> String {
+        let mut out = String::with_capacity(config.len());
+        let mut inside = false;
+        for line in config.lines() {
+            let trimmed = line.trim();
+            if trimmed == MANAGED_MOUNTS_BEGIN {
+                inside = true;
+                continue;
+            }
+            if trimmed == MANAGED_MOUNTS_END {
+                inside = false;
+                continue;
+            }
+            if !inside {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Start the container with `network`.
+    pub fn start(&self, network: StartNetwork) -> Result<(), String> {
+        let mut cmd = self.lxc_command("lxc-start");
+        cmd.args(network.to_start_args());
+        Self::run_tool(cmd)
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
-    /// Returns (exit_code, stdout, stderr).
     pub fn exec(
         &self,
         command: &str,
@@ -307,57 +391,16 @@ impl LxcContainer {
         ))
     }
 
-    /// Execute a command inside a running container using lxc-attach, with
-    /// the inner process attached to a freshly-allocated pty via
-    /// [`mxc_pty::run_with_pty`]. See that crate for the full pty-bridge
-    /// contract (output streamed live to host stdio, stdin forwarded after
-    /// first byte arrives from inner shell, etc.).
+    /// Run a command inside the running container.
     ///
-    /// `working_directory` is honored by wrapping the user command in a
-    /// `cd -- "$1" && exec /bin/sh -c "$2"` shell prelude with cwd and
-    /// command passed as positional args so neither needs additional
-    /// shell escaping. Empty string preserves the container default cwd.
-    /// A nonexistent or non-permitted cwd surfaces as a generic non-zero
-    /// exit (typically 1, from `cd`'s own status) with no structured
-    /// signal that the cwd was the cause — same observable behavior as
-    /// a bad `Command::current_dir` on the other backends. Callers
-    /// needing strong cwd validation should pre-check the path.
+    /// Output streams go straight to the host; both returned strings are always
+    /// empty.
     ///
-    /// `env` is honored by translating each `KEY=VAL` entry into a
-    /// repeated `--set-var=KEY=VAL` argument to `lxc-attach`. Entries
-    /// that are malformed — no `=` (e.g. `"BADENTRY"`) or an empty key
-    /// (e.g. `"=foo"`) — are silently skipped.
+    /// An empty `env` leaves this process's own environment in place, proxy
+    /// variables and host credentials included.
     ///
-    /// When `env` is non-empty, `--clear-env` is also passed (regardless
-    /// of how many entries survive validation) so `lxc-exec`'s own caller
-    /// environment does **not** leak into the sandbox. This matches
-    /// Seatbelt's `env_clear()`-on-non-empty contract and is the posture
-    /// `lxc-attach(1)` recommends for sandbox-spawn callers. `lxc-attach`
-    /// still injects a small baseline (`container`, `HOME`, `TERM`,
-    /// default `PATH`, `USER`) and applies the container's
-    /// `lxc.environment` config; those layers sit below the user vars
-    /// and are outside this function's control.
-    ///
-    /// When `env` is empty, the legacy keep-env behavior is preserved so
-    /// existing call sites without explicit env are undisturbed unless
-    /// `force_clear_env` is true. An empty `env` is ambiguous -- it is both
-    /// "no caller opinion" and "a scrub removed every entry there was" -- and
-    /// keep-env is only the right reading of the first, because it is the
-    /// mode under which this process's own environment, proxy variables and
-    /// host credentials included, reaches the container.
-    ///
-    /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
-    /// [`crate::signal_cleanup::install`] blocks them in this process so
-    /// its watchdog thread can `sigwait` on them; that mask is inherited
-    /// across `fork`+`exec` and would otherwise make the inner shell
-    /// silently ignore Ctrl-C / termination.
-    ///
-    /// Stdout/stderr are streamed live via the primary fd; the returned
-    /// strings are always empty. Callers needing captured output should run
-    /// a self-contained `commandLine` and read it back from a file.
-    ///
-    /// `timeout: Some(d)` kills the child if it runs longer than `d` and
-    /// returns `Err("script timed out after {ms}ms")`.
+    /// The unblocked signals are ones this process blocks for its cleanup
+    /// watchdog; left blocked, the inner shell would ignore Ctrl-C.
     #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
@@ -378,6 +421,9 @@ impl LxcContainer {
             command,
             force_clear_env,
         ));
+
+        // Must run before the command is spawned; it registers a pre-exec hook.
+        confine_network_capabilities(&mut cmd);
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -410,23 +456,30 @@ impl LxcContainer {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
 
-    /// Stop the container.
+    /// Stop the container by killing it, not by asking it to exit.
     pub fn stop(&self) -> Result<(), String> {
-        Self::run_status(self.lxc_command("lxc-stop"), "lxc-stop")
+        Self::run_tool(self.stop_command())
     }
 
-    /// Destroy the container (removes rootfs and config).
-    ///
-    /// `lxc-destroy -f` already force-stops a running container; we used to
-    /// call `lxc-stop` first, but plain `lxc-stop` waits up to 60 s for a
-    /// graceful shutdown — fatal for distros with systemd as PID 1 in
-    /// unprivileged userns where init never cleanly responds to SIGPWR.
-    /// Forcing the stop via destroy keeps this fast for both alpine and
-    /// ubuntu-class images.
+    /// The command [`Self::stop`] runs, built without running it.
+    fn stop_command(&self) -> std::process::Command {
+        let mut cmd = self.lxc_command("lxc-stop");
+
+        // -k kills the container outright.  Asking it to exit instead waits 60
+        // seconds for a SIGPWR reply that systemd as PID 1 in an unprivileged
+        // userns never sends.
+        cmd.arg("-k");
+        cmd
+    }
+
+    /// Destroy the container, removing its rootfs and config.
     pub fn destroy(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
+
+        // -f force-stops a running container rather than waiting for it to
+        // shut down on its own.
         cmd.arg("-f");
-        Self::run_status(cmd, "lxc-destroy")
+        Self::run_tool(cmd)
     }
 
     /// Get the path to the container's config file.
@@ -434,7 +487,6 @@ impl LxcContainer {
         format!("{}/{}/config", self.lxc_path, self.name)
     }
 
-    /// Get the current system architecture string for LXC templates.
     fn current_arch() -> &'static str {
         #[cfg(target_arch = "x86_64")]
         {
@@ -460,6 +512,44 @@ mod tests {
     }
 
     #[test]
+    fn stop_kills_rather_than_waiting_for_a_clean_shutdown() {
+        let container = LxcContainer::new("mxc-stop-test", Some("/var/lib/lxc"));
+        let args: Vec<String> = container
+            .stop_command()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            args.iter().any(|a| a == "mxc-stop-test"),
+            "the command must address this container, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "-k"),
+            "stop must kill the container: a clean shutdown waits 60 seconds for an \
+             init that may never answer, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_interface_states_that_to_lxc_start() {
+        assert_eq!(
+            StartNetwork::NoInterface.to_start_args(),
+            ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
+            "lxc-start reads each config item from the -s that precedes it, \
+             and loopback stays up for a workload that binds 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn a_run_that_keeps_the_container_config_states_nothing() {
+        assert!(
+            StartNetwork::FromContainerConfig.to_start_args().is_empty(),
+            "the container's own config must be left to decide its interfaces"
+        );
+    }
+
+    #[test]
     fn lxcpath_honors_lxc_path_env() {
         let p = resolve_lxcpath_with_env(
             |k| {
@@ -476,7 +566,6 @@ mod tests {
 
     #[test]
     fn lxcpath_lxc_path_takes_precedence_over_root_default() {
-        // Even as root, LXC_PATH wins, matching liblxc's behavior.
         let p = resolve_lxcpath_with_env(
             |k| {
                 if k == "LXC_PATH" {
@@ -506,7 +595,6 @@ mod tests {
             },
             || 1000,
         );
-        // XDG_DATA_HOME wins over HOME for unprivileged users.
         assert_eq!(p, "/home/u/.data/lxc");
     }
 
@@ -557,8 +645,6 @@ mod tests {
 
     #[test]
     fn lxcpath_empty_env_values_are_ignored() {
-        // Empty LXC_PATH/XDG_DATA_HOME must not be used as the path; resolution
-        // should fall through to the next candidate.
         let p = resolve_lxcpath_with_env(
             |k| match k {
                 "LXC_PATH" | "XDG_DATA_HOME" => Some(String::new()),
@@ -572,18 +658,12 @@ mod tests {
 
     #[test]
     fn lxcpath_user_with_no_env_has_safe_fallback() {
-        // Highly unusual: unprivileged process with neither HOME nor
-        // XDG_DATA_HOME. We still return a deterministic path rather than
-        // panicking; callers will surface the resulting filesystem error.
         let p = resolve_lxcpath_with_env(no_env, || 1000);
         assert_eq!(p, "/var/lib/lxc");
     }
 
     #[test]
     fn lxc_container_uses_resolved_lxcpath_when_none_provided() {
-        // We can't easily mock libc::geteuid() in the real ctor, but we can
-        // assert the contract: lxc_path() always returns a non-empty path,
-        // even when the caller passes None.
         let c = LxcContainer::new("any", None);
         assert!(!c.lxc_path().is_empty());
     }
@@ -603,9 +683,6 @@ mod tests {
 
     #[test]
     fn set_config_item_error_includes_key_value_and_path() {
-        // Point the container at a path that does not exist so the open()
-        // call reliably fails. The error message must include all three
-        // diagnostic details so users can pinpoint the failure.
         let bogus_base = std::env::temp_dir().join(format!(
             "mxc-nonexistent-lxc-{}-{}",
             std::process::id(),
@@ -635,13 +712,151 @@ mod tests {
         );
     }
 
+    // ---- managed mount entries -------------------------------------------
+
+    /// Build a container whose config file lives in a fresh temp directory
+    /// seeded with `body`.
+    fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "mxc-lxc-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let dir = base.join("box");
+        std::fs::create_dir_all(&dir).expect("temp container dir");
+        let config = dir.join("config");
+        std::fs::write(&config, body).expect("seed config");
+        let container = LxcContainer::new("box", Some(base.to_str().unwrap()));
+        (container, config)
+    }
+
+    const TEMPLATE_CONFIG: &str = "# Template used to create this container\n\
+                                   lxc.include = /usr/share/lxc/config/common.conf\n\
+                                   lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
+                                   lxc.mount.entry = /opt/handwritten opt none bind 0 0\n";
+
+    #[test]
+    fn a_reused_container_does_not_inherit_an_earlier_runs_mounts() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        container
+            .set_managed_mount_entries(&["/tmp/secret tmp/secret none bind,create=dir 0 0".into()])
+            .expect("first run programs its mount");
+        let after_first = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            after_first.contains("/tmp/secret"),
+            "the first run's mount must be programmed; got:\n{after_first}"
+        );
+
+        container
+            .set_managed_mount_entries(&[])
+            .expect("second run grants nothing");
+        let after_second = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            !after_second.contains("/tmp/secret"),
+            "a run granting no filesystem policy must not inherit the earlier mount; got:\n{after_second}"
+        );
+    }
+
+    #[test]
+    fn rewriting_mounts_preserves_every_line_the_backend_does_not_own() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        container
+            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .expect("program mounts");
+        container
+            .set_managed_mount_entries(&[])
+            .expect("clear mounts");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        for line in [
+            "# Template used to create this container",
+            "lxc.include = /usr/share/lxc/config/common.conf",
+            "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs",
+            "lxc.mount.entry = /opt/handwritten opt none bind 0 0",
+        ] {
+            assert!(
+                body.contains(line),
+                "{line:?} must survive the rewrite; got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_runs_do_not_accumulate_managed_blocks() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        for _ in 0..3 {
+            container
+                .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+                .expect("program mounts");
+        }
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        assert_eq!(
+            body.matches("lxc.mount.entry = /data").count(),
+            1,
+            "the block must be replaced, not appended; got:\n{body}"
+        );
+        assert_eq!(
+            body.matches(MANAGED_MOUNTS_BEGIN).count(),
+            1,
+            "exactly one managed block may exist; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_managed_block_is_cleared_rather_than_inherited() {
+        let truncated = format!(
+            "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n{}\nlxc.mount.entry = /tmp/secret tmp/secret none bind 0 0\n",
+            MANAGED_MOUNTS_BEGIN
+        );
+        let (container, config) = container_with_config(&truncated);
+
+        container
+            .set_managed_mount_entries(&[])
+            .expect("clear mounts");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            !body.contains("/tmp/secret"),
+            "an unterminated block must not survive; got:\n{body}"
+        );
+        assert!(
+            body.contains("lxc.rootfs.path"),
+            "lines before the marker must survive; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_failed_rewrite_leaves_no_temporary_file_behind() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let err = LxcContainer::new("ghost", Some("/nonexistent-mxc-base"))
+            .set_managed_mount_entries(&[])
+            .expect_err("a missing config must fail loudly");
+        assert!(
+            err.contains("ghost/config"),
+            "error must name the config file, got: {err}"
+        );
+
+        container
+            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .expect("program mounts");
+        let temp = format!("{}.mxc-tmp", config.display());
+        assert!(
+            !std::path::Path::new(&temp).exists(),
+            "the staging file must not outlive a successful rewrite"
+        );
+    }
+
     // ---- build_attach_args ----------------------------------------------
 
     #[test]
     fn build_attach_args_no_env_no_cwd_is_unchanged_legacy_shape() {
-        // Empty env + empty cwd must reproduce the original argv shape:
-        // `-- /bin/sh -c <command>` so we don't perturb existing call sites
-        // when neither cwd nor env is set.
         let args = build_attach_args(&[], "", "echo hi");
         assert_eq!(args, vec!["--", "/bin/sh", "-c", "echo hi"]);
     }
@@ -671,7 +886,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_env_entries_without_equals_are_skipped() {
-        // Malformed entry can't poison the whole attach call.
         let env = vec!["BADENTRY".to_string(), "OK=val".to_string()];
         let args = build_attach_args(&env, "", "cmd");
         assert_eq!(
@@ -689,9 +903,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_empty_key_entries_are_skipped() {
-        // `"=foo"` and `"="` both have an empty key — `--set-var==foo`
-        // would either be rejected by lxc-attach or create a phantom
-        // unnamed var. Drop them the same way we drop entries without `=`.
         let env = vec![
             "=foo".to_string(),
             "=".to_string(),
@@ -731,17 +942,13 @@ mod tests {
 
     #[test]
     fn build_attach_args_cwd_with_special_chars_does_not_require_escaping() {
-        // The whole point of the positional-arg trick is that nasty cwd
-        // values (spaces, single/double quotes, dollar signs, backticks)
-        // pass through sh as `$1` verbatim — no escaping needed here.
         let cwd = "/tmp/has spaces & 'quotes' $vars `cmd`";
         let cmd = "printf '%s' \"$PWD\"";
         let args = build_attach_args(&[], cwd, cmd);
 
-        // cwd and command must appear verbatim as the last two argv entries.
         assert_eq!(args[args.len() - 2], cwd);
         assert_eq!(args[args.len() - 1], cmd);
-        // And the wrapper script must reference them positionally.
+
         assert!(args
             .iter()
             .any(|a| a == "cd -- \"$1\" && exec /bin/sh -c \"$2\""));
@@ -769,10 +976,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_emits_clear_env_when_env_non_empty() {
-        // Containment guarantee: when the caller supplies env, lxc-exec's
-        // own environment must NOT leak into the sandbox. `--clear-env`
-        // also has to land BEFORE the `--set-var` entries so lxc-attach
-        // clears first, then applies user vars on top.
         let env = vec!["FOO=bar".to_string()];
         let args = build_attach_args(&env, "", "cmd");
         let clear_idx = args
@@ -792,9 +995,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_omits_clear_env_when_env_empty() {
-        // Backward-compat guarantee: empty env preserves the legacy
-        // keep-env shape so existing call sites with no explicit env are
-        // undisturbed.
         let args = build_attach_args(&[], "", "echo hi");
         assert!(
             !args.iter().any(|a| a == "--clear-env"),
@@ -811,10 +1011,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_clears_env_even_when_all_entries_malformed() {
-        // Caller opted into env control by populating the field. Even if
-        // every entry is malformed, `--clear-env` must still fire so the
-        // host env doesn't leak in through a back door. lxc-attach's own
-        // baseline (HOME, PATH, USER, ...) keeps the child runnable.
         let env = vec!["BADENTRY".to_string(), "=alsobad".to_string()];
         let args = build_attach_args(&env, "", "cmd");
         assert_eq!(args, vec!["--clear-env", "--", "/bin/sh", "-c", "cmd"]);
@@ -822,14 +1018,6 @@ mod tests {
 
     #[test]
     fn build_attach_args_caller_env_replaces_host_env() {
-        // Documents the host-vs-caller collision contract: when both the
-        // host and the caller set the same KEY, the caller's value wins
-        // because `--clear-env` lands BEFORE the `--set-var` entries, so
-        // lxc-attach wipes the inherited slot and then re-sets it from
-        // the caller's value. The integration test in
-        // `tests/scripts/run_lxc_env_cwd_test.sh` exports a host-side
-        // `MXC_TEST_FOO=HOST_LEAK_SHOULD_NOT_APPEAR` and asserts the
-        // child sees the config's `MXC_TEST_FOO=bar baz`.
         let env = vec!["MXC_TEST_FOO=bar baz".to_string()];
         let args = build_attach_args(&env, "", "cmd");
         let clear_idx = args.iter().position(|a| a == "--clear-env").unwrap();
@@ -844,16 +1032,8 @@ mod tests {
         );
     }
 
-    // ── End-to-end: proxy policy → env → attach args ─────────────────────────
-    // These tests drive apply_proxy_env then build_attach_args_with_env_control
-    // together so the observable output (the lxc-attach argv) is what is
-    // asserted, not just an intermediate bool.
-
     #[test]
     fn proxy_disabled_keeps_caller_proxy_env_and_still_clears_inherited_env() {
-        // With no MXC proxy there is no egress path of ours for a caller's own
-        // proxy variable to bypass, and the firewall chain -- not an
-        // environment variable -- is what enforces the policy either way.
         use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
         let mut env = vec![
             "HTTP_PROXY=http://caller-proxy.example:9999".to_string(),

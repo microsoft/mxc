@@ -28,17 +28,16 @@ use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::CreatedResources;
 #[cfg(target_os = "linux")]
-use crate::network_iptables::NetworkIptablesManager;
+use crate::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 #[cfg(target_os = "linux")]
 use wxc_common::logger::{Logger, Mode};
 
 /// What the watchdog needs to roll back on a fatal signal: the container
-/// name (so we can `lxc-destroy` it), the host-side veth interface when
-/// known (so we can also remove the iptables FORWARD hook the runner
-/// installed against it), the set of egress chains and hooks the runner has
-/// actually created so far (so we remove only those), and the container's init
-/// PID when known (so we can also remove the container-netns iptables INPUT
-/// rules the inbound chain installed inside it, before the container is
+/// name (so we can `lxc-destroy` it), the set of egress chains and hooks the
+/// runner has actually created so far (so we remove only those), and the
+/// container's init PID when known (so we can enter the container's network
+/// namespace to remove both the egress `OUTPUT` hooks and the inbound `INPUT`
+/// rules the two chains installed inside it, before the container is
 /// destroyed).
 ///
 /// All live behind one mutex on purpose. The watchdog takes a single
@@ -47,7 +46,6 @@ use wxc_common::logger::{Logger, Mode};
 #[derive(Default)]
 struct ActiveSandbox {
     name: Option<String>,
-    veth: Option<String>,
     created: CreatedResources,
     netns_pid: Option<u32>,
 }
@@ -65,30 +63,18 @@ fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
 
 /// Records `name` as the currently active container so the cleanup watchdog
 /// can destroy it if a fatal signal arrives. Replaces any previous value
-/// (including any previously registered veth and created-resource record,
-/// since the new container has not had its veth discovered and has not
-/// created anything yet).
+/// (including any previously registered created-resource record, since the
+/// new container has not created anything yet).
 pub fn set_active(name: &str) {
     let mut slot = lock_slot();
     slot.name = Some(name.to_owned());
-    slot.veth = None;
     slot.created = CreatedResources::default();
     slot.netns_pid = None;
 }
 
-/// Records the host-side veth interface for the active container so the
-/// watchdog can also remove the iptables FORWARD hook on a fatal signal.
-/// No-op if no container is currently registered.
-pub fn set_active_veth(veth: &str) {
-    let mut slot = lock_slot();
-    if slot.name.is_some() {
-        slot.veth = Some(veth.to_owned());
-    }
-}
-
 /// Records the container's init PID for the active container so the watchdog
-/// can remove the container-netns iptables INPUT (inbound) rules on a fatal
-/// signal, before the container is destroyed. No-op if no container is
+/// can remove the iptables rules inside the container's network namespace on
+/// a fatal signal, before the container is destroyed. No-op if no container is
 /// currently registered.
 pub fn set_active_pid(pid: u32) {
     let mut slot = lock_slot();
@@ -97,7 +83,7 @@ pub fn set_active_pid(pid: u32) {
     }
 }
 
-/// Records which iptables chains and FORWARD hooks the runner has created so
+/// Records which iptables chains and OUTPUT hooks the runner has created so
 /// far, so signal-time cleanup removes exactly those and nothing else.
 ///
 /// No-op when no container is registered. Backends that never call
@@ -114,19 +100,9 @@ pub(crate) fn set_active_created(created: CreatedResources) {
 /// Reads back what the watchdog would act on. Test-only: production code has
 /// exactly one reader, and it is the watchdog itself.
 #[cfg(test)]
-fn active_snapshot() -> (
-    Option<String>,
-    Option<String>,
-    CreatedResources,
-    Option<u32>,
-) {
+fn active_snapshot() -> (Option<String>, CreatedResources, Option<u32>) {
     let slot = lock_slot();
-    (
-        slot.name.clone(),
-        slot.veth.clone(),
-        slot.created,
-        slot.netns_pid,
-    )
+    (slot.name.clone(), slot.created, slot.netns_pid)
 }
 
 /// Returns the slot to its process-start state so a test leaves nothing behind.
@@ -193,25 +169,20 @@ fn run_watchdog(mask: SigSet) -> ! {
         let Ok(sig) = mask.wait() else { continue };
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
-            // Remove iptables rules first so the FORWARD hook and chain
-            // don't outlive the container. The veth disappears once the
-            // container is destroyed below; cleaning up first avoids a
-            // dangling reference. Best-effort with a buffered logger so
-            // signal-time output doesn't interleave with whatever else
-            // might still be writing to the host's stdio.
+            // Remove the iptables rules first so neither chain outlives the
+            // container. Both live inside the container's own network
+            // namespace, which vanishes when it is destroyed below, so this
+            // only runs while the init PID is still known. Best-effort with a
+            // buffered logger so signal-time output doesn't interleave with
+            // whatever else might still be writing to the host's stdio.
             let mut buf_logger = Logger::new(Mode::Buffer);
-            NetworkIptablesManager::force_cleanup(
-                &name,
-                active.veth.as_deref(),
-                active.created,
-                &mut buf_logger,
-            );
-            // Also remove the container-netns inbound INPUT rules while the
-            // netns still exists (it vanishes when the container is destroyed
-            // below). Only possible when we know the init PID; without it the
-            // netns is unaddressable, so there is nothing we can enter to clean.
-            // Best-effort; a no-op if nothing was installed.
             if let Some(pid) = active.netns_pid {
+                NetworkIptablesManager::force_cleanup(
+                    &name,
+                    EgressHookPoint::ContainerNetns(pid),
+                    active.created,
+                    &mut buf_logger,
+                );
                 IngressManager::force_cleanup(&name, pid, &mut buf_logger);
             }
             let _ = LxcContainer::new(&name, None).destroy();
@@ -236,14 +207,13 @@ mod tests {
         // its resources must not become something the watchdog would remove.
         set_active_created(CreatedResources::for_test(true, true, true, true));
         set_active_pid(4242);
-        let (name, veth, created, netns_pid) = active_snapshot();
+        let (name, created, netns_pid) = active_snapshot();
         assert_eq!(name, None, "no container should be registered yet");
         assert_eq!(
             created,
             CreatedResources::default(),
             "ownership published with no registered container must be discarded"
         );
-        assert_eq!(veth, None);
         assert_eq!(
             netns_pid, None,
             "a netns PID published with no registered container must be discarded"
@@ -251,18 +221,12 @@ mod tests {
 
         // Registering a container opens the slot.
         set_active("ctr-a");
-        set_active_veth("veth-a");
         set_active_pid(1234);
         let v4_chain_only = CreatedResources::for_test(true, false, false, false);
         set_active_created(v4_chain_only);
         assert_eq!(
             active_snapshot(),
-            (
-                Some("ctr-a".to_owned()),
-                Some("veth-a".to_owned()),
-                v4_chain_only,
-                Some(1234)
-            ),
+            (Some("ctr-a".to_owned()), v4_chain_only, Some(1234)),
             "a registered container must see its own identity and ownership"
         );
 
@@ -272,7 +236,7 @@ mod tests {
         let both_chains = CreatedResources::for_test(true, true, false, false);
         set_active_created(both_chains);
         assert_eq!(
-            active_snapshot().2,
+            active_snapshot().1,
             both_chains,
             "the most recent publication is what the watchdog must act on"
         );
@@ -283,13 +247,8 @@ mod tests {
         set_active("ctr-b");
         assert_eq!(
             active_snapshot(),
-            (
-                Some("ctr-b".to_owned()),
-                None,
-                CreatedResources::default(),
-                None
-            ),
-            "registering a new container must reset veth, ownership, and netns PID"
+            (Some("ctr-b".to_owned()), CreatedResources::default(), None),
+            "registering a new container must reset ownership and netns PID"
         );
 
         clear_active();
