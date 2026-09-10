@@ -147,7 +147,18 @@ wxc-exec.exe --config-base64 <base64-encoded-json>
 
 # Debug output
 wxc-exec.exe --debug config.json
+
+# Supply or replace process.commandLine from trailing arguments
+wxc-exec.exe config.json -- python --version
 ```
+
+For `wxc-exec.exe`, arguments after the required `--` separator are rendered
+for the selected backend and spliced into `process.commandLine` before the
+request is parsed. They may supply a missing command or replace the policy's
+command. This form is supported for one-shot requests and state-aware `exec`;
+other state-aware phases reject it. A policy that relies on trailing arguments
+is a CLI template rather than a complete request that can be executed
+independently.
 
 On Linux: `./lxc-exec config.json`
 On macOS: `./mxc-exec-mac --experimental config.json`
@@ -225,13 +236,13 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 wxc-exec.exe --audit policy.json
 ```
 
-Successful non-dry-run audits require capture metadata, actionable denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
+Successful non-dry-run audits require capture metadata, actionable denials JSON, its verbose diagnostic sibling, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json`, `denials.verbose.json`, and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps both JSON files and the ETL but has no source config to snapshot or adjust. Truncated analysis keeps both JSON files, the ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
 ## Telemetry
 
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution`, `MXC.Error`, and the sanitized Learning Mode artifact event `MXC.VerboseDenials`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
 Telemetry requires:
 1. Top-level `"telemetry": { "enabled": true }` in the JSON config
@@ -259,9 +270,21 @@ Windows user consent is granted and administrative policy allows collection.
 
 #### What official builds send
 
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution` and `MXC.Error` events to Microsoft through the UTC pipeline when telemetry is enabled — that same build-time setting also selects the correct Measures keyword and Product-and-Service-Usage privacy tag for the events, so telemetry routing and event classification always agree. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only, use a provider-local keyword with no UTC meaning, and carry no privacy classification tag, and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution`, `MXC.Error`, and `MXC.VerboseDenials` events to Microsoft through the UTC pipeline when telemetry is enabled — that same build-time setting also selects the correct Measures keyword and Product-and-Service-Usage privacy tag for the events, so telemetry routing and event classification always agree. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only, use a provider-local keyword with no UTC meaning, and carry no privacy classification tag, and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
-No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and a bounded error category (`error_type`). Free-form error message text is never emitted, so paths, usernames, and credentials cannot leak through telemetry. If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
+No PII is collected. Execution/error events contain only execution metrics
+(duration, backend type, exit code) and a bounded error category
+(`error_type`). When a ProcessContainer run successfully produces a Learning
+Mode verbose artifact, `MXC.VerboseDenials` can include sanitized
+provider/event identifiers, process IDs, closed outcome reasons,
+access/resource classifications, occurrence counts, and truncation state. The
+telemetry projection derives provider GUIDs from a closed provider enum and
+drops all verbose property names and values. MXC never emits commands,
+credentials, complete file paths, usernames, workload-derived properties, sandbox output,
+raw ETL, actionable denial documents, general logger text, or free-form error
+text. The verbose-event data inventory requires explicit privacy/release review
+before shipment. If you use the SDK to build applications, you are responsible
+for providing appropriate telemetry notices to your own users.
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
 

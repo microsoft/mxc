@@ -56,6 +56,33 @@ public sealed class SandboxPolicy
     /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
     [JsonPropertyName("timeoutMs")]
     public uint? TimeoutMs { get; set; }
+
+    /// <summary>
+    /// Per-invocation telemetry settings serialized in the binding policy as
+    /// <c>{"telemetry":{"enabled":...}}</c>.
+    /// </summary>
+    [JsonPropertyName("telemetry")]
+    public TelemetrySettings? Telemetry { get; set; }
+
+    internal SandboxPolicy WithoutLegacyCaptureDenials()
+    {
+        var clone = (SandboxPolicy)MemberwiseClone();
+#pragma warning disable MXC0001 // Clears the compatibility alias on the clone only.
+        clone.CaptureDenials = null;
+#pragma warning restore MXC0001
+        return clone;
+    }
+}
+
+/// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>
+public sealed class TelemetrySettings
+{
+    /// <summary>
+    /// Opt this invocation into telemetry, subject to persisted user consent
+    /// and administrative policy.
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
 }
 
 /// <summary>

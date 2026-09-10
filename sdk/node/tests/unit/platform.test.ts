@@ -21,6 +21,8 @@ import {
   _setLxcAvailabilityProbe,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
+  _resetWxcExecutableCache,
+  _setWxcExecutableVerifier,
 } from '../../src/platform.js';
 
 const isWindows = os.platform() === 'win32';
@@ -352,6 +354,7 @@ describe('findWxcExecutable failure modes', () => {
 
   beforeEach(() => {
     prevBinDir = process.env.MXC_BIN_DIR;
+    _resetWxcExecutableCache();
   });
 
   afterEach(() => {
@@ -360,6 +363,8 @@ describe('findWxcExecutable failure modes', () => {
     } else {
       process.env.MXC_BIN_DIR = prevBinDir;
     }
+    _setWxcExecutableVerifier(null);
+    _resetWxcExecutableCache();
   });
 
   it('returns a string or null and never throws under a nonexistent MXC_BIN_DIR', () => {
@@ -380,6 +385,65 @@ describe('findWxcExecutable failure modes', () => {
     process.env.MXC_BIN_DIR = '';
     const result = findWxcExecutable();
     assert.ok(result === null || typeof result === 'string');
+  });
+
+  it('does not cache a failed executable lookup', () => {
+    process.env.MXC_BIN_DIR = path.join(
+      os.tmpdir(),
+      `mxc-sdk-unit-no-such-dir-${process.pid}`,
+    );
+    _setWxcExecutableVerifier(() => false);
+    assert.strictEqual(findWxcExecutable(), null);
+
+    _setWxcExecutableVerifier((candidate) => candidate.startsWith(process.env.MXC_BIN_DIR!));
+    assert.ok(findWxcExecutable()?.startsWith(process.env.MXC_BIN_DIR));
+  });
+
+  it('honors an MXC_BIN_DIR override configured after a cached lookup', () => {
+    delete process.env.MXC_BIN_DIR;
+    _setWxcExecutableVerifier(() => true);
+    const initial = findWxcExecutable();
+    assert.ok(initial);
+
+    const override = path.join(os.tmpdir(), `mxc-sdk-unit-override-${process.pid}`);
+    process.env.MXC_BIN_DIR = override;
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved?.startsWith(override));
+    assert.notStrictEqual(resolved, initial);
+  });
+
+  it('honors an MXC_BIN_DIR executable staged after caching a fallback', () => {
+    const override = path.join(os.tmpdir(), `mxc-sdk-unit-override-${process.pid}`);
+    const overrideExecutable = path.join(
+      override,
+      os.arch() === 'arm64' ? 'arm64' : 'x64',
+      'wxc-exec.exe',
+    );
+    process.env.MXC_BIN_DIR = override;
+
+    let overrideAvailable = false;
+    _setWxcExecutableVerifier((candidate) =>
+      candidate === overrideExecutable ? overrideAvailable : true,
+    );
+
+    const fallback = findWxcExecutable();
+    assert.ok(fallback);
+    assert.notStrictEqual(fallback, overrideExecutable);
+
+    overrideAvailable = true;
+    assert.strictEqual(findWxcExecutable(), overrideExecutable);
+  });
+
+  it('revalidates a cached executable before returning it', () => {
+    let cachedPath: string | null = null;
+    _setWxcExecutableVerifier((candidate) => candidate !== cachedPath);
+    cachedPath = findWxcExecutable();
+    assert.ok(cachedPath);
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved);
+    assert.notStrictEqual(resolved, cachedPath);
   });
 });
 

@@ -115,6 +115,13 @@ expectConst(
   /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
   stateAwareWslc
 );
+expectConst(
+  "state-aware-helper.ts",
+  stateAwareTs,
+  "TELEMETRY_STATE_AWARE_VERSION",
+  /const TELEMETRY_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
+  maxSupported
+);
 
 // -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
 const schemaVersionsCs = read(

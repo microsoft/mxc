@@ -129,7 +129,8 @@ fn build_request_rejects_empty_version() {
         timeout_ms: None,
     };
 
-    let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
+    let err = build_request(&policy, "echo hello", None)
+        .expect_err("an empty policy version must be rejected");
     assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
 }
 
@@ -148,7 +149,7 @@ fn build_request_host_rules_require_outbound() {
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
     // ProcessContainer requires it. Either way this must not panic.
-    let result = build_request(&policy, None);
+    let result = build_request(&policy, "echo hello", None);
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             result.is_ok(),
@@ -180,7 +181,8 @@ fn rust_sdk_builds_legacy_networking() {
         timeout_ms: None,
     };
 
-    build_request(&policy, None).expect("the Rust SDK should build legacy networking");
+    build_request(&policy, "echo hello", None)
+        .expect("the Rust SDK should build legacy networking");
 }
 
 #[test]
@@ -206,7 +208,8 @@ fn rust_sdk_builds_directional_networking() {
         timeout_ms: None,
     };
 
-    build_request(&policy, None).expect("the Rust SDK should build directional networking");
+    build_request(&policy, "echo hello", None)
+        .expect("the Rust SDK should build directional networking");
 }
 
 #[test]
@@ -246,6 +249,7 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     build_request_with_containment(
         &policy,
         &Containment::ProcessContainer(process_container),
+        "echo hello",
         None,
     )
     .expect("public re-exports should build a schema 0.8 ProcessContainer request");
@@ -267,8 +271,8 @@ fn build_request_then_run_seatbelt() {
         timeout_ms: Some(10000),
     };
 
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script("echo built-from-policy");
+    let request = build_request(&policy, "echo built-from-policy", None)
+        .expect("build_request should succeed");
 
     let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();

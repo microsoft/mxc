@@ -345,11 +345,16 @@ export interface PortMapping {
   protocol?: 'tcp';
 }
 
-/** Telemetry configuration for TraceLogging ETW support. */
+/**
+ * Telemetry configuration for TraceLogging ETW support.
+ */
 export interface TelemetryConfig {
   /**
-   * Explicit telemetry opt-in. `true` requests telemetry subject to user
-   * consent and administrative policy; `false` or `undefined` keeps it off.
+   * Per-invocation telemetry opt-in.
+   *
+   * `true` requests telemetry for this invocation; emission is still gated by
+   * persisted user consent and administrative policy. `false` (or `undefined`)
+   * disables telemetry for this invocation.
    */
   enabled?: boolean;
 }
@@ -388,11 +393,11 @@ export interface ContainerConfig {
   network?: NetworkConfig;
   /** Runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
-  /** Telemetry configuration */
+  /** Telemetry configuration for TraceLogging ETW support */
   telemetry?: TelemetryConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
-    /** WSLC SDK configuration for Linux containers from Windows */
+      /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
@@ -452,6 +457,8 @@ export type SandboxPolicy = {
   };
   /** Schema 0.8 runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
   /** Schema 0.8 ProcessContainer-specific policy. */
   processContainer?: {
       /** ProcessContainer-specific networking settings. */

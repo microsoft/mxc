@@ -173,10 +173,10 @@ impl ConsentState {
 
     /// Whether this consent state represents an absent user decision.
     ///
-    /// This is deliberately private and policy-blind. Host applications must
-    /// use [`needs_consent_prompt`], which also suppresses the prompt under an
-    /// administrative block.
-    fn needs_prompt(&self) -> bool {
+    /// Policy-blind: this only reflects the stored consent state. Host
+    /// applications must use [`needs_consent_prompt`], which also suppresses
+    /// the prompt under an administrative block.
+    pub fn needs_prompt(&self) -> bool {
         matches!(self, ConsentState::Undetermined)
     }
 }
@@ -1784,7 +1784,10 @@ mod tests {
             env.set_policy_value(3);
 
             let outcome = request_consent(Some("en-US"), |prompt| {
-                assert_eq!(prompt.resource_version, 1);
+                assert_eq!(
+                    prompt.resource_version,
+                    crate::telemetry::consent_prompt::CONSENT_RESOURCE_VERSION
+                );
                 assert_eq!(prompt.locale, "en-US");
                 Ok(ConsentDecision::Yes)
             })
@@ -1803,7 +1806,10 @@ mod tests {
             env.set_policy_value(3);
 
             let outcome = block_on(request_consent_async(Some("en-US"), |prompt| {
-                assert_eq!(prompt.resource_version, 1);
+                assert_eq!(
+                    prompt.resource_version,
+                    crate::telemetry::consent_prompt::CONSENT_RESOURCE_VERSION
+                );
                 assert_eq!(prompt.locale, "en-US");
                 async { Ok(ConsentDecision::Yes) }
             }))
