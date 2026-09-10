@@ -7,8 +7,9 @@ from tag `v0.8.0`; Phase 6.5 reconstructed its exact Rust contract and
 advanced exact development to `0.9.0-alpha`.
 
 The implementation PR stack was published through Phase 9.5 as of 2026-09-08,
-with seven PRs open at that checkpoint. Phase 10a is now published on its
-implementation branch, with no PR opened yet. "Complete" below means
+with seven PRs open at that checkpoint. Phase 10a and the atomic 10b-10d
+cutover are now published on their implementation branches, with no PRs
+opened for those branches yet. "Complete" below means
 implemented, not merged or fully accepted; native Unix and live-backend
 acceptance remain outstanding.
 
@@ -19,18 +20,21 @@ acceptance remain outstanding.
 | Phase 7.3: private exact parser and builders | #1096 | `b13c0bae` |
 | Phase 7.4: differential equivalence harness | #1097 | `3b411771` |
 | Phase 8: producer and corpus migration | #1099 | `92581c44` |
-| Phase 9: authoritative exact dispatch | #1104 | `bcc2ac7f` |
-| Phase 9.5: typed state-aware dispatch | #1123 | `01b05281` |
-| Phase 10a: additive IsolationSession acknowledgment | Not opened | `7da86a30` |
+| Phase 9: authoritative exact dispatch | #1104 | `1116d233` |
+| Phase 9.5: typed state-aware dispatch | #1123 | `2ae06e78` |
+| Phase 10a: additive IsolationSession acknowledgment | Not opened | `16ed3c81` |
+| Phases 10b-10d: directional-only v0.9 cutover | Not opened | `8722f343` |
 
 The stack root was rebased onto `origin/main` at `29702c3a` on 2026-09-04.
 Review fixes and subsequent restacks were published with explicit leases on
 2026-09-05; #1096 and #1104 are each a single commit relative to their stack
 bases. Phase 7.5 is maintained on this dedicated plan branch. Phase 9.5 was
 published as a single commit in #1123 on 2026-09-08, with acceptance pending.
-Phase 10a is implemented on
-`user/gudge/version_specific_config_parsers_phase10a`; the next unimplemented
-unit is the atomic Phase 10b-10d cutover. The planned end state after Phases
+The rewritten Phase 9a/9b tips are `1116d233`/`2ae06e78`; Phase 10a was
+squashed and restacked on that parent as `16ed3c81`. The atomic 10b-10d
+implementation is published as `8722f343` on
+`user/gudge/version_specific_config_parsers_phase10b`. Phase 11a is the next
+unimplemented unit. The planned end state after Phases
 10-11 publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 The phase descriptions retain the design and behavior at each intermediate
@@ -1003,7 +1007,7 @@ This step is primarily mechanical and is suitable for delegation.
 
 ### Phase 9: Enable exact dispatch
 
-Status: complete at `bcc2ac7f` on
+Status: complete at rewritten tip `1116d233` on
 `user/gudge/version_specific_config_parsers_phase9a`, open as PR #1104 and
 stacked on Phase 8 PR #1099.
 
@@ -1082,7 +1086,7 @@ unchanged.
 
 ### Phase 9.5: Replace raw state-aware dispatch payloads
 
-Status: implemented at `01b05281` on
+Status: implemented at rewritten tip `2ae06e78` on
 `user/gudge/version_specific_config_parsers_phase9b`, published as PR #1123
 stacked on Phase 9a PR #1104. Native Linux/macOS execution and successful live
 lifecycle acceptance for all three Windows backends remain outstanding.
@@ -1498,12 +1502,13 @@ nor backend behavior, with all six acceptance gates satisfied.
 
 ### Phase 10: Finalize the v0.9 stable candidate
 
-Phase 10a implementation is published through `7da86a30`: runtime preparation
-(`a48fd58f`), public contracts and SDK integration (`61fd83f8`), then persistent
-schema fixtures and native CI coverage. The feature branch's
-`docs/version-specific-parser-migration-inventory.md` records the local
-evidence and remaining native/live acceptance limitations. Phases 10b-10d
-have not started.
+Phase 10a is squashed and restacked as `16ed3c81`. The atomic Phase 10b-10d
+cutover is implemented and published as `8722f343`. Its exact contracts,
+backend mapping, Rust/Node/C# authoring, generated artifacts, request corpus,
+and documentation are updated together. The feature branch's
+`docs/version-specific-parser-migration-inventory.md` records the actual local
+verification and remaining native Unix/live-backend acceptance limitations.
+Implementation completion is not a claim that those host-dependent gates ran.
 
 Directional networking shipped in v0.8 through the rolling stack and is already
 present in the exact v0.8 and v0.9 contracts. Phase 10 therefore does not
@@ -1687,7 +1692,7 @@ Good tasks to delegate:
 
 ### Implementation PR plan
 
-**Adopted 2026-09-02; status updated 2026-09-09.** The work uses ten reviewable
+**Adopted 2026-09-02; status updated 2026-09-10.** The work uses ten reviewable
 PRs rather than one PR per fine-grained work item or one very large PR per
 major phase. Each PR must build and test green on its own; later PRs may be
 stacked while review is in progress, but merge in the order below.
@@ -1698,10 +1703,10 @@ stacked while review is in progress, but merge in the order below.
 | 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders | Complete at `b13c0bae` |
 | 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory | Complete at `3b411771` |
 | 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Complete at `92581c44` |
-| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `bcc2ac7f` |
-| 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `01b05281`; acceptance pending |
-| 7 | Phase 10a | Add the IsolationSession acknowledgment and scoped runtime preparation without removing legacy v0.9 input yet | Implemented at `7da86a30`; native/live acceptance pending; PR not opened |
-| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Not started |
+| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `1116d233` |
+| 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `2ae06e78`; acceptance pending |
+| 7 | Phase 10a | Add the IsolationSession acknowledgment and scoped runtime preparation without removing legacy v0.9 input yet | Implemented at `16ed3c81`; native/live acceptance pending; PR not opened |
+| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Implemented at `8722f343`; native/live acceptance pending; PR not opened |
 | 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state | Not started |
 | 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling artifacts, metadata, and test-only parser/builder oracles | Not started |
 
@@ -4057,15 +4062,56 @@ intermediate contract.
 | Subphase | Scope | PR boundary |
 | --- | --- | --- |
 | 10a | Add the dedicated IsolationSession acknowledgment and scoped runtime preparation additively while legacy v0.9 input remains accepted | Implemented on the phase10a branch; PR pending |
-| 10b | Remove legacy fields from the v0.9 contract, update generated artifacts, adapters, policy builders, and migration diagnostics | Remaining implementation PR 8 |
-| 10c | Update backend validation and enforcement plus Rust, Node, C#, and FFI producer surfaces | Remaining implementation PR 8 |
-| 10d | Migrate the corpus, add publication guards, update documentation, and run the cross-platform quality gate | Remaining implementation PR 8 |
+| 10b | Remove legacy fields from the v0.9 contract, update generated artifacts, adapters, policy builders, and migration diagnostics | Implemented in `8722f343` |
+| 10c | Update backend validation and enforcement plus Rust, Node, C#, and FFI producer surfaces | Implemented in `8722f343` |
+| 10d | Migrate the corpus, add publication guards, update documentation, and run the cross-platform quality gate | Implemented in `8722f343`; native/live acceptance pending |
 
 PR 7 is deliberately additive and leaves all existing requests valid. PR 8 is
 the atomic cutover: contract removal, producer migration, generated artifacts,
 backend behavior, tests, and documentation land together so no merged tree
 declares v0.9 fields that its SDKs still emit or removes fields its corpus still
 uses.
+
+#### Phase 10b implementation decision: WSLC directional posture
+
+The user approved explicit unrestricted bridged networking for exact v0.9
+after the implementation inventory confirmed that WSLC has no independent
+ingress or host-loopback restriction primitive.
+
+| Mode | Egress default | Ingress default | Host loopback |
+| --- | --- | --- | --- |
+| Isolated | deny | deny | deny |
+| Bridged, unrestricted | allow | allow | allow |
+
+Reject mixed postures and per-host rules rather than implying enforcement
+that the SDK cannot supply. In particular, egress allow with omitted ingress
+is not a shorthand for unrestricted networking: omitted directional values
+default to deny, so all three allows must be explicit for a bridged request.
+An allow declaration does not create port forwarding or guarantee reachability
+through NAT. Published v0.6/v0.7/v0.8 contracts and their legacy runtime
+behavior remain unchanged.
+
+State-aware runtime-proxy-only exec requests inherit the provisioned posture
+and must not synthesize a network-mode change. The runtime URL must remain
+guest-routable; do not apply another backend's host-loopback-only endpoint rule
+to WSLC.
+
+#### Phase 10b implementation decision: NanVix network limits
+
+The user approved constrained v0.9 NanVix networking after review found that
+the old host-network flag and IPv4 filter do not implement arbitrary
+directional policies. Support isolated deny/deny/deny and explicitly
+unrestricted allow/allow/allow; reject mixed postures and directional egress
+rules with a clear unsupported-policy error. The host-network switch includes
+bind/listen capabilities, and the legacy allowlist has implicit DNS exceptions,
+so advertising full directional filtering would be misleading.
+
+Wire the validated mode to actual host-network enablement, not only capability
+flags. Keep positive network fixtures working with their explicit unrestricted
+declarations and retain negative isolation coverage. Unsupported filtering
+gets explicit rejection coverage. The legacy filter implementation remains for
+compatibility/reference; published contracts are not changed or down-versioned
+to hide the new v0.9 boundary.
 
 #### Phase 10a design decisions
 
