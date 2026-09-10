@@ -106,13 +106,11 @@ non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopbac
 development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee. It
 authorizes both host-loopback directions, although WFP still restricts client-container egress to the configured proxy
 endpoint. Host-loopback clients can reach listeners in the MXC client container.
-- MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
+MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
 `IsProcessSecurityEnvironmentVersionSupported` reports contract 1.1 or newer and
 `QueryProcessSecurityEnvironmentSupport` advertises ingress support. Otherwise, compatible directional defaults use
 the legacy PSEC 1.0/SBOX capability mapping; `hostLoopback: "allow"` is rejected because the legacy contracts cannot
 represent it.
-- `MXC-Loopback` peer identity passed to `CreateProcessSecurityEnvironment`. Caller-supplied `allowedProxyPeer` values
-cannot use that reserved identity.
 
 #### Identity-scoped proxy
 
