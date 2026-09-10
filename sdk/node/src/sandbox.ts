@@ -28,6 +28,15 @@ const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
 const REGISTERED_VERSION_ORDER = new Map(
     REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
 );
+const LEGACY_NETWORK_FIELDS = [
+    'allowOutbound',
+    'defaultPolicy',
+    'enforcementMode',
+    'allowLocalNetwork',
+    'allowedHosts',
+    'blockedHosts',
+    'proxy',
+] as const;
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -127,11 +136,9 @@ function validateTelemetryVersion(policy: SandboxPolicy): void {
 }
 
 function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return network.allowOutbound !== undefined ||
-        network.allowLocalNetwork !== undefined ||
-        network.allowedHosts !== undefined ||
-        network.blockedHosts !== undefined ||
-        network.proxy !== undefined;
+    return LEGACY_NETWORK_FIELDS.some(
+        field => (network as Record<string, unknown>)[field] !== undefined,
+    );
 }
 
 function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
@@ -148,10 +155,7 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
     if (policy.version === '0.9.0-alpha' && network !== undefined) {
-        for (const field of [
-            'allowOutbound', 'defaultPolicy', 'enforcementMode', 'allowLocalNetwork',
-            'allowedHosts', 'blockedHosts', 'proxy',
-        ]) {
+        for (const field of LEGACY_NETWORK_FIELDS) {
             if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
                 throw new Error(
                     `Schema 0.9.0-alpha no longer supports network.${field}. ` +
