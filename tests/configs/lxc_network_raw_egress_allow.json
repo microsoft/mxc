@@ -1,0 +1,21 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Raw-Allow",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"ping -c 1 -W 3 203.0.113.9 >/dev/null 2>&1; nc -w 3 203.0.113.9 443 </dev/null >/dev/null 2>&1; echo x | nc -u -w 3 203.0.113.9 443 >/dev/null 2>&1; echo MXC_STACK_ARMS_RAN\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["203.0.113.9"],
+    "blockedHosts": []
+  }
+}

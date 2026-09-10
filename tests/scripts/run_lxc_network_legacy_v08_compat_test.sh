@@ -104,25 +104,33 @@ for config in "$CTRL_CONFIG" "$CASE_CONFIG" "$BLOCK_CONFIG"; do
     fi
 done
 
-# Cases A and B must carry bare default-allow with no host lists.
+# Cases A and B must carry default-allow with no host lists.  They must also
+# name the firewall mode: LXC refuses `capabilities`, which is what an omitted
+# enforcementMode means, and a refused run measures nothing.
 for config in "$CTRL_CONFIG" "$CASE_CONFIG"; do
     if ! grep -Eq '"defaultPolicy"[[:space:]]*:[[:space:]]*"allow"' "$config"; then
-        fail "fixture $(basename "$config") does not carry defaultPolicy: allow; the shape under test is a bare legacy default-allow."
+        fail "fixture $(basename "$config") does not carry defaultPolicy: allow; the shape under test is a legacy default-allow."
     fi
-    for field in allowedHosts blockedHosts enforcementMode egress ingress; do
+    if ! grep -Eq '"enforcementMode"[[:space:]]*:[[:space:]]*"(firewall|both)"' "$config"; then
+        fail "fixture $(basename "$config") does not name enforcementMode firewall or both; LXC refuses the capabilities default and the run would measure nothing."
+    fi
+    for field in allowedHosts blockedHosts egress ingress; do
         if grep -Fq "\"$field\"" "$config"; then
-            fail "fixture $(basename "$config") carries '$field'; the shape under test is a bare legacy default-allow with no other network fields."
+            fail "fixture $(basename "$config") carries '$field'; the shape under test is a legacy default-allow with no host lists and no directional keys."
         fi
     done
 done
 
-# Case C must carry bare default-block with no host lists.
+# Case C must carry default-block with no host lists.
 if ! grep -Eq '"defaultPolicy"[[:space:]]*:[[:space:]]*"block"' "$BLOCK_CONFIG"; then
-    fail "Case C fixture does not carry defaultPolicy: block; the negative guard must be a bare legacy default-block."
+    fail "Case C fixture does not carry defaultPolicy: block; the negative guard must be a legacy default-block."
 fi
-for field in allowedHosts blockedHosts enforcementMode egress ingress; do
+if ! grep -Eq '"enforcementMode"[[:space:]]*:[[:space:]]*"(firewall|both)"' "$BLOCK_CONFIG"; then
+    fail "Case C fixture does not name enforcementMode firewall or both; LXC refuses the capabilities default and the run would measure nothing."
+fi
+for field in allowedHosts blockedHosts egress ingress; do
     if grep -Fq "\"$field\"" "$BLOCK_CONFIG"; then
-        fail "Case C fixture carries '$field'; the negative guard must be a bare legacy default-block with no other network fields."
+        fail "Case C fixture carries '$field'; the negative guard must be a legacy default-block with no host lists and no directional keys."
     fi
 done
 

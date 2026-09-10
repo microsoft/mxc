@@ -227,9 +227,6 @@ source — inside the namespace the traffic originates in — removes the questi
 of how the veth is attached, and needs no `br_netfilter`, no topology change,
 and no address management.
 
-This is the enforcement point the 0.8.0 networking contract specifies, and it
-is where inbound filtering already lives.
-
 Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` suppresses that teardown on both the explicit path and the drop path. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
 
 ### No network at all
@@ -267,7 +264,7 @@ The signal is the file's *existence* rather than its contents, because a contain
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
-Default-deny is not a containment boundary against the sandboxed workload, in either direction. Because both chains live in the container's own network namespace, the workload can reach them: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chains live in, where it can flush or delete them. Default-deny therefore holds for any workload that does not deliberately tear it down, and does not survive one that does. Making enforcement tamper-proof is tracked in issue #897.
+Both chains live in the container's own network namespace, so a workload holding `CAP_NET_ADMIN` there could flush or delete them. MXC drops that capability from the bounding set of the process it attaches, before the workload runs. The workload otherwise runs as container root: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio` — and `lxc-attach` is invoked without `-u` or `-g`. `CAP_NET_RAW` is retained, because a policy may permit `icmp` and a workload needs it to send one; a packet socket opened with it transmits below the chains, and closing that route belongs to a syscall filter rather than to a capability. Container init keeps both capabilities for its DHCP client. Making enforcement tamper-proof is tracked in issue #897.
 
 The inbound chain honors the lifecycle's `preservePolicy` as the egress chains do: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
@@ -298,12 +295,15 @@ literal.
 Two further constraints are enforced at parse time, both rejections rather than
 silent corrections:
 
-- **`enforcementMode` must be `firewall` or `both`.** Under the default
-  `capabilities` mode no iptables rules are installed, so the proxy env vars
-  would be injected while direct egress stayed open — a config that reads as
-  deny-all-except-proxy and enforces neither half. MXC refuses it rather than
-  auto-promoting the mode, so a stated enforcement level is never silently
-  rewritten.
+- **`enforcementMode` must be `firewall` or `both`.** This holds for every 0.7
+  network section, not only a proxied one. `capabilities` names Windows
+  AppContainer capability SIDs, a mechanism LXC does not have, and it is also
+  the field's default — so a config that never wrote `enforcementMode` asks for
+  it without meaning to. Accepting it would enforce the policy by some means
+  other than the one named, or leave it unenforced while reporting success. A
+  0.8 `network.egress` / `network.ingress` section carries no enforcement mode
+  and is unaffected. MXC refuses rather than auto-promoting the mode, so a
+  stated enforcement level is never silently rewritten.
 - **The `url` must not carry credentials.** LXC passes the proxy URL to
   `lxc-attach` as a `--set-var` argument, and process arguments are
   world-readable through `/proc/<pid>/cmdline`, so inline `user:pass@` would be

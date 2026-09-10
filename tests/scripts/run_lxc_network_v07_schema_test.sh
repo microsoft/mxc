@@ -5,8 +5,9 @@
 # what the 0.7 schema is owed, using configs that declare the version rather
 # than leaving it absent.
 #
-# The DNS case is the sharpest contrast with 0.8: a 0.7 chain carries an
-# unconditional port 53 accept, and the same intent expressed in 0.8 does not.
+# The DNS case is the sharpest contrast with 0.8: a filtered 0.7 chain opens
+# port 53 so the container can resolve the hosts it is allowed to reach, and
+# the same intent expressed in 0.8 does not.
 # Run this alongside run_lxc_network_ga_egress_test.sh, whose dns-denied case
 # is the other half of the pair.
 set -euo pipefail
@@ -84,7 +85,7 @@ CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 # ---------------------------------------------------------------------------
 
 echo "Running LXC schema 0.7 enforcement test..."
-echo "--- dns case: 0.7 defaultPolicy block, enforcementMode firewall ---"
+echo "--- dns case: 0.7 defaultPolicy block, enforcementMode firewall, one allowed host ---"
 
 DNS_OUTPUT=$("$LXC_EXEC" --debug "$DNS_CONFIG" 2>&1 || true)
 echo "$DNS_OUTPUT"
@@ -94,7 +95,7 @@ if echo "$DNS_OUTPUT" | grep -Fq "requests no firewall; skipping iptables"; then
 fi
 
 if echo "$DNS_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
-    fail "a DNS query was blocked under the 0.7 schema. The unconditional port 53 accept that every 0.7 chain carries is missing, which breaks name resolution for every existing config."
+    fail "a DNS query was blocked under the 0.7 schema. A filtered 0.7 chain opens port 53 so the container can resolve the hosts it is allowed to reach; without it every 0.7 config naming a hostname is broken."
 fi
 
 if ! echo "$DNS_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
@@ -108,7 +109,7 @@ assert_no_new_mxc_chains ip6tables "$CHAINS_BEFORE_V6"
 echo "PASS: the 0.7 chain kept its DNS exemption."
 
 # ---------------------------------------------------------------------------
-# Case 2: capabilities mode installs nothing
+# Case 2: capabilities mode is refused
 # ---------------------------------------------------------------------------
 
 echo "--- capabilities case: 0.7 defaultPolicy block, enforcementMode absent ---"
@@ -116,19 +117,20 @@ echo "--- capabilities case: 0.7 defaultPolicy block, enforcementMode absent ---
 CAP_OUTPUT=$("$LXC_EXEC" --debug "$CAPABILITIES_CONFIG" 2>&1 || true)
 echo "$CAP_OUTPUT"
 
-# `capabilities` is the 0.7 default, so this is what every config that never
-# wrote `enforcementMode` gets. Installing a chain here would put a firewall on
-# configs that predate the field.
-if ! echo "$CAP_OUTPUT" | grep -Fq "requests no firewall; skipping iptables"; then
-    fail "the default enforcement mode did not skip the firewall. A 0.7 config that never asked for one is being given a chain."
+# `capabilities` names Windows AppContainer capability SIDs, which LXC has no
+# mechanism for. It is also the 0.7 default, so a config that never wrote
+# `enforcementMode` asks for it without meaning to. Accepting it would enforce
+# the policy by some means other than the one named, or by none at all.
+if ! echo "$CAP_OUTPUT" | grep -Fq "which LXC has no mechanism for"; then
+    fail "the default enforcement mode was not refused. A 0.7 config naming a mechanism LXC does not have is being run anyway."
 fi
 
-if ! echo "$CAP_OUTPUT" | grep -Fq "MXC_WORKLOAD_RAN"; then
-    fail "the workload did not run; skipping the firewall must remain a successful no-op."
+if echo "$CAP_OUTPUT" | grep -Fq "MXC_WORKLOAD_RAN"; then
+    fail "the workload ran under a refused enforcement mode; a refusal must stop the run."
 fi
 
 assert_no_new_mxc_chains iptables "$CHAINS_BEFORE_V4"
 assert_no_new_mxc_chains ip6tables "$CHAINS_BEFORE_V6"
 
-echo "PASS: the default 0.7 enforcement mode installed nothing."
+echo "PASS: the default 0.7 enforcement mode was refused."
 echo "LXC schema 0.7 enforcement test complete."

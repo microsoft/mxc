@@ -13,6 +13,7 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "block"
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall"
   }
 }

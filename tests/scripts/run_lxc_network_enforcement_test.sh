@@ -222,9 +222,11 @@ if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_OK"; then
     fail "the deny case returned no loopback verdict; the in-container listener did not run."
 fi
 
-derive_chain_name "$DENY_OUTPUT"
-assert_no_forward_reference "$CHAIN_NAME"
-assert_firewall_chain_cleaned_up "$CHAIN_NAME"
+# A policy permitting nothing is withheld by giving the container no interface
+# at all, which installs no chain and leaves no name to derive.  Comparing the
+# snapshots still catches anything left behind.
+assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 
 echo "--- allow case: same default, destination explicitly allowed ---"
 MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"

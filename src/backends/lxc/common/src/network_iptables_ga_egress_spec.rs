@@ -5,6 +5,7 @@
 //! against the rule builder's documented contract rather than its implementation.
 
 use super::*;
+use wxc_common::models::NetworkEnforcementMode;
 
 fn directional_policy(
     default: NetworkAction,
@@ -781,6 +782,7 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
 fn a_legacy_policy_still_opens_dns() {
     let policy = ContainerPolicy {
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        allowed_hosts: vec!["example.com".to_string()],
         ..Default::default()
     };
     let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
@@ -792,17 +794,53 @@ fn a_legacy_policy_still_opens_dns() {
 }
 
 #[test]
-fn a_parsed_legacy_request_keeps_the_dns_exemption() {
+fn a_legacy_block_with_allowed_hosts_opens_dns() {
     let policy = policy_from_json(
         r#"{"version": "0.7.0",
             "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block", "enforcementMode": "firewall"}}"#,
+            "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
+                        "allowedHosts": ["example.com"]}}"#,
     );
     let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
 
     assert!(
         opens_dns_unconditionally(&rules),
-        "input=0.7 defaultPolicy=block; expected the legacy port 53 accept; output={rules:?}"
+        "input=0.7 defaultPolicy=block allowedHosts=[example.com]; expected the port 53 accept; output={rules:?}"
+    );
+}
+
+// A closed chain that allows no host has no name to resolve.
+#[test]
+fn a_legacy_block_with_no_allowed_hosts_does_not_open_dns() {
+    let policy = policy_from_json(
+        r#"{"version": "0.7.0",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
+                        "blockedHosts": ["example.com"]}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("legacy-block-no-allow", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=0.7 defaultPolicy=block with no allowedHosts; expected no port 53 accept; output={rules:?}"
+    );
+}
+
+// An open chain enforces its policy through deny rules, and an accept ahead of
+// them would let a blocked host answer on port 53.
+#[test]
+fn a_legacy_allow_with_blocked_hosts_does_not_open_dns() {
+    let policy = policy_from_json(
+        r#"{"version": "0.7.0",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow", "enforcementMode": "firewall",
+                        "blockedHosts": ["example.com"]}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("legacy-allow-blocked", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=0.7 defaultPolicy=allow blockedHosts=[example.com]; expected no port 53 accept; output={rules:?}"
     );
 }
 

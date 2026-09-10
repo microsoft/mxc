@@ -2,15 +2,16 @@
 // Licensed under the MIT License.
 
 //! `LxcScriptRunner` — executes scripts inside LXC containers.
-//!
-//! Implements the `ScriptRunner` trait for LXC-based containment on Linux.
 
 use std::fmt::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse};
+use wxc_common::models::{
+    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
+    ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -18,13 +19,13 @@ use crate::filesystem_mounts;
 use crate::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
-    needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
+    needs_network, plan_network, uses_directional_keys, EgressHookPoint, NetworkIptablesManager,
 };
 use crate::signal_cleanup;
 
-/// Comment marker on every `/etc/hosts` line this runner writes, so a later
-/// run can strip its own previous entries without disturbing the
-/// distribution's.
+/// Comment marker on every `/etc/hosts` line this runner writes.  A later run
+/// recognizes its own previous entries by this marker and strips them without
+/// disturbing the distribution's.
 const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 
 /// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
@@ -66,7 +67,6 @@ impl LxcScriptRunner {
     }
 
     /// Wait for the container's network stack to initialize.
-    /// Polls `lxc-info` until the container has an IP address or the timeout is reached.
     fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
         let start = Instant::now();
         let poll_interval = Duration::from_millis(500);
@@ -116,9 +116,9 @@ impl LxcScriptRunner {
         }
     }
 
-    /// Report a container the run could not dispose of.  A stop or destroy
-    /// that fails leaves it running with whatever access an earlier policy
-    /// gave it, and no other line records that.
+    /// Report a container the run could not dispose of.  A failed stop or
+    /// destroy leaves it running with whatever access an earlier policy gave
+    /// it.
     fn report_release_failure(
         release: ContainerRelease,
         result: Result<(), String>,
@@ -150,6 +150,73 @@ impl LxcScriptRunner {
         Self::report_release_failure(release, result, logger);
     }
 
+    /// Program both chains from a 0.7 host-list policy.
+    fn set_up_network_rules_for_v07(
+        &self,
+        container_name: &str,
+        hook_point: EgressHookPoint,
+        netns_pid: Option<u32>,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(NetworkIptablesManager, Option<IngressManager>), String> {
+        let mut fw_manager = NetworkIptablesManager::new(container_name, hook_point);
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
+        Self::egress_apply_outcome(fw_manager.apply_legacy_rules(policy, logger))?;
+
+        let mut ingress_manager = None;
+        if let Some(pid) = netns_pid {
+            let mut mgr = IngressManager::new(container_name, pid);
+            Self::ingress_apply_outcome(mgr.apply_legacy_rules(policy, logger))?;
+            mgr.set_preserve_policy(!self.cleanup_policy);
+            ingress_manager = Some(mgr);
+        }
+
+        Ok((fw_manager, ingress_manager))
+    }
+
+    /// Program both chains from a 0.8 directional policy.
+    fn set_up_network_rules_for_v08(
+        &self,
+        container_name: &str,
+        hook_point: EgressHookPoint,
+        netns_pid: Option<u32>,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(NetworkIptablesManager, Option<IngressManager>), String> {
+        let mut fw_manager = NetworkIptablesManager::new(container_name, hook_point);
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
+        Self::egress_apply_outcome(fw_manager.apply_directional_rules(policy, logger))?;
+
+        let mut ingress_manager = None;
+        if let Some(pid) = netns_pid {
+            let mut mgr = IngressManager::new(container_name, pid);
+            Self::ingress_apply_outcome(mgr.apply_directional_rules(policy, logger))?;
+            mgr.set_preserve_policy(!self.cleanup_policy);
+            ingress_manager = Some(mgr);
+        }
+
+        Ok((fw_manager, ingress_manager))
+    }
+
+    /// A failed or partial apply must return an error: the preserve flag that
+    /// suppresses `Drop` is set only on success, and a partial chain still
+    /// needs tearing down.
+    fn egress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Failed to apply network firewall rules.".to_string()),
+            Err(e) => Err(format!("Network policy error: {}", e)),
+        }
+    }
+
+    fn ingress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Failed to apply inbound network firewall rules.".to_string()),
+            Err(e) => Err(format!("Inbound network policy error: {}", e)),
+        }
+    }
+
     fn enforce_network_readiness<P, R>(
         &self,
         container_name: &str,
@@ -177,13 +244,36 @@ impl LxcScriptRunner {
         )))
     }
 
+    /// Where to hook the egress chain, or the response to send back when the
+    /// namespace is unknown and the policy asked for a firewall. Releases the
+    /// container before giving up, so a refusal leaves nothing running.
+    fn enforce_netns_discovery<R>(
+        &self,
+        netns_pid: Option<u32>,
+        installs_firewall: bool,
+        container_created: bool,
+        logger: &mut Logger,
+        mut release_container: R,
+    ) -> Result<EgressHookPoint, ScriptResponse>
+    where
+        R: FnMut(ContainerRelease) -> Result<(), String>,
+    {
+        if let Some(hook_point) = egress_hook_point(netns_pid, installs_firewall) {
+            return Ok(hook_point);
+        }
+
+        let release = self.release_kind(container_created);
+        Self::report_release_failure(release, release_container(release), logger);
+
+        Err(ScriptResponse::error(
+            "Failed to discover the container init PID; cannot enter the container \
+             network namespace to enforce the requested firewall. Aborting rather \
+             than running with enforcement silently disabled.",
+        ))
+    }
+
     /// Core execution logic.
     fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw) before building
-        // mounts. See `wxc_common::filesystem_object`. Only clone the request
-        // when an aliasing conflict actually needs tightening; an unresolvable
-        // path with deniedPaths present fails closed.
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
@@ -199,15 +289,10 @@ impl LxcScriptRunner {
             Ok(None) => request,
             Err(msg) => return ScriptResponse::error(&msg),
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents.
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
             return ScriptResponse::error(&msg);
         }
 
-        // Validate required LXC fields
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return ScriptResponse::error(
                 "LXC distribution and release are required \
@@ -216,18 +301,13 @@ impl LxcScriptRunner {
         }
 
         let container_name = self.resolve_container_name();
-        // Refuse a credential-bearing proxy URL here as well as at parse time.
-        // The parser guard only covers requests it built; `ExecutionRequest`
-        // and `ProxyAddress::from_url` are public, so a caller can hand this
-        // runner a policy the parser never saw. Below, `apply_proxy_env` sets
-        // HTTP(S)_PROXY to `to_url()`, which returns the original URL verbatim,
-        // and `build_attach_args_with_env_control` turns every environment
-        // entry into a `--set-var=KEY=VALUE` argument of the `lxc-attach`
-        // process this backend spawns (lxc_bindings.rs). A process's argv is
-        // readable through /proc/<pid>/cmdline by any local user for the
-        // lifetime of the command. The check sits ahead of container creation
-        // and firewall programming so a rejected request leaves no state
-        // behind.
+
+        // A credential-bearing proxy URL becomes an lxc-attach `--set-var`
+        // argument, and a process's argv is world-readable through
+        // /proc/<pid>/cmdline for the life of the command.  Refuse it here as
+        // well as at parse time: the parser guard covers only requests it
+        // built, and a caller can construct an `ExecutionRequest` the parser
+        // never saw.
         if let Some(url) = request
             .policy
             .network_proxy
@@ -236,8 +316,9 @@ impl LxcScriptRunner {
             .map(|address| address.to_url())
         {
             if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
-                // Built from the redacted form so the rejection cannot become
-                // the leak it is rejecting.
+                // Built from the redacted form: the rejection travels to logs
+                // and to the caller, and must not carry the password it
+                // refuses.
                 return ScriptResponse::error(&format!(
                     "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
                      proxy URL to lxc-attach as a --set-var command-line argument, and process \
@@ -249,11 +330,10 @@ impl LxcScriptRunner {
                 ));
             }
         }
-        // Make the name visible to the signal-cleanup watchdog so a fatal
-        // signal during create/start/attach still tears the container down —
-        // but only when the caller actually wants the container destroyed at
-        // exit. With `destroyOnExit = false` the normal completion path
-        // preserves the container, so the signal path must too.
+
+        // Register with the watchdog only when the caller wants the container
+        // destroyed at exit.  Otherwise the signal path would tear down a
+        // container the normal completion path preserves.
         if self.destroy_on_exit {
             signal_cleanup::set_active(&container_name);
         }
@@ -264,7 +344,6 @@ impl LxcScriptRunner {
             self.config.distribution, self.config.release
         );
 
-        // Apply experimental features when flag is set
         if request.experimental_enabled {
             if let Some(ref test) = request.experimental.test {
                 let _ = writeln!(
@@ -275,11 +354,9 @@ impl LxcScriptRunner {
             }
         }
 
-        // Create container handle
         let container = LxcContainer::new(&container_name, None);
         let mut container_created = false;
 
-        // Create the container if it doesn't exist
         if !container.is_defined() {
             let _ = writeln!(logger, "Creating LXC container...");
             if let Err(e) = container.create(&self.config.distribution, &self.config.release) {
@@ -291,7 +368,6 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already exists, reusing.");
         }
 
-        // Configure filesystem mounts
         if let Err(e) =
             filesystem_mounts::configure_filesystem_mounts(&container, &request.policy, logger)
         {
@@ -345,8 +421,8 @@ impl LxcScriptRunner {
         let needs_network = needs_network(&request.policy);
 
         if needs_network {
-            // Fail closed: proceeding without an IP silently breaks DNS and produces
-            // flaky failures. Alpine DHCP leases can arrive at ~9s, so allow 30s.
+            // Fail closed: proceeding without an IP silently breaks DNS.
+            // Alpine DHCP leases can arrive at ~9s; 30s leaves margin.
             let timeout = Duration::from_secs(30);
             if let Some(response) = self.enforce_network_readiness(
                 &container_name,
@@ -363,93 +439,63 @@ impl LxcScriptRunner {
             }
         }
 
-        // Both chains this backend installs live inside the container's own
-        // network namespace -- egress hooks its OUTPUT, inbound hooks its
-        // INPUT -- so neither can be programmed before the init PID names the
-        // namespace to enter.
+        // Both chains live inside the container's own network namespace, and
+        // the init PID is what names that namespace to enter.
         let netns_pid = container.init_pid();
-        match netns_pid {
-            Some(pid) => {
-                let _ = writeln!(logger, "Container init PID: {}", pid);
-                if self.destroy_on_exit {
-                    // Tell the watchdog about the netns PID so signal-time
-                    // cleanup can remove both chains before the container is
-                    // destroyed and the namespace goes with it.
-                    signal_cleanup::set_active_pid(pid);
-                }
-            }
-            None if plan.installs_firewall() => {
-                // The run asked for a firewall but we could not find the
-                // container netns to enforce it in. Running anyway would
-                // silently disable every rule the caller asked for, so abort.
-                self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error(
-                    "Failed to discover the container init PID; cannot enter the container \
-                     network namespace to enforce the requested firewall. Aborting rather \
-                     than running with enforcement silently disabled.",
-                );
-            }
-            None => {
-                // No firewall requested and no netns PID: there is nothing to
-                // enforce in either direction.
-            }
-        }
-
-        // Configure network rules
-        let hook_point = match netns_pid {
-            Some(pid) => EgressHookPoint::ContainerNetns(pid),
-            None => EgressHookPoint::Unhooked,
+        let hook_point = match self.enforce_netns_discovery(
+            netns_pid,
+            plan.installs_firewall(),
+            container_created,
+            logger,
+            |release| match release {
+                ContainerRelease::Destroy => container.destroy(),
+                ContainerRelease::Stop => container.stop(),
+            },
+        ) {
+            Ok(hook_point) => hook_point,
+            Err(response) => return response,
         };
 
-        let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
-        fw_manager.set_preserve_policy(!self.cleanup_policy);
-
-        match fw_manager.apply_firewall_rules(&request.policy, logger) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error("Failed to apply network firewall rules.");
+        if let Some(pid) = netns_pid {
+            let _ = writeln!(logger, "Container init PID: {}", pid);
+            if self.destroy_on_exit {
+                // The watchdog needs the netns PID to remove both chains
+                // before the container is destroyed and its namespace
+                // disappears.
+                signal_cleanup::set_active_pid(pid);
             }
+        }
+
+        let setup = if uses_directional_keys(&request.policy) {
+            self.set_up_network_rules_for_v08(
+                &container_name,
+                hook_point,
+                netns_pid,
+                &request.policy,
+                logger,
+            )
+        } else {
+            self.set_up_network_rules_for_v07(
+                &container_name,
+                hook_point,
+                netns_pid,
+                &request.policy,
+                logger,
+            )
+        };
+
+        let (mut fw_manager, mut ingress_manager) = match setup {
+            Ok(managers) => managers,
             Err(e) => {
                 self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error(&format!("Network policy error: {}", e));
+                return ScriptResponse::error(&e);
             }
-        }
-
-        // Kept in scope for post-execution cleanup; `None` when there is no
-        // netns PID and no firewall was requested (nothing to enforce).
-        let mut ingress_manager: Option<IngressManager> = None;
-
-        if let Some(pid) = netns_pid {
-            let mut mgr = IngressManager::new(&container_name, pid);
-            match mgr.apply_firewall_rules(&request.policy, logger) {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.release_after_failure(&container, container_created, logger);
-                    return ScriptResponse::error(
-                        "Failed to apply inbound network firewall rules.",
-                    );
-                }
-                Err(e) => {
-                    self.release_after_failure(&container, container_created, logger);
-                    return ScriptResponse::error(&format!("Inbound network policy error: {}", e));
-                }
-            }
-            // Every non-success arm above returns, so the apply call
-            // succeeded. Only now may the policy be marked for
-            // preservation: the flag also suppresses `Drop`, and a partial
-            // chain from a failed install must still be torn down. Success
-            // does not imply a chain exists — a non-firewall enforcement
-            // mode succeeds without installing one — but in that case no
-            // ownership flag is set and `Drop` has nothing to do either way.
-            mgr.set_preserve_policy(!self.cleanup_policy);
-            ingress_manager = Some(mgr);
-        }
+        };
 
         let mut pinned = false;
 
-        // A proxied chain opens no port 53, so without this the container has
-        // no resolver to find its proxy with.
+        // A proxied chain opens no port 53; without this pin the container has
+        // no resolver to reach its proxy.
         if let Some(pin) = fw_manager.proxy_host_pin() {
             let command = Self::build_hosts_pin_command(&pin.hosts_line());
             let _ = writeln!(
@@ -463,8 +509,6 @@ impl LxcScriptRunner {
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
 
-                // `attach_run` streams the child's output and returns empty
-                // strings, so the exit code is the whole report.
                 Ok((code, _, _)) => Some(Self::hosts_command_failure("writing", code)),
                 Err(e) => Some(e.to_string()),
             };
@@ -478,13 +522,10 @@ impl LxcScriptRunner {
             }
             pinned = true;
         } else if !container_created {
-            // A run that pins rewrites /etc/hosts from a filtered copy, so it
-            // disposes of an earlier pin on its way past.  A run that pins
-            // nothing has no such side effect, and a container this run did not
-            // create can still be carrying one -- left by a run interrupted
-            // after pinning, or by a removal that failed and only warned.  Left
-            // in place it keeps resolving a hostname to an address that only
-            // some earlier policy authorized.
+            // A run that pins nothing still clears a stale pin a reused
+            // container may carry from an interrupted or failed earlier run.
+            // Left in place it resolves a hostname to an address only an
+            // earlier policy authorized.
             let unpin = Self::build_hosts_unpin_command();
             let stale_pin_error =
                 match container.attach_run(&unpin, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT)) {
@@ -493,9 +534,9 @@ impl LxcScriptRunner {
                     Err(e) => Some(e.to_string()),
                 };
 
-            // Unlike the post-run removal, this one runs *before* the script, so
-            // a failure still changes what the script would resolve. Refuse the
-            // run rather than execute against a mapping this policy never made.
+            // This clearing runs before the script, and a failure would leave
+            // the script resolving against a mapping this policy never made.
+            // Refuse the run rather than execute.
             if let Some(reason) = stale_pin_error {
                 self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!(
@@ -507,7 +548,6 @@ impl LxcScriptRunner {
             }
         }
 
-        // Execute the script using lxc-attach (container is already running).
         // `script_timeout == 0` means "no timeout" per the SDK contract.
         let timeout = if request.script_timeout == 0 {
             None
@@ -516,8 +556,6 @@ impl LxcScriptRunner {
         };
         let _ = writeln!(logger, "Executing script inside container...");
         let mut exec_env = request.env.clone();
-        // Scrub every inherited proxy variable and, when the policy carries a
-        // proxy, point HTTP(S)_PROXY at it.
         wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
 
         // Always clear, including for an empty env: otherwise `lxc-attach`
@@ -542,8 +580,8 @@ impl LxcScriptRunner {
             Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
         };
 
-        // The pin names an address only this run's chain authorized, so it
-        // must not outlive that chain.
+        // The pin names an address only this run's chain authorized.  It must
+        // not outlive that chain.
         if pinned && self.cleanup_policy {
             let unpin = Self::build_hosts_unpin_command();
             let unpin_error =
@@ -553,7 +591,7 @@ impl LxcScriptRunner {
                     Err(e) => Some(e.to_string()),
                 };
 
-            // The script has already run, so a failure here cannot change its
+            // The script has already run; a failure here cannot change its
             // result and must not replace it.
             if let Some(reason) = unpin_error {
                 let _ = writeln!(
@@ -564,7 +602,6 @@ impl LxcScriptRunner {
             }
         }
 
-        // Cleanup: remove network rules
         if fw_manager.rules_applied() && self.cleanup_policy {
             let _ = fw_manager.remove_firewall_rules(logger);
         }
@@ -574,7 +611,6 @@ impl LxcScriptRunner {
             }
         }
 
-        // Cleanup: destroy container if configured
         if self.destroy_on_exit {
             let _ = writeln!(logger, "Destroying container...");
             if let Err(e) = container.destroy() {
@@ -585,45 +621,24 @@ impl LxcScriptRunner {
         response
     }
 
-    /// Build the shell command that installs `hosts_line` into the
-    /// container's `/etc/hosts`.
+    /// Build the shell command that installs `hosts_line` into the container's
+    /// `/etc/hosts`, marked for a later run to strip.
     ///
-    /// The first match wins in a hosts file, so an entry left by an earlier
-    /// run on a container reused across runs (`destroy_on_exit = false`) would
-    /// shadow the pin this run authorized. Marking each written line is what
-    /// lets a later run recognize its own without disturbing the ones the
-    /// distribution shipped.
-    ///
-    /// LXC may bind-mount `/etc/hosts`, so the file is rewritten in place:
-    /// replacing the inode would leave the container reading the old one. The
-    /// toolset is held to `grep` and `printf` because the image may be BusyBox
-    /// rather than coreutils.
-    ///
-    /// The kept lines are staged in a shell variable because a scratch file
-    /// has a name in the container's own filesystem and this command runs
-    /// privileged through `lxc-attach`. A previous workload on a reused
-    /// container can pre-create any predictable name as a symlink, and `>`
-    /// follows symlinks, so staging in a file aims a privileged truncating
-    /// write at whatever the link names -- another container file, or a host
-    /// path exposed through a writable bind mount. A variable has no name to
-    /// hijack.
-    ///
-    /// Staging must also finish before the redirect opens `/etc/hosts`,
-    /// because `>` truncates on open. Past that point nothing reads the
-    /// filesystem again: what remains works from text already in memory, so
-    /// no read failure can strand a file that has already been emptied.
+    /// The file is rewritten in place because LXC may bind-mount it, and the
+    /// toolset is held to `grep` and `printf` for BusyBox images.  Kept lines
+    /// are staged in a shell variable, not a scratch file: a reused container
+    /// can pre-create any predictable filename as a symlink, and `>` follows
+    /// symlinks into another container file or a host path on a writable bind
+    /// mount.
     ///
     /// Single-quoting `hosts_line` is safe by construction: `ProxyHostPin`
-    /// builds it from a parsed [`std::net::IpAddr`] and a validated
-    /// hostname, neither of which can carry a quote or a newline. The one
-    /// space it does contain is the hosts-file separator, and single quotes
-    /// render that inert.
+    /// builds it from a parsed [`std::net::IpAddr`] and a validated hostname,
+    /// neither of which can carry a quote or a newline.
     fn build_hosts_pin_command(hosts_line: &str) -> String {
-        // `$(...)` strips trailing newlines, so the kept text is re-emitted
-        // with an explicit one and the guard keeps an empty result from
-        // becoming a blank first line. The group's exit status is the final
-        // printf's, so a grep that matches nothing and exits 1 does not fail
-        // the command.
+        // `$(...)` strips trailing newlines, and the explicit `printf '%s\n'`
+        // restores one while the `-n` guard keeps an empty result from becoming
+        // a blank first line.  The group's exit status is the final printf's: a
+        // grep matching nothing and exiting 1 does not fail the command.
         format!(
             "{}{{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; \
              printf '%s {marker}\\n' '{hosts_line}'; }} > /etc/hosts",
@@ -636,41 +651,19 @@ impl LxcScriptRunner {
     /// Read the existing `/etc/hosts` into `$kept`, or abort before anything
     /// opens the file for writing.
     ///
-    /// `> /etc/hosts` truncates the moment it is opened, so every reason the
-    /// read could fail has to be settled before that point. Were the status
-    /// left unexamined, the failure would run in the worst possible
-    /// direction: `$kept` would be empty whether `grep` is absent,
-    /// `/etc/hosts` is unreadable, or the binary is killed, and the closing
-    /// `printf` would still exit 0 -- a successful pin reported over a hosts
-    /// file emptied of every entry the image shipped.
+    /// `> /etc/hosts` truncates the instant it opens; a read that failed must
+    /// stop the command before that point rather than just yield nothing to
+    /// write back.  Only grep status 0 (lines kept) and 1 (nothing kept) are
+    /// outcomes; 1 is ordinary, from an empty file or a re-pin of only-marked
+    /// lines.  Anything above 1 is a failed read, including the 127 a missing
+    /// `grep` gives.  A missing file is handled ahead of the read because
+    /// `grep` reports both "absent" and "unreadable" as status 2.
     ///
-    /// Only 0 (lines kept) and 1 (nothing kept) are outcomes rather than
-    /// failures. Status 1 is legitimate and common: an empty file, or a re-pin
-    /// where every existing line carries the marker. Anything above 1 is a
-    /// failed read, which also catches the `127` a missing `grep` produces. A
-    /// missing file is separated out ahead of the read because `grep` reports
-    /// both "absent" and "unreadable" as status 2, and an image that ships no
-    /// `/etc/hosts` has no content to protect.
-    ///
-    /// Two gaps survive this guard, and neither is closable while the command
-    /// is restricted to `grep` and `printf` for BusyBox:
-    ///
-    /// * A successful read still loses NUL bytes, because a shell variable
-    ///   cannot hold them. A hosts file containing one is rewritten truncated
-    ///   at that byte with status 0, and no check here observes it. A NUL in
-    ///   `/etc/hosts` is malformed to begin with, and the alternatives -- a
-    ///   scratch file, `sed`, `awk` -- each cost either a filesystem name an
-    ///   attacker can hijack or a tool BusyBox may not ship.
-    ///
-    /// * A symlink swapped in between the `-h` test and the redirect is still
-    ///   followed. Closing that race needs an open-once-and-rewrite primitive
-    ///   -- `openat` with `O_NOFOLLOW` inside the container's mount namespace
-    ///   -- which is a Rust-side change rather than a shell one. The `-h` test
-    ///   covers the unraced shape: a workload reused across runs can simply
-    ///   leave `/etc/hosts` as a symlink. A dangling one is the worst of
-    ///   those, because it fails `-e` as well, and a redirect onto a dangling
-    ///   link creates the link's target -- a write to an attacker-named path,
-    ///   which on a writable host bind mount lands outside the container.
+    /// Two gaps remain deliberately, neither closable while restricted to
+    /// `grep` and `printf` for BusyBox: a NUL byte cannot survive a shell
+    /// variable and truncates the rewrite, and a symlink swapped in between the
+    /// `-h` test and the redirect is still followed.  Closing the race needs an
+    /// `openat(O_NOFOLLOW)` primitive on the Rust side.
     fn hosts_read_prologue() -> String {
         format!(
             "if [ -h /etc/hosts ]; then \
@@ -692,13 +685,6 @@ impl LxcScriptRunner {
     }
 
     /// Strip every pin this runner has ever written from `/etc/hosts`.
-    ///
-    /// Only a run that pins something removes the previous pin on its way
-    /// past, so a run that pins nothing needs its own removal. Left in place
-    /// on a container kept alive across runs, a stale pin outlives the policy
-    /// that authorized it: the new policy resolves the hostname fresh to build
-    /// its rules, so a deny would be written against one address while the
-    /// container still reaches the other.
     fn build_hosts_unpin_command() -> String {
         format!(
             "{}{{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; }} > /etc/hosts",
@@ -706,21 +692,38 @@ impl LxcScriptRunner {
         )
     }
 
-    /// Why a `/etc/hosts` command that ran to completion is being treated as a
-    /// failure, given the verb for what it was doing and the code it exited
-    /// with.
+    /// Why a completed `/etc/hosts` command is being treated as a failure,
+    /// from the verb it was doing and its exit code.
     ///
-    /// The exit code is the entire report, and that is a property of how these
-    /// commands are run rather than a choice about brevity. `attach_run`
-    /// streams the child's output to the caller as it arrives and hands back
-    /// empty strings for both streams, so a reason that appended the returned
-    /// stderr would read `exited with 1: ` every single time -- a colon
-    /// offering an explanation, followed by nothing. Taking only the code
-    /// leaves the message true, and leaves the actual diagnostics where the
-    /// child already wrote them.
+    /// The exit code is the whole report: `attach_run` streams the child's
+    /// output live and returns empty strings, and an appended stderr would read
+    /// "exited with 1: " with nothing after the colon.
     fn hosts_command_failure(verb: &str, exit_code: i32) -> String {
         format!("{} /etc/hosts exited with {}", verb, exit_code)
     }
+}
+
+/// Why LXC refuses a run that asks for enforcement through capabilities.
+pub const LXC_CAPABILITIES_MODE_UNSUPPORTED: &str =
+    "LXC: network.enforcementMode='capabilities' (the default) selects Windows AppContainer \
+     capability SIDs, which LXC has no mechanism for. Accepting it would enforce the policy by \
+     some means other than the one named. Set network.enforcementMode to 'firewall' or 'both', \
+     or state the policy in the 0.8 network.egress / network.ingress form, which carries no \
+     enforcement mode.";
+
+/// Whether this request names an enforcement mode LXC cannot carry out.
+///
+/// Only a 0.7-shaped network section names a mode.  The parser fills the
+/// directional sections from the keys the caller sent, not the version
+/// declared, and a 0.8 config written with 0.7 keys is judged here as the 0.7
+/// section it is.
+fn asks_for_capabilities_enforcement(request: &ExecutionRequest) -> bool {
+    !uses_directional_keys(&request.policy)
+        && request.policy.network_mode_specified
+        && matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Capabilities
+        )
 }
 
 fn lxc_network_policy_support() -> NetworkPolicySupport {
@@ -733,11 +736,13 @@ fn lxc_network_policy_support() -> NetworkPolicySupport {
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, lxc_network_policy_support())?;
+        if asks_for_capabilities_enforcement(request) {
+            return Err(ScriptResponse::error(LXC_CAPABILITIES_MODE_UNSUPPORTED));
+        }
         Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        // Run with panic catching for safety
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run_internal(request, logger)
         })) {
@@ -747,7 +752,7 @@ impl ScriptRunner for LxcScriptRunner {
     }
 }
 
-/// Generate a simple 8-character hex ID (no uuid crate dependency needed).
+/// Generate a simple 8-character hex ID.
 fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -757,10 +762,136 @@ fn uuid_simple() -> String {
     format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
 }
 
+/// Where the egress chain hooks, or `None` when the container's network
+/// namespace is unknown and the policy asked for a firewall. Enforcing is
+/// impossible then, and running would leave every requested rule off.
+fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<EgressHookPoint> {
+    match netns_pid {
+        Some(pid) => Some(EgressHookPoint::ContainerNetns(pid)),
+        None if installs_firewall => None,
+        None => Some(EgressHookPoint::Unhooked),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
+    use wxc_common::models::ContainerPolicy;
+
+    fn validating_runner() -> LxcScriptRunner {
+        LxcScriptRunner::new(
+            &LxcConfig::default(),
+            "validate-test",
+            &LifecycleConfig::default(),
+        )
+    }
+
+    fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            policy,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_07_network_section_left_on_capabilities_is_refused() {
+        let policy = ContainerPolicy {
+            network_mode_specified: true,
+            ..Default::default()
+        };
+
+        let refusal = validating_runner()
+            .validate_runner(&request_with_policy(policy))
+            .expect_err("LXC has no capability-SID mechanism to enforce through");
+
+        assert_eq!(refusal.error_message, LXC_CAPABILITIES_MODE_UNSUPPORTED);
+    }
+
+    #[test]
+    fn a_07_network_section_naming_the_firewall_is_accepted() {
+        let policy = ContainerPolicy {
+            network_mode_specified: true,
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            ..Default::default()
+        };
+
+        assert!(validating_runner()
+            .validate_runner(&request_with_policy(policy))
+            .is_ok());
+    }
+
+    // A request with no network section states no posture to enforce; the
+    // mode arriving at its default says nothing about what the caller wanted.
+    #[test]
+    fn a_request_with_no_network_section_is_accepted() {
+        assert!(validating_runner()
+            .validate_runner(&request_with_policy(ContainerPolicy::default()))
+            .is_ok());
+    }
+
+    // A 0.8 network section carries no enforcement mode; the field arrives at
+    // its default and must not be read as a request for capabilities.
+    #[test]
+    fn a_08_directional_network_section_is_accepted() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            ..Default::default()
+        };
+
+        assert!(validating_runner()
+            .validate_runner(&request_with_policy(policy))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_known_netns_hooks_the_chain_inside_the_container() {
+        assert!(matches!(
+            egress_hook_point(Some(4242), true),
+            Some(EgressHookPoint::ContainerNetns(4242))
+        ));
+    }
+
+    // A non-zero exit alone would also be produced by running the workload
+    // unfiltered and reporting the failure afterwards. The empty standard
+    // output is what pins the refusal to before the workload runs.
+    #[test]
+    fn an_unknown_netns_refuses_to_run_when_a_firewall_was_requested() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner_for_network_readiness_tests(true)
+            .enforce_netns_discovery(None, true, true, &mut logger, |_release| Ok(()))
+            .expect_err("a firewall was requested and the namespace is unknown");
+
+        assert_ne!(response.exit_code, 0);
+        assert!(response.standard_out.is_empty());
+    }
+
+    // The control for the refusal above, which a helper that always refused
+    // would otherwise pass.
+    #[test]
+    fn a_known_netns_lets_the_run_proceed() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        assert!(matches!(
+            runner_for_network_readiness_tests(true).enforce_netns_discovery(
+                Some(4242),
+                true,
+                true,
+                &mut logger,
+                |_release| Ok(())
+            ),
+            Ok(EgressHookPoint::ContainerNetns(4242))
+        ));
+    }
+
+    #[test]
+    fn an_unknown_netns_is_allowed_when_no_firewall_was_requested() {
+        assert!(matches!(
+            egress_hook_point(None, false),
+            Some(EgressHookPoint::Unhooked)
+        ));
+    }
 
     #[test]
     fn uuid_simple_is_8_chars() {
@@ -786,8 +917,6 @@ mod tests {
         assert!(name.starts_with("mxc-"));
     }
 
-    // The pin is worthless if the mapping it was built from is not the one
-    // that lands in the file.
     #[test]
     fn the_hosts_pin_command_writes_the_requested_mapping() {
         let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
@@ -802,9 +931,6 @@ mod tests {
         );
     }
 
-    // A container reused across runs would otherwise accumulate entries, and
-    // the first match in a hosts file wins -- so a stale line would shadow the
-    // pin this run just authorized.
     #[test]
     fn the_hosts_pin_command_strips_its_own_previous_entries_first() {
         let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
@@ -821,11 +947,6 @@ mod tests {
 
     #[test]
     fn a_failed_hosts_command_reports_a_reason_it_can_actually_supply() {
-        // `attach_run` streams the child's output live and returns empty
-        // strings for both streams, so the earlier form of this message
-        // appended an empty stderr and always read "exited with 1: " -- a
-        // colon offering an explanation, with nothing after it. Both verbs are
-        // checked because the pin and unpin paths build this independently.
         for verb in ["writing", "clearing"] {
             let reason = LxcScriptRunner::hosts_command_failure(verb, 1);
 
@@ -847,9 +968,6 @@ mod tests {
 
     #[test]
     fn a_failed_hosts_command_distinguishes_the_step_that_failed() {
-        // Pinning and unpinning fail for different reasons and are fixed
-        // differently, so a message that named neither would send whoever
-        // reads it to the wrong half of the path.
         let pinning = LxcScriptRunner::hosts_command_failure("writing", 2);
         let clearing = LxcScriptRunner::hosts_command_failure("clearing", 2);
 
@@ -867,10 +985,9 @@ mod tests {
             command.contains(&format!("grep -v '{}'", HOSTS_PIN_MARKER)),
             "the command must filter out every marked line; got: {command}"
         );
-        // Banning `printf` outright would fail here: re-emitting the *kept*
-        // lines needs one, on a command that writes no marked line. The
-        // marker count states the invariant directly -- the marker's one
-        // appearance is inside the filter, so no marked line can be written.
+
+        // The marker's only appearance is inside the filter, which keeps any
+        // marked line from being written back.
         assert_eq!(
             command.matches(HOSTS_PIN_MARKER).count(),
             1,
@@ -880,8 +997,8 @@ mod tests {
 
     #[test]
     fn the_hosts_unpin_command_rewrites_the_file_in_place_rather_than_replacing_it() {
-        // Same bind-mount reasoning as the pin: replacing the inode would leave
-        // the container still reading the file that carries the stale pin.
+        // LXC may bind-mount `/etc/hosts`; replacing the inode would leave the
+        // container reading the stale file.
         let command = LxcScriptRunner::build_hosts_unpin_command();
 
         assert!(
@@ -924,13 +1041,10 @@ mod tests {
         }
     }
 
-    // `/tmp` is the container's, and this command runs privileged through
-    // `lxc-attach`. On a container reused across runs a previous workload can
-    // pre-create any predictable name there as a symlink, and `>` follows
-    // symlinks -- so a scratch file would let it aim a privileged truncating
-    // write at another container file or at a host path exposed through a
-    // writable bind mount. Neither command may stage anything in a directory
-    // the container can write.
+    // This command runs privileged through `lxc-attach`.  A reused container's
+    // prior workload can pre-create any predictable scratch name as a symlink,
+    // and `>` follows it into another container file or a host path on a
+    // writable bind mount.
     #[test]
     fn the_hosts_commands_stage_nothing_in_a_container_writable_directory() {
         let commands = [
@@ -953,10 +1067,9 @@ mod tests {
         }
     }
 
-    // Staging in a variable is only an improvement if the content is complete
-    // before the target is truncated. `>` truncates as the redirect opens, so
-    // any command that still had to *produce* content after that point would
-    // leave the container with an empty /etc/hosts if it failed.
+    // `>` truncates as the redirect opens, and any command still producing
+    // content after that point would leave `/etc/hosts` empty on failure.  The
+    // staged content must be complete first.
     #[test]
     fn the_hosts_commands_build_their_content_before_truncating_the_target() {
         let commands = [
@@ -983,11 +1096,9 @@ mod tests {
         }
     }
 
-    // The parser rejects a credential-bearing proxy URL, but `ExecutionRequest`
-    // and `ProxyAddress::from_url` are public: a caller can build a request the
-    // parser never saw and hand it straight to this runner.  These tests take
-    // that path deliberately -- no parser anywhere in them -- because a guard
-    // that only exists on the parse path does not protect the process spawn.
+    // These tests build requests directly, with no parser, because
+    // `ExecutionRequest` and `ProxyAddress::from_url` are public and a guard
+    // living only on the parse path would not protect the process spawn.
     use wxc_common::models::{
         NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
@@ -1075,8 +1186,6 @@ mod tests {
         );
     }
 
-    // Pins the directional claim as all-or-nothing: dropping to the two egress
-    // bits alone would reject the config above.
     #[test]
     fn claiming_only_the_egress_bits_would_reject_an_egress_only_config() {
         let egress_bits_only =
@@ -1109,9 +1218,6 @@ mod tests {
         );
     }
 
-    // The rejection is built from the redacted URL so the guard cannot become
-    // the leak it exists to prevent -- the message travels to logs and to the
-    // caller.
     #[test]
     fn the_runner_refusal_does_not_echo_the_password() {
         let runner = runner_for_guard_tests();
@@ -1136,10 +1242,10 @@ mod tests {
         );
     }
 
-    // Anti-vacuity: without this, a guard that refused every proxy would pass
-    // both tests above while breaking every legitimate proxy configuration.
-    // The run cannot succeed here (there is no live container), so the
-    // assertion is that it does not fail *for this reason*.
+    // Anti-vacuity: a guard that refused every proxy would pass the two tests
+    // above while breaking every legitimate config.  The run cannot succeed
+    // here without a live container; the assertion is only that it does not
+    // fail for this reason.
     #[test]
     fn a_credential_free_proxy_url_is_not_refused_by_the_credential_guard() {
         let runner = runner_for_guard_tests();
@@ -1157,9 +1263,6 @@ mod tests {
         );
     }
 
-    // The guard runs ahead of container creation and firewall programming, so a
-    // rejected request leaves nothing to clean up.  A container name in the log
-    // would mean the runner had already started announcing work it must not do.
     #[test]
     fn the_credential_refusal_happens_before_any_container_work() {
         let runner = runner_for_guard_tests();
@@ -1281,12 +1384,9 @@ mod tests {
 
 /// The generated hosts commands, executed rather than pattern-matched.
 ///
-/// Every hosts test in `tests` above asserts on the command *string*. No
-/// string assertion can separate a command that preserves `/etc/hosts` from
-/// one that empties it -- both contain `> /etc/hosts`, and the truncation
-/// defect these tests exist to pin was invisible to all six of them. Running
-/// the command under a real `/bin/sh` is what makes the difference
-/// observable.
+/// A string assertion cannot separate a command that preserves `/etc/hosts`
+/// from one that empties it -- both contain `> /etc/hosts`.  Running the
+/// command under a real `/bin/sh` is what makes the difference observable.
 #[cfg(all(test, unix))]
 mod hosts_command_execution {
     use super::*;
@@ -1297,8 +1397,8 @@ mod hosts_command_execution {
 
     const PIN_LINE: &str = "10.0.0.5 proxy.example.com";
 
-    /// A private directory that removes itself, so a failing test cannot leave
-    /// a hosts fixture behind for the next run to find.
+    /// A private directory that removes itself on drop, keeping a failing test
+    /// from leaving a hosts fixture behind.
     struct Scratch {
         dir: PathBuf,
     }
@@ -1330,9 +1430,9 @@ mod hosts_command_execution {
             std::fs::read_to_string(self.hosts()).expect("the fixture should be readable")
         }
 
-        /// A `PATH` carrying a `grep` that fails with `status`, so the read
-        /// can be broken without breaking the shell around it: `printf` and
-        /// `[` are builtins and survive the override.
+        /// A `PATH` carrying a `grep` that fails with `status`.  The read
+        /// breaks while the shell around it survives, because `printf` and `[`
+        /// are builtins.
         fn path_with_failing_grep(&self, status: i32) -> String {
             use std::os::unix::fs::PermissionsExt;
 
@@ -1367,10 +1467,8 @@ mod hosts_command_execution {
         }
     }
 
-    /// Point a generated command at a scratch file, so what runs is the
-    /// generated text with only the path substituted. That the real target is
-    /// `/etc/hosts` is not left unpinned by the substitution; the string tests
-    /// above pin it.
+    /// Point a generated command at a scratch file by substituting only the
+    /// path; what runs is otherwise the generated text.
     fn retarget(command: &str, hosts: &Path) -> String {
         command.replace(
             "/etc/hosts",
@@ -1421,8 +1519,6 @@ mod hosts_command_execution {
         );
     }
 
-    // The first match in a hosts file wins, so a pin left over from a previous
-    // run on a reused container would shadow the one this run authorized.
     #[test]
     fn re_pinning_replaces_the_previous_entry_instead_of_stacking_on_it() {
         let scratch = Scratch::new("repin");
@@ -1443,9 +1539,9 @@ mod hosts_command_execution {
         );
     }
 
-    // The defect this module was written for. `> /etc/hosts` truncates the
-    // instant it is opened, so a read that failed has to stop the command
-    // before the redirect -- not merely produce nothing to write back.
+    // `> /etc/hosts` truncates the instant it opens; a read that failed must
+    // stop the command before the redirect, not merely produce nothing to
+    // write back.
     #[test]
     fn a_failed_read_leaves_the_file_byte_for_byte_as_it_was() {
         let scratch = Scratch::new("failread");
@@ -1483,8 +1579,8 @@ mod hosts_command_execution {
         assert_ne!(code, 0, "a missing grep must fail the command");
     }
 
-    // Unpinning writes back only what it read, so a failed read there empties
-    // the file outright rather than reducing it to one line.
+    // Unpinning writes back only what it read; a failed read there empties the
+    // file outright rather than reducing it to one line.
     #[test]
     fn a_failed_read_while_unpinning_leaves_the_file_byte_for_byte_as_it_was() {
         let scratch = Scratch::new("failunpin");
@@ -1563,10 +1659,9 @@ mod hosts_command_execution {
             );
         }
     }
-    // A dangling symlink was the worst shape the guard did not cover: `-e` is
-    // false, so no read happened, and the redirect then *created* the target.
-    // On a writable host bind mount that is a write outside the container, at
-    // a path the workload chose.
+    // A dangling symlink: `-e` is false, no read happens, and the redirect
+    // then creates the target.  On a writable host bind mount that is a write
+    // outside the container, at a path the workload chose.
     #[test]
     fn pinning_refuses_a_dangling_symlink_instead_of_creating_its_target() {
         let scratch = Scratch::new("dangling");
@@ -1604,9 +1699,8 @@ mod hosts_command_execution {
         );
     }
 
-    // Unpinning takes the same prologue, so it has to refuse on the same terms
-    // -- and it is the more destructive of the two, since it writes back only
-    // what it read.
+    // Unpinning takes the same prologue and refuses on the same terms.  It is
+    // the more destructive of the two, writing back only what it read.
     #[test]
     fn unpinning_refuses_a_symlink_rather_than_emptying_its_target() {
         let scratch = Scratch::new("unpinsymlink");

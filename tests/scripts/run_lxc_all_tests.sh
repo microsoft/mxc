@@ -120,6 +120,7 @@ run_test "LXC Network Invalid CIDR" "$SCRIPT_DIR/run_lxc_network_invalid_cidr_te
 run_test "LXC Network Dual-Stack Hostname" "$SCRIPT_DIR/run_lxc_network_dualstack_test.sh"
 run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_test.sh"
 run_test "LXC Network Enforcement" "$SCRIPT_DIR/run_lxc_network_enforcement_test.sh"
+run_test "LXC Network Raw Egress" "$SCRIPT_DIR/run_lxc_network_raw_egress_test.sh"
 run_test "LXC Network Schema 0.7" "$SCRIPT_DIR/run_lxc_network_v07_schema_test.sh"
 run_test "LXC Network GA Egress (0.8)" "$SCRIPT_DIR/run_lxc_network_ga_egress_test.sh"
 run_test "LXC Network 0.8 Omitted Network Section" "$SCRIPT_DIR/run_lxc_network_v08_no_network_test.sh"
