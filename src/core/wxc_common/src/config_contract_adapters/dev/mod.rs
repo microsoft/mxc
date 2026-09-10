@@ -147,6 +147,7 @@ mod tests {
         assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Exec)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
+        assert!(adapted.config.experimental.is_none());
         assert!(adapted.config.process.is_some());
 
         let process = adapted.config.process.unwrap();

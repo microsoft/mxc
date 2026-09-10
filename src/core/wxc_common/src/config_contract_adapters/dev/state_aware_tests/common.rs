@@ -4,7 +4,31 @@
 use super::super::{
     contract, extract_experimental_value, into_state_aware_wire_input, start_into_wire, wire,
 };
+use crate::config_parser::parse_rolling_state_aware_wire_input;
 use crate::state_aware_wire::StateAwareWireInput;
+use serde_json::value::RawValue;
+
+#[derive(serde::Deserialize)]
+struct ExperimentalProbe<'a> {
+    #[serde(borrow, default)]
+    experimental: Option<&'a RawValue>,
+}
+
+pub(super) fn assert_config_matches_rolling_state_aware_wire_input(
+    source: &str,
+    adapted_config: wire::MxcConfig,
+) {
+    let probe: ExperimentalProbe<'_> = serde_json::from_str(source).unwrap();
+    let rolling = parse_rolling_state_aware_wire_input(source, probe.experimental).unwrap();
+    let adapted = into_state_aware_wire_input(adapted_config, source).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(adapted.config).unwrap(),
+        serde_json::to_value(rolling.config).unwrap()
+    );
+    assert_eq!(adapted.experimental_raw, rolling.experimental_raw);
+    assert_eq!(adapted.source_text, rolling.source_text);
+}
 
 #[test]
 fn extract_experimental_value_returns_none_when_absent() {
