@@ -349,7 +349,7 @@ use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
 // Provision. Acknowledge unrestricted networking without authoring a network
-// policy. The canonical legacy acknowledgment remains accepted during 10a.
+// policy. Exact v0.9 rejects the legacy network acknowledgment.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "experimental":{"isolation_session":{"provision":{
