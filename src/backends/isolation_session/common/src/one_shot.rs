@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse, UnrestrictedNetworkAcknowledgment};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -17,6 +17,21 @@ use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOut
 use super::policy::validate_provision_policy;
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
+
+/// The caller's unrestricted-network acknowledgment as supplied on the one-shot
+/// surface, under `experimental.isolation_session`.
+///
+/// State-aware provision carries its own copy in the provision config, so the
+/// one-shot section deliberately stays separate and never gains `appId`.
+fn one_shot_acknowledgment(
+    request: &ExecutionRequest,
+) -> Option<UnrestrictedNetworkAcknowledgment> {
+    request
+        .experimental
+        .isolation_session
+        .as_ref()
+        .and_then(|config| config.acknowledge_unrestricted_network)
+}
 
 /// Refuses the `lifecycle` settings the backend cannot honor.
 ///
@@ -53,11 +68,13 @@ impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the full provision → start → exec → stop →
         // deprovision lifecycle in a single process, so provision-phase
-        // semantics apply to the whole call. The one-shot surface takes no
-        // backend configuration, so there is nothing backend-specific to
-        // validate here — only the cross-cutting stable-surface policy.
+        // semantics apply to the whole call. The only backend-specific input
+        // the one-shot surface takes is the unrestricted-network
+        // acknowledgment, which is handed to the shared provision validator
+        // below; everything else is the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
-        validate_provision_policy(request).map_err(ScriptResponse::from)?;
+        validate_provision_policy(request, one_shot_acknowledgment(request))
+            .map_err(ScriptResponse::from)?;
         validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         Ok(())
     }
@@ -171,7 +188,9 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, LifecycleConfig, NetworkPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, IsolationSessionConfig, LifecycleConfig, NetworkPolicy,
+    };
 
     #[test]
     fn validate_runner_one_shot_rejects_default_network() {
@@ -259,5 +278,63 @@ mod tests {
             "got {}",
             resp.error_message
         );
+    }
+
+    // ====== explicit unrestricted-network acknowledgment ======
+
+    /// A one-shot request carrying the acknowledgment in its own experimental
+    /// section, over the implicit directional deny defaults a v0.9 request with
+    /// no `network` section normalizes to.
+    fn acknowledged_request() -> ExecutionRequest {
+        let mut req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(wxc_common::models::NetworkEgressPolicy::default()),
+                network_ingress: Some(wxc_common::models::NetworkIngressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        req.experimental.isolation_session = Some(IsolationSessionConfig {
+            acknowledge_unrestricted_network: Some(UnrestrictedNetworkAcknowledgment),
+        });
+        req
+    }
+
+    #[test]
+    fn validate_runner_one_shot_accepts_the_acknowledgment_without_a_network_section() {
+        let runner = IsolationSessionRunner::new();
+        runner.validate_runner(&acknowledged_request()).unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_accepts_the_acknowledgment_with_the_legacy_form() {
+        let runner = IsolationSessionRunner::new();
+        let mut req = canonical_request();
+        req.experimental.isolation_session = Some(IsolationSessionConfig {
+            acknowledge_unrestricted_network: Some(UnrestrictedNetworkAcknowledgment),
+        });
+        runner.validate_runner(&req).unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_an_acknowledged_authored_network() {
+        let runner = IsolationSessionRunner::new();
+        let mut req = acknowledged_request();
+        req.policy.network_specified = true;
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains("network"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_ignores_an_empty_isolation_session_section() {
+        // A section with no acknowledgment is not an acknowledgment.
+        let runner = IsolationSessionRunner::new();
+        let mut req = acknowledged_request();
+        req.experimental.isolation_session = Some(IsolationSessionConfig::default());
+        assert!(runner.validate_runner(&req).is_err());
     }
 }

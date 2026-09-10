@@ -100,12 +100,7 @@ public class MxcLifecycleE2ETests
     {
         var provisioned = MxcLifecycle.ProvisionSandbox(
             StateAwareContainment.IsolationSession,
-            new IsolationSessionProvisionOptions(
-                new StateAwareNetworkPolicy
-                {
-                    DefaultPolicy = StateAwareNetworkDefault.Allow,
-                    AllowLocalNetwork = true,
-                })
+            new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)
             {
                 AppId = null,
             });

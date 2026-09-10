@@ -21,6 +21,7 @@ import os from 'os';
 import {
   execInSandboxAsync,
   MxcError,
+  type ProvisionResult,
   provisionSandbox,
   startSandbox,
   stopSandbox,
@@ -40,6 +41,15 @@ import {
  */
 const wellFormedSandboxId = (agentUserName: string): string =>
   `iso:${Buffer.from(JSON.stringify({ version: 1, agentUserName }), 'utf8').toString('base64url')}`;
+
+// Transitional 10a compatibility path: the public IsolationSession-specific
+// config has moved to the final acknowledgment-first shape, while raw native
+// v0.9 requests using the canonical legacy network pair remain accepted.
+const provisionWithLegacyNetwork = provisionSandbox as unknown as (
+  containment: 'isolation_session',
+  config: unknown,
+  options: unknown,
+) => Promise<ProvisionResult<'isolation_session'>>;
 
 const platformSkipReason =
   os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
@@ -67,7 +77,11 @@ const policyValidationSkipReason =
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionWithLegacyNetwork(
+      'isolation_session',
+      { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
     assert.ok(
       sandboxId.startsWith('iso:'),
@@ -113,7 +127,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('shares files with the session through the ephemeral workspace', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      { acknowledgeUnrestrictedNetwork: true },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
     assert.ok(
@@ -173,7 +191,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('exec surfaces a non-zero script exit as ExecResult.exitCode', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      { acknowledgeUnrestrictedNetwork: true },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
 
     try {
@@ -215,10 +237,10 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 // file rather than here because its `await` must precede the first `describe`
 // -- see the note there before moving it back.
 describe('IsolationSession state-aware request validation', { skip: policyValidationSkipReason }, () => {
-  // The TypeScript type makes `network` required (and pins its value) at
-  // provision, but a plain-JS caller can bypass that. The exact contract must
-  // still reject missing or non-canonical acknowledgments before backend
-  // dispatch — the public boundary must not rely on the compile-time type.
+  // The TypeScript type requires the true-only acknowledgment at provision,
+  // but a plain-JS caller can bypass that. The exact contract must still reject
+  // missing, malformed, or conflicting acknowledgments before backend dispatch
+  // — the public boundary must not rely on the compile-time type.
   type UntypedProvision = (
     containment: 'isolation_session',
     config: unknown,
@@ -226,34 +248,67 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
   ) => Promise<unknown>;
   const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
 
-  it('exact contract rejects a provision that omits the network acknowledgment', async () => {
+  it('exact contract rejects a provision that omits both acknowledgment forms', async () => {
     await assert.rejects(
       () => provisionUntyped('isolation_session', {}, { experimental: true }),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('exact contract rejects a provision with a non-canonical network (defaultPolicy=block)', async () => {
+  it('new acknowledgment does not override a restrictive legacy network policy', async () => {
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
-        { network: { defaultPolicy: 'block' } },
+        {
+          acknowledgeUnrestrictedNetwork: true,
+          network: { defaultPolicy: 'block' },
+        },
         { experimental: true },
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('exact contract rejects a provision whose network omits allowLocalNetwork', async () => {
+  it('new acknowledgment does not override an incomplete legacy acknowledgment', async () => {
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
-        { network: { defaultPolicy: 'allow' } },
+        {
+          acknowledgeUnrestrictedNetwork: true,
+          network: { defaultPolicy: 'allow' },
+        },
         { experimental: true },
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
+
+  it('new acknowledgment does not turn an explicit empty network section into omission', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        {
+          acknowledgeUnrestrictedNetwork: true,
+          network: {},
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
+    );
+  });
+
+  for (const value of [false, null]) {
+    it(`exact contract rejects acknowledgeUnrestrictedNetwork=${String(value)}`, async () => {
+      await assert.rejects(
+        () => provisionUntyped(
+          'isolation_session',
+          { acknowledgeUnrestrictedNetwork: value },
+          { experimental: true },
+        ),
+        (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
+      );
+    });
+  }
 
   // Full chain, negative case. An oversized appId is rejected by MXC's
   // own validation, before any IsolationSession API call is made. `operation`
@@ -261,15 +316,15 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
   // reach the caller absent rather than empty. This rejection also offers no
   // hint, so `remediation` is absent too.
   //
-  // The canonical network acknowledgment is supplied so the only thing wrong
-  // with this request is the appId; that keeps the assertion on the message
-  // independent of the order in which the backend runs its validations.
+  // The explicit acknowledgment is supplied so the only thing wrong with this
+  // request is the appId; that keeps the assertion on the message independent
+  // of the order in which the backend runs its validations.
   it('a policy rejection reaches the SDK with no failing-call detail', async () => {
     await assert.rejects(
       () => provisionSandbox(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          acknowledgeUnrestrictedNetwork: true,
           appId: 'x'.repeat(257),
         },
         { experimental: true },
@@ -305,7 +360,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          acknowledgeUnrestrictedNetwork: true,
           ui: { disable: true },
         },
         { experimental: true },
@@ -321,7 +376,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          acknowledgeUnrestrictedNetwork: true,
           ui: {},
         },
         { experimental: true },

@@ -68,6 +68,104 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
 }
 
 #[test]
+fn isolation_session_acknowledgment_forms_map_without_synthesizing_network() {
+    // Legacy-only, acknowledgment-only, and both-consistent are all valid
+    // during the additive phase. The acknowledgment-only form must reach the
+    // runtime with NO network section at all: synthesizing a legacy `allow`
+    // would assert a grant the caller never wrote.
+    let acknowledgment = r#","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}"#;
+    let legacy = r#""network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#;
+    let request = |fields: &str| {
+        format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+        )
+    };
+
+    for (fields, network_present, expected_config) in [
+        (format!(",{legacy}"), true, None),
+        (acknowledgment.to_owned(), false, Some((true, None))),
+        (format!(",{legacy}{acknowledgment}"), true, Some((true, None))),
+        (
+            r#","experimental":{"isolation_session":{"provision":{"appId":"Contoso.App","acknowledgeUnrestrictedNetwork":true}}}"#.to_owned(),
+            false,
+            Some((true, Some("Contoso.App"))),
+        ),
+        (
+            format!(
+                r#",{legacy},"experimental":{{"isolation_session":{{"provision":{{"appId":"Contoso.App"}}}}}}"#
+            ),
+            true,
+            Some((false, Some("Contoso.App"))),
+        ),
+    ] {
+        let json = request(&fields);
+        let (common, operation) = adapt(&json);
+        assert_clean_common(&common);
+        // The rolling parser is the independent check that the exact adapter
+        // neither invents nor drops the common network section.
+        assert_common_matches_legacy(&json, &common);
+        assert_eq!(common.network.is_some(), network_present, "{json}");
+        let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) =
+            operation
+        else {
+            panic!("wrong operation");
+        };
+        assert_eq!(
+            config.map(|config| (
+                config.acknowledge_unrestricted_network.is_some(),
+                config.app_id
+            )),
+            expected_config
+                .map(|(acknowledged, app_id): (bool, Option<&str>)| (
+                    acknowledged,
+                    app_id.map(str::to_owned)
+                )),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn isolation_session_provision_requires_one_acknowledgment_form() {
+    // Structural: the contract refuses the document, so the adapter is never
+    // reached and no backend policy check is involved.
+    for fields in [
+        "",
+        r#","experimental":{}"#,
+        r#","experimental":{"isolation_session":{"provision":{"appId":"Contoso.App"}}}"#,
+        r#","network":{}"#,
+        r#","network":{"defaultPolicy":"block","allowLocalNetwork":true}"#,
+    ] {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+        );
+        assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+}
+
+#[test]
+fn the_acknowledgment_is_provision_only_and_backend_scoped() {
+    // Later phases carry no per-phase config, and another backend's provision
+    // section is closed, so a misplaced acknowledgment is refused rather than
+    // silently ignored.
+    for phase in ["start", "stop", "deprovision"] {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"iso:example","experimental":{{"isolation_session":{{"provision":{{"acknowledgeUnrestrictedNetwork":true}}}}}}}}"#
+        );
+        assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+    let exec = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"iso:example","process":{"commandLine":"echo hi"},"experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}}"#;
+    assert!(contract::parse_request(exec).is_err());
+
+    for backend in ["windows_sandbox", "wslc"] {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"{backend}","experimental":{{"{backend}":{{"provision":{{"acknowledgeUnrestrictedNetwork":true}}}}}}}}"#
+        );
+        assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+}
+
+#[test]
 fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
     for (fields, expected) in [
         ("", None),

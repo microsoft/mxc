@@ -8,9 +8,10 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, UnrestrictedNetworkAcknowledgment, WindowsSandboxConfig,
+    WslcConfig,
 };
 use crate::mxc_error::MxcError;
 #[cfg(test)]
@@ -1863,10 +1864,32 @@ fn convert_wire_config(
                 .to_string();
             return Err(WxcError::ConfigParse(msg));
         }
+        // The one-shot IsolationSession section carries only the
+        // unrestricted-network acknowledgment. Its `provision` leaf belongs to
+        // the state-aware lifecycle, which never reaches this converter, so a
+        // one-shot request that nests one is refused rather than silently
+        // ignored.
+        let isolation_session = match raw_exp.isolation_session {
+            Some(section) => {
+                if section.provision.is_some() {
+                    let msg = "'experimental.isolation_session.provision' is a state-aware \
+                               provision-phase section and is not accepted on a one-shot request"
+                        .to_string();
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                Some(IsolationSessionConfig {
+                    acknowledge_unrestricted_network: section
+                        .acknowledge_unrestricted_network
+                        .map(|wire::True| UnrestrictedNetworkAcknowledgment),
+                })
+            }
+            None => None,
+        };
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
+            isolation_session,
         }
     } else {
         ExperimentalConfig::default()
@@ -2362,6 +2385,21 @@ mod tests {
         InvalidLegacyPayload(String),
     }
 
+    /// Frozen mirror of the runtime IsolationSession provision config as it
+    /// stood before the Phase 10a acknowledgment was added.
+    ///
+    /// The legacy payload path is the independent *baseline* the exact parser is
+    /// characterized against. Pointing it at the live runtime type would let it
+    /// silently learn every field added to that type afterwards, so the baseline
+    /// would grow the acknowledgment the exact contract has not yet exposed and
+    /// stop being independent. Freezing the shape here keeps the reference
+    /// describing the old parser, which is its only job.
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct FrozenLegacyIsolationSessionProvisionConfig {
+        app_id: Option<String>,
+    }
+
     impl From<&MxcRequest> for RequestSnapshot {
         fn from(request: &MxcRequest) -> Self {
             match request {
@@ -2406,7 +2444,7 @@ mod tests {
                     provision: if request.phase == Phase::Provision {
                         match request.containment {
                             Some(ContainmentBackend::IsolationSession) => Some(
-                                request.deserialize_config::<crate::models::IsolationSessionProvisionConfig>("isolation_session", "provision")
+                                request.deserialize_config::<FrozenLegacyIsolationSessionProvisionConfig>("isolation_session", "provision")
                                     .map(|config| ProvisionSnapshot::IsolationSession(config.map(|config| config.app_id)))
                                     .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
                             ),
@@ -2783,8 +2821,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
+                    path: Some("experimental.isolation_session.configurationId"),
+                    message_fragment: "unknown field `configurationId`",
                 },
             ),
             (
@@ -2793,8 +2831,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
+                    path: Some("experimental.isolation_session.unrecognizedSetting"),
+                    message_fragment: "unknown field `unrecognizedSetting`",
                 },
             ),
             (
@@ -3110,9 +3148,19 @@ mod tests {
 
         let version = object.get("version")?.as_str()?;
         if version == "0.9.0-alpha" {
+            // The one-shot IsolationSession section is a closed contract that
+            // accepts only the unrestricted-network acknowledgment. The rolling
+            // parser stores whatever it finds there and lets the backend decide;
+            // the exact contract refuses any other member outright. Matching on
+            // the section's own path keeps this specific to that surface rather
+            // than exempting one-shot unknown fields generally.
             let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
                 && exact.category == ErrorCategory::TypedStructure
-                && exact.message.contains("unknown field `isolation_session`");
+                && exact
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("experimental.isolation_session"))
+                && exact.message.contains("unknown field");
             let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
                 && matches!(
                     exact.category,
@@ -4860,7 +4908,8 @@ mod tests {
             parsed.operation(),
             &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
                 crate::models::IsolationSessionProvisionConfig {
-                    app_id: Some("Contoso.App".into())
+                    app_id: Some("Contoso.App".into()),
+                    ..Default::default()
                 },
             )))
         );
@@ -5529,6 +5578,7 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::models::IsolationSessionProvisionConfig {
                         app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".into()),
+                        ..Default::default()
                     },
                 )),
             ),
@@ -5537,6 +5587,7 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::models::IsolationSessionProvisionConfig {
                         app_id: Some(String::new()),
+                        ..Default::default()
                     },
                 )),
             ),
@@ -6208,6 +6259,161 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_acknowledgment_reaches_the_runtime_experimental_config() {
+        // Through the real public loader, not a local helper: the exact
+        // contract, the one-shot adapter, and the common wire converter must
+        // all carry the acknowledgment into `ExperimentalConfig`.
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "cmd /c ver"},
+            "experimental": {
+                "isolation_session": {"acknowledgeUnrestrictedNetwork": true}
+            }
+        }"#;
+        let MxcRequest::OneShot(request) = load_mxc(json).unwrap() else {
+            panic!("expected one-shot");
+        };
+        let config = request
+            .experimental
+            .isolation_session
+            .as_ref()
+            .expect("one-shot IsolationSession section");
+        assert_eq!(
+            config.acknowledge_unrestricted_network,
+            Some(crate::models::UnrestrictedNetworkAcknowledgment)
+        );
+        // The acknowledgment is caller intent, never an execution grant: the
+        // experimental gate is unchanged and still off unless the CLI enables it.
+        assert!(!request.experimental_enabled);
+        // No network policy is invented for the acknowledged request.
+        assert!(!request.policy.network_specified);
+        assert!(!request.policy.allow_local_network);
+    }
+
+    #[test]
+    fn one_shot_acknowledgment_omission_and_invalid_values_are_structural() {
+        // An absent section stays absent — omission never implies acknowledgment.
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "cmd /c ver"}
+        }"#;
+        let MxcRequest::OneShot(request) = load_mxc(json).unwrap() else {
+            panic!("expected one-shot");
+        };
+        assert!(request.experimental.isolation_session.is_none());
+
+        for payload in [
+            r#"{"acknowledgeUnrestrictedNetwork": false}"#,
+            r#"{"acknowledgeUnrestrictedNetwork": null}"#,
+            r#"{"acknowledgeUnrestrictedNetwork": "true"}"#,
+            r#"{"acknowledgeUnrestrictedNetwork": 1}"#,
+            // `appId` is state-aware provision configuration and must not be
+            // reachable from the one-shot surface.
+            r#"{"appId": "Contoso.App"}"#,
+            // The provision leaf belongs to the state-aware lifecycle.
+            r#"{"provision": {"acknowledgeUnrestrictedNetwork": true}}"#,
+        ] {
+            let json = format!(
+                r#"{{"version":"0.9.0-alpha","containment":"isolation_session",
+                     "process":{{"commandLine":"cmd /c ver"}},
+                     "experimental":{{"isolation_session":{payload}}}}}"#
+            );
+            assert!(load_mxc(&json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn one_shot_isolation_acknowledgment_cannot_configure_another_backend() {
+        for containment in ["processcontainer", "wslc"] {
+            let json = format!(
+                r#"{{"version":"0.9.0-alpha","containment":"{containment}",
+                     "process":{{"commandLine":"cmd /c ver"}},
+                     "experimental":{{"isolation_session":{{"acknowledgeUnrestrictedNetwork":true}}}}}}"#
+            );
+            let error = load_mxc(&json).unwrap_err();
+            let ParseError::OneShot(error) = error else {
+                panic!("expected a one-shot policy error, got {error:?}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("Multiple containment backends configured"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_acknowledgment_is_not_accepted_by_published_versions() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let json = format!(
+                r#"{{"version":"{version}","containment":"isolation_session",
+                     "process":{{"commandLine":"cmd /c ver"}},
+                     "experimental":{{"isolation_session":{{"acknowledgeUnrestrictedNetwork":true}}}}}}"#
+            );
+            assert!(
+                load_mxc(&json).is_err(),
+                "published contracts must not learn a 0.9 development field: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_acknowledgment_reaches_the_typed_operation() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {
+                "isolation_session": {
+                    "provision": {"acknowledgeUnrestrictedNetwork": true}
+                }
+            }
+        }"#;
+        let MxcRequest::StateAware(parsed) = load_mxc(json).unwrap() else {
+            panic!("expected state-aware");
+        };
+        assert_eq!(
+            parsed.operation(),
+            &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
+                crate::models::IsolationSessionProvisionConfig {
+                    app_id: None,
+                    acknowledge_unrestricted_network: Some(
+                        crate::models::UnrestrictedNetworkAcknowledgment
+                    ),
+                },
+            ))),
+        );
+        // No legacy grant is synthesized: the acknowledged request authored no
+        // network policy, and the presence flags must say so.
+        assert!(!parsed.request().policy.network_specified);
+        assert!(!parsed.request().policy.allow_local_network);
+    }
+
+    #[test]
+    fn state_aware_provision_without_any_acknowledgment_is_malformed_not_a_backend_failure() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session"
+        }"#;
+        let error = load_mxc(json).unwrap_err();
+        let ParseError::StateAware(error) = error else {
+            panic!("expected a state-aware malformed request");
+        };
+        assert_eq!(error.code, crate::mxc_error::MxcErrorCode::MalformedRequest);
+        assert!(
+            error
+                .message
+                .contains("must acknowledge that the container's network is unrestricted"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn state_aware_telemetry_populates_typed_field() {
         // Telemetry is a stable cross-cutting setting parsed identically for
         // one-shot and state-aware requests.
@@ -6233,7 +6439,7 @@ mod tests {
                 assert_eq!(
                     p.operation(),
                     &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-                        crate::models::IsolationSessionProvisionConfig { app_id: None },
+                        crate::models::IsolationSessionProvisionConfig::default(),
                     ))),
                 );
             }

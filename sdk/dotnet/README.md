@@ -626,18 +626,25 @@ the Rust parser and TypeScript SDK constants.
 deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
+For IsolationSession, prefer
+`new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)`.
+The Boolean constructor refuses `false`; there is no implicit acknowledgment.
+It emits `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork`
+and omits the network key entirely unless a network value was supplied.
+
+The existing constructor taking the canonical legacy `StateAwareNetworkPolicy`
+remains available during the additive v0.9 transition. `Network` is now nullable,
+so code reading that IsolationSession-specific property must account for the
+acknowledgment-only form. Any supplied network value is still revalidated;
+empty, restrictive, or proxy-bearing policies are not discarded or overridden.
+This does not add IsolationSession to the public one-shot run/spawn surface.
+
 ```csharp
-// IsolationSession accepts only the unrestricted-network posture, and refuses
-// an absent policy: its container runs on a network MXC can neither filter nor
-// deny, so the caller states that posture.
+// Acknowledge that IsolationSession networking is unrestricted.
+// This is not a network on/off control and emits no network policy.
 var provisioned = MxcLifecycle.ProvisionSandbox(
     StateAwareContainment.IsolationSession,
-    new IsolationSessionProvisionOptions(
-    new StateAwareNetworkPolicy
-    {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
-        AllowLocalNetwork = true,
-    }));
+    new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true));
 SandboxId id = provisioned.SandboxId;   // opaque — carry it forward, never parse it
 
 // Provision mints host-side resources, so deprovision has to run even when a

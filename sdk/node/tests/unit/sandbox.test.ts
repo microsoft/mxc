@@ -1848,6 +1848,119 @@ describe('Development containment vocabulary', () => {
     };
     assert.strictEqual(c.containment, 'isolation_session');
   });
+
+  it('types the one-shot IsolationSession leaf as a true-only acknowledgment', () => {
+    const config: ContainerConfig = {
+      version: '0.9.0-alpha',
+      containment: 'isolation_session',
+      process: { commandLine: 'echo hello' },
+      experimental: {
+        isolation_session: { acknowledgeUnrestrictedNetwork: true },
+      },
+    };
+    assert.strictEqual(
+      config.experimental?.isolation_session?.acknowledgeUnrestrictedNetwork,
+      true,
+    );
+
+    const falseConfig: ContainerConfig = {
+      version: '0.9.0-alpha',
+      experimental: {
+        isolation_session: {
+          // @ts-expect-error — acknowledgment is a true-only marker.
+          acknowledgeUnrestrictedNetwork: false,
+        },
+      },
+    };
+    const nullConfig: ContainerConfig = {
+      version: '0.9.0-alpha',
+      experimental: {
+        isolation_session: {
+          // @ts-expect-error — explicit null is structurally invalid.
+          acknowledgeUnrestrictedNetwork: null,
+        },
+      },
+    };
+    assert.ok(falseConfig);
+    assert.ok(nullConfig);
+  });
+
+  it('does not expose state-aware provision fields on the one-shot leaf', () => {
+    const config: ContainerConfig = {
+      version: '0.9.0-alpha',
+      experimental: {
+        isolation_session: {
+          // @ts-expect-error — appId is provision-only and is not part of one-shot config.
+          appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
+        },
+      },
+    };
+    assert.ok(config);
+  });
+});
+
+describe('IsolationSession one-shot request serialization', () => {
+  const decodeConfig = (config: ContainerConfig): Record<string, unknown> => {
+    const { args } = resolveExecutableAndArgs(config, {
+      executablePath: process.execPath,
+      skipPlatformCheck: true,
+      experimental: true,
+    });
+    const index = args.indexOf('--config-base64');
+    assert.ok(index >= 0, '--config-base64 should be present in args');
+    return JSON.parse(Buffer.from(args[index + 1], 'base64').toString('utf-8'));
+  };
+
+  it('preserves acknowledgment-only network omission and correct nesting', () => {
+    const request = decodeConfig({
+      version: '0.9.0-alpha',
+      containment: 'isolation_session',
+      process: { commandLine: 'echo hello' },
+      experimental: {
+        isolation_session: { acknowledgeUnrestrictedNetwork: true },
+      },
+    });
+    assert.ok(!('network' in request), 'acknowledgment-only input must omit network');
+    assert.deepStrictEqual(request.experimental, {
+      isolation_session: { acknowledgeUnrestrictedNetwork: true },
+    });
+  });
+
+  it('does not acknowledge merely because the backend and experimental flag are selected', () => {
+    const request = decodeConfig({
+      version: '0.9.0-alpha',
+      containment: 'isolation_session',
+      process: { commandLine: 'echo hello' },
+    });
+    assert.ok(!('network' in request));
+    assert.ok(!('experimental' in request));
+  });
+
+  it('forwards false and null from untyped callers without coercing or dropping them', () => {
+    for (const value of [false, null]) {
+      const request = decodeConfig({
+        version: '0.9.0-alpha',
+        containment: 'isolation_session',
+        process: { commandLine: 'echo hello' },
+        experimental: {
+          isolation_session: {
+            acknowledgeUnrestrictedNetwork: value,
+          },
+        },
+      } as unknown as ContainerConfig);
+      const experimental = request.experimental as {
+        isolation_session: { acknowledgeUnrestrictedNetwork: unknown };
+      };
+      assert.ok(
+        'acknowledgeUnrestrictedNetwork' in experimental.isolation_session,
+        'invalid authored values must not become omission',
+      );
+      assert.strictEqual(
+        experimental.isolation_session.acknowledgeUnrestrictedNetwork,
+        value,
+      );
+    }
+  });
 });
 
 describe('resolveExecutableAndArgs (containment validation)', { skip: platformSkip }, () => {

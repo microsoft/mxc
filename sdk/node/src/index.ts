@@ -47,6 +47,7 @@ export {
   ExperimentalBackends,
   ContainerConfig,
   ProcessContainerConfig,
+  IsolationSessionConfig,
   NetworkAction,
   NetworkProtocol,
   NetworkPeerConfig,

@@ -26,7 +26,8 @@ pub use containment::{probe_containment, Containment, ContainmentProbeError};
 pub use isolation_session::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
     IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MissingUnrestrictedNetworkAcknowledgment,
+    StateAwareIsolationSession,
 };
 pub use windows_sandbox::{
     WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,

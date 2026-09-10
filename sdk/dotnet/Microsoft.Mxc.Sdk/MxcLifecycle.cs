@@ -107,7 +107,19 @@ public static class MxcLifecycle
         switch (options)
         {
             case IsolationSessionProvisionOptions isolation:
-                envelope["network"] = SerializeToNode(isolation.Network);
+                if (isolation.Network is not null)
+                {
+                    envelope["network"] = SerializeToNode(isolation.Network);
+                }
+                if (isolation.AcknowledgeUnrestrictedNetwork)
+                {
+                    SetBackendConfig(
+                        envelope,
+                        backend,
+                        "provision",
+                        "acknowledgeUnrestrictedNetwork",
+                        true);
+                }
                 SetOptionalBackendConfig(
                     envelope,
                     backend,
@@ -535,7 +547,8 @@ public static class MxcLifecycle
                     : $"{options.GetType().Name} cannot configure {containment}",
                 nameof(options));
         }
-        if (options is IsolationSessionProvisionOptions isolation)
+        if (options is IsolationSessionProvisionOptions isolation
+            && (isolation.Network is not null || !isolation.AcknowledgeUnrestrictedNetwork))
         {
             IsolationSessionProvisionOptions.ValidateNetwork(
                 isolation.Network,

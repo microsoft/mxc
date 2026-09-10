@@ -31,6 +31,19 @@
 //! `ExperimentalConfig`. Adding a field to either is a compile error until it is
 //! classified as hashed or explicitly excluded with a reason.
 //!
+//! # Acknowledgment-scoped presence facts
+//!
+//! `ContainerPolicy`'s parse-derived presence flags are `#[serde(skip)]`, so
+//! they normally stay out of the projection — un-skipping them would move every
+//! backend's hash. A request that carries an explicit unrestricted-network
+//! acknowledgment additionally gets an `unrestrictedNetworkAcknowledgment`
+//! object holding the network presence facts, because for those requests an
+//! omitted `network` section, `network: {}`, and an authored directional deny
+//! normalize to identical policy *values* while meaning different things. The
+//! key is absent from every other request, so no pre-existing identity moves.
+//! This records what the caller supplied; it is not a verdict, and no backend
+//! validation is consulted.
+//!
 //! # What is excluded, and why
 //!
 //! | Excluded | Reason |
@@ -115,8 +128,69 @@ pub fn state_aware_policy_hash(
                 "config": state_aware_config_projection(operation),
             }),
         );
+        if state_aware_acknowledges_unrestricted_network(operation) {
+            insert_unrestricted_network_acknowledgment(root, request);
+        }
     }
     hash_canonical_json(&canonical_json(&projection))
+}
+
+/// True when the typed lifecycle operation itself carries the acknowledgment.
+///
+/// Exhaustively matched for the same tripwire reason as the projections: a new
+/// acknowledgment-bearing phase must be classified rather than silently
+/// defaulting to "not acknowledged".
+fn state_aware_acknowledges_unrestricted_network(operation: &StateAwareOperation) -> bool {
+    match operation {
+        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) => config
+            .as_ref()
+            .is_some_and(|config| config.acknowledge_unrestricted_network.is_some()),
+        // No other backend or phase accepts the acknowledgment.
+        StateAwareOperation::Provision(
+            StateAwareProvision::WindowsSandbox | StateAwareProvision::Wslc(_),
+        )
+        | StateAwareOperation::Start { .. }
+        | StateAwareOperation::Exec { .. }
+        | StateAwareOperation::Stop { .. }
+        | StateAwareOperation::Deprovision { .. } => false,
+    }
+}
+
+/// Record the parse-derived presence facts that separate a caller-authored
+/// network policy from parser-generated defaults.
+///
+/// This runs **only** for acknowledgment-bearing requests, so no pre-existing
+/// identity moves. It exists because an omitted `network` section, an explicit
+/// `network: {}`, and an explicitly authored directional deny can normalize to
+/// identical `ContainerPolicy` *values* while differing in acknowledgment
+/// semantics — the first is accepted alongside an acknowledgment, the other two
+/// are refused. The distinguishing flags are `#[serde(skip)]` on
+/// `ContainerPolicy` (removing that would move every backend's hash), so the
+/// relevant ones are re-added here, scoped to this case.
+///
+/// Classification of the presence flags:
+///
+/// * `network_specified`, `network_mode_specified` and
+///   `runtime_network_proxy_specified` are **included**: each one decides
+///   whether an acknowledgment-bearing request is accepted or refused.
+/// * `ui_specified` is **excluded**: it is not network authorship, and its
+///   accept/reject behavior is identical with and without an acknowledgment.
+///
+/// This is configuration identity, not authorization: it records what the
+/// caller supplied, never a verdict, and no backend validation is consulted.
+fn insert_unrestricted_network_acknowledgment(
+    root: &mut Map<String, Value>,
+    request: &ExecutionRequest,
+) {
+    let policy = &request.policy;
+    root.insert(
+        "unrestrictedNetworkAcknowledgment".into(),
+        serde_json::json!({
+            "networkSpecified": policy.network_specified,
+            "networkModeSpecified": policy.network_mode_specified,
+            "runtimeNetworkProxySpecified": policy.runtime_network_proxy_specified,
+        }),
+    );
 }
 
 /// Exhaustive matching forces new operation/config fields to be classified
@@ -124,11 +198,19 @@ pub fn state_aware_policy_hash(
 fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
     match operation {
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-            IsolationSessionProvisionConfig { app_id },
+            IsolationSessionProvisionConfig {
+                app_id,
+                acknowledge_unrestricted_network,
+            },
         ))) => {
             let mut config = Map::new();
             if let Some(app_id) = app_id {
                 config.insert("appId".into(), Value::String(app_id.clone()));
+            }
+            // Key inserted only when acknowledged, so every acknowledgment-free
+            // provision request keeps the identity it had before Phase 10a.
+            if acknowledge_unrestricted_network.is_some() {
+                config.insert("acknowledgeUnrestrictedNetwork".into(), Value::Bool(true));
             }
             Value::Object(config)
         }
@@ -269,6 +351,14 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     );
     root.insert("experimental".into(), experimental_projection(experimental));
 
+    if experimental
+        .isolation_session
+        .as_ref()
+        .is_some_and(|config| config.acknowledge_unrestricted_network.is_some())
+    {
+        insert_unrestricted_network_acknowledgment(&mut root, request);
+    }
+
     Value::Object(root)
 }
 
@@ -285,6 +375,7 @@ fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
     let ExperimentalConfig {
         windows_sandbox,
         wslc,
+        isolation_session,
         // A placeholder feature with no enforcement effect.
         test: _excluded_test_feature,
     } = experimental;
@@ -298,10 +389,16 @@ fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
     );
-    // IsolationSession has no domain-level experimental config. Keep an
-    // explicit null projection so the canonical shape remains deterministic;
-    // state-aware phase config (including appId) is projected separately.
-    out.insert("isolation_session".into(), Value::Null);
+    // The one-shot IsolationSession section carries the unrestricted-network
+    // acknowledgment, which is enforcement-relevant: it decides whether an
+    // otherwise-unauthored network request is accepted. An absent section stays
+    // `null`, exactly as it was before the section existed, so acknowledgment-free
+    // identities do not move. State-aware phase config (including `appId`) is
+    // projected separately.
+    out.insert(
+        "isolation_session".into(),
+        serde_json::to_value(isolation_session).unwrap_or(Value::Null),
+    );
 
     Value::Object(out)
 }
@@ -956,6 +1053,367 @@ mod tests {
                 "{phase}: an empty experimental wrapper is not a phase config"
             );
         }
+    }
+
+    // === Phase 10a identity baselines ===
+    //
+    // These digests were captured from the projection as it stood *before* the
+    // Phase 10a acknowledgment work and are pinned as literals on purpose: an
+    // expectation recomputed from `policy_projection` would silently rewrite
+    // its own baseline the moment the projection changed, which is exactly the
+    // regression these guard against. Every fixture below is expressible
+    // without the acknowledgment, so all three acknowledgment-free shapes —
+    // one-shot legacy, another backend, and each state-aware provision config
+    // shape — must keep their historical identity.
+    const GOLDEN_ONE_SHOT_LEGACY_ACKNOWLEDGMENT: &str =
+        "sha256:7bc1f77e6b0f3fbac7f83e7fe9d1bfb86af0d95866802575870342f847f91e5e";
+    const GOLDEN_ONE_SHOT_PROCESS_CONTAINER: &str =
+        "sha256:7b8d0f3aaf5a0b339033cef8fb21dc5e68bfbe7dec4f3175cae9eadfeeebb7ce";
+    const GOLDEN_PROVISION_CONFIG_ABSENT: &str =
+        "sha256:72eda4c69af7feb89d985dd1512ef8fd9be5aa4980d45a5d2cb03c64369d0431";
+    const GOLDEN_PROVISION_CONFIG_EMPTY: &str =
+        "sha256:17d8dfb624577cbc7a74f56df98c75b187f2999582e21c16afccd034673417e7";
+    const GOLDEN_PROVISION_APP_ID: &str =
+        "sha256:fbe0b7d682837ba0bd7ad074f30b1080364168e29bde00baef776bd41abfd3f3";
+    const GOLDEN_PROVISION_WSLC_ABSENT: &str =
+        "sha256:6e02bba71db65abfcaf5a86b4c8372661cb0aeacc1f65f26b9f6f125b4803475";
+
+    /// A one-shot IsolationSession request carrying only the legacy canonical
+    /// unrestricted-network acknowledgment.
+    fn golden_one_shot_legacy_acknowledgment() -> ExecutionRequest {
+        ExecutionRequest {
+            schema_version: "0.9.0-alpha".to_string(),
+            container_id: "golden".to_string(),
+            script_code: "cmd /c ver".to_string(),
+            working_directory: "C:\\work".to_string(),
+            script_timeout: 30,
+            containment: ContainmentBackend::IsolationSession,
+            policy: crate::models::ContainerPolicy {
+                default_network_policy: crate::models::NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// An unrelated backend, proving the acknowledgment projection does not
+    /// perturb identities outside IsolationSession.
+    fn golden_one_shot_process_container() -> ExecutionRequest {
+        ExecutionRequest {
+            schema_version: "0.9.0-alpha".to_string(),
+            container_id: "golden".to_string(),
+            script_code: "cmd /c ver".to_string(),
+            working_directory: "C:\\work".to_string(),
+            script_timeout: 30,
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        }
+    }
+
+    fn golden_state_aware_request() -> ExecutionRequest {
+        ExecutionRequest {
+            schema_version: "0.9.0-alpha".to_string(),
+            container_id: "golden".to_string(),
+            working_directory: "C:\\work".to_string(),
+            script_timeout: 30,
+            containment: ContainmentBackend::IsolationSession,
+            policy: crate::models::ContainerPolicy {
+                default_network_policy: crate::models::NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn isolation_session_provision(
+        config: Option<IsolationSessionProvisionConfig>,
+    ) -> StateAwareOperation {
+        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config))
+    }
+
+    #[test]
+    fn phase_10a_preserves_pre_existing_policy_identities() {
+        assert_eq!(
+            policy_hash(&golden_one_shot_legacy_acknowledgment()),
+            GOLDEN_ONE_SHOT_LEGACY_ACKNOWLEDGMENT,
+            "the legacy one-shot acknowledgment identity must not move",
+        );
+        assert_eq!(
+            policy_hash(&golden_one_shot_process_container()),
+            GOLDEN_ONE_SHOT_PROCESS_CONTAINER,
+            "unrelated backends must not be perturbed",
+        );
+
+        let request = golden_state_aware_request();
+        assert_eq!(
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(None)
+            ),
+            GOLDEN_PROVISION_CONFIG_ABSENT,
+            "absent provision config must keep its identity",
+        );
+        assert_eq!(
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(IsolationSessionProvisionConfig::default())),
+            ),
+            GOLDEN_PROVISION_CONFIG_EMPTY,
+            "present-empty provision config must keep its identity",
+        );
+        assert_eq!(
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(IsolationSessionProvisionConfig {
+                    app_id: Some("Contoso.App".to_string()),
+                    ..Default::default()
+                })),
+            ),
+            GOLDEN_PROVISION_APP_ID,
+            "appId values must keep their identity",
+        );
+
+        let mut wslc = golden_state_aware_request();
+        wslc.containment = ContainmentBackend::Wslc;
+        assert_eq!(
+            state_aware_policy_hash(
+                &wslc,
+                "wslc",
+                &StateAwareOperation::Provision(StateAwareProvision::Wslc(None)),
+            ),
+            GOLDEN_PROVISION_WSLC_ABSENT,
+            "other state-aware backends must not be perturbed",
+        );
+    }
+
+    /// The directional deny values `apply_directional_network` writes for a
+    /// v0.9 request whose `network` section is absent, `{}`, or an explicitly
+    /// authored deny — all three normalize to exactly these values.
+    fn implicit_directional_defaults(policy: &mut crate::models::ContainerPolicy) {
+        policy.network_egress = Some(crate::models::NetworkEgressPolicy::default());
+        policy.network_ingress = Some(crate::models::NetworkIngressPolicy::default());
+    }
+
+    fn acknowledged_one_shot() -> ExecutionRequest {
+        let mut request = golden_one_shot_process_container();
+        request.containment = ContainmentBackend::IsolationSession;
+        request.experimental.isolation_session = Some(crate::models::IsolationSessionConfig {
+            acknowledge_unrestricted_network: Some(
+                crate::models::UnrestrictedNetworkAcknowledgment,
+            ),
+        });
+        implicit_directional_defaults(&mut request.policy);
+        request
+    }
+
+    #[test]
+    fn one_shot_acknowledgment_forms_have_distinct_identities() {
+        // Legacy-only, new-only, and both-consistent are deliberately distinct
+        // identities: they are different configuration inputs, even though they
+        // request the same posture.
+        let legacy_only = golden_one_shot_legacy_acknowledgment();
+        let new_only = acknowledged_one_shot();
+
+        let mut both = new_only.clone();
+        both.policy.default_network_policy = crate::models::NetworkPolicy::Allow;
+        both.policy.allow_local_network = true;
+        both.policy.network_egress = None;
+        both.policy.network_ingress = None;
+
+        let hashes = [
+            policy_hash(&legacy_only),
+            policy_hash(&new_only),
+            policy_hash(&both),
+        ];
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "legacy-only, new-only and both-consistent forms must stay distinct: {hashes:?}"
+        );
+        assert_eq!(
+            policy_hash(&legacy_only),
+            GOLDEN_ONE_SHOT_LEGACY_ACKNOWLEDGMENT,
+            "the legacy form keeps its historical identity",
+        );
+    }
+
+    #[test]
+    fn one_shot_acknowledgment_separates_absent_empty_and_authored_network() {
+        // An omitted network section, `network: {}`, and an explicitly authored
+        // directional deny normalize to identical policy VALUES; only the
+        // parse-derived presence flags tell them apart, and those flags are
+        // `#[serde(skip)]`. The acknowledgment projection must not collapse
+        // them, because the first is accepted and the others are refused.
+        let absent = acknowledged_one_shot();
+
+        let mut empty_section = absent.clone();
+        empty_section.policy.network_specified = true;
+
+        let mut authored_deny = empty_section.clone();
+        authored_deny.policy.network_mode_specified = true;
+
+        let mut runtime_proxy_only = absent.clone();
+        runtime_proxy_only.policy.runtime_network_proxy_specified = true;
+
+        let projected = |request: &ExecutionRequest| policy_projection(request)["policy"].clone();
+        assert_eq!(
+            projected(&absent),
+            projected(&empty_section),
+            "the collision this test guards must actually exist",
+        );
+        assert_eq!(projected(&absent), projected(&authored_deny));
+        assert_eq!(projected(&absent), projected(&runtime_proxy_only));
+
+        let hashes = [
+            policy_hash(&absent),
+            policy_hash(&empty_section),
+            policy_hash(&authored_deny),
+            policy_hash(&runtime_proxy_only),
+        ];
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "authored presence must survive into the identity: {hashes:?}"
+        );
+    }
+
+    #[test]
+    fn presence_flags_only_reach_the_hash_through_an_acknowledgment() {
+        // Without an acknowledgment the flags stay skipped, so no other
+        // backend's identity moves.
+        let mut baseline = golden_one_shot_process_container();
+        implicit_directional_defaults(&mut baseline.policy);
+        let mut flagged = baseline.clone();
+        flagged.policy.network_specified = true;
+        flagged.policy.network_mode_specified = true;
+        flagged.policy.runtime_network_proxy_specified = true;
+        flagged.policy.ui_specified = true;
+        assert_eq!(policy_hash(&baseline), policy_hash(&flagged));
+    }
+
+    #[test]
+    fn state_aware_acknowledgment_forms_have_distinct_identities() {
+        let request = golden_state_aware_request();
+        let acknowledged = IsolationSessionProvisionConfig {
+            acknowledge_unrestricted_network: Some(
+                crate::models::UnrestrictedNetworkAcknowledgment,
+            ),
+            ..Default::default()
+        };
+
+        let mut unauthored = golden_state_aware_request();
+        unauthored.policy = crate::models::ContainerPolicy::default();
+        implicit_directional_defaults(&mut unauthored.policy);
+
+        let mut authored_empty = unauthored.clone();
+        authored_empty.policy.network_specified = true;
+
+        let hashes = [
+            // legacy-only: canonical allow policy, no acknowledgment field
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(IsolationSessionProvisionConfig::default())),
+            ),
+            // both-consistent: canonical allow policy plus the acknowledgment
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(acknowledged.clone())),
+            ),
+            // new-only: acknowledgment with no authored network
+            state_aware_policy_hash(
+                &unauthored,
+                "isolation_session",
+                &isolation_session_provision(Some(acknowledged.clone())),
+            ),
+            // refused shape: acknowledgment plus an authored empty section
+            state_aware_policy_hash(
+                &authored_empty,
+                "isolation_session",
+                &isolation_session_provision(Some(acknowledged)),
+            ),
+        ];
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "acknowledgment and authored presence must all be distinguishable: {hashes:?}"
+        );
+        assert_eq!(
+            hashes[0], GOLDEN_PROVISION_CONFIG_EMPTY,
+            "the acknowledgment-free provision config keeps its identity",
+        );
+    }
+
+    #[test]
+    fn acknowledgment_projection_appears_only_for_acknowledged_requests() {
+        let unacknowledged = policy_projection(&golden_one_shot_legacy_acknowledgment());
+        assert!(unacknowledged
+            .get("unrestrictedNetworkAcknowledgment")
+            .is_none());
+        assert_eq!(
+            unacknowledged["experimental"]["isolation_session"],
+            Value::Null
+        );
+
+        let acknowledged = policy_projection(&acknowledged_one_shot());
+        assert_eq!(
+            acknowledged["unrestrictedNetworkAcknowledgment"],
+            serde_json::json!({
+                "networkSpecified": false,
+                "networkModeSpecified": false,
+                "runtimeNetworkProxySpecified": false,
+            })
+        );
+        assert_eq!(
+            acknowledged["experimental"]["isolation_session"],
+            serde_json::json!({"acknowledgeUnrestrictedNetwork": true})
+        );
+    }
+
+    #[test]
+    fn acknowledgment_does_not_admit_credentials_or_sandbox_ids() {
+        let mut baseline = acknowledged_one_shot();
+        baseline.script_code = "curl -H \"Authorization: synthetic-secret\"".to_string();
+        baseline.env = Some(vec!["API_KEY=synthetic-environment-secret".to_string()]);
+
+        let mut changed = acknowledged_one_shot();
+        changed.script_code = "echo other".to_string();
+        changed.env = Some(vec!["API_KEY=other-synthetic-secret".to_string()]);
+        assert_eq!(
+            policy_hash(&baseline),
+            policy_hash(&changed),
+            "command and environment stay excluded for acknowledged requests"
+        );
+
+        let request = golden_state_aware_request();
+        let acknowledged = IsolationSessionProvisionConfig {
+            acknowledge_unrestricted_network: Some(
+                crate::models::UnrestrictedNetworkAcknowledgment,
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(acknowledged.clone())),
+            ),
+            state_aware_policy_hash(
+                &request,
+                "isolation_session",
+                &isolation_session_provision(Some(acknowledged)),
+            ),
+            "no sandbox id or other unverified identity enters the projection"
+        );
     }
 
     #[test]

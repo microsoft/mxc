@@ -22,6 +22,7 @@
 //   *Config.version                       top-level `version` (SDK fills default)
 //   ExecConfig.process                    top-level `Process`
 //   ProvisionConfig.appId                 IsolationSessionProvisionPhase.appId
+//   ProvisionConfig.acknowledge...         IsolationSessionProvisionPhase.acknowledge...
 //
 // The top-level fields are already covered by the one-shot oracle; here we (a)
 // assert the per-phase configs REUSE those same public leaf types (so the
@@ -128,10 +129,16 @@ type _DeprovisionNoBackendKeys = AssertTrue<
 // adding a backend-specific field to the provision config must be a deliberate
 // edit here, not a silent widening.
 type _ProvisionKeysNonVacuous = AssertTrue<
-  Equivalent<BackendKeys<IsolationSessionProvisionConfig>, 'appId'>
+  Equivalent<
+    BackendKeys<IsolationSessionProvisionConfig>,
+    'acknowledgeUnrestrictedNetwork' | 'appId'
+  >
 >;
 type _ProvisionWireKeysNonVacuous = AssertTrue<
-  Equivalent<WireKeys<WireProvisionPhase>, 'appId'>
+  Equivalent<
+    WireKeys<WireProvisionPhase>,
+    'acknowledgeUnrestrictedNetwork' | 'appId'
+  >
 >;
 
 // --- WSLc per-phase wire field-set conformance -----------------------------

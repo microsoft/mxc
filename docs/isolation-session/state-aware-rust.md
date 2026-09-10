@@ -85,7 +85,30 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. There is no trimming, case folding, or normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such; JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `acknowledgeUnrestrictedNetwork` | `true` \| absent | absent | Explicit acknowledgment that networking is unrestricted and cannot be filtered or denied. When supplied, only JSON `true` is valid. Omit the top-level `network` section for the acknowledgment-only form. During 10a the canonical legacy network acknowledgment remains an alternative, and consistent use of both is accepted. |
+
+For example, acknowledgment-only provision is:
+
+```json
+{
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "experimental": {
+    "isolation_session": {
+      "provision": {
+        "acknowledgeUnrestrictedNetwork": true
+      }
+    }
+  }
+}
+```
+
+The exact provision contract requires the new acknowledgment or the valid
+legacy network form. Supplying neither remains a structural
+`malformed_request` error. The acknowledgment is not a network setting and
+does not override an explicitly empty or restrictive policy.
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
@@ -159,10 +182,9 @@ the executable.
 ### Start
 
 **Config (none).** Start takes only the `sandboxId`; it accepts no per-phase
-payload. The one-shot surface likewise takes **no backend configuration at
-all**, so anything under `experimental.isolation_session` there is simply an
-unrecognised key in the deliberately permissive `experimental` block and is
-ignored.
+payload or repeated acknowledgment. The separate one-shot section accepts
+`experimental.isolation_session.acknowledgeUnrestrictedNetwork`, not a
+state-aware phase object or `appId`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -199,14 +221,17 @@ backend has no host-folder-sharing primitive, so there is nothing to honor.
 
 The container's network is unrestricted (outbound open; a process inside can
 listen on a port reachable from outside via localhost) and MXC has no
-primitive to filter or deny it. So the network policy is honesty-gated rather
-than silently accepted: **provision** (and one-shot) accept only the canonical
-unrestricted-network acknowledgment — `defaultPolicy=allow` +
-`allowLocalNetwork=true`, no `allowedHosts`/`blockedHosts`, no proxy, default
-enforcement — and refuse anything else, including an absent policy (which
-defaults to the unenforceable `block`). On the **post-provision** phases the
-network posture is fixed at provision, so any supplied network policy is
-rejected and an absent one is inherited.
+primitive to filter or deny it. **Provision** and one-shot therefore require
+an unrestricted-network acknowledgment. In v0.9, the preferred form is
+`acknowledgeUnrestrictedNetwork: true` in the appropriate backend section,
+with no authored `network` section. The canonical legacy form
+(`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy,
+default enforcement) remains valid during 10a, alone or consistently with the
+new field. An authored `network: {}`, restrictions, or proxy settings remain
+rejected; they are never erased or overridden. The common model's implicit
+deny defaults are not authored policy and are not synthesized into allow
+grants. On **post-provision** phases the posture is fixed: supplied network
+policy or another acknowledgment is rejected, and absence is inherited.
 
 UI policy is rejected at every phase, on both surfaces, and **no `ui` posture is
 truthful for this backend** — there is no value combination that could be
@@ -243,7 +268,7 @@ isolation does nothing for it.
 **An omitted `ui` is accepted, and applies no restriction.** The schema's
 default-deny reading ("an omitted `ui` is equivalent to full lockdown") does
 **not** hold on this backend. The asymmetry with the network gate — which
-*requires* a positive acknowledgment and refuses an absent policy — is
+*requires* a positive acknowledgment and refuses its absence — is
 deliberate, and rests on how the two defaults fail. An absent `network` defaults
 to `block` while the container's network is genuinely open to the outside world,
 so the caller is exposed and must acknowledge it. An absent `ui` defaults to
@@ -265,9 +290,10 @@ meaning for this backend.
 |---|---|---|---|---|---|---|
 | `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
-| `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | **required** | rejected | rejected | rejected | rejected |
+| Unrestricted-network acknowledgment, using the new field or canonical legacy form | **required** | **required** | rejected | rejected | rejected | rejected |
+| `policy.network` — canonical legacy `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during 10a | accepted during 10a | rejected | rejected | rejected | rejected |
 | `policy.network` — any other **supplied** value (host rules, proxy, `defaultPolicy=block`) | rejected | rejected | rejected | rejected | rejected | rejected |
-| `policy.network` — **absent** | rejected (defaults to the unenforceable `block`) | rejected (same) | inherited from provision | inherited | inherited | inherited |
+| `policy.network` — **absent** | accepted with the new acknowledgment | accepted with the new acknowledgment | inherited from provision | inherited | inherited | inherited |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
@@ -275,8 +301,10 @@ meaning for this backend.
 | `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
 | `process.commandLine` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
 | `process.{cwd,env,timeout}` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
-| `experimental.isolation_session.provision.appId` | accepted, ignored | **honored** | n/a | n/a | n/a | n/a |
-| `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
+| `experimental.isolation_session.acknowledgeUnrestrictedNetwork` | **honored** | rejected (wrong nesting) | rejected | rejected | rejected | rejected |
+| `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork` | rejected | **honored** | rejected | rejected | rejected | rejected |
+| `experimental.isolation_session.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
+| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
 | another backend's `experimental.<backend>` section | rejected | rejected | accepted, ignored if it is the only one | accepted, ignored if the only one | accepted, ignored if the only one | accepted, ignored if the only one |
 
@@ -306,11 +334,12 @@ Notes on the rows that are not a simple accept/reject:
 - **`process` on non-exec state-aware phases** is structurally rejected. Supply
   process settings only on exec; other phases do not run a workload.
 
-The absence of a provision member produces `None`; a present empty object
-produces a configuration with `app_id: None`; and an explicit empty `appId`
-remains `Some("")`. Exact input rejects `appId: null`. These distinctions
-survive binding unchanged, so application identity resolution remains owned by
-the backend rather than by the parser or dispatcher.
+With a valid legacy network acknowledgment, an absent provision member remains
+`None`, while a present empty object remains a configuration with absent
+fields. An acknowledgment-only request necessarily has a provision object.
+An explicit empty `appId` remains `Some("")`, and exact input rejects
+`appId: null`. These distinctions survive binding unchanged, so application
+identity resolution remains owned by the backend.
 
 The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
 fields before backend validation. For example, supplied `ui`, noncanonical
@@ -340,8 +369,9 @@ field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
 phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
 per the matrix — provision requires the canonical unrestricted-network
-acknowledgment and post-provision rejects any supplied network policy
-(inheriting an absent one). One-shot enforces all of this via `validate_runner`;
+acknowledgment in either accepted 10a form, and post-provision rejects supplied
+network policy or acknowledgment (inheriting absence). One-shot enforces its
+policy checks via `validate_runner`;
 state-aware enforces it via the `validate_<phase>` hooks.
 
 The one asymmetry is `lifecycle`: one-shot refuses it by value (the defaults
@@ -355,9 +385,8 @@ whole section for every backend. See the matrix notes above.
 - `experimental.isolation_session.provision` — optional provision configuration;
   `start` / `exec` / `stop` / `deprovision` carry no backend config.
 - `experimental.isolation_session.provision.appId` — the calling application's
-  identifier. Honoured here. The one-shot surface takes no backend
-  configuration at all, so a supplied one-shot payload is rejected by the
-  closed exact contract rather than accepted and ignored.
+  identifier. Honoured here and not accepted by the one-shot acknowledgment
+  section.
 
 ## Idempotence per phase
 

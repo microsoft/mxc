@@ -92,14 +92,24 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       # The job defaults working-directory to src/core/lxc, so the `Test lxc`
-      # step above covers only the lxc package -- nothing else in this job runs
-      # mxc-sdk's tests, making this step their sole CI coverage. It must follow
+      # step above covers only the lxc package. This streaming suite must follow
       # the install: these skip when bwrap is absent, so running them earlier
       # would silently exercise nothing.
       - name: Test Bubblewrap streaming (mxc-sdk)
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test streaming_bubblewrap
+
+      - name: Test common contracts and state-aware SDK boundaries
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --lib
+          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --doc
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_config_contract --all-features
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.

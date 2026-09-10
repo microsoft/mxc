@@ -143,15 +143,23 @@ mod tests {
     #[test]
     fn provision_presence_and_empty_values_are_distinct() {
         let absent = StateAwareProvision::IsolationSession(None);
-        let empty = StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig {
-            app_id: None,
-        }));
+        let empty =
+            StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig::default()));
         let empty_app_id =
             StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig {
                 app_id: Some(String::new()),
+                ..Default::default()
+            }));
+        let acknowledged =
+            StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig {
+                acknowledge_unrestricted_network: Some(
+                    crate::models::UnrestrictedNetworkAcknowledgment,
+                ),
+                ..Default::default()
             }));
         assert_ne!(absent, empty);
         assert_ne!(empty, empty_app_id);
+        assert_ne!(empty, acknowledged);
         assert_ne!(
             StateAwareProvision::Wslc(None),
             StateAwareProvision::Wslc(Some(WslcProvisionConfig::default()))

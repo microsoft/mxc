@@ -130,22 +130,29 @@ invocations, without changing the manager's interface. See
         "env": ["MYVAR=hello"],
         "timeout": 30000
     },
-    "network": {
-        "defaultPolicy": "allow",
-        "allowLocalNetwork": true
-    },
     "experimental": {
-        "isolation_session": {}
+        "isolation_session": {
+            "acknowledgeUnrestrictedNetwork": true
+        }
     }
 }
 ```
 
-The one-shot surface takes **no backend configuration at all** — there is no
-`experimental.isolation_session` field the one-shot path reads. Anything
-supplied there is just an unrecognised key in the deliberately permissive
-`experimental` block and is ignored (the run proceeds normally). Process options
-(`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
-matching the contract every other backend honors.
+The one-shot `experimental.isolation_session` section is closed and accepts
+only `acknowledgeUnrestrictedNetwork`. Its only valid supplied value is `true`;
+`false`, `null`, and other value types are structural errors. This acknowledges
+that the backend cannot restrict networking; it does not configure a network
+grant. Omit `network` when using the acknowledgment alone.
+
+During the additive v0.9 transition, the existing canonical `network` form
+(`defaultPolicy: "allow"` and `allowLocalNetwork: true`, with no host rules,
+proxy, or non-default enforcement) remains accepted, either alone or together
+with the new acknowledgment. Neither form means rejection. An explicitly empty
+`network` section or an incompatible policy is not rescued by acknowledgment.
+
+`appId` and the nested `provision` section are state-aware-only and are
+rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
+in the top-level `process` section.
 
 Run with: `wxc-exec.exe --experimental config.json`.
 
@@ -246,14 +253,17 @@ the rationale for each disposition, and the error mapping live in
 | `process.commandLine` | **honored** (required) |
 | `process.cwd` / `process.env` / `process.timeout` | **honored** |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
-| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
+| Unrestricted-network acknowledgment, using the new backend field or the canonical legacy form | **required** |
+| `experimental.isolation_session.acknowledgeUnrestrictedNetwork` | **honored**; supplied value must be `true` |
+| `network` — canonical legacy acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during 10a, alone or consistently alongside the new field |
+| `network` — absent | accepted only with the new acknowledgment |
+| `network` — any other supplied policy, including `{}` | rejected; acknowledgment does not override it |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.provision` | accepted, ignored — per-phase config is state-aware-only |
+| `experimental.isolation_session.provision` / one-shot `appId` | rejected — these are not fields of the closed one-shot section |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
@@ -280,12 +290,10 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
-  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
-  workloads programmatically **on the one-shot path**. Today the one-shot
-  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
-  `wxc-exec` directly), and it takes no backend configuration; the
-  state-aware lifecycle *is* SDK-exposed.
+- **Additional one-shot SDK convenience APIs.** The explicit JSON/config path
+  (`spawnSandboxFromConfig` or `wxc-exec` directly) supports the acknowledgment.
+  The public Rust and C# SDKs still reach IsolationSession through state-aware
+  lifecycle APIs, not their one-shot run/spawn surfaces.
 
 ## Test Plan
 
@@ -293,8 +301,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is accepted and ignored |
-| Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
+| Config parsing | `config_parser.rs` | The closed one-shot acknowledgment section, true-only values, wrong nesting, and retained legacy request acceptance |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; acknowledgment-only, legacy-only, and consistent combined forms; authored empty/restrictive policy rejection; unchanged post-provision rules |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
@@ -395,12 +403,10 @@ wxc-exec.exe --experimental hello.json
     "commandLine": "whoami",
     "timeout": 30000
   },
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
   "experimental": {
-    "isolation_session": {}
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true
+    }
   }
 }
 ```

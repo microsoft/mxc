@@ -374,6 +374,10 @@
       "additionalProperties": false,
       "description": "IsolationSession settings accepted during provisioning.",
       "properties": {
+        "acknowledgeUnrestrictedNetwork": {
+          "$ref": "#/definitions/True",
+          "description": "Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid.\n\nProvision-phase only: the posture is fixed for the sandbox's lifetime, so no later phase accepts it."
+        },
         "appId": {
           "description": "Optional application identifier carried by the sandbox identity.",
           "type": "string"
@@ -394,7 +398,40 @@
     },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for isolation_session",
+      "anyOf": [
+        {
+          "required": [
+            "network"
+          ]
+        },
+        {
+          "properties": {
+            "experimental": {
+              "properties": {
+                "isolation_session": {
+                  "properties": {
+                    "provision": {
+                      "required": [
+                        "acknowledgeUnrestrictedNetwork"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "provision"
+                  ]
+                }
+              },
+              "required": [
+                "isolation_session"
+              ]
+            }
+          },
+          "required": [
+            "experimental"
+          ]
+        }
+      ],
+      "description": "A complete state-aware `provision` request for isolation_session. The container's network is unrestricted and MXC cannot filter or deny it, so the request must acknowledge that: supply `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork: true`, the legacy `network` acknowledgment, or both consistent forms. At least one is required; supplying both is valid.",
       "properties": {
         "$schema": {
           "description": "Optional JSON Schema reference for editor validation.",
@@ -413,7 +450,7 @@
         },
         "network": {
           "$ref": "#/definitions/IsolationSessionNetwork",
-          "description": "Required unrestricted-network acknowledgment."
+          "description": "Optional legacy unrestricted-network acknowledgment."
         },
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
@@ -430,7 +467,6 @@
       },
       "required": [
         "containment",
-        "network",
         "phase",
         "version"
       ],
@@ -864,6 +900,10 @@
       "additionalProperties": false,
       "description": "Experimental settings.",
       "properties": {
+        "isolation_session": {
+          "$ref": "#/definitions/OneShotIsolationSession",
+          "description": "Optional one-shot IsolationSession backend settings."
+        },
         "test": {
           "$ref": "#/definitions/TestFeature",
           "description": "Optional placeholder test feature."
@@ -875,6 +915,17 @@
         "wslc": {
           "$ref": "#/definitions/OneShotWslc",
           "description": "Optional one-shot WSLC backend settings."
+        }
+      },
+      "type": "object"
+    },
+    "OneShotIsolationSession": {
+      "additionalProperties": false,
+      "description": "One-shot IsolationSession backend settings.\n\nDeliberately narrower than the state-aware provision shape: `appId` is a state-aware concept (it is carried inside the returned sandbox id so later phases can recover it), and the one-shot surface has no phases, so it must not acquire either `appId` or a `provision` leaf.",
+      "properties": {
+        "acknowledgeUnrestrictedNetwork": {
+          "$ref": "#/definitions/True",
+          "description": "Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid."
         }
       },
       "type": "object"

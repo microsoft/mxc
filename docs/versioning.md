@@ -148,6 +148,38 @@ dry-run behavior, and both exec topologies without requiring live sandboxes.
 This migration changes no registered JSON contract or generated schema/type
 artifact.
 
+### Additive IsolationSession acknowledgment
+
+The mutable `0.9.0-alpha` contract now accepts an explicit true-only
+`acknowledgeUnrestrictedNetwork` field under `experimental.isolation_session`
+for one-shot requests, or under its `provision` member for state-aware
+provision. It acknowledges an inherently unrestricted network; it does not
+grant or configure network access.
+
+During Phase 10a, the existing canonical legacy network acknowledgment remains
+accepted, alone or consistently with the new field. The new field with an
+omitted network section is also accepted. An explicitly empty or restrictive
+network policy, proxy, or absence of both acknowledgment forms remains an
+error. State-aware missing-both is a conditional exact-contract failure;
+one-shot retains its existing common/backend-policy validation boundary.
+
+SDK authoring preserves omission before normalization rather than emitting
+`network: null`, `{}`, or a synthesized deny for the acknowledgment-only form.
+Changes are confined to IsolationSession-specific authoring; shared SDK APIs
+and the set of supported backend execution surfaces remain unchanged.
+
+Existing policy hashes stay unchanged. Acknowledgment-bearing requests gain a
+scoped projection of acknowledgment and network-presence facts, so authored
+policy is not confused with implicit defaults. These are audit/diagnostic
+configuration identities, not authorization tokens or proof that validation
+succeeded. Legacy-only, new-only, and combined forms intentionally need not
+have equal hashes.
+
+The affected development schema and TypeScript oracles are regenerated from
+their Rust sources. Published v0.6/v0.7/v0.8 contracts are unchanged, and this
+additive step does not remove legacy v0.9 networking fields or retire the
+test-only rolling reference.
+
 ### Trust boundary vs schema defaults
 
 Schemas in `stable/` are immutable: they document the input shape that was

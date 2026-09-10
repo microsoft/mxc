@@ -15,14 +15,28 @@
 //!
 //! Network policy is honesty-gated. The container runs on an unrestricted
 //! network that MXC cannot filter or deny, so at provision (and one-shot, which
-//! runs the full lifecycle in one call) the ONLY accepted network policy is the
-//! canonical acknowledgment — `defaultPolicy=allow` + `allowLocalNetwork=true`
-//! with no host rules, no proxy, and default enforcement. Anything else,
-//! including an absent policy (which defaults to the unenforceable `Block`), is
-//! refused. On post-provision phases the network posture is fixed at provision:
-//! any supplied network policy is refused, an absent one is inherited.
+//! runs the full lifecycle in one call) the caller must acknowledge that. Two
+//! forms are accepted during Phase 10a:
+//!
+//! * the **legacy** canonical acknowledgment — `defaultPolicy=allow` +
+//!   `allowLocalNetwork=true` with no host rules, no proxy, and default
+//!   enforcement; or
+//! * the **explicit** [`UnrestrictedNetworkAcknowledgment`], supplied through
+//!   the backend's own runtime config, over a request that authored no network
+//!   policy at all.
+//!
+//! Anything else is refused: an absent acknowledgment (the domain default is
+//! the unenforceable `Block`), an explicitly authored but empty network
+//! section, host rules, non-default enforcement, or a proxy. An acknowledgment
+//! never overrides an authored restriction and never synthesizes a legacy
+//! `allow` grant. On post-provision phases the network posture is fixed at
+//! provision: any supplied network policy is refused, an absent one is
+//! inherited.
 
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy};
+use wxc_common::models::{
+    ExecutionRequest, NetworkEgressPolicy, NetworkEnforcementMode, NetworkIngressPolicy,
+    NetworkPolicy, UnrestrictedNetworkAcknowledgment,
+};
 
 use super::error::IsolationSessionError;
 
@@ -35,9 +49,12 @@ const ERR_UI_POLICY: &str = "UI policy is not supported by the isolation session
     applies no restriction — it is not the lockdown the schema's default implies. Use a \
     backend that enforces UI policy if you need one";
 const ERR_NETWORK_POLICY: &str = "the network is unrestricted and cannot be filtered or denied; \
-    set network.defaultPolicy=allow and network.allowLocalNetwork=true with no allowed/blocked \
-    hosts, no proxy, and default enforcement to acknowledge the container is fully \
-    network-accessible, or use a backend that enforces network policy";
+    acknowledge that the container is fully network-accessible with no network policy at all — \
+    experimental.isolation_session.acknowledgeUnrestrictedNetwork=true on a one-shot request, or \
+    experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork=true on a state-aware \
+    provision request — or set network.defaultPolicy=allow and network.allowLocalNetwork=true with \
+    no allowed/blocked hosts, no proxy, and default enforcement, or use a backend that enforces \
+    network policy";
 const ERR_PROXY_POLICY: &str =
     "the network cannot be routed through a proxy; remove network.proxy \
     (the container's network is unrestricted and unproxied)";
@@ -47,14 +64,21 @@ const ERR_NETWORK_IMMUTABLE: &str =
 
 /// Validates the request for the provision phase (also used by the one-shot
 /// runner, which runs the whole lifecycle in one call so provision-phase
-/// semantics apply). Filesystem policy is rejected first, then the network
-/// policy must be the canonical unrestricted-network acknowledgment.
+/// semantics apply). Filesystem policy is rejected first, then UI policy, then
+/// the network policy must carry one of the two accepted acknowledgment forms.
+///
+/// `acknowledgment` is the caller's explicit acknowledgment as it arrived in
+/// the backend's own runtime config — the one-shot `experimental.isolation_session`
+/// section or the state-aware provision config. It is passed in rather than read
+/// from the request because the two surfaces carry it in different places, and
+/// because `wxc_common` must not learn backend-specific semantics.
 pub(super) fn validate_provision_policy(
     request: &ExecutionRequest,
+    acknowledgment: Option<UnrestrictedNetworkAcknowledgment>,
 ) -> Result<(), IsolationSessionError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
-    validate_provision_network_policy(request)
+    validate_provision_network_policy(request, acknowledgment)
 }
 
 /// Validates the request for any non-provision phase (start / exec / stop /
@@ -110,15 +134,73 @@ fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), IsolationSessionEr
     Ok(())
 }
 
-/// Accepts only the canonical unrestricted-network acknowledgment and refuses
-/// everything else. The container's network is open on both axes — outbound is
+/// Accepts only an acknowledged unrestricted network and refuses everything
+/// else. The container's network is open on both axes — outbound is
 /// unrestricted and a process inside can listen on a localhost-reachable port —
-/// and MXC has no primitive to change that, so the one honest request is
-/// `defaultPolicy=allow` + `allowLocalNetwork=true` with no host rules, no
-/// proxy, and default enforcement. An absent policy (domain default `Block`),
-/// an explicit `Block`, host rules, non-default enforcement, or a proxy all
-/// imply a restriction the backend cannot honor and are refused.
+/// and MXC has no primitive to change that.
+///
+/// Two forms are honest here, and neither invents policy:
+///
+/// * the explicit acknowledgment over a request that authored no network policy
+///   at all. Such a request still carries the parser's implicit directional
+///   deny defaults, which were never authored by the caller, so they are
+///   accepted as the absence they represent rather than as a restriction the
+///   backend would be pretending to enforce; and
+/// * the legacy canonical form `defaultPolicy=allow` + `allowLocalNetwork=true`
+///   with no host rules, no proxy, and default enforcement — accepted on its
+///   own, and also accepted alongside the explicit acknowledgment, which is the
+///   consistent-redundancy case.
+///
+/// An acknowledgment never rescues authored content: with anything authored the
+/// request falls through to the legacy check, which reports the established
+/// diagnostics in the established order. So an explicitly empty network
+/// section, an authored directional deny, host rules, non-default enforcement,
+/// or a proxy stay refused whether or not the acknowledgment is present.
 fn validate_provision_network_policy(
+    request: &ExecutionRequest,
+    acknowledgment: Option<UnrestrictedNetworkAcknowledgment>,
+) -> Result<(), IsolationSessionError> {
+    if acknowledgment.is_some() && network_policy_unauthored(request) {
+        return Ok(());
+    }
+    validate_canonical_allow_network_policy(request)
+}
+
+/// True when nothing in the request authored any network policy.
+///
+/// Presence flags separate a caller-authored section from the parser's implicit
+/// defaults, which is the only thing that distinguishes an omitted `network`
+/// from `network: {}` or an authored directional deny — all three normalize to
+/// the same values. The flags alone are not enough, though: a direct typed
+/// caller can populate the policy without setting them, so every field that
+/// could carry a restriction or a grant is also checked against its unauthored
+/// value. Runtime proxy, proxy-peer identity, and host lists are included, so
+/// an absent `network` section cannot hide network settings supplied elsewhere.
+fn network_policy_unauthored(request: &ExecutionRequest) -> bool {
+    let policy = &request.policy;
+    !policy.network_specified
+        && !policy.network_mode_specified
+        && !policy.runtime_network_proxy_specified
+        && !policy.network_proxy.is_enabled()
+        && policy.allowed_proxy_peer.is_none()
+        && policy.allowed_hosts.is_empty()
+        && policy.blocked_hosts.is_empty()
+        && policy.default_network_policy == NetworkPolicy::Block
+        && !policy.allow_local_network
+        && policy.network_enforcement_mode == NetworkEnforcementMode::Capabilities
+        && policy
+            .network_egress
+            .as_ref()
+            .is_none_or(|egress| *egress == NetworkEgressPolicy::default())
+        && policy
+            .network_ingress
+            .as_ref()
+            .is_none_or(|ingress| *ingress == NetworkIngressPolicy::default())
+}
+
+/// The legacy canonical acknowledgment check, unchanged: `allow` outbound +
+/// `allowLocalNetwork` + no host rules + default enforcement + no proxy.
+fn validate_canonical_allow_network_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     let policy = &request.policy;
@@ -142,7 +224,8 @@ fn validate_provision_network_policy(
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkEgressPolicy, ProxyAddress, ProxyConfig, UiPolicy,
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig, UiPolicy,
     };
     use wxc_common::mxc_error::MxcErrorCode;
 
@@ -184,7 +267,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -199,7 +282,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -215,7 +298,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -230,7 +313,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -246,7 +329,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -257,7 +340,7 @@ mod tests {
             policy: canonical_allow_policy(),
             ..Default::default()
         };
-        validate_provision_policy(&request).unwrap();
+        validate_provision_policy(&request, None).unwrap();
     }
 
     #[test]
@@ -266,7 +349,7 @@ mod tests {
         // cannot enforce, so provision refuses it.
         let request = ExecutionRequest::default();
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -282,7 +365,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -298,7 +381,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -313,7 +396,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -328,7 +411,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -343,7 +426,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -358,7 +441,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_NETWORK_POLICY,
         );
     }
@@ -377,7 +460,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_PROXY_POLICY,
         );
     }
@@ -394,7 +477,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
     }
@@ -411,7 +494,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             "UI policy is not supported",
         );
     }
@@ -423,7 +506,7 @@ mod tests {
             policy: canonical_allow_policy(),
             ..Default::default()
         };
-        validate_provision_policy(&request).unwrap();
+        validate_provision_policy(&request, None).unwrap();
     }
 
     #[test]
@@ -441,7 +524,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
             "UI policy is not supported",
         );
     }
@@ -480,7 +563,7 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&fs_and_ui).unwrap_err(),
+            validate_provision_policy(&fs_and_ui, None).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
 
@@ -494,9 +577,225 @@ mod tests {
             ..Default::default()
         };
         assert_policy_err_contains(
-            validate_provision_policy(&ui_and_network).unwrap_err(),
+            validate_provision_policy(&ui_and_network, None).unwrap_err(),
             "UI policy is not supported",
         );
+    }
+
+    // ====== Explicit unrestricted-network acknowledgment ======
+    //
+    // The explicit acknowledgment accepts a request that authored no network
+    // policy at all. It never rescues authored content: with anything authored
+    // the request falls back to the legacy canonical check, so the established
+    // diagnostics and their order are unchanged.
+
+    const ACK: Option<UnrestrictedNetworkAcknowledgment> = Some(UnrestrictedNetworkAcknowledgment);
+
+    /// The policy a v0.9 request with no `network` section normalizes to: the
+    /// parser installs implicit directional deny defaults and leaves every
+    /// presence flag false.
+    fn unauthored_directional_policy() -> ContainerPolicy {
+        ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(NetworkIngressPolicy::default()),
+            ..Default::default()
+        }
+    }
+
+    fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            policy,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn acknowledgment_accepts_an_unauthored_network() {
+        // Implicit directional deny defaults are the *absence* of a policy, not
+        // a restriction, so the acknowledgment covers them without any legacy
+        // `allow` being synthesized.
+        validate_provision_policy(&request_with_policy(unauthored_directional_policy()), ACK)
+            .unwrap();
+        // A default-constructed policy (a direct typed caller that never went
+        // through the parser) is equally unauthored.
+        validate_provision_policy(&request_with_policy(ContainerPolicy::default()), ACK).unwrap();
+    }
+
+    #[test]
+    fn acknowledgment_accepts_the_consistent_legacy_form() {
+        // Both forms together: consistent redundancy is accepted so a caller
+        // can adopt the new field before dropping the legacy one.
+        validate_provision_policy(&request_with_policy(canonical_allow_policy()), ACK).unwrap();
+    }
+
+    #[test]
+    fn absent_acknowledgment_still_requires_the_legacy_form() {
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(unauthored_directional_policy()), None)
+                .unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_rejects_an_authored_empty_network_section() {
+        // `network: {}` normalizes to exactly the same values as an omitted
+        // section; only `network_specified` tells them apart, and an explicitly
+        // authored section is not an omission.
+        let policy = ContainerPolicy {
+            network_specified: true,
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(policy), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_rejects_an_authored_directional_deny() {
+        let policy = ContainerPolicy {
+            network_specified: true,
+            network_mode_specified: true,
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(policy), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_rejects_an_authored_directional_allow() {
+        // Value-level authorship, reachable by a direct typed caller whose
+        // presence flags were never set.
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(policy), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_rejects_network_settings_supplied_outside_the_network_section() {
+        // An absent `network` section must not hide a runtime proxy, a proxy
+        // peer identity, or host lists supplied elsewhere.
+        let runtime_proxy = ContainerPolicy {
+            runtime_network_proxy_specified: true,
+            network_proxy: ProxyConfig {
+                address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                builtin_test_server: false,
+            },
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(runtime_proxy), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+
+        let proxy_peer = ContainerPolicy {
+            allowed_proxy_peer: Some("C:\\proxy.exe".to_string()),
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(proxy_peer), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+
+        let allowed_hosts = ContainerPolicy {
+            allowed_hosts: vec!["example.test".to_string()],
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(allowed_hosts), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+
+        let enforcement = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(enforcement), ACK).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_preserves_the_established_diagnostic_order() {
+        // Filesystem and UI rejections keep precedence over the network check,
+        // acknowledged or not.
+        let filesystem = ContainerPolicy {
+            readwrite_paths: vec!["C:\\src".to_string()],
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(filesystem), ACK).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+
+        let ui = ContainerPolicy {
+            ui_specified: true,
+            ..unauthored_directional_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(ui), ACK).unwrap_err(),
+            ERR_UI_POLICY,
+        );
+
+        // Canonical legacy network plus a proxy still reports the proxy error,
+        // not the network error, exactly as it does without the acknowledgment.
+        let canonical_with_proxy = ContainerPolicy {
+            network_proxy: ProxyConfig {
+                address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                builtin_test_server: false,
+            },
+            ..canonical_allow_policy()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(canonical_with_proxy.clone()), ACK)
+                .unwrap_err(),
+            ERR_PROXY_POLICY,
+        );
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(canonical_with_proxy), None)
+                .unwrap_err(),
+            ERR_PROXY_POLICY,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_does_not_reach_post_provision_phases() {
+        // The posture is fixed at provision. Post-provision validation takes no
+        // acknowledgment at all, so an authored network stays refused and an
+        // absent one stays inherited.
+        validate_post_provision_policy(&request_with_policy(ContainerPolicy::default())).unwrap();
+        let authored = ContainerPolicy {
+            network_specified: true,
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request_with_policy(authored)).unwrap_err(),
+            ERR_NETWORK_IMMUTABLE,
+        );
+    }
+
+    #[test]
+    fn acknowledgment_rejection_maps_to_policy_validation() {
+        let policy = ContainerPolicy {
+            network_specified: true,
+            ..unauthored_directional_policy()
+        };
+        let err = super::super::error::map_lifecycle_error(
+            validate_provision_policy(&request_with_policy(policy), ACK).unwrap_err(),
+        );
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
     }
 
     #[test]
@@ -509,7 +808,7 @@ mod tests {
             ..Default::default()
         };
         let err = super::super::error::map_lifecycle_error(
-            validate_provision_policy(&request).unwrap_err(),
+            validate_provision_policy(&request, None).unwrap_err(),
         );
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
     }

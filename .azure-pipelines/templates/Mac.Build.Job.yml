@@ -76,6 +76,14 @@ jobs:
           workingDirectory: $(workingDirectory)
           cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy
 
+    - script: |
+        set -euo pipefail
+        cargo test --locked --release --target $(targetTriple) -p mxc_config_contract --all-features
+        cargo test --locked --release --target $(targetTriple) -p mxc_engine -p mxc_ffi --lib state_aware
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
+      displayName: Test exact contracts and state-aware SDK boundaries
+      workingDirectory: $(workingDirectory)
+
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.

@@ -92,13 +92,14 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
-  it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
+  it('retains cross-cutting policy for native rejection while nesting the acknowledgment', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
         version: '0.9.0-alpha',
+        acknowledgeUnrestrictedNetwork: true,
         filesystem: { readwritePaths: ['C:\\workspace'] },
         network: { defaultPolicy: 'block' },
         ui: { disable: true, clipboard: 'none', injection: false },
@@ -109,7 +110,11 @@ describe('buildStateAwareEnvelope', () => {
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\workspace'] });
     assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
     assert.deepStrictEqual(env.ui, { disable: true, clipboard: 'none', injection: false });
-    assert.strictEqual(env.experimental, undefined);
+    assert.deepStrictEqual(env.experimental, {
+      isolation_session: {
+        provision: { acknowledgeUnrestrictedNetwork: true },
+      },
+    });
     assert.strictEqual(env.sandboxId, undefined);
   });
 
@@ -164,19 +169,42 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
-  it('nests provision appId under experimental.isolation_session.provision', () => {
+  it('nests an acknowledgment-only provision without synthesizing network', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
-      config: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
+      config: { acknowledgeUnrestrictedNetwork: true },
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
       isolation_session: {
-        provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
+        provision: { acknowledgeUnrestrictedNetwork: true },
       },
     });
+    assert.ok(!('network' in wire), 'acknowledgment-only input must preserve network omission');
+  });
+
+  it('nests provision acknowledgment and appId together', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: {
+        acknowledgeUnrestrictedNetwork: true,
+        appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
+      },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: {
+        provision: {
+          acknowledgeUnrestrictedNetwork: true,
+          appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
+        },
+      },
+    });
+    assert.ok(!('network' in wire));
   });
 
   it('emits an explicitly empty appId rather than dropping it', () => {
@@ -186,15 +214,17 @@ describe('buildStateAwareEnvelope', () => {
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
-      config: { appId: '' },
+      config: { acknowledgeUnrestrictedNetwork: true, appId: '' },
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
-      isolation_session: { provision: { appId: '' } },
+      isolation_session: {
+        provision: { acknowledgeUnrestrictedNetwork: true, appId: '' },
+      },
     });
   });
 
-  it('omits the experimental block entirely when no appId is supplied', () => {
+  it('does not automatically acknowledge when an untyped caller supplies an empty config', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
@@ -203,6 +233,47 @@ describe('buildStateAwareEnvelope', () => {
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.strictEqual(wire.experimental, undefined);
+    assert.ok(!('network' in wire));
+  });
+
+  it('retains explicit empty and legacy network sections alongside the acknowledgment', () => {
+    for (const network of [
+      {},
+      { defaultPolicy: 'allow', allowLocalNetwork: true },
+    ]) {
+      const env = buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'isolation_session',
+        containment: 'isolation_session',
+        config: { acknowledgeUnrestrictedNetwork: true, network },
+      });
+      const wire = JSON.parse(JSON.stringify(env));
+      assert.deepStrictEqual(wire.network, network);
+      assert.deepStrictEqual(
+        wire.experimental.isolation_session.provision,
+        { acknowledgeUnrestrictedNetwork: true },
+      );
+    }
+  });
+
+  it('retains false and null acknowledgment values from untyped callers', () => {
+    for (const acknowledgeUnrestrictedNetwork of [false, null]) {
+      const env = buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'isolation_session',
+        containment: 'isolation_session',
+        config: { acknowledgeUnrestrictedNetwork },
+      });
+      const wire = JSON.parse(JSON.stringify(env));
+      assert.ok(
+        'acknowledgeUnrestrictedNetwork' in wire.experimental.isolation_session.provision,
+      );
+      assert.strictEqual(
+        wire.experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork,
+        acknowledgeUnrestrictedNetwork,
+      );
+      assert.ok(!('network' in wire));
+    }
   });
 
   it('never emits correlationVector on state-aware envelopes', () => {
@@ -321,11 +392,11 @@ describe('parseNonExecResponse', () => {
 describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
-  // The unrestricted-network acknowledgment is a required member of
+  // The explicit unrestricted-network acknowledgment is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
   // itself use this minimal valid value.
-  const ACK = { network: { defaultPolicy: 'allow', allowLocalNetwork: true } } as const;
+  const ACK = { acknowledgeUnrestrictedNetwork: true } as const;
 
   beforeEach(() => { activeFake = null; });
   afterEach(() => { _resetSpawnImpl(); activeFake = null; });
@@ -340,7 +411,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        acknowledgeUnrestrictedNetwork: true,
         appId: 'example.app.id',
       },
       testOptions(),
@@ -353,14 +424,16 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
     // An unpackaged app may pass any string; it reaches the wire config verbatim.
     const provisionConfig = (fake.captured.envelope?.experimental as {
-      isolation_session?: { provision?: { appId?: string } };
+      isolation_session?: {
+        provision?: { acknowledgeUnrestrictedNetwork?: true; appId?: string };
+      };
     })?.isolation_session?.provision;
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
-    // The unrestricted-network acknowledgment is lifted to the envelope top level.
-    assert.deepStrictEqual(fake.captured.envelope?.network, {
-      defaultPolicy: 'allow',
-      allowLocalNetwork: true,
-    });
+    assert.strictEqual(provisionConfig?.acknowledgeUnrestrictedNetwork, true);
+    assert.ok(
+      !('network' in (fake.captured.envelope ?? {})),
+      'acknowledgment-only provision must not synthesize a network key',
+    );
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 

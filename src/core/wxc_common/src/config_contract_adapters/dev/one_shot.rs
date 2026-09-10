@@ -258,17 +258,36 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
     }
 }
 
+fn convert_one_shot_isolation_session(
+    value: contract::OneShotIsolationSession,
+) -> wire::IsolationSession {
+    let contract::OneShotIsolationSession {
+        acknowledge_unrestricted_network,
+    } = value;
+    wire::IsolationSession {
+        acknowledge_unrestricted_network: acknowledge_unrestricted_network
+            .into_option()
+            .map(|contract::True| wire::True),
+        // One-shot has no lifecycle phases, so the provision leaf is not part
+        // of the one-shot contract and can never be populated from it.
+        provision: None,
+    }
+}
+
 fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimental {
     let contract::OneShotExperimental {
         test,
         windows_sandbox,
         wslc,
+        isolation_session,
     } = value;
     wire::Experimental {
         test: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         wslc: wslc.into_option().map(convert_wslc),
-        isolation_session: None,
+        isolation_session: isolation_session
+            .into_option()
+            .map(convert_one_shot_isolation_session),
         seatbelt: None,
     }
 }

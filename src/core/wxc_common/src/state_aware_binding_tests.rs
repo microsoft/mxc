@@ -21,7 +21,10 @@ use std::marker::PhantomData;
 enum Config {
     Absent,
     Unit,
-    Isolation(Option<String>),
+    Isolation {
+        app_id: Option<String>,
+        acknowledged: bool,
+    },
     Wslc(Option<String>, Option<String>),
 }
 
@@ -44,8 +47,9 @@ impl Case for Isolation {
     const BACKEND: &'static str = "isolation_session";
     const PREFIX: &'static str = "iso";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
-        config.map_or(Config::Absent, |config| {
-            Config::Isolation(config.app_id.clone())
+        config.map_or(Config::Absent, |config| Config::Isolation {
+            app_id: config.app_id.clone(),
+            acknowledged: config.acknowledge_unrestricted_network.is_some(),
         })
     }
     fn bind(
@@ -416,15 +420,51 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
     value["experimental"] = json!({"isolation_session": {}});
     assert_dispatch::<Isolation>(&value, Config::Absent);
     for (config, expected) in [
-        (json!({}), Config::Isolation(None)),
-        (json!({"appId": ""}), Config::Isolation(Some(String::new()))),
+        (
+            json!({}),
+            Config::Isolation {
+                app_id: None,
+                acknowledged: false,
+            },
+        ),
+        (
+            json!({"appId": ""}),
+            Config::Isolation {
+                app_id: Some(String::new()),
+                acknowledged: false,
+            },
+        ),
         (
             json!({"appId": "PFN:example"}),
-            Config::Isolation(Some("PFN:example".into())),
+            Config::Isolation {
+                app_id: Some("PFN:example".into()),
+                acknowledged: false,
+            },
         ),
     ] {
         value["experimental"] = json!({"isolation_session": {"provision": config}});
         assert_dispatch::<Isolation>(&value, expected);
+    }
+
+    value.as_object_mut().unwrap().remove("network");
+    for (config, expected_app_id) in [
+        (json!({"acknowledgeUnrestrictedNetwork": true}), None),
+        (
+            json!({
+                "appId": "PFN:acknowledged",
+                "acknowledgeUnrestrictedNetwork": true
+            }),
+            Some("PFN:acknowledged".to_string()),
+        ),
+    ] {
+        value["experimental"] = json!({"isolation_session": {"provision": config}});
+        assert_dispatch::<Isolation>(
+            &value,
+            Config::Isolation {
+                app_id: expected_app_id,
+                acknowledged: true,
+            },
+        );
     }
 }
 

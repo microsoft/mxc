@@ -1,0 +1,11 @@
+{
+  "version": "0.9.0-alpha",
+  "phase": "exec",
+  "sandboxId": "iso:opaque",
+  "process": { "commandLine": "cmd /c exit 0" },
+  "experimental": {
+    "isolation_session": {
+      "provision": { "acknowledgeUnrestrictedNetwork": true }
+    }
+  }
+}

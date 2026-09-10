@@ -263,7 +263,7 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
         case 'isolation_session': {
           const result = await provisionSandbox(
             'isolation_session',
-            { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+            { acknowledgeUnrestrictedNetwork: true },
             { experimental: true },
           );
           return result.sandboxId;
@@ -329,7 +329,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        acknowledgeUnrestrictedNetwork: true,
         appId: 'x'.repeat(257),
       },
       { experimental: true },

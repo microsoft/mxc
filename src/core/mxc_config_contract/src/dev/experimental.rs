@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::primitives::OptionalField;
+use super::primitives::{OptionalField, True};
 use std::num::NonZeroU16;
 
 /// Placeholder feature used to exercise experimental configuration plumbing.
@@ -84,6 +84,22 @@ pub struct OneShotWslc {
     pub port_mappings: OptionalField<Vec<PortMapping>>,
 }
 
+/// One-shot IsolationSession backend settings.
+///
+/// Deliberately narrower than the state-aware provision shape: `appId` is a
+/// state-aware concept (it is carried inside the returned sandbox id so later
+/// phases can recover it), and the one-shot surface has no phases, so it must
+/// not acquire either `appId` or a `provision` leaf.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OneShotIsolationSession {
+    /// Affirmative acknowledgment that the container's network is unrestricted
+    /// and cannot be filtered or denied. Only the JSON value `true` is valid.
+    #[serde(default)]
+    pub acknowledge_unrestricted_network: OptionalField<True>,
+}
+
 /// Experimental settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -98,4 +114,7 @@ pub struct OneShotExperimental {
     /// Optional one-shot WSLC backend settings.
     #[serde(default)]
     pub wslc: OptionalField<OneShotWslc>,
+    /// Optional one-shot IsolationSession backend settings.
+    #[serde(rename = "isolation_session", default)]
+    pub isolation_session: OptionalField<OneShotIsolationSession>,
 }

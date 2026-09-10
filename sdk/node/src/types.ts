@@ -348,6 +348,23 @@ export interface WslcConfig {
 }
 
 /**
+ * One-shot IsolationSession configuration.
+ *
+ * IsolationSession networking is inherently unrestricted: MXC cannot filter
+ * outbound traffic or prevent a contained process from listening on a port
+ * reachable through host loopback. Callers must explicitly acknowledge that
+ * posture. This one-shot leaf intentionally contains no provision-only fields
+ * such as `appId`.
+ */
+export interface IsolationSessionConfig {
+  /**
+   * Explicit unrestricted-network acknowledgment. The only valid value is the
+   * literal `true`; omission does not acknowledge the posture.
+   */
+  acknowledgeUnrestrictedNetwork?: true;
+}
+
+/**
  * Port mapping for host↔container port forwarding.
  */
 export interface PortMapping {
@@ -418,6 +435,8 @@ export interface ContainerConfig {
   experimental?: {
       /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** One-shot IsolationSession unrestricted-network acknowledgment. */
+    isolation_session?: IsolationSessionConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;

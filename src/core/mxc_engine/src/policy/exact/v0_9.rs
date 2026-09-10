@@ -330,6 +330,9 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 test: Default::default(),
                 windows_sandbox: Default::default(),
                 wslc: contract::OptionalField::present(map_wslc(wslc)?),
+                // The public Rust one-shot surface does not support
+                // IsolationSession, so this builder never emits its section.
+                isolation_session: Default::default(),
             })
         }
         _ => Default::default(),

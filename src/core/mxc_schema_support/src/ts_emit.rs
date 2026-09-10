@@ -429,7 +429,7 @@ fn push_doc(out: &mut String, description: Option<&Value>) {
     if let Some(text) = description.and_then(|v| v.as_str()) {
         out.push_str("/**\n");
         for line in jsdoc_lines(text) {
-            out.push_str(&format!(" * {line}\n"));
+            out.push_str(&jsdoc_line(" *", &line));
         }
         out.push_str(" */\n");
     }
@@ -440,9 +440,21 @@ fn push_field_doc(out: &mut String, description: Option<&Value>) {
     if let Some(text) = description.and_then(|v| v.as_str()) {
         out.push_str("  /**\n");
         for line in jsdoc_lines(text) {
-            out.push_str(&format!("   * {line}\n"));
+            out.push_str(&jsdoc_line("   *", &line));
         }
         out.push_str("   */\n");
+    }
+}
+
+/// Render one JSDoc body line under `prefix`, leaving a paragraph break as a
+/// bare `*` rather than `* ` — a trailing space on a blank line is a
+/// whitespace error that `git diff --check` (and most linters) reject, and a
+/// doc comment with a paragraph break would otherwise emit one.
+fn jsdoc_line(prefix: &str, line: &str) -> String {
+    if line.is_empty() {
+        format!("{prefix}\n")
+    } else {
+        format!("{prefix} {line}\n")
     }
 }
 
@@ -459,6 +471,33 @@ fn jsdoc_lines(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn paragraph_breaks_in_docs_carry_no_trailing_whitespace() {
+        // A blank JSDoc line must be a bare `*`: `* ` is a trailing-whitespace
+        // error that `git diff --check` rejects in the committed artifacts.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "field": { "description": "First.\n\nSecond.", "type": "string" }
+            },
+            "definitions": {
+                "Thing": {
+                    "description": "Top.\n\nBottom.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(ts.contains("\n *\n"), "definition paragraph break: {ts}");
+        assert!(ts.contains("\n   *\n"), "field paragraph break: {ts}");
+        for line in ts.lines() {
+            assert_eq!(line, line.trim_end(), "trailing whitespace in: {line:?}");
+        }
+    }
 
     #[test]
     fn emits_string_union_from_one_of() {

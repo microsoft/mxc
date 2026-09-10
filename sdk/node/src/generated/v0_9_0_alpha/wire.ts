@@ -177,6 +177,12 @@ export type IsolationSessionNetworkDefaultPolicy = "allow";
  */
 export interface IsolationSessionProvision {
   /**
+   * Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid.
+   *
+   * Provision-phase only: the posture is fixed for the sandbox's lifetime, so no later phase accepts it.
+   */
+  acknowledgeUnrestrictedNetwork?: True;
+  /**
    * Optional application identifier carried by the sandbox identity.
    */
   appId?: string;
@@ -193,7 +199,7 @@ export interface IsolationSessionProvisionExperimental {
 }
 
 /**
- * A complete state-aware `provision` request for isolation_session
+ * A complete state-aware `provision` request for isolation_session. The container's network is unrestricted and MXC cannot filter or deny it, so the request must acknowledge that: supply `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork: true`, the legacy `network` acknowledgment, or both consistent forms. At least one is required; supplying both is valid.
  */
 export interface IsolationSessionProvisionRequest {
   /**
@@ -213,9 +219,9 @@ export interface IsolationSessionProvisionRequest {
    */
   experimental?: IsolationSessionProvisionExperimental;
   /**
-   * Required unrestricted-network acknowledgment.
+   * Optional legacy unrestricted-network acknowledgment.
    */
-  network: IsolationSessionNetwork;
+  network?: IsolationSessionNetwork;
   /**
    * Exact `provision` phase marker.
    */
@@ -396,6 +402,10 @@ export type OneShotContainment = "process" | "processcontainer" | "appcontainer"
  */
 export interface OneShotExperimental {
   /**
+   * Optional one-shot IsolationSession backend settings.
+   */
+  isolation_session?: OneShotIsolationSession;
+  /**
    * Optional placeholder test feature.
    */
   test?: TestFeature;
@@ -407,6 +417,18 @@ export interface OneShotExperimental {
    * Optional one-shot WSLC backend settings.
    */
   wslc?: OneShotWslc;
+}
+
+/**
+ * One-shot IsolationSession backend settings.
+ *
+ * Deliberately narrower than the state-aware provision shape: `appId` is a state-aware concept (it is carried inside the returned sandbox id so later phases can recover it), and the one-shot surface has no phases, so it must not acquire either `appId` or a `provision` leaf.
+ */
+export interface OneShotIsolationSession {
+  /**
+   * Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid.
+   */
+  acknowledgeUnrestrictedNetwork?: True;
 }
 
 /**
@@ -579,7 +601,7 @@ export interface Process {
   cwd?: string;
   /**
    * Optional environment entries encoded as `KEY=VALUE` strings.
-   * 
+   *
    * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.
    */
   env?: string[];

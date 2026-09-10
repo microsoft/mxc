@@ -348,11 +348,12 @@ use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. IsolationSession accepts only the canonical unrestricted-network
-// acknowledgment; an absent policy defaults to `block`, which it refuses.
+// Provision. Acknowledge unrestricted networking without authoring a network
+// policy. The canonical legacy acknowledgment remains accepted during 10a.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+        "experimental":{"isolation_session":{"provision":{
+          "acknowledgeUnrestrictedNetwork":true}}}}"#,
     false, // dry_run
     true,  // experimental
 )?;

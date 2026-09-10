@@ -5,7 +5,9 @@ use crate::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
 };
 use crate::error::WxcError;
-use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::models::{
+    IsolationSessionProvisionConfig, UnrestrictedNetworkAcknowledgment, WslcProvisionConfig,
+};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
@@ -23,9 +25,15 @@ fn convert_state_aware_isolation_session(
 fn convert_isolation_session_provision(
     value: contract::IsolationSessionProvision,
 ) -> IsolationSessionProvisionConfig {
-    let contract::IsolationSessionProvision { app_id } = value;
+    let contract::IsolationSessionProvision {
+        app_id,
+        acknowledge_unrestricted_network,
+    } = value;
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
+        acknowledge_unrestricted_network: acknowledge_unrestricted_network
+            .into_option()
+            .map(|contract::True| UnrestrictedNetworkAcknowledgment),
     }
 }
 
@@ -144,6 +152,13 @@ pub(super) fn provision_into_input(
 fn isolation_session_provision_into_input(
     request: contract::IsolationSessionProvisionRequest,
 ) -> Result<StateAwareInput, WxcError> {
+    // The conditional acknowledgment requirement is part of deserialization, so
+    // this only matters for a request a caller assembled from the contract's
+    // public fields. Re-checking it here means the adapter cannot be the hole
+    // through which an unacknowledged provision reaches the runtime.
+    request
+        .validate()
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
     let contract::IsolationSessionProvisionRequest {
         schema,
         comment,
@@ -158,7 +173,9 @@ fn isolation_session_provision_into_input(
         .into_option()
         .and_then(convert_isolation_session_provision_experimental);
     let mut common = state_aware_common(schema, comment, version, telemetry);
-    common.network = Some(convert_isolation_session_network(network));
+    // Keep an acknowledgment-only request network-free: synthesizing a legacy
+    // `allow` grant would assert policy the caller never authored.
+    common.network = network.into_option().map(convert_isolation_session_network);
     StateAwareInput::new(
         common,
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(provision)),

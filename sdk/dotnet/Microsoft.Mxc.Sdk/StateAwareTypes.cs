@@ -86,8 +86,24 @@ public abstract class StateAwareProvisionOptions
 public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOptions
 {
     /// <summary>
-    /// Creates options with the unrestricted-network acknowledgement required
-    /// by IsolationSession.
+    /// Creates options that explicitly acknowledge inherently unrestricted
+    /// networking without supplying a network policy.
+    /// </summary>
+    public IsolationSessionProvisionOptions(bool acknowledgeUnrestrictedNetwork)
+    {
+        if (!acknowledgeUnrestrictedNetwork)
+        {
+            throw new ArgumentException(
+                "Unrestricted networking must be explicitly acknowledged with true.",
+                nameof(acknowledgeUnrestrictedNetwork));
+        }
+
+        AcknowledgeUnrestrictedNetwork = true;
+    }
+
+    /// <summary>
+    /// Creates options using the canonical legacy network acknowledgment,
+    /// retained during the additive v0.9 transition.
     /// </summary>
     public IsolationSessionProvisionOptions(StateAwareNetworkPolicy network)
     {
@@ -96,15 +112,23 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
     }
 
     /// <summary>
-    /// Required unrestricted posture: default allow with local network access.
+    /// Whether these options explicitly acknowledge unrestricted networking.
+    /// This is not a network on/off control.
     /// </summary>
-    public StateAwareNetworkPolicy Network { get; set; }
+    public bool AcknowledgeUnrestrictedNetwork { get; }
+
+    /// <summary>
+    /// Optional canonical legacy acknowledgment. When supplied it must remain
+    /// default allow with local network access and no restrictions or proxy.
+    /// Leave absent for the explicit acknowledgment-only form.
+    /// </summary>
+    public StateAwareNetworkPolicy? Network { get; set; }
 
     /// <summary>Optional packaged-app PFN or unpackaged-app identifier.</summary>
     public string? AppId { get; set; }
 
     internal static void ValidateNetwork(
-        StateAwareNetworkPolicy network,
+        StateAwareNetworkPolicy? network,
         string parameterName)
     {
         ArgumentNullException.ThrowIfNull(network, parameterName);

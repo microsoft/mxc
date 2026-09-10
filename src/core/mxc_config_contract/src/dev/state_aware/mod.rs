@@ -69,7 +69,8 @@ pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
     IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MissingUnrestrictedNetworkAcknowledgment,
+    StateAwareIsolationSession,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
 pub use provision::{

@@ -294,6 +294,29 @@ config.process!.commandLine = 'cmd /c whoami';
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
+IsolationSession one-shot execution uses the explicit configuration path and
+requires an affirmative acknowledgment that its network is unrestricted:
+
+```typescript
+import { ContainerConfig, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const config: ContainerConfig = {
+  version: '0.9.0-alpha',
+  containment: 'isolation_session',
+  process: { commandLine: 'cmd /c whoami' },
+  experimental: {
+    isolation_session: { acknowledgeUnrestrictedNetwork: true },
+  },
+};
+
+const pty = spawnSandboxFromConfig(config, { experimental: true });
+```
+
+The one-shot `experimental.isolation_session` leaf contains only the optional
+true-only acknowledgment marker; `appId` is state-aware provision configuration
+and is not accepted there. Selecting the backend or passing
+`experimental: true` never supplies the acknowledgment automatically.
+
 Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 
 - Stable backends: [`schemas/stable/`](https://github.com/microsoft/mxc/tree/main/schemas/stable/)
@@ -330,7 +353,7 @@ import {
 // the container's network cannot be filtered or denied, so you must opt in.
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+  { acknowledgeUnrestrictedNetwork: true },
   { experimental: true },
 );
 const opts = { experimental: true };
@@ -343,6 +366,16 @@ const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami
 await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
+
+`IsolationSessionProvisionConfig` now uses the final acknowledgment-first
+source shape: replace
+`network: { defaultPolicy: 'allow', allowLocalNetwork: true }` with
+`acknowledgeUnrestrictedNetwork: true`. The shared lifecycle signatures and
+other backends are unchanged. During Phase 10a, the native v0.9 contract still
+accepts raw legacy requests using the canonical network pair, as well as
+consistent requests carrying both forms; the SDK's IsolationSession-specific
+type exposes the preferred post-cutover marker. An acknowledgment-only request
+omits the top-level `network` key entirely.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
@@ -484,7 +517,8 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
-// has a required member (isolation_session: the network acknowledgment) and
+// has a required member (isolation_session:
+// acknowledgeUnrestrictedNetwork: true) and
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>

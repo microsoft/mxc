@@ -59,6 +59,7 @@ import type {
   ProcessContainerConfig,
   BaseProcessUiConfig,
   WslcConfig,
+  IsolationSessionConfig,
   PortMapping as PublicPortMapping,
   LxcConfig,
   SeatbeltConfig,
@@ -84,6 +85,7 @@ import type {
   ProcessContainer as WireProcessContainer,
   BaseProcessUi as WireBaseProcessUi,
   Wslc as WireWslc,
+  IsolationSession as WireIsolationSession,
   PortMapping as WirePortMapping,
   Lxc as WireLxc,
   Seatbelt as WireSeatbelt,
@@ -167,6 +169,9 @@ type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
 type _WslcVals = AssertTrue<Assignable<WslcConfig, WireWslc>>;
+type _IsolationSessionVals = AssertTrue<
+  Assignable<IsolationSessionConfig, WireIsolationSession>
+>;
 type _PortMappingVals = AssertTrue<Assignable<PublicPortMapping, WirePortMapping>>;
 type _SeatbeltVals = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
 type _TelemetryVals = AssertTrue<Assignable<TelemetryConfig, WireTelemetry>>;
@@ -188,6 +193,9 @@ type _LifecycleKeys = AssertTrue<Equivalent<OnlyInPublic<LifecycleConfig, WireLi
 type _UiKeys = AssertTrue<Equivalent<OnlyInPublic<UiConfig, WireUi>, never>>;
 type _BaseProcessUiKeys = AssertTrue<Equivalent<OnlyInPublic<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 type _WslcKeys = AssertTrue<Equivalent<OnlyInPublic<WslcConfig, WireWslc>, never>>;
+type _IsolationSessionKeys = AssertTrue<
+  Equivalent<OnlyInPublic<IsolationSessionConfig, WireIsolationSession>, never>
+>;
 type _PortMappingKeys = AssertTrue<Equivalent<OnlyInPublic<PublicPortMapping, WirePortMapping>, never>>;
 type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeatbelt>, never>>;
 type _TelemetryKeys = AssertTrue<Equivalent<OnlyInPublic<TelemetryConfig, WireTelemetry>, never>>;
@@ -243,6 +251,28 @@ type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConf
 // one-shot public `WslcConfig` intentionally omits it (state-aware config is
 // surfaced through `state-aware-types.ts`, not the one-shot policy surface).
 type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, 'provision'>>;
+// The rolling wire object is shared by one-shot and state-aware parsing, so it
+// also carries the provision mirror. The public one-shot leaf deliberately
+// exposes only its own acknowledgment marker: appId and the nested provision
+// object remain state-aware-only.
+type _IsolationSessionWireKeys = AssertTrue<
+  Equivalent<OnlyInWire<IsolationSessionConfig, WireIsolationSession>, 'provision'>
+>;
+type _IsolationSessionAckValue = AssertTrue<
+  Equivalent<
+    NonNullable<IsolationSessionConfig['acknowledgeUnrestrictedNetwork']>,
+    NonNullable<StripIndex<WireIsolationSession>['acknowledgeUnrestrictedNetwork']>
+  >
+>;
+type _IsolationSessionPublicKeysNonVacuous = AssertTrue<
+  Equivalent<keyof IsolationSessionConfig, 'acknowledgeUnrestrictedNetwork'>
+>;
+type _IsolationSessionWireKeysNonVacuous = AssertTrue<
+  Equivalent<
+    keyof StripIndex<WireIsolationSession>,
+    'acknowledgeUnrestrictedNetwork' | 'provision'
+  >
+>;
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
@@ -278,15 +308,18 @@ export type WireConformanceAssertions = [
   _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
   _NetworkRuleVals, _RuntimeConfigVals,
   _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
-  _SeatbeltVals, _LxcVals,
+  _IsolationSessionVals, _SeatbeltVals, _LxcVals,
   _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
-  _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _PortMappingKeys,
+  _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _IsolationSessionKeys, _PortMappingKeys,
   _SeatbeltKeys, _LxcKeys,
   _RootVals, _RootKeys,
   _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
   _NetworkEgressWireKeys, _NetworkIngressWireKeys, _NetworkPeerWireKeys,
   _NetworkPortWireKeys, _NetworkRuleWireKeys, _RuntimeConfigWireKeys,
-  _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _PortMappingWireKeys,
+  _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys,
+  _IsolationSessionWireKeys, _IsolationSessionAckValue,
+  _IsolationSessionPublicKeysNonVacuous, _IsolationSessionWireKeysNonVacuous,
+  _PortMappingWireKeys,
   _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
 ];
 

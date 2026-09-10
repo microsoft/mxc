@@ -53,6 +53,20 @@ interface StateAwareConfig {
 
 export interface IsolationSessionProvisionConfig extends StateAwareConfig {
   /**
+   * Explicit unrestricted-network acknowledgment (**required**). The
+   * isolation session runs on a network MXC cannot filter or deny: outbound is
+   * open, and a contained process can listen on a port reachable through host
+   * loopback. The only accepted value is the literal `true`.
+   *
+   * This replaces the legacy SDK spelling
+   * `network: { defaultPolicy: 'allow', allowLocalNetwork: true }`. Native
+   * v0.9 requests using that legacy spelling remain accepted during Phase 10a,
+   * but new SDK source should use this field. The posture is fixed at
+   * provision, so neither this acknowledgment nor `network` is accepted on
+   * later phases.
+   */
+  acknowledgeUnrestrictedNetwork: true;
+  /**
    * Optional identifier for the calling application.
    *
    * **A packaged application must supply its Package Family Name in the form
@@ -72,17 +86,6 @@ export interface IsolationSessionProvisionConfig extends StateAwareConfig {
    * accepted on any later phase.
    */
   appId?: string;
-  /**
-   * Unrestricted-network acknowledgment (**required**). The isolation session
-   * container runs on a network MXC cannot filter or deny — outbound is open,
-   * and a process inside can listen on a port reachable from outside via
-   * localhost. The caller must explicitly acknowledge this; the ONLY accepted
-   * value is `{ defaultPolicy: 'allow', allowLocalNetwork: true }`. Any other
-   * network policy (including omission, which the backend treats as the
-   * unenforceable default-deny) is rejected at provision. The posture is fixed
-   * at provision, so `network` is not accepted on the post-provision phases.
-   */
-  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
 export type IsolationSessionStartConfig = StateAwareConfig;
@@ -288,8 +291,10 @@ export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : f
  *
  * Without this, a required field could be bypassed by omitting the whole
  * argument — the config type would advertise a guarantee the call signature did
- * not enforce. IsolationSession depends on it: its unrestricted-network
- * acknowledgment is mandatory, and the backend refuses a provision without it.
+ * not enforce. IsolationSession depends on it: its explicit
+ * `acknowledgeUnrestrictedNetwork: true` marker is mandatory, and the backend
+ * refuses a provision without either that marker or the transitional legacy
+ * native acknowledgment.
  */
 export type EveryBackendConfigIsOptional<C extends StateAwareContainmentBackend> =
   [C extends unknown ? (HasNoRequiredMembers<ProvisionConfigFor<C>> extends true ? never : C) : never] extends [never]

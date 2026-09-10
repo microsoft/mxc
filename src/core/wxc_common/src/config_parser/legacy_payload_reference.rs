@@ -24,9 +24,22 @@ pub(crate) fn extract<C: DeserializeOwned>(
 mod tests {
     use super::*;
     use crate::config_parser::legacy_state_aware_request::LegacyStateAwareRequest as ParsedStateAwareRequest;
-    use crate::models::IsolationSessionProvisionConfig;
     use crate::state_aware_request::Phase;
     use crate::wire;
+
+    /// Frozen mirror of the runtime IsolationSession provision config as it
+    /// stood before the Phase 10a acknowledgment was added.
+    ///
+    /// This module is an *independent reference* for the pre-typed extraction,
+    /// so it must characterize the old shape rather than track the live runtime
+    /// type. Deserializing into the runtime type would make the reference learn
+    /// each field added to that type later, which would quietly turn the
+    /// baseline into a copy of current behavior.
+    #[derive(Debug, Default, PartialEq, Eq, serde::Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct FrozenIsolationSessionProvisionConfig {
+        app_id: Option<String>,
+    }
 
     #[test]
     fn legacy_sensitive_field_matching_remains_case_insensitive() {
@@ -84,16 +97,19 @@ mod tests {
             (Some(r#"{"provision":{"appId":null}}"#), Some(None)),
         ] {
             let json = source("isolation_session", payload);
-            let observed =
-                extract::<IsolationSessionProvisionConfig>(&json, "isolation_session", "provision")
-                    .unwrap();
+            let observed = extract::<FrozenIsolationSessionProvisionConfig>(
+                &json,
+                "isolation_session",
+                "provision",
+            )
+            .unwrap();
             assert_eq!(
                 observed.as_ref().map(|config| config.app_id.as_deref()),
                 expected
             );
             assert_eq!(
                 old_request(&json)
-                    .deserialize_config::<IsolationSessionProvisionConfig>(
+                    .deserialize_config::<FrozenIsolationSessionProvisionConfig>(
                         "isolation_session",
                         "provision",
                     )
@@ -101,7 +117,7 @@ mod tests {
                 observed,
             );
         }
-        assert!(extract::<IsolationSessionProvisionConfig>(
+        assert!(extract::<FrozenIsolationSessionProvisionConfig>(
             &source("isolation_session", Some(r#"{"provision":{"appId":7}}"#)),
             "isolation_session",
             "provision",

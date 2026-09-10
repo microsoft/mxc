@@ -1,0 +1,11 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "isolation_session",
+  "process": { "commandLine": "cmd /c exit 0" },
+  "experimental": {
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true,
+      "appId": "state-aware-only"
+    }
+  }
+}

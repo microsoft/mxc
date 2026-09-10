@@ -256,9 +256,67 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
+/// An affirmative, value-less acknowledgment that a backend's network is
+/// inherently unrestricted and cannot be filtered or denied by MXC.
+///
+/// This is a *marker*, not a Boolean control: its only inhabitant means
+/// "acknowledged", and absence is expressed by `Option::None` on the field that
+/// carries it. Modelling it that way makes an explicit "not acknowledged"
+/// unrepresentable, so no code path can accidentally construct a negative
+/// acknowledgment or read one as a network on/off switch.
+///
+/// `Default` is deliberately **not** implemented: an acknowledgment must always
+/// be an explicit caller act, and `Option<UnrestrictedNetworkAcknowledgment>`
+/// already defaults to the absent state inside `#[serde(default)]` containers.
+///
+/// Serialization exists for the runtime model's own round-tripping and
+/// diagnostics only; it is not the external wire contract. It maps to and from
+/// the JSON boolean `true`, and deserializing `false` is an error rather than a
+/// silently-absent acknowledgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnrestrictedNetworkAcknowledgment;
+
+impl Serialize for UnrestrictedNetworkAcknowledgment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnrestrictedNetworkAcknowledgment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Bool(false),
+                &"true",
+            ))
+        }
+    }
+}
+
+/// One-shot runtime config for the Isolation Session backend, nested under
+/// `experimental.isolation_session`.
+///
+/// Deliberately separate from [`IsolationSessionProvisionConfig`]: `appId` is a
+/// state-aware provision concept (it is carried inside the returned sandbox id
+/// for later phases to recover), and the one-shot surface must not acquire it
+/// as a side effect of sharing a type.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct IsolationSessionConfig {
+    /// Affirmative acknowledgment that the container's network is unrestricted.
+    ///
+    /// The backend cannot filter or deny that network, so a caller must say so
+    /// explicitly. `None` means the caller did not acknowledge it here; during
+    /// Phase 10a the previously accepted legacy network form remains a valid
+    /// alternative.
+    pub acknowledge_unrestricted_network: Option<UnrestrictedNetworkAcknowledgment>,
+}
+
 /// State-aware provision-phase config for the Isolation Session backend.
 /// Nested under `experimental.isolation_session.provision`. The one-shot
-/// surface takes no backend configuration.
+/// surface carries [`IsolationSessionConfig`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
@@ -278,6 +336,13 @@ pub struct IsolationSessionProvisionConfig {
     /// JSON contract rejects `null`; the retained legacy deserializer treats it
     /// as absent only for compatibility characterization.
     pub app_id: Option<String>,
+    /// Affirmative acknowledgment that the container's network is unrestricted.
+    ///
+    /// Provision-phase only: the posture is fixed for the sandbox's lifetime,
+    /// so no later phase accepts it. `None` means the caller did not
+    /// acknowledge it here; during Phase 10a the previously accepted legacy
+    /// network form remains a valid alternative.
+    pub acknowledge_unrestricted_network: Option<UnrestrictedNetworkAcknowledgment>,
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -977,6 +1042,11 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Isolation Session backend, one-shot surface (experimental).
+    ///
+    /// The state-aware provision config is carried by the typed lifecycle
+    /// operation instead, so this slot stays one-shot-only.
+    pub isolation_session: Option<IsolationSessionConfig>,
 }
 
 /// Telemetry configuration parsed from the top-level JSON config `telemetry` section.
@@ -1577,5 +1647,67 @@ mod tests {
         let value = serde_json::to_value(metadata).expect("serialize metadata");
         assert_eq!(value["captureDenialsError"]["message"], "decode failed");
         assert_eq!(value["captureDenialsError"]["etlPath"], "capture.etl");
+    }
+
+    #[test]
+    fn unrestricted_network_acknowledgment_round_trips_as_true() {
+        let config = IsolationSessionConfig {
+            acknowledge_unrestricted_network: Some(UnrestrictedNetworkAcknowledgment),
+        };
+        let value = serde_json::to_value(&config).expect("serialize acknowledgment");
+        assert_eq!(value["acknowledgeUnrestrictedNetwork"], true);
+        assert_eq!(
+            serde_json::from_value::<IsolationSessionConfig>(value).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn an_absent_acknowledgment_is_the_default() {
+        let config = IsolationSessionConfig::default();
+        assert!(config.acknowledge_unrestricted_network.is_none());
+        assert_eq!(
+            serde_json::from_str::<IsolationSessionConfig>("{}").unwrap(),
+            config
+        );
+        assert_eq!(
+            serde_json::from_str::<IsolationSessionProvisionConfig>("{}")
+                .unwrap()
+                .acknowledge_unrestricted_network,
+            None
+        );
+    }
+
+    #[test]
+    fn a_negative_or_non_boolean_acknowledgment_is_not_representable() {
+        // The marker has no "false" inhabitant, so a negative acknowledgment is
+        // an error rather than a silently-absent one, as are non-boolean
+        // spellings.
+        for payload in [
+            r#"{"acknowledgeUnrestrictedNetwork":false}"#,
+            r#"{"acknowledgeUnrestrictedNetwork":"true"}"#,
+            r#"{"acknowledgeUnrestrictedNetwork":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<IsolationSessionConfig>(payload).is_err(),
+                "{payload}"
+            );
+            assert!(
+                serde_json::from_str::<IsolationSessionProvisionConfig>(payload).is_err(),
+                "{payload}"
+            );
+        }
+
+        // `null` reads as absent here, matching how this permissive runtime
+        // model already treats `appId: null`. Rejecting an explicit `null`
+        // belongs to the exact JSON contract, which is the structural authority
+        // for caller input; this type is the runtime carrier behind it.
+        let null_payload = r#"{"acknowledgeUnrestrictedNetwork":null}"#;
+        assert_eq!(
+            serde_json::from_str::<IsolationSessionConfig>(null_payload)
+                .unwrap()
+                .acknowledge_unrestricted_network,
+            None
+        );
     }
 }

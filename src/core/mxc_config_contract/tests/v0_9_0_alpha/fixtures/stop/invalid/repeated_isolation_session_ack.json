@@ -1,0 +1,10 @@
+{
+  "version": "0.9.0-alpha",
+  "phase": "stop",
+  "sandboxId": "iso:opaque",
+  "experimental": {
+    "isolation_session": {
+      "provision": { "acknowledgeUnrestrictedNetwork": true }
+    }
+  }
+}

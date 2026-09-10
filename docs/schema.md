@@ -80,6 +80,45 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+### IsolationSession unrestricted-network acknowledgment (0.9)
+
+IsolationSession cannot restrict networking. Exact v0.9 requests can acknowledge
+that explicitly without supplying network-policy fields:
+
+| Surface | Field |
+| --- | --- |
+| One-shot | `experimental.isolation_session.acknowledgeUnrestrictedNetwork` |
+| State-aware provision | `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork` |
+
+The supplied value must be the JSON boolean `true`; `false`, `null`, strings,
+and numbers are rejected. The one-shot section is separate from provision:
+`appId` remains provision-only, and later lifecycle phases accept no repeated
+acknowledgment.
+
+```json
+{
+    "version": "0.9.0-alpha",
+    "phase": "provision",
+    "containment": "isolation_session",
+    "experimental": {
+        "isolation_session": {
+            "provision": {
+                "acknowledgeUnrestrictedNetwork": true
+            }
+        }
+    }
+}
+```
+
+During the additive 10a transition, a currently valid legacy acknowledgment
+(`defaultPolicy: "allow"` plus `allowLocalNetwork: true`, with no host rules,
+proxy, or non-default enforcement) remains accepted, alone or consistently
+with the new field. Neither acknowledgment form means rejection. A supplied
+`network: {}` or incompatible policy is not treated as omission or overridden.
+The existing experimental execution opt-in remains required. Published
+v0.6/v0.7/v0.8 contracts and the legacy v0.9 networking vocabulary are unchanged
+by this addition.
+
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or

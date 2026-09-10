@@ -231,8 +231,8 @@ mod stable;
 mod state_aware;
 
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
-    TransportProtocol,
+    OneShotExperimental, OneShotIsolationSession, OneShotWindowsSandbox, OneShotWslc, PortMapping,
+    TestFeature, TransportProtocol,
 };
 pub use network::{
     DefaultNetworkPolicy, Network, NetworkAction, NetworkEgress, NetworkEnforcementMode,
@@ -256,7 +256,8 @@ pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
 pub use state_aware::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
     IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MissingUnrestrictedNetworkAcknowledgment,
+    StateAwareIsolationSession,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{StartExperimental, StartPhase, StartRequest};

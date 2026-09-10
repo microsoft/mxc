@@ -118,6 +118,52 @@ No skipped suite or cross-compilation is counted as live lifecycle evidence.
 Native Unix test execution and successful provision-through-teardown evidence
 on suitable hosts are still required before declaring Phase 9.5 complete.
 
+## Phase 10A acknowledgment implementation
+
+Runtime preparation is published at `a48fd58f`; the exact-contract and SDK
+integration is published at `61fd83f8` on
+`user/gudge/version_specific_config_parsers_phase10a`, based on Phase 9B.
+The new field is `acknowledgeUnrestrictedNetwork: true` under
+`experimental.isolation_session` for native/Node one-shot requests, and under
+its `provision` member for state-aware requests. Legacy-only, new-only, and
+consistent combined native forms remain accepted during 10a.
+
+The implementation preserves validation boundaries, authored policy presence,
+legacy policy hashes, and published contracts. Node and C# expose pre-build
+acknowledgment authoring; Rust's existing state-aware JSON entry point accepts
+the new form. No Rust/C# one-shot backend support was added.
+
+Local evidence for the public integration:
+
+| Gate | Result |
+| --- | --- |
+| Common parser/adapter/identity tests | 1,165 passed; seven documentation tests passed |
+| IsolationSession backend unit tests | 194 passed |
+| CLI unit tests | 62 passed |
+| Contract/schema tests | All contract feature suites passed; schema emitter tests passed |
+| Rust feature matrix | Check, clippy, and engine/FFI/Rust SDK state-aware suites passed separately for default, isolation_session, wslc, and both |
+| Node SDK | 312 passed, 19 skipped; compile-time wire conformance included |
+| C# lifecycle/native-boundary tests | 51 passed in each of the four Windows feature configurations |
+| Native CLI | Twelve dry runs covered one-shot/provision legacy/new/both and missing/empty/restrictive forms; no sandbox was created |
+| Generated schema | Twenty-six new-form acceptance/rejection cases passed through the existing AJV validator |
+| Artifacts/corpus | Exact/rolling/SDK codegen, schema-version, and existing 277-config corpus gates passed |
+| Linux/macOS | Default cross-target checks passed, with existing telemetry-consent warnings; native tests were not executed locally |
+
+The native CI build jobs now explicitly select the common/contract and
+engine/FFI/Rust SDK state-aware suites that dependency compilation alone did
+not execute. The existing macOS common-crate test selection is retained.
+The Azure Linux additions follow its existing native-x64 test restriction;
+the GitHub Linux matrix runs on its native x64 and ARM64 runners.
+New contract fixtures also put the acknowledgment matrix under the existing
+Rust fixture and generated-schema gates rather than relying only on a manual
+schema probe.
+
+**Acceptance limitations remain explicit:** native Unix CI execution is not
+established merely by adding those steps, and successful live IsolationSession
+lifecycle evidence is still required on a suitable host. No skipped suite,
+cross-target check, or dry run is counted as live execution. The inherited
+denied-path/debug-output issue is not attributed to this implementation.
+
 ## Documents
 
 | Path | Request kind | Classification | Current version | Target version | Existing schema reference | Owner |

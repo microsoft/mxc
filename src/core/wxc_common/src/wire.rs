@@ -29,6 +29,57 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A wire marker that accepts only the JSON value `true`.
+///
+/// Used for affirmative acknowledgments, where the field's *presence* is the
+/// statement and a `false` would be meaningless: modelling it as `bool` would
+/// invite `false` to read as "not acknowledged" when the honest spelling for
+/// that is omitting the field. It generates as a `true` literal, so the SDK's
+/// oracle types are `true` rather than `boolean`.
+///
+/// Deliberately separate from the runtime marker in
+/// [`crate::models::UnrestrictedNetworkAcknowledgment`]: the wire model is the
+/// versioned request shape and the runtime model is the parsed domain, and the
+/// two must be free to change independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct True;
+
+impl Serialize for True {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for True {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Bool(false),
+                &"true",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for True {
+    fn schema_name() -> String {
+        "True".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Boolean))),
+            enum_values: Some(vec![serde_json::Value::Bool(true)]),
+            ..Default::default()
+        })
+    }
+}
+
 /// Rolling compatibility model retained as a test oracle while production
 /// requests use registered exact contracts. It includes historical fields that
 /// exact `0.9.0-alpha` rejects; authors should use the exact development schema.
@@ -707,16 +758,21 @@ pub enum TransportProtocol {
     Tcp,
 }
 
-/// IsolationSession backend config. Carries only the per-phase state-aware
-/// nesting for the phases that take config (`provision`). The one-shot surface
-/// takes no backend configuration at all. `start`, `stop`, `deprovision`, and
-/// `exec` take no per-phase config payload: `start`, `stop` and `deprovision`
-/// are invoked with only the top-level `phase` and `sandboxId`, and `exec`
-/// additionally carries the top-level `process` block.
+/// IsolationSession backend config. Carries the one-shot unrestricted-network
+/// acknowledgment plus the per-phase state-aware nesting for the phases that
+/// take config (`provision`). `start`, `stop`, `deprovision`, and `exec` take no
+/// per-phase config payload: `start`, `stop` and `deprovision` are invoked with
+/// only the top-level `phase` and `sandboxId`, and `exec` additionally carries
+/// the top-level `process` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
+    /// One-shot acknowledgment that the container's network is unrestricted and
+    /// cannot be filtered or denied by MXC. Only `true` is accepted; omit the
+    /// field when not acknowledging. One-shot only — the state-aware
+    /// acknowledgment lives on the `provision` phase below.
+    pub acknowledge_unrestricted_network: Option<True>,
     /// State-aware provision-phase configuration.
     pub provision: Option<IsolationSessionProvisionPhase>,
 }
@@ -738,6 +794,12 @@ pub struct IsolationSessionProvisionPhase {
     /// An unpackaged application may pass any string. Carried inside the `sandboxId`
     /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
+    /// Acknowledgment that the container's network is unrestricted and cannot
+    /// be filtered or denied by MXC. Only `true` is accepted; omit the field
+    /// when not acknowledging. Provision-phase only — the posture is fixed for
+    /// the sandbox's lifetime, so no later phase accepts it. A provision request
+    /// must carry either this or the legacy `network` acknowledgment.
+    pub acknowledge_unrestricted_network: Option<True>,
 }
 
 /// JSON Schema generation from the wire model, gated behind `schema-gen` so

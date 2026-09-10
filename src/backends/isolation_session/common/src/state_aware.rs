@@ -206,7 +206,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
             sandbox_id::validate_app_id(app_id)?;
         }
-        validate_provision_policy(request).map_err(map_lifecycle_error)
+        // The acknowledgment rides in the provision config, so it reaches the
+        // shared validator explicitly rather than through the common policy
+        // model. Later phases carry no config at all, which is what keeps the
+        // acknowledgment provision-only.
+        let acknowledgment = config.and_then(|c| c.acknowledge_unrestricted_network);
+        validate_provision_policy(request, acknowledgment).map_err(map_lifecycle_error)
     }
 
     fn validate_start(
@@ -449,7 +454,10 @@ mod tests {
         // Field-by-field construction is deliberate: adding a per-phase field
         // to the wire struct breaks this test's compilation, forcing a
         // decision about whether the backend honors it.
-        let wire = wxc_common::wire::IsolationSession { provision: None };
+        let wire = wxc_common::wire::IsolationSession {
+            acknowledge_unrestricted_network: None,
+            provision: None,
+        };
         let value = serde_json::to_value(&wire).unwrap();
         let mut keys: Vec<&str> = value
             .as_object()
@@ -460,7 +468,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["provision"],
+            ["acknowledgeUnrestrictedNetwork", "provision"],
             "wire model nests a per-phase config for a phase the backend takes none for"
         );
     }
@@ -506,6 +514,7 @@ mod tests {
         // does not error — it silently drops the value.
         let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
             app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
+            acknowledge_unrestricted_network: Some(wxc_common::wire::True),
         };
         let provision: ProvisionConfig =
             serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
@@ -513,6 +522,11 @@ mod tests {
             provision.app_id.as_deref(),
             Some("PFN:Contoso.App_8wekyb3d8bbwe"),
             "provision dropped the wire appId (serde rename drift?)"
+        );
+        assert_eq!(
+            provision.acknowledge_unrestricted_network,
+            Some(wxc_common::models::UnrestrictedNetworkAcknowledgment),
+            "provision dropped the wire acknowledgment (serde rename drift?)"
         );
     }
 
@@ -834,6 +848,7 @@ mod tests {
     fn provision_config_with_app_id(app_id: &str) -> IsolationSessionProvisionConfig {
         IsolationSessionProvisionConfig {
             app_id: Some(app_id.to_string()),
+            ..Default::default()
         }
     }
 
@@ -844,6 +859,88 @@ mod tests {
         runner
             .validate_provision(&request_with_canonical_network(), Some(&cfg))
             .unwrap();
+    }
+
+    // ====== explicit unrestricted-network acknowledgment ======
+
+    /// A provision request with no authored network section: the parser leaves
+    /// implicit directional deny defaults and every presence flag false.
+    fn request_without_authored_network() -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(wxc_common::models::NetworkEgressPolicy::default()),
+                network_ingress: Some(wxc_common::models::NetworkIngressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn acknowledged_provision_config() -> IsolationSessionProvisionConfig {
+        IsolationSessionProvisionConfig {
+            acknowledge_unrestricted_network: Some(
+                wxc_common::models::UnrestrictedNetworkAcknowledgment,
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_provision_accepts_the_acknowledgment_without_a_network_section() {
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_provision(
+                &request_without_authored_network(),
+                Some(&acknowledged_provision_config()),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_accepts_the_acknowledgment_with_the_legacy_form() {
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_provision(
+                &request_with_canonical_network(),
+                Some(&acknowledged_provision_config()),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_rejects_an_acknowledged_authored_network() {
+        let runner = IsolationSessionRunner::new();
+        let mut request = request_without_authored_network();
+        request.policy.network_specified = true;
+        let err = runner
+            .validate_provision(&request, Some(&acknowledged_provision_config()))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_provision_still_validates_app_id_before_the_acknowledgment() {
+        // appId is structural and keeps its precedence over the policy checks.
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionProvisionConfig {
+            app_id: Some("bad\u{0}id".to_string()),
+            ..acknowledged_provision_config()
+        };
+        assert!(runner
+            .validate_provision(&request_without_authored_network(), Some(&cfg))
+            .is_err());
+    }
+
+    #[test]
+    fn validate_provision_rejects_an_absent_acknowledgment_without_a_network_section() {
+        let runner = IsolationSessionRunner::new();
+        let err = runner
+            .validate_provision(
+                &request_without_authored_network(),
+                Some(&IsolationSessionProvisionConfig::default()),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
     }
 
     #[test]
