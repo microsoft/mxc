@@ -3,6 +3,7 @@
 
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -190,6 +191,58 @@ public class MxcLifecycleTests
                 StateAwareContainment.IsolationSession,
                 new ProvisionSandboxOptions { Network = network }));
         Assert.Contains("IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)", error.Message);
+    }
+
+    [Fact]
+    public void WslcProvisionOptions_RoundTripDoesNotInventLegacyNetworkFields()
+    {
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+        var options = new WslcProvisionOptions
+        {
+            Network = new StateAwareNetworkPolicy
+            {
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
+                Ingress = new NetworkIngressPolicy
+                {
+                    Default = NetworkAction.Deny,
+                    HostLoopback = NetworkAction.Deny,
+                },
+            },
+        };
+
+        var json = JsonSerializer.Serialize(options, jsonOptions);
+        var roundTripped = JsonSerializer.Deserialize<WslcProvisionOptions>(json, jsonOptions)!;
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.Wslc,
+            roundTripped);
+
+        Assert.DoesNotContain("defaultPolicy", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("allowLocalNetwork", json, StringComparison.Ordinal);
+        Assert.NotNull(envelope["network"]);
+    }
+
+    [Fact]
+    public void WslcProvisionOptions_RoundTripPreservesExplicitLegacyNull()
+    {
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+        const string json = """{"network":{"defaultPolicy":null}}""";
+        var options = JsonSerializer.Deserialize<WslcProvisionOptions>(json, jsonOptions)!;
+        var roundTripped = JsonSerializer.Serialize(options, jsonOptions);
+
+        Assert.Contains("\"defaultPolicy\":null", roundTripped, StringComparison.Ordinal);
+        var error = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildProvisionEnvelope(
+                StateAwareContainment.Wslc,
+                JsonSerializer.Deserialize<WslcProvisionOptions>(roundTripped, jsonOptions)!));
+        Assert.Contains("network.defaultPolicy", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

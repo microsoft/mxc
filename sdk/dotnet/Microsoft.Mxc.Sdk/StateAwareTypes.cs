@@ -37,6 +37,7 @@ public enum StateAwareNetworkDefault
 /// Schema 0.9 accepts only Egress and Ingress on WSLC provision. Legacy
 /// properties remain source-visible solely to produce actionable migration errors.
 /// </summary>
+[JsonConverter(typeof(StateAwareNetworkPolicyJsonConverter))]
 public sealed class StateAwareNetworkPolicy
 {
     private StateAwareNetworkDefault? _defaultPolicy;
@@ -44,8 +45,18 @@ public sealed class StateAwareNetworkPolicy
     private List<string>? _allowedHosts;
     private List<string>? _blockedHosts;
     private NetworkProxyPolicy? _proxy;
+    private string? _firstLegacyField;
+    private readonly HashSet<string> _legacyFields = new(StringComparer.Ordinal);
 
-    internal string? LegacyFieldSpecified { get; private set; }
+    internal string? LegacyFieldSpecified => _firstLegacyField;
+
+    internal bool HasLegacyField(string field) => _legacyFields.Contains(field);
+
+    private void RecordLegacyField(string field)
+    {
+        _firstLegacyField ??= field;
+        _legacyFields.Add(field);
+    }
 
     /// <summary>Directional outbound posture for WSLC provision.</summary>
     public NetworkEgressPolicy? Egress { get; set; }
@@ -57,35 +68,35 @@ public sealed class StateAwareNetworkPolicy
     public StateAwareNetworkDefault? DefaultPolicy
     {
         get => _defaultPolicy;
-        set { _defaultPolicy = value; LegacyFieldSpecified ??= "defaultPolicy"; }
+        set { _defaultPolicy = value; RecordLegacyField("defaultPolicy"); }
     }
 
     /// <summary>Whether the sandbox may reach the local network.</summary>
     public bool? AllowLocalNetwork
     {
         get => _allowLocalNetwork;
-        set { _allowLocalNetwork = value; LegacyFieldSpecified ??= "allowLocalNetwork"; }
+        set { _allowLocalNetwork = value; RecordLegacyField("allowLocalNetwork"); }
     }
 
     /// <summary>Host names or IP addresses the sandbox may contact.</summary>
     public List<string>? AllowedHosts
     {
         get => _allowedHosts;
-        set { _allowedHosts = value; LegacyFieldSpecified ??= "allowedHosts"; }
+        set { _allowedHosts = value; RecordLegacyField("allowedHosts"); }
     }
 
     /// <summary>Host names or IP addresses the sandbox may not contact.</summary>
     public List<string>? BlockedHosts
     {
         get => _blockedHosts;
-        set { _blockedHosts = value; LegacyFieldSpecified ??= "blockedHosts"; }
+        set { _blockedHosts = value; RecordLegacyField("blockedHosts"); }
     }
 
     /// <summary>Optional cooperative HTTP/HTTPS proxy configuration.</summary>
     public NetworkProxyPolicy? Proxy
     {
         get => _proxy;
-        set { _proxy = value; LegacyFieldSpecified ??= "proxy"; }
+        set { _proxy = value; RecordLegacyField("proxy"); }
     }
 }
 
