@@ -131,7 +131,7 @@ export interface Filesystem {
  */
 export interface IsolationSession {
   /**
-   * One-shot acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Only `true` is accepted; omit the field when not acknowledging. One-shot only — the state-aware acknowledgment lives on the `provision` phase below.
+   * One-shot acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. The rolling oracle represents field presence, while the exact `0.9.0-alpha` loader requires `true` whenever one-shot IsolationSession containment is selected.
    */
   acknowledgeUnrestrictedNetwork?: True | null;
   /**
@@ -148,7 +148,7 @@ export interface IsolationSession {
  */
 export interface IsolationSessionProvisionPhase {
   /**
-   * Acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Only `true` is accepted; omit the field when not acknowledging. Provision-phase only — the posture is fixed for the sandbox's lifetime, so no later phase accepts it. A provision request must carry either this or the legacy `network` acknowledgment.
+   * Acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Exact `0.9.0-alpha` provision requests require `true`; the legacy `network` acknowledgment is rejected.
    */
   acknowledgeUnrestrictedNetwork?: True | null;
   /**

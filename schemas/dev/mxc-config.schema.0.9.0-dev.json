@@ -311,7 +311,7 @@
               "type": "null"
             }
           ],
-          "description": "One-shot acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Only `true` is accepted; omit the field when not acknowledging. One-shot only — the state-aware acknowledgment lives on the `provision` phase below."
+          "description": "One-shot acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. The rolling oracle represents field presence, while the exact `0.9.0-alpha` loader requires `true` whenever one-shot IsolationSession containment is selected."
         },
         "provision": {
           "anyOf": [
@@ -339,7 +339,7 @@
               "type": "null"
             }
           ],
-          "description": "Acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Only `true` is accepted; omit the field when not acknowledging. Provision-phase only — the posture is fixed for the sandbox's lifetime, so no later phase accepts it. A provision request must carry either this or the legacy `network` acknowledgment."
+          "description": "Acknowledgment that the container's network is unrestricted and cannot be filtered or denied by MXC. Exact `0.9.0-alpha` provision requests require `true`; the legacy `network` acknowledgment is rejected."
         },
         "appId": {
           "description": "Optional identifier for the calling application.\n\n**A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",

@@ -769,9 +769,9 @@ pub enum TransportProtocol {
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
     /// One-shot acknowledgment that the container's network is unrestricted and
-    /// cannot be filtered or denied by MXC. Only `true` is accepted; omit the
-    /// field when not acknowledging. One-shot only — the state-aware
-    /// acknowledgment lives on the `provision` phase below.
+    /// cannot be filtered or denied by MXC. The rolling oracle represents field
+    /// presence, while the exact `0.9.0-alpha` loader requires `true` whenever
+    /// one-shot IsolationSession containment is selected.
     pub acknowledge_unrestricted_network: Option<True>,
     /// State-aware provision-phase configuration.
     pub provision: Option<IsolationSessionProvisionPhase>,
@@ -795,10 +795,8 @@ pub struct IsolationSessionProvisionPhase {
     /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
     /// Acknowledgment that the container's network is unrestricted and cannot
-    /// be filtered or denied by MXC. Only `true` is accepted; omit the field
-    /// when not acknowledging. Provision-phase only — the posture is fixed for
-    /// the sandbox's lifetime, so no later phase accepts it. A provision request
-    /// must carry either this or the legacy `network` acknowledgment.
+    /// be filtered or denied by MXC. Exact `0.9.0-alpha` provision requests
+    /// require `true`; the legacy `network` acknowledgment is rejected.
     pub acknowledge_unrestricted_network: Option<True>,
 }
 
