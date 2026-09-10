@@ -734,16 +734,12 @@ impl BaseContainerRunner {
         Ok(false)
     }
 
-    fn validate_resolved_network_contract(
+    /// Fail closed when the selected legacy SBOX contract cannot preserve the
+    /// requested network policy; PSEC ingress support is resolved separately.
+    fn validate_legacy_sbox_network_contract(
         request: &ExecutionRequest,
-        use_process_security_environment: bool,
     ) -> Result<(), ScriptResponse> {
-        if use_process_security_environment
-            || Self::legacy_sbox_compatible_with_request(
-                request,
-                Self::query_sandbox_capabilities(),
-            )
-        {
+        if Self::legacy_sbox_compatible_with_request(request, Self::query_sandbox_capabilities()) {
             return Ok(());
         }
 
@@ -1205,7 +1201,6 @@ impl BaseContainerRunner {
         }
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
         let capture_denials = request.policy.capture_denials.clone();
-        Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
             let bytes = build_sbox_spec(&request);
@@ -2181,7 +2176,9 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
-        Self::validate_resolved_network_contract(request, use_process_security_environment)?;
+        if !use_process_security_environment {
+            Self::validate_legacy_sbox_network_contract(request)?;
+        }
         // BaseContainer's native PSEC/V2 capture seals its own ETL, so when it
         // is selected retainEtl is honored natively regardless of the guarded
         // provider's transfer capability (the native-capture exception).
@@ -3878,11 +3875,7 @@ mod tests {
         let mut request = request_with_rich_network_rules();
         request.policy.capture_denials = Some(Default::default());
 
-        assert!(
-            BaseContainerRunner::validate_resolved_network_contract(&request, true).is_ok(),
-            "PSEC preserves the complete directional policy"
-        );
-        let error = BaseContainerRunner::validate_resolved_network_contract(&request, false)
+        let error = BaseContainerRunner::validate_legacy_sbox_network_contract(&request)
             .expect_err("a late PSEC-to-SBOX transition must fail closed");
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
         assert!(error
@@ -3894,7 +3887,7 @@ mod tests {
     fn resolved_sbox_contract_accepts_compatible_networking() {
         let request = ExecutionRequest::default();
 
-        assert!(BaseContainerRunner::validate_resolved_network_contract(&request, false).is_ok());
+        assert!(BaseContainerRunner::validate_legacy_sbox_network_contract(&request).is_ok());
     }
 
     #[test]
