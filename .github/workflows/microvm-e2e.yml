@@ -84,7 +84,7 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_suite -- --nocapture
+          cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
 
       - name: Upload logs on failure
         if: failure() || cancelled()
