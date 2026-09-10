@@ -55,23 +55,24 @@ reasons:
 | **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
-- **Schema version** is semver and is checked at the trust boundary: the parser
-  accepts the `0.6.x` floor line through the `0.9.x` dev-ceiling line (the
-  canonical min/max constants are currently `0.6.0-alpha` and `0.9.0-alpha` in
-  `schemas/schema-version.json`), and the SDK mirrors that range. Only
-  `major.minor` is compared — patch and pre-release labels are ignored — and both
-  back-dated and forward-dated versions are rejected.
+- **Schema version** selects an exact registered contract at the trust boundary:
+  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`.
+  Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
+  are not registered and are rejected. A missing declaration is rejected too.
+  The SDK enforces the same exact set, and state-aware requests require
+  `0.9.0-alpha`. The compatibility constants in `schemas/schema-version.json`
+  do not authorize other versions within their minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
   step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
   constants in step — but the two axes are not tied to each other.
 - **Host capability** is resolved by runtime negotiation, not by a version string.
-  As of Phase 3a the schema `version` no longer selects the Windows backend:
+  The schema `version` does not select the Windows backend:
   ProcessContainer resolves to BaseContainer or AppContainer purely by host
   capability (see [Version Negotiation](#version-negotiation)). An identical
-  config runs the same way regardless of which (in-range) schema version it
-  declares.
+  policy that is expressible in multiple registered contracts retains the same
+  host-capability-driven backend selection.
 
 ## Schema Shipping Model
 
@@ -84,30 +85,30 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
 │   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.9.0-dev.json    (rolling parser — currently authoritative)
-    └── mxc-config.schema.0.9.0-alpha.json  (exact closed contract — future authority)
+    ├── mxc-config.schema.0.9.0-dev.json    (rolling differential oracle)
+    └── mxc-config.schema.0.9.0-alpha.json  (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development schemas coexist during the version-specific parser
-transition:
+The two development schemas coexist for production parsing and differential
+characterization:
 
 - `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It remains authoritative for runtime parsing and
-  corpus validation until exact dispatch is enabled.
+  `wxc_common::wire` model. It is retained as a migration oracle for
+  differential parser and SDK-conformance tests.
 - `mxc-config.schema.0.9.0-alpha.json` is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
-  state-aware roots, including recursively closed experimental structures, but
-  does not become authoritative until exact dispatch replaces the rolling
-  parser.
+  state-aware roots, including recursively closed experimental structures, and
+  is the authoritative contract for declared `0.9.0-alpha` requests.
 
-The Rust SDK policy builders use the rolling production path, keeping the SDK,
-FFI, executor, and state-aware surfaces under one authority. Test-only
-per-version builders construct the published or development exact root selected
-by the declared version and compare its runtime model with the rolling builder.
+The runtime parser and Rust SDK policy builders dispatch through the exact
+contract registered for the declared version. The rolling parser and builder
+remain only to characterize intentional migration differences and detect
+unplanned drift. Corpus validation likewise selects the exact registered schema
+from each document's `version`.
 
 Both files are generated development artifacts rather than released schemas.
 See [Schema Code Generation](schema-codegen.md) for their regeneration commands
@@ -190,7 +191,15 @@ The SDK passes `--experimental` to the underlying binary when this option is set
 Developers adding experimental features follow this pattern. For a detailed
 step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 
-**In `wire.rs` (the parse + schema source of truth):**
+**In the exact development contract (the production parse + schema source of
+truth):**
+
+Add the field to the applicable closed request type under
+`src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
+that admit it.
+
+**In `wire.rs` (the rolling differential oracle and shared normalized
+representation):**
 ```rust
 pub struct MxcConfig {
     // ... stable fields ...
@@ -206,8 +215,8 @@ pub struct Experimental {
 }
 ```
 
-During the exact-parser transition, edit both the rolling `wire.rs` model used
-by the current parser and the closed mutable contract under
+While the differential oracle remains, edit both the rolling `wire.rs` model
+and the authoritative closed mutable contract under
 `src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
 
 ```text
@@ -232,8 +241,10 @@ pub struct ExecutionRequest {
 }
 ```
 
-**In `config_parser.rs`:** map the wire `Experimental` field to the domain
-`ExperimentalConfig` inside `convert_wire_config` (there is no `Raw*` struct).
+**In the version-specific adapter and `config_parser.rs`:** map the exact
+contract field into the shared wire representation, then map the wire
+`Experimental` field to the domain `ExperimentalConfig` inside
+`convert_wire_config`.
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
@@ -294,8 +305,9 @@ User writes SandboxPolicy (policy + environment, versioned)
 Config JSON (version: "0.6.0-alpha")
         │
         ▼
-MXC parses → Stage 1: validate schema version (range check)
-        │       → if --experimental, includes experimental section
+MXC parses → Stage 1: select and validate the exact registered contract
+        │       → published contracts exclude experimental fields
+        │       → development defines them; execution still requires --experimental
         │
         ▼
 Stage 2: resolve `containment` intent → concrete backend
@@ -315,25 +327,28 @@ Launch (Experimental_CreateProcessInSandbox(flatbuffer))
 Process runs in sandbox
 ```
 
-## Wire Model vs Runtime Model
+## Exact Contract, Normalized Wire, and Runtime Models
 
-MXC deliberately keeps **two** Rust representations of a config with a mapping at
-the parse boundary, rather than one shared type:
+MXC deliberately keeps three Rust representations rather than sharing one type
+across trust-boundary parsing, common normalization, and backend execution:
 
-- **Wire model** (`wxc_common::wire::MxcConfig`) — a faithful 1:1 mirror of the
-  config JSON: every field `Option`, `camelCase`, `experimental` carried as a raw
-  `serde_json::Value`, no invariants enforced. It is the parser's deserialization
-  target **and** the single source of truth the JSON schema (via schemars) and the
-  SDK TypeScript types are generated from.
+- **Exact registered contracts** (`mxc_config_contract`) — version-, phase-, and
+  backend-specific closed request roots. These are the production JSON
+  deserialization boundary and the source for authoritative schemas and
+  generated exact TypeScript wire types.
+- **Normalized wire model** (`wxc_common::wire::MxcConfig`) — the common
+  representation produced by version-specific adapters and consumed by shared
+  semantic normalization. It also remains the source of the rolling schema and
+  TypeScript differential oracles, but is not a production parse target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
   validated, defaults-applied, invariant-rich model the backends consume:
   abstract containment resolved to a concrete backend, `process.commandLine`
-  reshaped to `script_code`, enums resolved to domain enums, required fields no
-  longer `Option`.
+  reshaped to `script_code`, enums resolved to domain enums, and required fields
+  no longer optional.
 
-The parser (`config_parser`) is the one validate/normalize boundary between them;
-trivial enum/struct conversions are `From` impls beside the domain type, and the
-larger reshaping lives in `convert_wire_config`.
+The exact contract rejects structural errors first. Version-specific adapters
+then produce the normalized wire representation, and `config_parser` applies
+shared semantic validation and maps it to the runtime model.
 
 ### Why two layers (pros)
 
@@ -389,16 +404,15 @@ on the roadmap.
 ## Version Negotiation
 
 Execution resolves a request in three ordered stages. The schema version gates
-only the first; it does **not** influence stages 2 or 3 (Phase 3a removed that
-coupling).
+only the first; it does **not** influence stages 2 or 3.
 
 ```
-Stage 1 — Schema-range check (the trust boundary, `config_parser`)
-  Is config.version within [floor, dev-ceiling]?  (major.minor; pre-release
-  labels ignored)
-    below floor   → error: "older than supported" (update your config)
-    above ceiling → error: "newer than supported" (upgrade wxc-exec)
-    in range / absent → continue
+Stage 1 — Exact contract selection (the trust boundary, `config_parser`)
+  Does config.version name an exact registered contract?
+    missing / malformed → declaration error
+    unregistered        → unsupported contract version error
+    registered          → deserialize that contract, then validate policy
+  Patch and prerelease spelling are significant; there is no range fallback.
 
 Stage 2 — Containment resolve (independent of schema version)
   Map the `containment` intent to a concrete backend:
@@ -476,9 +490,11 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   submitted value. After the root JSON value, only whitespace is accepted;
   trailing JSON values or other trailing content are rejected as malformed
   syntax.
-- **Schema-range failures** (Stage 1) carry a clear "older than supported" /
-  "newer than supported" message telling the caller whether to update the config
-  or upgrade `wxc-exec`.
+- **Contract-version failures** (Stage 1) identify a missing or malformed
+  declaration or an unsupported exact version. The SDK retains its
+  "older than supported" / "newer than supported" hints for versions outside
+  the supported lines, and rejects unregistered in-range spellings with
+  "not a registered schema contract". No loader silently chooses a version.
 - **Capability failures** (Stage 3) surface on the runner's `ScriptResponse`
   (and the SDK `spawn` path's `MxcError`) as a `BackendUnavailable` failure
   phase when the requested backend's API is absent (e.g. the BaseContainer OS

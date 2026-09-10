@@ -29,9 +29,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// MXC container execution configuration. Defines the recommended config format
-/// for both one-shot and state-aware sandbox lifecycle requests. A few
-/// deprecated field spellings not listed here are also accepted via serde aliases.
+/// Rolling compatibility model retained as a test oracle while production
+/// requests use registered exact contracts. It includes historical fields that
+/// exact `0.9.0-alpha` rejects; authors should use the exact development schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(title = "MXC Configuration"))]

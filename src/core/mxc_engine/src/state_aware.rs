@@ -232,15 +232,16 @@ fn parse_state_aware(
 }
 
 /// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
-/// an [`MxcError`]. The state-aware arm already carries one; the decode / one-
-/// shot arms carry a `WxcError` that maps to `malformed_request`.
+/// an [`MxcError`]. The state-aware arm already carries one; the decode,
+/// version, and one-shot arms carry a `WxcError` that maps to `malformed_request`.
 fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
-        ParseError::Decode(err) | ParseError::OneShot(err) | ParseError::OneShotMalformed(err) => {
-            MxcError::malformed_request(err.to_string())
-        }
+        ParseError::Decode(err)
+        | ParseError::Version(err)
+        | ParseError::OneShot(err)
+        | ParseError::OneShotMalformed(err) => MxcError::malformed_request(err.to_string()),
     }
 }
 
@@ -581,6 +582,19 @@ mod tests {
     use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
 
     #[test]
+    fn version_failures_keep_the_state_aware_wire_error_code() {
+        for json in [
+            r#"{"version":"0.6.1-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":null,"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+        ] {
+            let error = parse_state_aware(json, false, &mut Logger::new(Mode::Buffer)).unwrap_err();
+            assert_eq!(error.code, crate::ErrorCode::MalformedRequest);
+            assert!(error.message.contains("version"), "{}", error.message);
+        }
+    }
+
+    #[test]
     fn inactive_telemetry_does_not_create_a_correlation_vector() {
         assert_eq!(
             phase_correlation(false, Phase::Provision, None),
@@ -811,35 +825,6 @@ mod tests {
         assert!(error
             .message
             .contains("compiled without the `wslc` feature"));
-    }
-
-    #[test]
-    fn parse_state_aware_preserves_parser_warnings_on_caller_logger() {
-        let mut logger = Logger::new(Mode::Buffer);
-        let parsed = super::parse_state_aware(
-            r#"{
-                "phase": "provision",
-                "containment": "bubblewrap",
-                "experimental": {"bubblewrap": {"start": {}}},
-                "process": {"commandLine": "echo hi"},
-                "network": {
-                    "proxy": {"builtinTestServer": true},
-                    "defaultPolicy": "block"
-                }
-            }"#,
-            false,
-            &mut logger,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.phase, Phase::Provision);
-        assert!(
-            logger
-                .take_warnings()
-                .iter()
-                .any(|warning| warning.contains("Bubblewrap network.proxy")),
-            "parser warnings should stay on the caller-owned logger"
-        );
     }
 
     #[cfg(target_os = "windows")]

@@ -64,9 +64,9 @@ elaborates.
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
 | TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
-| JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
-| Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
-| Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
+| JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. Exact registered roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
+| Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Exact registered request contracts selected by version, phase, and provision containment before conversion to the shared execution model. | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
+| Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. Exact-root structural failures precede backend validation. | One-shot retains its existing response surface, while exact-contract failures use that surface's structural-error mapping. |
 | Plug-in surface (§11) | Implement `StatefulSandboxBackend` (in addition to or instead of `ScriptRunner`). Define typed per-(backend, phase) `*Config` interfaces. Declare the backend's `ID_PREFIX` and `BACKEND_KEY` consts on the trait impl. Document the cross-cutting policy honor matrix. | Ephemeral-only backends require no changes. The `ContainmentBackend` Rust enum is extended, not replaced. |
 
 ## 2. Context and motivation
@@ -1030,7 +1030,7 @@ other state-aware backend, so caller error-handling code is portable across back
 
 | Code | Meaning |
 |---|---|
-| `malformed_request` | Envelope-level error: missing required field, unknown phase, malformed JSON |
+| `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown experimental field, or invalid phase-specific shape |
 | `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
@@ -1040,7 +1040,7 @@ other state-aware backend, so caller error-handling code is portable across back
 | `not_started` | Phase requires a started sandbox; the id is provisioned but not started |
 | `already_started` | `start` called on an already-running sandbox |
 | `already_stopped` | `stop` called on an already-stopped sandbox |
-| `policy_validation` | Per-stage config or cross-cutting policy contents do not satisfy the backend's expected shape or values |
+| `policy_validation` | A request that passed the exact structural contract violates a backend semantic invariant or unsupported value combination |
 | `backend_error` | Catch-all for backend-specific failures; `details` carries structured information |
 
 ```typescript
@@ -1096,17 +1096,20 @@ The Rust layer adds a new `StatefulSandboxBackend` trait alongside the existing
 implements one trait, the other, or both, depending on its declared participation mode
 (§4).
 
-### 9.1 Wire envelope (Rust mirror)
+### 9.1 Exact request contracts and the shared execution model
 
-`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
-deserialization into the typed wire model in
-`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`).
-`src/core/wxc_common/src/config_parser.rs` discriminates request shape,
-validates the wire model, and maps it into the typed domain models
-(`convert_wire_config` → `ExecutionRequest`, with `From` impls beside the
-domain types for trivial enum/struct conversions). The state-aware path reuses
-this wire model while retaining its per-backend `experimental` subtree for
-dispatch-time typing.
+`src/core/wxc_common/src/config_parser.rs` probes the declared version and
+deserializes directly into the matching closed request contract from
+`mxc_config_contract`. Published versions select their one-shot root. The
+`0.9.0-alpha` development contract uses `phase` to select one-shot,
+`provision`, `start`, `exec`, `stop`, or `deprovision`; provision then uses
+`containment` to select the backend-specific closed root.
+
+The exact contract is the JSON trust boundary. Missing required fields,
+phase-inappropriate fields, unknown fields, and recursively unknown
+`experimental` fields are rejected there with `malformed_request` before
+backend binding or policy validation. The rolling `wire::MxcConfig` parser is
+retained only in tests as a differential migration oracle.
 
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
@@ -1116,28 +1119,27 @@ command may shift a later same-line column from its position in the caller's
 original bytes.
 
 ```rust
-// In load_mxc_request_with_options — complete a CLI template first.
-let (json_str, override_log) = if opts.cli_command.is_empty() {
-    (json_str, None)
-} else {
-    apply_cli_command(&json_str, opts.cli_command)?
-};
-let request = parse_mxc_request_json(&json_str, logger)?;
+fn parse_mxc_request_json_with_cli(
+    json: &str,
+    logger: &mut Logger,
+    cli_command: &[String],
+) -> Result<MxcRequest, ParseError> {
+    if cli_command.is_empty() {
+        return parse_exact_mxc_request_json(json, logger);
+    }
 
-// In parse_mxc_request_json — discriminate and run the normal typed parser.
-let discriminator: RequestDiscriminator<'_> =
-    config_deserialize::from_str(json_str)?;
-if discriminator.phase.is_some() {
-    convert_wire_state_aware(json_str, discriminator.experimental, logger)
-} else {
-    let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)?;
-    convert_wire_config(cfg, logger, true, false)
+    let (effective_json, override_log) = apply_cli_command(json, cli_command)?;
+    let request = parse_exact_mxc_request_json(&effective_json, logger)?;
+    if let Some(message) = override_log {
+        logger.log_line(&message);
+    }
+    Ok(request)
 }
 ```
 
-`parse_rolling_state_aware_wire_input` is the rolling source adapter. It
-extracts and validates the raw experimental block, masks that block for base
-wire deserialization, and produces:
+After exact deserialization, version-specific adapters convert common fields
+into the internal `wire::MxcConfig` representation used by shared semantic
+normalization. For state-aware requests they produce:
 
 ```rust
 StateAwareWireInput {
@@ -1147,35 +1149,19 @@ StateAwareWireInput {
 }
 ```
 
-`convert_wire_state_aware` composes that source adapter with the shared
-`normalize_state_aware` seam, which owns request-kind and containment
-validation, one-shot-section rejection, common policy conversion,
-post-provision Network presence handling, and typed telemetry population. The
-exact development adapter produces the same neutral representation so the
-private exact router can enter this seam without duplicating rolling
-normalization.
-
-The trailing-command path keeps the exact phase probe separate because it owns
-error routing. Backend selection and command editing share one
-duplicate-preserving raw root parse, and the resulting effective document then
-uses the authoritative parser above. The ordinary path with no trailing command
-enters `parse_mxc_request_json` directly.
-
-`wire::MxcConfig` is closed (`deny_unknown_fields`) on its stable surface, so
-unknown fields are rejected at the trust boundary. `phase` maps to the
-`wire::Phase` enum. The rolling `experimental` block stays permissive and is
-captured as a raw `serde_json::Value`; the exact contract closes the same shape
-before its adapter preserves the source value. In both cases
-`config.experimental` is cleared, and the dispatcher types each backend's
-per-phase config from `experimental_raw`
+`normalize_state_aware` converts this neutral representation into the shared
+`ExecutionRequest` model and `ParsedStateAwareRequest`. The dispatcher then
+types each backend's per-phase config from `experimental_raw`
 (`experimental.<backend>.<phase>`). This raw value is the temporary transport
 between structural parsing and backend phase deserialization.
 
 Per-phase requirements (`containment` for `provision`, `sandboxId` for the
-others) are enforced in the conversion step, not at the deserializer. The
-one-shot path rejects `phase` / `sandboxId`, and the state-aware path rejects
-one-shot-only sections (`seatbelt` / `processContainer` / `lxc` / `lifecycle`),
-so each mode only accepts its valid fields.
+others, and `process` for `exec`) and phase-specific field exclusion are
+enforced by the selected exact request root. Shared normalization and backend
+`validate_<phase>` hooks therefore receive only structurally representable
+fields and enforce semantic values, cross-field invariants, and backend policy
+capabilities. Those representable policy refusals surface as
+`policy_validation`.
 
 Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
@@ -1641,7 +1627,7 @@ shapes.
 | Layer | Validates | Failure surfaces as |
 |---|---|---|
 | SDK (TypeScript) | Recognised `containment` (provision); branded `SandboxId<C>` (other phases); required cross-backend fields (`process.commandLine` for exec); typed config shape (autocompletion + compile-time check) | Thrown at the call site, before any subprocess runs |
-| MXC parser (Rust) | Envelope shape: `phase` present; `sandbox_id` present for non-provision; `process` present for exec; typed config deserialisation from JSON | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
+| MXC parser (Rust) | Exact registered version and closed request root; required phase fields; phase-inappropriate, unknown, and recursively unknown experimental fields | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
 | MXC dispatch common (Rust) | Cross-backend per-phase invariants (e.g., `validate_exec_common` checks `process.commandLine` non-empty) | `error.code: malformed_request`, `policy_validation` |
 | Backend `validate_<phase>` hooks (Rust) | Per-backend per-phase invariants: config field values, cross-cutting policy honor (per the matrix in §10.3), id format checks beyond prefix matching | `error.code: policy_validation`, `malformed_id`, `stale_id`, `backend_error`, `backend_unavailable` |
 
@@ -1750,12 +1736,14 @@ unconditionally by the in-guest agent).
   true }`), the only value the backend accepts; `filesystem` is rejected.
   The start, exec, stop, and deprovision Configs carry none of these fields. Callers
   cannot accidentally pass them.
-- **Runtime enforcement at Rust.** The backend's `validate_<phase>` hooks reject
-  cross-cutting fields received from raw-JSON callers (or from a future SDK release
-  whose typing has fallen out of step) that the matrix marks as `rejected`. Failures
-  surface as `policy_validation` (§8). The Rust check is the authoritative contract
-  for any wire-format consumer that bypasses the SDK; the SDK check is a strictly
-  stricter (compile-time) restatement of the same matrix for TypeScript callers.
+- **Runtime enforcement at Rust.** The exact phase contract structurally
+  rejects fields that are not representable for that phase, including input
+  from raw-JSON callers or a future SDK whose typing has drifted. Those failures
+  surface as `malformed_request`. Backend `validate_<phase>` hooks then reject
+  unsupported values or combinations among fields the exact contract admits;
+  those failures surface as `policy_validation` (§8). Together these checks are
+  authoritative for wire-format consumers that bypass the SDK; the SDK types
+  are a compile-time restatement of the same boundary.
 
 Per-phase honor is the backend's choice and must be documented in its plan doc. When
 the matrix evolves (e.g., a new cross-cutting field lands at the SDK layer), each
