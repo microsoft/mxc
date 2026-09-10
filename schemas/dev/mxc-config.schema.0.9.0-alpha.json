@@ -7,7 +7,43 @@
   "allOf": [
     {
       "else": {
-        "$ref": "#/definitions/OneShotRequest"
+        "allOf": [
+          {
+            "$ref": "#/definitions/OneShotRequest"
+          },
+          {
+            "else": true,
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "isolation_session"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "properties": {
+                "experimental": {
+                  "properties": {
+                    "isolation_session": {
+                      "required": [
+                        "acknowledgeUnrestrictedNetwork"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "isolation_session"
+                  ]
+                }
+              },
+              "required": [
+                "experimental"
+              ]
+            }
+          }
+        ]
       },
       "if": {
         "required": [

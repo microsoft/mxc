@@ -402,9 +402,16 @@ fn deserialize_development_request(
     use mxc_config_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
 
     match phase {
-        None => deserialize_development_root(json, "one-shot", false)
-            .map(Box::new)
-            .map(Request::OneShot),
+        None => {
+            let request: mxc_config_contract::dev::OneShotRequest =
+                deserialize_development_root(json, "one-shot", false)?;
+            request.validate().map_err(|message| {
+                ParseError::OneShot(WxcError::ConfigParse(format!(
+                    "Invalid one-shot request: {message}"
+                )))
+            })?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
@@ -6502,16 +6509,18 @@ mod tests {
 
     #[test]
     fn one_shot_acknowledgment_omission_and_invalid_values_are_structural() {
-        // An absent section stays absent — omission never implies acknowledgment.
         let json = r#"{
             "version": "0.9.0-alpha",
             "containment": "isolation_session",
             "process": {"commandLine": "cmd /c ver"}
         }"#;
-        let MxcRequest::OneShot(request) = load_mxc(json).unwrap() else {
-            panic!("expected one-shot");
-        };
-        assert!(request.experimental.isolation_session.is_none());
+        let error = load_mxc(json).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("acknowledgeUnrestrictedNetwork=true"),
+            "{error:?}"
+        );
 
         for payload in [
             r#"{"acknowledgeUnrestrictedNetwork": false}"#,

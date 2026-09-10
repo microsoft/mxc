@@ -251,8 +251,8 @@ function validateFixtures(schema, fixtureRoot) {
     }
 
     for (const fixture of readFixtures(fixtureRoot, directory, "invalid")) {
-      if (validateRoot(fixture.value)) {
-        fail(`invalid fixture ${fixture.name} passed ${definition}`);
+      if (validateRoot(fixture.value) && composed(fixture.value)) {
+        fail(`invalid fixture ${fixture.name} passed ${definition} and composed dispatch`);
       }
     }
   }

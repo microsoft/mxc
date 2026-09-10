@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use mxc_config_contract::dev::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
+    parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
     StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
 };
 use serde::de::DeserializeOwned;
@@ -76,9 +76,25 @@ where
     }
 }
 
+fn assert_one_shot_fixtures() {
+    for (name, json) in read_fixtures("one_shot", "valid") {
+        assert!(
+            matches!(parse_request(&json), Ok(Request::OneShot(_))),
+            "valid fixture 'one_shot/valid/{name}' failed"
+        );
+    }
+
+    for (name, json) in read_fixtures("one_shot", "invalid") {
+        assert!(
+            !matches!(parse_request(&json), Ok(Request::OneShot(_))),
+            "invalid fixture 'one_shot/invalid/{name}' was accepted"
+        );
+    }
+}
+
 #[test]
 fn accepts_and_rejects_every_discovered_fixture() {
-    assert_root_fixtures::<OneShotRequest>("one_shot");
+    assert_one_shot_fixtures();
     assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
     assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
     assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");

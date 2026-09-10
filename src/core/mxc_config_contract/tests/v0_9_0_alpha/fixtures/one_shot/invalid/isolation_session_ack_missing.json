@@ -1,0 +1,7 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "cmd.exe /c echo must-not-run"
+  }
+}

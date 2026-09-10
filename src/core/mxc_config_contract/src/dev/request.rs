@@ -45,6 +45,15 @@ pub enum RequestParseError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// The selected request is structurally valid but violates a cross-field constraint.
+    #[error("Invalid {contract} request: {message}")]
+    InvalidCombination {
+        /// Human-readable name of the selected contract.
+        contract: &'static str,
+        /// Description of the violated cross-field constraint.
+        message: &'static str,
+    },
 }
 
 fn deserialize<T>(json: &str, contract: &'static str) -> Result<T, RequestParseError>
@@ -83,9 +92,16 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
 /// rejects the document.
 pub fn parse_request(json: &str) -> Result<Request, RequestParseError> {
     match probe_phase(json)? {
-        None => deserialize(json, "one-shot")
-            .map(Box::new)
-            .map(Request::OneShot),
+        None => {
+            let request: OneShotRequest = deserialize(json, "one-shot")?;
+            request
+                .validate()
+                .map_err(|message| RequestParseError::InvalidCombination {
+                    contract: "one-shot",
+                    message,
+                })?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
         Some(Phase::Provision) => parse_provision(json).map(Request::Provision),
         Some(Phase::Start) => deserialize(json, "start").map(Request::Start),
         Some(Phase::Exec) => deserialize(json, "exec").map(Request::Exec),

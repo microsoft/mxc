@@ -50,6 +50,31 @@ fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Va
     )
 }
 
+fn one_shot_dispatch(one_shot: Value) -> Value {
+    json!({
+        "allOf": [
+            one_shot,
+            branch(
+                discriminator("containment", "isolation_session"),
+                json!({
+                    "required": ["experimental"],
+                    "properties": {
+                        "experimental": {
+                            "required": ["isolation_session"],
+                            "properties": {
+                                "isolation_session": {
+                                    "required": ["acknowledgeUnrestrictedNetwork"]
+                                }
+                            }
+                        }
+                    }
+                }),
+                Value::Bool(true)
+            )
+        ]
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn phase_dispatch(
     provision: Value,
@@ -133,7 +158,11 @@ pub fn development_schema() -> Value {
 
     let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
     let state_aware = phase_dispatch(provision, start, exec, stop, deprovision);
-    let dispatch = branch(json!({ "required": ["phase"] }), state_aware, one_shot);
+    let dispatch = branch(
+        json!({ "required": ["phase"] }),
+        state_aware,
+        one_shot_dispatch(one_shot),
+    );
     let mut definitions =
         serde_json::to_value(generator.take_definitions()).expect("definitions serialize to JSON");
     add_property_alias(

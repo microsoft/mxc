@@ -99,3 +99,25 @@ pub struct Request {
     #[serde(default)]
     pub experimental: OptionalField<OneShotExperimental>,
 }
+
+impl Request {
+    /// Validate constraints that depend on more than one request field.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if matches!(
+            self.containment.as_ref(),
+            Some(Containment::IsolationSession)
+        ) && self
+            .experimental
+            .as_ref()
+            .and_then(|experimental| experimental.isolation_session.as_ref())
+            .and_then(|isolation_session| {
+                isolation_session.acknowledge_unrestricted_network.as_ref()
+            })
+            .is_none()
+        {
+            return Err("containment 'isolation_session' requires \
+                 experimental.isolation_session.acknowledgeUnrestrictedNetwork=true");
+        }
+        Ok(())
+    }
+}
