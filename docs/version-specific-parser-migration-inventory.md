@@ -31,9 +31,10 @@ All migrated documents target the mutable exact development contract because eve
 
 Three versionless files under `tests/policy` are intentionally absent from this inventory: `request-directional-network.json`, `request-process-container.json`, and `request-wslc.json` are policy-builder inputs rather than complete request documents, and both parsers already reject them in the nine-document shared-rejection set.
 
-## Post-migration disposition
+## Phase 9B post-migration disposition
 
-Version migration removed 118 of the 125 recorded divergences. The remaining
+At the Phase 9B checkpoint, version migration removed 118 of the 125 recorded
+divergences. The remaining
 seven now characterize only the test-scoped rolling parser; authoritative
 public loading rejects every document through its exact contract:
 
@@ -51,10 +52,10 @@ public loading rejects every document through its exact contract:
   from the 0.9 exec root, while `wslc_common::policy` retains direct backend
   validation coverage.
 
-The differential harness continues to record the seven exact-stricter results
+At that checkpoint, the differential harness recorded seven exact-stricter results
 so later contract changes cannot accidentally weaken the exact boundary. It
 also compares every corpus document through the public loader and the exact
-parser oracle. The retained rolling characterization remains 333 equivalent
+parser oracle. The retained rolling characterization was 333 equivalent
 accepts, 14 shared rejections, seven classified exact-stricter rejections, no
 exact-looser acceptance, and no accepted-model mismatch.
 
@@ -73,7 +74,7 @@ phase 8 rebase:
   eight were confirmed as intentionally invalid exemptions.
 - Schema-version, exact-contract codegen, SDK wire-type codegen, and package
   version-sync gates passed.
-- The seven residual fixtures were exercised through the rebuilt
+- The seven residual fixtures at that checkpoint were exercised through the rebuilt
   `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
   expectations retained by the E2E scripts.
 
