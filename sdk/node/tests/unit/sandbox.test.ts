@@ -11,6 +11,7 @@ import {
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
+import { MxcError } from '../../src/errors.js';
 import { platformSkip } from './test-helpers.js';
 
 describe('buildSandboxPayload', () => {
@@ -1912,5 +1913,65 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         'did not expect --allow-testing-features for a url proxy',
       );
     });
+  });
+
+  describe('one-shot telemetry', () => {
+    function decodeConfig(args: string[]): ContainerConfig {
+      const index = args.indexOf('--config-base64');
+      assert.ok(index >= 0, '--config-base64 should be present in args');
+      return JSON.parse(
+        Buffer.from(args[index + 1], 'base64').toString('utf-8'),
+      ) as ContainerConfig;
+    }
+
+    it('serializes config telemetry with schema 0.9', () => {
+      const config = makeConfig('process');
+      config.version = '0.9.0-alpha';
+      config.telemetry = { enabled: true };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+
+      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
+    });
+
+    it('propagates SandboxPolicy telemetry through the primary one-shot API', () => {
+      const payload = buildSandboxPayload('echo hi', {
+        version: '0.9.0-alpha',
+        telemetry: { enabled: true },
+      });
+
+      assert.deepStrictEqual(payload.telemetry, { enabled: true });
+    });
+
+    it('leaves config telemetry schema validation to the native parser', () => {
+      const config = makeConfig('process');
+      config.telemetry = { enabled: true };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+
+      const serialized = decodeConfig(args);
+      assert.deepStrictEqual(serialized.telemetry, { enabled: true });
+      assert.strictEqual(serialized.version, config.version);
+    });
+
+    for (const experimental of [true, 'invalid']) {
+      it(`leaves malformed experimental value ${JSON.stringify(experimental)} to the native parser`, () => {
+        const config = {
+          ...makeConfig('process'),
+          experimental,
+        } as unknown as ContainerConfig;
+
+        const { args } = resolveExecutableAndArgs(config, {
+          executablePath: fakeExe,
+          skipPlatformCheck: true,
+        });
+
+        assert.strictEqual(decodeConfig(args).experimental, experimental);
+      });
+    }
   });
 });

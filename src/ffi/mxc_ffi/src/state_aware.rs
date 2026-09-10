@@ -14,7 +14,7 @@
 //!   interactive terminal. It blocks and reports an [`MxcExecOutcome`].
 //! - [`mxc_state_aware_exec`] drives the **exec phase as a live streaming**
 //!   process, returning the same opaque [`MxcSandbox`](crate::MxcSandbox) handle
-//!   as [`mxc_spawn`](crate::mxc_spawn) — so the caller reuses the
+//!   as [`mxc_spawn_request`](crate::mxc_spawn_request) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //!
 //! The two exec entry points take the **same** request JSON and differ only in
@@ -132,7 +132,10 @@ pub unsafe extern "C" fn mxc_state_aware(
     let result = catch_unwind(AssertUnwindSafe(|| {
         state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
     }))
-    .unwrap_or_else(|_| MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware", &*panic);
+        MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable; ownership of the
@@ -181,10 +184,12 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
     if r.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller guarantees `r` points to a valid, not-yet-freed result.
         unsafe { (*r).free_strings() };
-    }));
+    })) {
+        crate::report_panic("mxc_state_aware_result_free", &*panic);
+    }
 }
 
 /// Run the `exec` phase of a state-aware request as a **live streaming** process.
@@ -226,7 +231,7 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
         unsafe { *out_handle = ptr::null_mut() };
     }
     if !out_error.is_null() {
-        // `write` rather than assignment, for the reason given on `mxc_spawn`:
+        // `write` rather than assignment, for the reason given on `mxc_spawn_request`:
         // the storage may be uninitialised, and nothing here is dropped.
         // SAFETY: caller-guaranteed writable storage for one detail.
         unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
@@ -259,7 +264,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
             )
         })
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -366,7 +372,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec_attached(
             )
         })
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec_attached", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),

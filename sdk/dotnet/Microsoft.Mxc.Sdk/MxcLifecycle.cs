@@ -148,6 +148,8 @@ public static class MxcLifecycle
                 break;
         }
 
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+
         return envelope;
     }
 
@@ -165,8 +167,13 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildStartEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("start", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("start", options);
+        var envelope = BuildIdEnvelope("start", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
 
     /// <summary>
     /// Run a command in a started sandbox and return live stdio streams.
@@ -286,6 +293,7 @@ public static class MxcLifecycle
         {
             envelope["network"] = SerializeToNode(network);
         }
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -305,8 +313,9 @@ public static class MxcLifecycle
         StateAwareExecOptions? options,
         CancellationToken cancellationToken = default)
     {
-        var proc = await Task.Run(
+        var proc = await RunBlockingOperationAsync(
                 () => ExecInSandbox(id, command, options),
+                lateProc => lateProc.Dispose(),
                 cancellationToken)
             .ConfigureAwait(false);
         try
@@ -330,6 +339,45 @@ public static class MxcLifecycle
         }
     }
 
+    // Runs a synchronous blocking call on a background thread so it can be
+    // awaited with cancellation. If the caller cancels while the operation is
+    // still running the returned Task faults with an OperationCanceledException
+    // immediately, but the background call is *not* aborted — it continues to
+    // completion and, if it produced a resource the caller would otherwise own,
+    // the late-result cleanup callback is invoked so the resource isn't leaked.
+    internal static async Task<T> RunBlockingOperationAsync<T>(
+        Func<T> operation,
+        Action<T> disposeLateResult,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var task = Task.Run(operation, cancellationToken);
+        try
+        {
+            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _ = task.ContinueWith(
+                t =>
+                {
+                    if (t.Status == TaskStatus.RanToCompletion)
+                    {
+                        try { disposeLateResult(t.Result); }
+                        catch { /* best-effort cleanup */ }
+                    }
+                    else if (t.IsFaulted)
+                    {
+                        _ = t.Exception;
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
+        }
+    }
+
     /// <summary>Stop a running sandbox.</summary>
     public static void StopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
@@ -344,8 +392,13 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildStopEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("stop", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("stop", options);
+        var envelope = BuildIdEnvelope("stop", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
 
     /// <summary>Destroy a sandbox and release its resources.</summary>
     public static void DeprovisionSandbox(
@@ -365,8 +418,26 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildDeprovisionEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("deprovision", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("deprovision", options);
+        var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
+
+    private static void ValidateNonExecOptions(
+        string phase,
+        StateAwarePhaseOptions? options)
+    {
+        if (options is StateAwareExecOptions)
+        {
+            throw new ArgumentException(
+                $"{options.GetType().Name} cannot configure the {phase} phase; "
+                    + $"use {nameof(StateAwarePhaseOptions)}.",
+                nameof(options));
+        }
+    }
 
     private static JsonObject BuildIdEnvelope(
         string phase,
@@ -386,6 +457,24 @@ public static class MxcLifecycle
         ["version"] = version,
         ["phase"] = phase,
     };
+
+    // Stable, top-level telemetry request for this phase. Consent and
+    // administrative policy still gate emission independently. Never carries a
+    // caller-supplied correlationVector — that identifier is internal-only.
+    private static void ApplyTelemetry(
+        JsonObject envelope,
+        TelemetrySettings? telemetry,
+        string? suppliedVersion)
+    {
+        if (telemetry is not null)
+        {
+            if (suppliedVersion is null)
+            {
+                envelope["version"] = SchemaVersions.MaximumSupported;
+            }
+            envelope["telemetry"] = SerializeToNode(telemetry);
+        }
+    }
 
     private static string ContainmentKey(StateAwareContainment containment) => containment switch
     {
