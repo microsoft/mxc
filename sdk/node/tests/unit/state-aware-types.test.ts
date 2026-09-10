@@ -12,6 +12,7 @@ import {
   ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
+  StartConfigFor,
   StartMetadataFor,
   StateAwareContainmentBackend,
   StopConfigFor,
@@ -223,6 +224,84 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
     assert.ok(stopCfg);
     assert.ok(deprovCfg);
     assert.ok(wrongStop);
+  });
+});
+
+describe('LxcStartConfig', () => {
+  it('accepts the network fields LXC actually enforces', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      version: '0.8.0-alpha',
+      filesystem: { readwritePaths: ['/workspace'] },
+      network: {
+        defaultPolicy: 'block',
+        allowedHosts: ['example.com'],
+        blockedHosts: ['blocked.example.com'],
+      },
+    };
+    assert.strictEqual(cfg.network?.defaultPolicy, 'block');
+  });
+
+  it('rejects network.proxy because the LXC runner rejects it at start', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — LXC state-aware start does not support network.proxy.
+        proxy: { builtinTestServer: true },
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects removeRulesOnExit, which Rust would reject as an unknown field', () => {
+    // `wire::Network` is `deny_unknown_fields` and has no `removeRulesOnExit`,
+    // so emitting it inside the top-level `network` object fails the request.
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — SDK-only field; not part of the LXC wire surface.
+        removeRulesOnExit: true,
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects filesystem.clearPolicyOnExit, which Rust would reject as an unknown field', () => {
+    // `wire::Filesystem` is `deny_unknown_fields` and has no
+    // `clearPolicyOnExit`, so emitting it inside the top-level `filesystem`
+    // object fails the request.
+    const cfg: StartConfigFor<'lxc'> = {
+      filesystem: {
+        readwritePaths: ['/tmp/work'],
+        // @ts-expect-error — SDK-only field; not part of the LXC wire surface.
+        clearPolicyOnExit: false,
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects allowLocalNetwork, which the LXC backend never enforces', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — start rejects it with a policy-validation error.
+        allowLocalNetwork: true,
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects enforcementMode, which LXC never consults', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — enforcement follows the policy, not the mode.
+        enforcementMode: 'capabilities',
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('enforces a restrictive policy from the policy fields alone', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: { defaultPolicy: 'block', allowedHosts: ['example.com'] },
+    };
+    assert.strictEqual(cfg.network?.defaultPolicy, 'block');
   });
 });
 

@@ -165,16 +165,18 @@ fn apply_tears_down_the_chain_it_created_when_it_fails_closed() {
     );
 }
 
-// A container that never asked for a firewall (`Capabilities` is the default
-// enforcement mode) must not be punished for an interface the caller was
-// never required to set. Any firewall command touching the host here would
-// be an unrequested side effect on a container that opted out of firewalling
-// entirely.
+// A policy that requires no firewall at all -- default-allow, no host lists,
+// no proxy -- must not be punished for an interface the caller was never
+// required to set. Any firewall command touching the host here would be an
+// unrequested side effect on a container that opted out of filtering.
 #[test]
-fn capabilities_only_container_is_unaffected_by_a_missing_veth_interface() {
+fn a_policy_requiring_no_firewall_is_unaffected_by_a_missing_veth_interface() {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new("ctrl-capsonly");
-    let policy = policy_requesting(NetworkEnforcementMode::Capabilities);
+    let policy = ContainerPolicy {
+        default_network_policy: wxc_common::models::NetworkPolicy::Allow,
+        ..Default::default()
+    };
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
@@ -182,12 +184,12 @@ fn capabilities_only_container_is_unaffected_by_a_missing_veth_interface() {
 
     assert!(
         result.is_ok(),
-        "Capabilities mode must not fail just because the veth interface is unknown, got {:?}",
+        "a policy requiring no firewall must not fail just because the veth interface is unknown, got {:?}",
         result
     );
     assert!(
         fake.issued().is_empty(),
-        "Capabilities-only enforcement must not issue any iptables commands, issued: {:?}",
+        "a policy requiring no firewall must not issue any iptables commands, issued: {:?}",
         fake.issued()
     );
 }

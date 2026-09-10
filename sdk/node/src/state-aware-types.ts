@@ -20,7 +20,7 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  */
 export type StateAwareContainmentBackend = Extract<
   ContainmentBackend,
-  'isolation_session' | 'windows_sandbox' | 'wslc'
+  'isolation_session' | 'lxc' | 'windows_sandbox' | 'wslc'
 >;
 
 /**
@@ -92,6 +92,54 @@ export type IsolationSessionStopConfig = StateAwareConfig;
 
 export type IsolationSessionDeprovisionConfig = StateAwareConfig;
 
+export interface LxcProvisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Container name to use instead of a generated one. */
+  containerId?: string;
+  /** Linux distribution for the container rootfs, e.g. "alpine" or "ubuntu". */
+  distribution: string;
+  /** Distribution release version, e.g. "3.20" or "24.04". */
+  release: string;
+}
+
+/** The `NetworkConfig` fields LXC honors at start. */
+export interface LxcNetworkConfig {
+  defaultPolicy?: NetworkConfig['defaultPolicy'];
+  allowedHosts?: NetworkConfig['allowedHosts'];
+  blockedHosts?: NetworkConfig['blockedHosts'];
+}
+
+/** The `FilesystemConfig` fields LXC honors at start. */
+export interface LxcFilesystemConfig {
+  readwritePaths?: string[];
+  readonlyPaths?: string[];
+  deniedPaths?: string[];
+}
+
+export interface LxcStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+  filesystem?: LxcFilesystemConfig;
+  network?: LxcNetworkConfig;
+}
+
+export interface LxcExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface LxcStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface LxcDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
 /**
  * IsolationSession's provision-phase metadata surfaced to the caller: the
  * per-instance agent user account name minted for this sandbox, the agent
@@ -103,6 +151,11 @@ export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
   agentUserSid: string;
   ephemeralWorkspacePath: string;
+}
+
+export interface LxcProvisionMetadata {
+  containerName: string;
+  created: boolean;
 }
 
 // WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
@@ -223,6 +276,13 @@ type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
   };
+  lxc: {
+    provision: LxcProvisionConfig;
+    start: LxcStartConfig;
+    exec: LxcExecConfig;
+    stop: LxcStopConfig;
+    deprovision: LxcDeprovisionConfig;
+  };
   windows_sandbox: {
     provision: WindowsSandboxProvisionConfig;
     start: WindowsSandboxStartConfig;
@@ -321,6 +381,10 @@ export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
   isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
+  };
+  lxc: {
+    provision?: LxcProvisionMetadata;
+    // LXC returns no metadata for start, stop, or deprovision.
   };
   // WindowsSandbox returns no metadata for any phase (provision yields only the
   // sandbox id). The key still participates so `StateAwareMetadata[C]` type-

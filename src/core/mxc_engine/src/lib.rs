@@ -23,6 +23,8 @@
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
+//! - [`run_state_aware_with_telemetry`] — the same dispatch wrapped in the
+//!   shared telemetry / correlation-vector orchestration every executor needs.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
 //! - [`available_backends`] / [`AvailableBackend`] — read-only host
 //!   backend-availability probe (with effective isolation tier).
@@ -40,6 +42,7 @@ mod probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
+mod state_aware_telemetry;
 #[cfg(target_os = "windows")]
 mod verbose_telemetry;
 
@@ -61,6 +64,7 @@ pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
     exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
 };
+pub use state_aware_telemetry::run_state_aware_with_telemetry;
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;
 

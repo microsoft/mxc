@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-Network-Invalid-CIDR",
   "containment": "lxc",
   "process": {
-    "commandLine": "true"
+    "commandLine": "echo MXC_WORKLOAD_RAN"
   },
   "lifecycle": {
     "destroyOnExit": true

@@ -1,0 +1,21 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Refuse-Proxy-With-Allowed-Hosts",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo MXC_WORKLOAD_RAN"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "proxy": { "url": "http://10.0.3.1:3128" },
+    "allowedHosts": ["93.184.216.34"]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Capabilities-No-Posture-Control",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo MXC_WORKLOAD_RAN"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}

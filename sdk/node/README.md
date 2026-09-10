@@ -299,7 +299,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only; all still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (Windows-only) and `lxc` (Linux-only).  All four are experimental; every call must pass `{ experimental: true }`.  The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
@@ -463,10 +463,10 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
+// State-aware lifecycle (`isolation_session`, `windows_sandbox`, and `wslc` — Windows-only; `lxc` — Linux-only; all experimental)
 // `config` on provisionSandbox is required for backends whose provision config
-// has a required member (isolation_session: the network acknowledgment) and
-// optional otherwise (windows_sandbox, wslc).
+// has a required member (isolation_session: the network acknowledgment; lxc:
+// distribution and release) and optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming

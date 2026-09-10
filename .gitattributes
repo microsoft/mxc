@@ -2,3 +2,6 @@
 *.sh text eol=lf
 .github/copilot-instructions.md whitespace=cr-at-eol
 .github/workflows/*.lock.yml linguist-generated=true
+# Rust sources under the LXC backend are stored LF; editors on Windows write CRLF
+# and silently re-commit the whole file as a rewrite.
+src/backends/lxc/**/*.rs text eol=lf

@@ -1,0 +1,20 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Refuse-Unresolvable-Allowed-Host",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo MXC_WORKLOAD_RAN"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["no-such-host.invalid"]
+  }
+}

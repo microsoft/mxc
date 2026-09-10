@@ -342,7 +342,7 @@ fn the_same_unresolvable_blocked_host_does_not_error_under_a_block_default() {
 }
 
 #[test]
-fn an_unresolvable_allowed_host_never_errors_under_an_allow_default() {
+fn an_unresolvable_allowed_host_is_refused_under_an_allow_default() {
     let host = "/20";
     let policy = ContainerPolicy {
         allowed_hosts: vec![host.to_string()],
@@ -353,34 +353,19 @@ fn an_unresolvable_allowed_host_never_errors_under_an_allow_default() {
 
     let result =
         NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
-    let args = expect_ok(
-        result,
-        "B4 reserves Err for an unresolvable BLOCK entry under an Allow \
-         default; an unresolvable ALLOW entry must never error",
-    );
 
-    assert!(
-        args.ipv4.is_empty() && args.ipv6.is_empty(),
-        "an unresolvable entry contributes no rules; actual ipv4: {:?}, \
-         ipv6: {:?}",
-        args.ipv4,
-        args.ipv6
+    let message = result.expect_err(
+        "a destination that resolves to no address cannot be programmed, and the \
+         caller learns by the request failing rather than by a log line",
     );
-
-    let expected_warning = format!("Warning: could not resolve host '{host}'");
     assert!(
-        logger
-            .get_buffer()
-            .lines()
-            .any(|line| line == expected_warning),
-        "expected the exact warning line {expected_warning:?}; actual \
-         buffer: {:?}",
-        logger.get_buffer()
+        message.contains(host),
+        "the refusal must name the entry that was not honored; actual: {message:?}"
     );
 }
 
 #[test]
-fn an_unresolvable_allowed_host_never_errors_under_a_block_default() {
+fn an_unresolvable_allowed_host_is_refused_under_a_block_default() {
     let host = "140.82.112.0/20/8";
     let policy = ContainerPolicy {
         allowed_hosts: vec![host.to_string()],
@@ -391,29 +376,14 @@ fn an_unresolvable_allowed_host_never_errors_under_a_block_default() {
 
     let result =
         NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
-    let args = expect_ok(
-        result,
-        "an unresolvable ALLOW entry must never error, regardless of the \
-         default network policy (B4)",
-    );
 
-    assert!(
-        args.ipv4.is_empty() && args.ipv6.is_empty(),
-        "an unresolvable entry contributes no rules; actual ipv4: {:?}, \
-         ipv6: {:?}",
-        args.ipv4,
-        args.ipv6
+    let message = result.expect_err(
+        "the default network policy does not change whether the named destination \
+         could be programmed",
     );
-
-    let expected_warning = format!("Warning: could not resolve host '{host}'");
     assert!(
-        logger
-            .get_buffer()
-            .lines()
-            .any(|line| line == expected_warning),
-        "expected the exact warning line {expected_warning:?}; actual \
-         buffer: {:?}",
-        logger.get_buffer()
+        message.contains(host),
+        "the refusal must name the entry that was not honored; actual: {message:?}"
     );
 }
 

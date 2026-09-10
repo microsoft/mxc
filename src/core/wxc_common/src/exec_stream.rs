@@ -665,9 +665,10 @@ fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
 /// [`dup_fd_to_file`] alone would: `InterruptibleReader` sets `O_NONBLOCK`, and
 /// that is a property of the open file description, which every `dup` shares.
 /// The backend's fd therefore becomes non-blocking too. Harmless while no
-/// state-aware backend is non-Windows — all three are Windows — but a Unix one
-/// that later reads or re-hands its own fd would see `EAGAIN` where it expected
-/// a blocking read.
+/// non-Windows state-aware backend hands back streaming exec — the current
+/// Linux backend (Lxc) relays its own stdio rather than returning streams, so
+/// it never reaches this path — but a Unix backend that later reads or
+/// re-hands its own fd would see `EAGAIN` where it expected a blocking read.
 #[cfg(not(target_os = "windows"))]
 fn wrap_cancellable_read(handle: PipeHandle) -> Option<ReadStream> {
     let file = dup_fd_to_file(handle)?;

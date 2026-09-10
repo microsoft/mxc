@@ -164,7 +164,7 @@ pub struct IngressManager {
     /// `/proc/<pid>/net/if_inet6`, which names the same namespace by PID
     /// without entering it. A caller that cannot supply a PID must not
     /// construct an `IngressManager` at all. See `lxc_runner`, which aborts the
-    /// run when a firewall mode is requested but no init PID can be found.
+    /// run when no init PID can be found.
     netns_pid: u32,
     /// Per-resource ownership. What we actually created or hooked, tracked
     /// separately per family, so teardown attempts only the operations this run
@@ -180,6 +180,15 @@ pub struct IngressManager {
     v6_chain_created: bool,
     v4_hooked: bool,
     v6_hooked: bool,
+    /// The host's own address on the bridge the container's veth joins, when
+    /// the caller could determine it. From inside the container namespace this
+    /// address *is* the host. It is what the container-to-host half of
+    /// `ingress.hostLoopback` has to close.
+    host_gateway: Option<String>,
+    /// Whether this run installed the container-to-host drop. Tracked apart
+    /// from the chain flags because the drop lives in the namespace's built-in
+    /// `OUTPUT` chain rather than in a chain this run created.
+    host_loopback_dropped: bool,
     /// Whether the caller asked for a successfully installed policy to outlive
     /// this run (the lifecycle's `preservePolicy`). Consulted by [`Drop`] and
     /// not only by the runner's explicit teardown call, because `Drop` fires on
@@ -425,6 +434,8 @@ impl IngressManager {
             v6_chain_created: false,
             v4_hooked: false,
             v6_hooked: false,
+            host_gateway: None,
+            host_loopback_dropped: false,
             preserve_policy: false,
             uses_directional_schema,
         }
@@ -460,7 +471,53 @@ impl IngressManager {
     /// from the per-resource flags rather than stored, so it can never disagree
     /// with what teardown will actually remove.
     pub fn rules_applied(&self) -> bool {
-        self.v4_chain_created || self.v6_chain_created || self.v4_hooked || self.v6_hooked
+        self.v4_chain_created
+            || self.v6_chain_created
+            || self.v4_hooked
+            || self.v6_hooked
+            || self.host_loopback_dropped
+    }
+
+    /// Tell the manager where the host sits on the container's bridge.
+    ///
+    /// The caller resolves this on the host, before the guest has configured
+    /// anything, because the container's own routing table is empty for several
+    /// seconds after LXC reports the container running.
+    pub fn set_host_gateway(&mut self, address: &str) {
+        self.host_gateway = Some(address.to_string());
+    }
+
+    /// Whether the policy closes the host-loopback path.
+    ///
+    /// An absent 0.8 ingress section still denies: the contract's default
+    /// stance for `hostLoopback` is `deny`, and a caller who wrote no ingress
+    /// section did not ask to open it.
+    fn denies_host_loopback(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+        if !uses_directional_schema {
+            return false;
+        }
+        Self::stated_ingress(policy, uses_directional_schema)
+            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Deny)
+    }
+
+    /// The rule closing the container-to-host path, dropped into the
+    /// namespace's own `OUTPUT` chain.
+    ///
+    /// Inserted at the head: `OUTPUT` is first-match, and a later accept
+    /// covering the gateway would otherwise reopen the path.
+    fn build_host_loopback_drop_args(gateway: &str) -> Vec<String> {
+        ["-I", "OUTPUT", "-d", gateway, "-j", "DROP"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+
+    /// The same rule as a deletion.
+    fn build_host_loopback_undrop_args(gateway: &str) -> Vec<String> {
+        ["-D", "OUTPUT", "-d", gateway, "-j", "DROP"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     }
 
     /// Record that this run created `family`'s chain.
@@ -526,7 +583,7 @@ impl IngressManager {
     /// 0.7 states this in `allowLocalNetwork`; 0.8 splits it across
     /// `network.ingress.default` and `network.ingress.hostLoopback`, but
     /// LXC's single inbound chain refuses either `allow` value alike.
-    fn permissive_inbound_field(
+    pub(crate) fn permissive_inbound_field(
         policy: &ContainerPolicy,
         uses_directional_schema: bool,
     ) -> Option<&'static str> {
@@ -654,7 +711,47 @@ impl IngressManager {
             self.install_family(IpFamily::V6, &ipv6_rules, &mut runner, logger)?;
         }
 
+        // IPv4 only, matching the one route LXC's default bridge gives the
+        // container to the host. `lxc-net` ships an IPv4 address and leaves
+        // `LXC_IPV6_ADDR` unset, leaving no IPv6 path to close.
+        if Self::denies_host_loopback(policy, uses_directional_schema) {
+            self.install_host_loopback_drop(&mut runner, logger)?;
+        }
+
         Ok(true)
+    }
+
+    /// Close the container-to-host half of `ingress.hostLoopback: deny`.
+    ///
+    /// Fails the start when the host address is unknown. The alternative is a
+    /// container running with the path open under a policy that says it is
+    /// shut, which is the unenforceable-policy case this file already refuses
+    /// for inbound IPv6.
+    fn install_host_loopback_drop(
+        &mut self,
+        runner: &mut dyn CommandRunner,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        let Some(gateway) = self.host_gateway.clone() else {
+            return Err(format!(
+                "network.ingress.hostLoopback='deny' has to block the container-to-host \
+                 path, and the host's address on the container's bridge could not be \
+                 determined for chain '{}'. Refusing to start with an unenforceable \
+                 host-loopback policy.",
+                self.chain_name
+            ));
+        };
+
+        let args = Self::build_host_loopback_drop_args(&gateway);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run(runner, IpFamily::V4.binary(), &arg_refs, logger)
+            .map_err(RunError::into_message)?;
+        self.host_loopback_dropped = true;
+
+        logger.log_line(&format!(
+            "Host-loopback deny: container traffic to the host at {gateway} is dropped."
+        ));
+        Ok(())
     }
 
     /// Install one family's chain: reset any leftover to a known-empty baseline,
@@ -727,9 +824,9 @@ impl IngressManager {
     /// Instead we *force* a known state: remove every INPUT reference (there
     /// may be more than one), then flush and delete any existing chain. This
     /// reuses the same over-approximating teardown planner and executor as
-    /// `force_cleanup` ("assume everything might exist"), so install-time reset
-    /// and ownership teardown share one shape. A genuinely absent rule or chain
-    /// is a no-op; any real failure aborts install fail-closed.
+    /// ownership teardown ("assume everything might exist"), so install-time
+    /// reset and ownership teardown share one shape. A genuinely absent rule or
+    /// chain is a no-op; any real failure aborts install fail-closed.
     fn reset_family(
         &mut self,
         family: IpFamily,
@@ -923,7 +1020,49 @@ impl IngressManager {
         ));
 
         let steps = self.owned_teardown_steps();
-        self.execute_teardown(&steps, runner, logger)
+        let chain_result = self.execute_teardown(&steps, runner, logger);
+        let host_loopback_result = self.remove_host_loopback_drop(runner, logger);
+
+        match (chain_result, host_loopback_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(chain), Ok(())) => Err(chain),
+            (Ok(()), Err(loopback)) => Err(loopback),
+            (Err(chain), Err(loopback)) => Err(format!("{chain}; {loopback}")),
+        }
+    }
+
+    /// Remove the container-to-host drop this run installed.
+    ///
+    /// Keeps ownership on a real failure so [`Drop`] retries, and treats
+    /// iptables' own missing-rule message as done.
+    fn remove_host_loopback_drop(
+        &mut self,
+        runner: &mut dyn CommandRunner,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        if !self.host_loopback_dropped {
+            return Ok(());
+        }
+        let Some(gateway) = self.host_gateway.clone() else {
+            self.host_loopback_dropped = false;
+            return Ok(());
+        };
+
+        let args = Self::build_host_loopback_undrop_args(&gateway);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        match self.run(runner, IpFamily::V4.binary(), &arg_refs, logger) {
+            Ok(()) => {
+                self.host_loopback_dropped = false;
+                Ok(())
+            }
+            Err(RunError::Exit { ref stderr, .. })
+                if StepKind::Unhook.stderr_means_absent(stderr) =>
+            {
+                self.host_loopback_dropped = false;
+                Ok(())
+            }
+            Err(e) => Err(e.into_message()),
+        }
     }
 
     /// Execute an ordered list of teardown [`TeardownStep`]s, clearing each
@@ -1060,49 +1199,6 @@ impl IngressManager {
             StepKind::Flush => {}
             StepKind::Delete => self.clear_created(step.family),
         }
-    }
-
-    /// Best-effort cleanup of iptables state when the owning [`IngressManager`]
-    /// instance isn't reachable (e.g. signal-time cleanup from the watchdog
-    /// thread). We do not know which resources a prior run installed, so this
-    /// assumes all of them and lets teardown over-approximate: a genuinely
-    /// absent chain or hook is treated as an already-removed no-op. The caller
-    /// supplies the container's init PID, which it only has while the netns
-    /// still exists — once the container is gone there is nothing to remove, so
-    /// the caller simply does not call this. The result is ignored: this path is
-    /// best-effort by nature.
-    pub fn force_cleanup(container_name: &str, netns_pid: u32, logger: &mut Logger) {
-        let mut runner = NsenterRunner;
-        Self::force_cleanup_with(container_name, netns_pid, &mut runner, logger);
-    }
-
-    /// The body of [`Self::force_cleanup`] against an injectable
-    /// [`CommandRunner`] — the real path passes [`NsenterRunner`]; tests pass a
-    /// runner that captures the planned argv without spawning. Constructs the
-    /// over-approximating manager and runs teardown; the result is ignored
-    /// because this path is best-effort by nature.
-    fn force_cleanup_with(
-        container_name: &str,
-        netns_pid: u32,
-        runner: &mut dyn CommandRunner,
-        logger: &mut Logger,
-    ) {
-        let mut mgr = Self::for_full_reset(container_name, netns_pid);
-        let _ = mgr.remove_firewall_rules_with(runner, logger);
-    }
-
-    /// A manager that assumes every resource might exist, for over-approximating
-    /// cleanup where we do not know what a dead run installed. Used by
-    /// [`Self::force_cleanup`].
-    fn for_full_reset(container_name: &str, netns_pid: u32) -> Self {
-        // Teardown removes whatever is there; no rule is built, so the schema
-        // this manager reports is never read.
-        let mut mgr = Self::new(container_name, netns_pid, false);
-        mgr.v4_chain_created = true;
-        mgr.v6_chain_created = true;
-        mgr.v4_hooked = true;
-        mgr.v6_hooked = true;
-        mgr
     }
 
     /// Build the full argv for running `binary args...` inside this container's
@@ -2069,7 +2165,9 @@ mod tests {
         );
     }
 
-    /// A firewall-mode policy with `allowLocalNetwork: true`.
+    /// A policy with `allowLocalNetwork: true` under an enforcement mode that
+    /// installs a firewall, so the refusal is reached rather than skipped by
+    /// the no-firewall gate.
     fn permissive_firewall_policy() -> ContainerPolicy {
         ContainerPolicy {
             allow_local_network: true,
@@ -2182,11 +2280,10 @@ mod tests {
         assert_eq!(tail, want, "the wrapped command args must be preserved");
     }
 
-    /// The teardown path (used by `remove_firewall_rules`, `Drop`, and
-    /// `force_cleanup`) must also route every command through `nsenter`, and
-    /// only against the manager's own chain. Assert the actual planned argv
-    /// rather than just the pure helper: a command that skips `nsenter` would
-    /// execute against the host's tables.
+    /// The teardown path (used by `remove_firewall_rules` and `Drop`) must also
+    /// route every command through `nsenter`, and only against the manager's own
+    /// chain. Assert the actual planned argv rather than just the pure helper: a
+    /// command that skips `nsenter` would execute against the host's tables.
     #[test]
     fn teardown_commands_are_nsenter_prefixed_and_chain_scoped() {
         let pid = 4242u32;
@@ -2277,84 +2374,6 @@ mod tests {
         // the real nsenter path.
         mgr.v4_chain_created = false;
         mgr.v4_hooked = false;
-    }
-
-    /// `force_cleanup` must actually run — over the injectable runner — so a
-    /// regression inside it fails this test, and it must plan to remove *all*
-    /// resources (it cannot know what a dead run installed). Assert the real
-    /// commands `force_cleanup_with` issues: every one nsenter-scoped to the
-    /// container netns, naming only our chain, unhook before flush before
-    /// delete, for both families. A no-leftover script (everything reports
-    /// already-absent) lets cleanup complete without error.
-    #[test]
-    fn force_cleanup_removes_all_resources_via_nsenter() {
-        let pid = 9001u32;
-        let container = "force-cleanup-container";
-        let chain = IngressManager::new(container, pid, false)
-            .chain_name()
-            .to_string();
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-
-        let mut runner = FakeRunner {
-            calls: Vec::new(),
-            respond: |argv: &[String]| match verb(argv) {
-                "-D" => Err(absent_rule()),
-                _ => Err(absent_chain()),
-            },
-        };
-
-        IngressManager::force_cleanup_with(container, pid, &mut runner, &mut logger);
-
-        // Six commands: unhook + flush + delete, per family.
-        assert_eq!(
-            runner.calls.len(),
-            6,
-            "force_cleanup must issue all six teardown commands, got {:?}",
-            runner.calls
-        );
-
-        // Every command is nsenter-scoped and names only our chain.
-        for argv in &runner.calls {
-            assert_eq!(
-                &argv[..4],
-                &[
-                    "nsenter".to_string(),
-                    "-t".to_string(),
-                    pid.to_string(),
-                    "-n".to_string(),
-                ],
-                "force_cleanup command must be nsenter-scoped to the netns: {argv:?}"
-            );
-            assert!(
-                argv[4] == "iptables" || argv[4] == "ip6tables",
-                "force_cleanup command must target a packet-filter binary: {argv:?}"
-            );
-            assert!(
-                argv.iter().any(|a| a == &chain),
-                "force_cleanup command must name our chain '{chain}': {argv:?}"
-            );
-        }
-
-        // Both families are covered.
-        for binary in ["iptables", "ip6tables"] {
-            assert!(
-                runner.calls.iter().any(|a| a[4] == binary),
-                "force_cleanup must cover {binary}"
-            );
-        }
-
-        // Per family: unhook (-D) before flush (-F) before delete (-X).
-        for binary in ["iptables", "ip6tables"] {
-            let idx = |v: &str| {
-                runner
-                    .calls
-                    .iter()
-                    .position(|a| a[4] == binary && verb(a) == v)
-                    .unwrap_or_else(|| panic!("{binary} {v} command missing"))
-            };
-            assert!(idx("-D") < idx("-F"), "{binary}: unhook must precede flush");
-            assert!(idx("-F") < idx("-X"), "{binary}: flush must precede delete");
-        }
     }
 
     /// The pure builder must return the chain *body* and the `INPUT` *hook* as

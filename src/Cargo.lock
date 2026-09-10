@@ -1398,6 +1398,7 @@ dependencies = [
  "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
+ "serde_json",
  "wxc_common",
 ]
 
@@ -1408,6 +1409,7 @@ dependencies = [
  "libc",
  "mxc_pty",
  "nix",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -22,6 +22,7 @@ mxc_engine = { workspace = true }
 lxc_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

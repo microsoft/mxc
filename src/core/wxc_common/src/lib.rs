@@ -7,6 +7,7 @@ pub mod audit;
 pub mod cmdline;
 mod config_deserialize;
 pub mod config_parser;
+pub mod config_rejection;
 pub mod encoding;
 pub mod error;
 pub mod exec_stream;
