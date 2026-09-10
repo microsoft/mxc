@@ -1390,7 +1390,8 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request should succeed");
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
 
         // No environment set yet: the backend supplies its default.
         assert_eq!(env_of(&request), None::<Vec<String>>);
@@ -1425,7 +1426,8 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request should succeed");
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
         request.inherit_default_env([("EXTRA", "1")]);
 
         assert!(request.inner.inherit_default_env);
