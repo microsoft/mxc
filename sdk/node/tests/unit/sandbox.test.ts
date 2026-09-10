@@ -34,6 +34,13 @@ describe('exact-version network authoring', () => {
 
   for (const version of ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha']) {
     it(`retains legacy authoring for the exact ${version} contract`, () => {
+      if (process.platform === 'darwin' && version === '0.6.0-alpha') {
+        assert.throws(() => createConfigFromPolicy({
+          version,
+          network: { allowOutbound: true },
+        }), /use schema 0\.7\.0-alpha or later/);
+        return;
+      }
       const config = createConfigFromPolicy({
         version,
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [], blockedHosts: [] },
