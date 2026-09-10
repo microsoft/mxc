@@ -820,6 +820,28 @@ foreach ($phase in @('provision', 'exec')) {
     }
 }
 
+# The exact exec root rejects a directional posture before dispatch, preserving
+# the provision-time network mode across later process invocations.
+Run-StateAwareTest "D: exec (directional network change rejected structurally)" {
+    $req = @{
+        phase = 'exec'
+        sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
+        process = @{ commandLine = 'echo DIRECTIONAL_NETWORK_MUST_NOT_RUN' }
+        network = @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+    }
+    $r = Invoke-StateAware -Request $req -DryRun
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+        "error.message identifies immutable exec network policy (got '$msg')"
+} | Out-Null
+
 # The exact start/stop contracts reject these policy sections before backend
 # dispatch. Direct backend unit tests cover validate_post_provision_policy.
 Run-StateAwareTest "D: start (filesystem rejected by exact contract)" {
