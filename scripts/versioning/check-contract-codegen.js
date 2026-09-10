@@ -13,6 +13,7 @@ const {
   readdirSync,
   rmSync,
 } = require("fs");
+const os = require("os");
 const { join } = require("path");
 const Ajv = require("ajv");
 
@@ -296,7 +297,7 @@ if (development.length === 0) {
   fail("registry did not report a development contract");
 }
 
-const temporary = mkdtempSync(join(repoRoot, ".mxc-contract-codegen-"));
+const temporary = mkdtempSync(join(os.tmpdir(), "mxc-contract-codegen-"));
 try {
   for (const contract of development) {
     if (!contract.typescriptPath) {
