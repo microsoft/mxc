@@ -181,7 +181,11 @@ pub fn run_state_aware_with_telemetry(
     // root now that the outcome — and, for provision, the freshly minted
     // `sandbox_id` — is known.
     if is_provision {
-        telemetry::correlation_state::on_provision_outcome(telemetry_active, &correlation, &outcome);
+        telemetry::correlation_state::on_provision_outcome(
+            telemetry_active,
+            &correlation,
+            &outcome,
+        );
     } else if phase == "deprovision" {
         if let Some(id) = sandbox_id.as_deref() {
             telemetry::correlation_state::on_deprovision_outcome(
@@ -279,7 +283,11 @@ mod tests {
         let rendered = policy_identity::redact_identity(&id);
         assert!(!rendered.contains("alice"), "got: {rendered}");
         assert!(!rendered.contains('@'), "got: {rendered}");
-        assert_eq!(rendered, policy_identity::ENTRA_UPN_MARKER, "got: {rendered}");
+        assert_eq!(
+            rendered,
+            policy_identity::ENTRA_UPN_MARKER,
+            "got: {rendered}"
+        );
     }
 
     #[test]

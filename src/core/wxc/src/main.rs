@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-use wxc_common::audit::RejectionReason;use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
+use wxc_common::audit::RejectionReason;
+use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{LoadOptions, ParseError};
 use wxc_common::config_rejection::{
     config_rejection_reason_for, log_config_rejected, offending_field_from_message,
@@ -379,12 +380,8 @@ fn run_state_aware_main(
     telemetry_active: bool,
     logger: &mut Logger,
 ) -> ! {
-    let outcome = mxc_engine::run_state_aware_with_telemetry(
-        parsed,
-        dry_run,
-        telemetry_active,
-        logger,
-    );
+    let outcome =
+        mxc_engine::run_state_aware_with_telemetry(parsed, dry_run, telemetry_active, logger);
 
     // On dispatch failure, route the error to the auxiliary diagnostic sinks
     // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
