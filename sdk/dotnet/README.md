@@ -488,6 +488,12 @@ Telemetry remains off by default unless the caller opts in with
 `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }` and
 applicable Windows consent/policy gates permit collection.
 
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
+
 The .NET consent APIs are UI-agnostic: `MxcTelemetry.RequestConsent` supplies
 the canonical resource to a host callback, while `GetConsentStatus`,
 `NeedsConsentPrompt`, and `WithdrawConsent` provide maintenance operations.
