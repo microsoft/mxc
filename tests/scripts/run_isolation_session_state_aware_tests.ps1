@@ -858,7 +858,10 @@ try {
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+                "error.message identifies the closed exec network field (got '$msg')"
         } | Out-Null
     }
 
