@@ -11,17 +11,10 @@
 #     opened, so a run that succeeded still reaches its timeout. Exit codes are
 #     therefore deliberately not asserted -- only side effects are.
 #
-# This suite drives the real GUI, and open mode leaks: `open -n` starts a fresh
-# Terminal *application instance* per run, and because the default shellExitAction
-# keeps the window after the command exits, Terminal never quits -- so `open -W`
-# never returns, MXC kills the waiter at its timeout, and the instance is
-# orphaned. Worse, LaunchServices never retires the open-document request, so
-# each new instance replays a growing backlog of them.
-#
-# Every launch here is therefore reaped: run_open_config waits for the workload's
-# own sentinel file, then terminates exactly the Terminal instances that appeared
-# during the run. Killing them also lets `open -W` return, so mxc-exec-mac exits
-# normally and still removes its own temp files.
+# This suite drives the real GUI and leaves Terminal instances behind: `open -n`
+# starts a fresh one per run and the default shellExitAction keeps the window
+# open, so Terminal never quits and `open -W` only returns when MXC kills the
+# waiter at process.timeout.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,34 +29,21 @@ launchctl managername >/dev/null 2>&1 ||
 # Fixtures live under /private/tmp: a narrow grant on a $TMPDIR path under
 # /var/folders cannot be traversed, because its ancestors are not readable.
 OPENDIR="$(mktemp -d /private/tmp/mxc-seatbelt-open.XXXXXX)"
-BASELINE_TERMS="$SEATBELT_TMP/terms.baseline"
-pgrep -x Terminal | sort -u >"$BASELINE_TERMS"
 
-# Reap anything still standing if an assertion aborts the suite mid-run.
-reap_strays() {
-    local now="$SEATBELT_TMP/terms.stray"
-    pgrep -x Terminal | sort -u >"$now" 2>/dev/null || return 0
-    local pid
-    for pid in $(comm -13 "$BASELINE_TERMS" "$now"); do
-        kill "$pid" 2>/dev/null
-    done
-}
-trap 'reap_strays; rm -rf "$OPENDIR" "$SEATBELT_TMP"' EXIT
+trap 'rm -rf "$OPENDIR" "$SEATBELT_TMP"' EXIT
 
 mkdir -p "$OPENDIR/work" "$OPENDIR/denied"
 echo "top secret" > "$OPENDIR/denied/secret.txt"
 
 read_fact() { [ -f "$OPENDIR/$1" ] && cat "$OPENDIR/$1" || echo "<missing>"; }
 
-# Run a config, waiting on the workload's sentinel rather than the timeout:
-# `open -W` would otherwise block for the full process.timeout on every run.
+# Run a config and wait for the workload's sentinel, then for mxc-exec-mac to
+# exit on its own (open -W only returns when MXC kills the waiter at timeout).
 run_open_config() {
     local config_path="$1" sentinel="$2"
     shift 2
-    local before="$SEATBELT_TMP/terms.before" after="$SEATBELT_TMP/terms.after"
     local outfile="$SEATBELT_TMP/open.out" rcfile="$SEATBELT_TMP/open.rc"
 
-    pgrep -x Terminal | sort -u >"$before"
     rm -f "$OPENDIR/$sentinel" "$outfile" "$rcfile"
 
     { "$MXC_EXEC_MAC" "$@" "$config_path" >"$outfile" 2>&1; echo $? >"$rcfile"; } &
@@ -75,12 +55,6 @@ run_open_config() {
         i=$((i + 1))
     done
     sleep 1  # let the workload's remaining writes land
-
-    pgrep -x Terminal | sort -u >"$after"
-    local pid
-    for pid in $(comm -13 "$before" "$after"); do
-        kill "$pid" 2>/dev/null
-    done
 
     wait "$runner" 2>/dev/null
     OUT="$(cat "$outfile" 2>/dev/null)"
@@ -141,10 +115,8 @@ fi
 
 # --- the launch must not orphan a Terminal instance (microsoft/mxc#1108) -----
 #
-# Deliberately unreaped: run_open_config exists to stop this suite leaking, so
-# using it here would assert the workaround rather than the behavior. The run
-# is left to finish on its own and the surviving instances are counted, then
-# cleaned up regardless of the verdict.
+# Surviving instances are only counted, never killed -- the point is to observe
+# the leak, and this suite is expected to run on a disposable host.
 
 TB="$SEATBELT_TMP/orphan.before"
 TA="$SEATBELT_TMP/orphan.after"
@@ -169,9 +141,6 @@ if [ -z "$ORPHANS" ]; then
 else
     fail_soft "open mode leaves no orphaned Terminal instance (microsoft/mxc#1108)" \
         "surviving pid(s): $ORPHANS"
-    for pid in $ORPHANS; do
-        kill "$pid" 2>/dev/null
-    done
 fi
 
 # The waiter is MXC's own child; it must never outlive the run either.

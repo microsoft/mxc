@@ -33,25 +33,35 @@ for f in "$EXAMPLES"/*mac*.json; do
     fi
 done
 
-# Hermetic examples that are meant to succeed: no network, no GUI, no
-# launchMethod "open".
-for name in 15_mac_hello_world 17_mac_deny_filesystem 21_mac_python_info \
-    34_mac_offline_build; do
+# Hermetic examples that are meant to succeed, each with the marker that proves
+# it did what its name claims. Exit status alone does not: several print their
+# verdict and exit 0 whichever way it went.
+run_example() {
+    local name="$1" marker="$2"
     RC=0
     OUT=$("$MXC_EXEC_MAC" "$EXAMPLES/$name.json" 2>&1) || RC=$?
     [ "$RC" = 0 ] || fail "$name failed to run (exit $RC)" "$OUT"
-    pass "$name runs successfully"
-done
+    expect_marker "$name prints '$marker'" "$marker"
+}
 
-# This example exists to demonstrate a denial: it pipes through pbcopy/pbpaste
-# with ui.disable=true, so the pasteboard is unreachable and the command is
-# supposed to fail. Asserting success here would mean UI policy stopped being
-# enforced.
-RC=0
-OUT=$("$MXC_EXEC_MAC" "$EXAMPLES/24_mac_ui_disabled.json" 2>&1) || RC=$?
-[ "$RC" != 0 ] || fail "24_mac_ui_disabled should fail: ui.disable=true must block the pasteboard" "$OUT"
-grep -qF "sandbox_clip_test" <<<"$OUT" &&
-    fail "24_mac_ui_disabled read back clipboard content despite ui.disable=true" "$OUT"
-pass "24_mac_ui_disabled demonstrates the pasteboard denial"
+run_example 15_mac_hello_world "hi from seatbelt"
+
+run_example 17_mac_deny_filesystem "FS_BLOCKED"
+expect_absent "17_mac_deny_filesystem cannot read the denied /Users" "FS_ALLOWED"
+
+run_example 21_mac_python_info "Python Version:"
+
+run_example 34_mac_offline_build "Offline build test complete!"
+expect_absent "34_mac_offline_build reports no failed check" "ERROR"
+
+# The clipboard pair: same command, opposite ui policy. 25 is the positive
+# control that keeps 24 meaningful -- a pbcopy failing for any other reason
+# would otherwise read as enforcement.
+run_example 25_mac_ui_clipboard_enabled "PBCOPY_OK"
+expect_marker "25_mac_ui_clipboard_enabled reads the value back" "sandbox_clip_test"
+
+run_example 24_mac_ui_disabled "PBCOPY_DENIED"
+expect_marker "24_mac_ui_disabled cannot read the pasteboard" "PBPASTE_DENIED"
+expect_absent "24_mac_ui_disabled gets nothing back from pbpaste" "sandbox_clip_test"
 
 summary "Seatbelt examples"

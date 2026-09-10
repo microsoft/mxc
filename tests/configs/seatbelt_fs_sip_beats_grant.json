@@ -2,9 +2,18 @@
     "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
+    "_comment": "The write to /usr fails for an unprivileged user with or without SIP, so the probe reports errno instead of success/failure: rootless returns EPERM, ordinary permissions return EACCES. The two writes above it are the controls.",
     "process": {
-        "commandLine": "touch /usr/mxc-sip-probe && echo FS_SIP_WRITE_SUCCEEDED; echo FS_PROBE_DONE",
-        "timeout": 10000
+        "commandLine": "/usr/bin/python3 -c 'import errno, os\ndef probe(path):\n    try:\n        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))\n        return \"CREATED\"\n    except OSError as e:\n        return errno.errorcode.get(e.errno, str(e.errno))\nprint(\"FS_GRANT_WRITE_\" + probe(\"{{TESTDIR}}/rw/sip_control\"))\nprint(\"FS_DAC_\" + probe(\"{{TESTDIR}}/dac/sip_control\"))\nprint(\"FS_SIP_\" + probe(\"/usr/mxc-sip-probe\"))\nprint(\"FS_PROBE_DONE\")'",
+        "timeout": 20000
     },
-    "filesystem": { "readwritePaths": ["/usr"] }
+    "filesystem": {
+        "readwritePaths": [
+            "/usr",
+            "{{TESTDIR}}"
+        ],
+        "readonlyPaths": [
+            "{{DEVDIR}}"
+        ]
+    }
 }
