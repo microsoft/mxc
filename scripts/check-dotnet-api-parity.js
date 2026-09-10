@@ -262,9 +262,7 @@ const managedPolicy = read(
   "Microsoft.Mxc.Sdk",
   "SandboxPolicy.cs"
 );
-const rustOneShot = enumVariants(rustPolicy, "Containment", "rust").filter(
-  (variant) => variant !== "IsolationSession"
-);
+const rustOneShot = enumVariants(rustPolicy, "Containment", "rust");
 compare(
   "Rust SDK vs managed containment variants",
   managedDerivedTypes(managedRequest, "SandboxContainment").map((name) =>

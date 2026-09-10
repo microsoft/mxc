@@ -585,6 +585,53 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxRequest_SerializesIsolationSessionContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Experimental = true,
+            Containment = new IsolationSessionContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        // The native side derives this spelling from a serde attribute while the
+        // managed side names it in an attribute of its own.
+        Assert.Equal("isolationSession", containment.GetProperty("type").GetString());
+
+        // The backend takes no configuration, so the discriminator is the whole
+        // object.
+        Assert.Single(containment.EnumerateObject());
+    }
+
+    [Fact]
+    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Containment = new IsolationSessionContainment(),
+        };
+
+        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+
+        // Both refusals name the backend. Which of the two fires depends on
+        // whether the native library was built with the backend.
+        Assert.Contains(
+            nameof(ContainmentBackend.IsolationSession),
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.True(
+            exception.Code is ErrorCode.MalformedRequest
+                or ErrorCode.UnsupportedContainment,
+            $"unexpected refusal: {exception.Code}: {exception.Message}");
+    }
+
+    [Fact]
     public void SandboxPolicy_SerializesDirectionalNetworking()
     {
         var policy = new SandboxPolicy

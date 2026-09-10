@@ -80,6 +80,7 @@ public sealed class SandboxRequest
 [JsonDerivedType(typeof(ProcessContainment), "process")]
 [JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
 [JsonDerivedType(typeof(WslcContainment), "wslc")]
+[JsonDerivedType(typeof(IsolationSessionContainment), "isolationSession")]
 public abstract class SandboxContainment;
 
 /// <summary>
@@ -87,6 +88,13 @@ public abstract class SandboxContainment;
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
 public sealed class ProcessContainment : SandboxContainment;
+
+/// <summary>
+/// Experimental Windows IsolationSession backend, which runs the workload under
+/// an isolated agent user account.
+/// </summary>
+/// <remarks>Requires <see cref="SandboxRequest.Experimental"/>.</remarks>
+public sealed class IsolationSessionContainment : SandboxContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment

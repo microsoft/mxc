@@ -129,8 +129,8 @@ foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
 `GetPlatformSupport()` reports whether this public SDK can launch a sandbox and
 the backends it can launch. `GetAvailableBackends()` is broader: it reports
 every backend the host can run, including lifecycle-only backends such as
-Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
-strongest tier the host can reach; policy can still select a weaker tier.
+Windows Sandbox. Its ProcessContainer `Tier` is the strongest tier the host can
+reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
 `BackendCapability.CaptureDenials`.
 
@@ -283,7 +283,42 @@ var request = new SandboxRequest(
 The image must already be cached unless `ImageTarPath` is supplied. The image
 store wins over the tar when both identify an already-cached image. WSLC is
 experimental, so `Experimental` is required; the native unit must also be built
-with WSLC support or execution returns `BackendUnavailable`.
+with WSLC support or execution returns `UnsupportedContainment`.
+
+#### Isolation session options
+
+`IsolationSessionContainment` selects the experimental IsolationSession backend,
+which runs the workload under an isolated agent user account. It carries no
+configuration of its own:
+
+```csharp
+var request = new SandboxRequest(
+    new SandboxPolicy
+    {
+        Version = "0.9.0-alpha",
+        Network = new NetworkPolicy
+        {
+            AllowOutbound = true,
+            AllowLocalNetwork = true,
+        },
+    },
+    "echo hello")
+{
+    Experimental = true,
+    Containment = new IsolationSessionContainment(),
+};
+```
+
+The network policy is not optional here. The backend cannot restrict the
+container's network, so it accepts only an explicit acknowledgment of that and
+refuses an absent policy, whose default is a deny it could not enforce. It also
+refuses filesystem paths and any `Ui`: supplying either is an error rather than
+a no-op, so the policy shown under Usage does not carry over to this backend.
+
+IsolationSession is experimental, so `Experimental` is required; the native unit
+must also be built with isolation-session support or execution returns
+`UnsupportedContainment`. It is refused from a single-threaded apartment, so a
+GUI caller must reach it from an MTA thread.
 
 ### Network proxy
 
@@ -584,7 +619,7 @@ exception messages and stack traces. See
   judged by whoever runs them; each states what to look for.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
   need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
-  The isolation-session lifecycle tests skip unless `GetAvailableBackends()`
+  The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
   reports that backend, which needs both a build with
   `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
   `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
@@ -611,9 +646,10 @@ other Windows RID for a multi-RID package.
 Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`Spawn` → `MxcSandboxProcess`), and the **state-aware lifecycle**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
-ProcessContainer, Linux Bubblewrap, macOS Seatbelt for run/stream; the
-state-aware lifecycle supports IsolationSession, Windows Sandbox, and WSLC on
-Windows; all three are experimental).
+ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
+IsolationSession and WSLC for run/stream; the state-aware lifecycle supports
+IsolationSession, Windows Sandbox, and WSLC on Windows; all three are
+experimental).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
