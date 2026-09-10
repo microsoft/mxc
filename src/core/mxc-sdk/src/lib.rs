@@ -25,8 +25,7 @@
 //!     ui: None,
 //!     timeout_ms: None,
 //! };
-//! let mut request = build_request(&policy, None)?;
-//! request.set_script("echo hi");
+//! let request = build_request(&policy, "echo hi", None)?;
 //! let output = run(request)?;
 //! match output.outcome {
 //!     WaitOutcome::Exited(code) => println!("exit={code}"),
@@ -93,8 +92,8 @@
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-//! request.set_script("python3 -c 'print(42)'").set_experimental(true);
+//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! request.set_experimental(true);
 //! let output = run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```

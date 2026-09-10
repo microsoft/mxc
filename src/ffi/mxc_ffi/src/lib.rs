@@ -908,6 +908,24 @@ mod tests {
     }
 
     #[test]
+    fn empty_command_reports_malformed_request() {
+        let mut out = run_with(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#);
+        assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(!out.error.message_utf8.is_null());
+        assert!(out.stdout_utf8.is_null());
+        assert!(out.stderr_utf8.is_null());
+
+        // SAFETY: `out` was filled by `mxc_run_request`.
+        let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "script parameter is required");
+
+        // SAFETY: `out` was filled by `mxc_run_request`.
+        unsafe { mxc_run_result_free(&mut out) };
+    }
+
+    #[test]
     fn null_out_pointer_reports_null_argument_without_leaking() {
         let request =
             CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":"echo hi"}"#).unwrap();

@@ -24,8 +24,8 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: Some(10_000),
 };
-let mut request = build_request(&policy, None)?;
-request.set_script("echo hello").set_telemetry_opt_in(true);
+let mut request = build_request(&policy, "echo hello", None)?;
+request.set_telemetry_opt_in(true);
 
 let output = run(request)?;
 assert_eq!(output.outcome, WaitOutcome::Exited(0));
@@ -40,9 +40,9 @@ Ok(())
 
 [`build_request`] resolves the host's default containment backend (see
 [Supported backends](#supported-backends)), builds the wire config, and runs it
-through the shared parser. The returned [`SandboxRequest`] has an empty command
-line — set the command with [`SandboxRequest::set_script`] (and any working
-directory / env) before spawning.
+through the shared parser. The command is supplied to [`build_request`], so the
+returned [`SandboxRequest`] is complete; optionally adjust its working directory
+or environment before spawning.
 
 Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
 called. Enabling that per-invocation switch still requires persisted user
@@ -84,6 +84,7 @@ process_container.capture_denials = Some(CaptureDenials::default());
 let request = build_request_with_containment(
     &policy,
     &Containment::ProcessContainer(process_container),
+    "echo hello",
     None,
 )?;
 # Ok::<(), mxc_sdk::Error>(())
@@ -242,9 +243,8 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: None,
 };
-let mut request = build_request(&policy, None)?;
-request.set_script("cat"); // echoes stdin until EOF
-
+// echoes stdin until EOF
+let request = build_request(&policy, "cat", None)?;
 let mut proc = spawn_sandbox(request)?;
 let mut stdin = proc.take_stdin().unwrap();
 let mut stdout = proc.take_stdout().unwrap();
@@ -437,8 +437,13 @@ let policy = SandboxPolicy {
     filesystem: None, network: None, ui: None, timeout_ms: None,
 };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-request.set_script("python3 -c 'print(42)'").set_experimental(true);
+let mut request = build_request_with_containment(
+    &policy,
+    &Containment::Wslc(wslc),
+    "python3 -c 'print(42)'",
+    None,
+)?;
+request.set_experimental(true);
 let output = run(request)?;
 let _ = output;
 Ok(())

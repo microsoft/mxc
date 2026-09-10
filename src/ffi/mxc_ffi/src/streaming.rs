@@ -925,6 +925,29 @@ mod tests {
     }
 
     #[test]
+    fn spawn_empty_command_reports_malformed_request() {
+        let request =
+            CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#).unwrap();
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
+
+        // SAFETY: valid string and valid out pointers.
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(handle.is_null());
+        assert!(!err.message_utf8.is_null());
+
+        // SAFETY: `err` was filled by `mxc_spawn_request`.
+        let message = unsafe { std::ffi::CStr::from_ptr(err.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "script parameter is required");
+
+        // SAFETY: `err` was filled by `mxc_spawn_request` and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
+    }
+
+    #[test]
     fn spawn_null_error_out_is_tolerated() {
         let request = CString::new("{ not json").unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();

@@ -332,9 +332,12 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     let (policy, telemetry) = spec.policy.into_sdk()?;
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&policy, &containment, spec.container_name.as_deref())?;
-    request.set_script(spec.command);
+    let mut request = build_request_with_containment(
+        &policy,
+        &containment,
+        &spec.command,
+        spec.container_name.as_deref(),
+    )?;
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
