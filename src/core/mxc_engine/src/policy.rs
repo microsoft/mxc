@@ -588,6 +588,11 @@ impl WslcSection {
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
 /// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
+///
+/// Telemetry is intentionally not a policy field. It is invocation
+/// instrumentation rather than a sandbox restriction, matching the global
+/// sandbox-policy design. Build the request first, then use
+/// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxPolicy {
@@ -703,12 +708,20 @@ impl SandboxRequest {
     /// Enabling this per-request switch is necessary but not sufficient:
     /// telemetry still requires persisted user consent and an administrative
     /// policy that permits collection. It is independent of experimental mode.
-    pub fn set_telemetry_enabled(&mut self, enabled: bool) -> &mut Self {
+    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
             requested_sandbox_kind: Some(self.requested_sandbox_kind),
         });
         self
+    }
+
+    /// Return the explicit per-request telemetry switch for this invocation.
+    pub fn telemetry_enabled(&self) -> Option<bool> {
+        self.inner
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.enabled)
     }
 }
 
@@ -762,11 +775,7 @@ pub fn build_request_with_containment(
     containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    // The shared parser tolerates an empty schema version (treats it as
-    // "unset"), but the SDK requires it; reject it here for parity.
-    if policy.version.is_empty() {
-        return Err(MxcError::malformed_request("Policy version is required").into());
-    }
+    require_sdk_policy_version(policy)?;
     let config = build_wire_config(policy, containment, container_name)?;
 
     let mut logger = Logger::new(Mode::Buffer);
@@ -781,6 +790,15 @@ pub fn build_request_with_containment(
     })
 }
 
+fn require_sdk_policy_version(policy: &SandboxPolicy) -> Result<(), crate::Error> {
+    // The config parser treats an empty version as "unset", but the public SDK
+    // policy contract requires one.
+    if policy.version.is_empty() {
+        return Err(MxcError::malformed_request("Policy version is required").into());
+    }
+    Ok(())
+}
+
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 pub(crate) fn build_wire_config(
@@ -788,6 +806,15 @@ pub(crate) fn build_wire_config(
     containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
+    build_wire_config_with_network_format(policy, containment, container_name)
+        .map(|(config, _)| config)
+}
+
+fn build_wire_config_with_network_format(
+    policy: &SandboxPolicy,
+    containment: &Containment,
+    container_name: Option<&str>,
+) -> Result<(serde_json::Value, NetworkFormat), MxcError> {
     use serde_json::json;
 
     let container_id = container_name
@@ -943,7 +970,7 @@ pub(crate) fn build_wire_config(
             config["containment"] = serde_json::json!("isolation_session");
         }
     }
-    Ok(config)
+    Ok((config, network_format))
 }
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
@@ -1635,15 +1662,8 @@ mod tests {
         assert!(request.inner.telemetry.is_none());
         assert!(!request.inner.experimental_enabled);
 
-        request.set_telemetry_enabled(true);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
+        request.set_telemetry_opt_in(true);
+        assert_eq!(request.telemetry_enabled(), Some(true));
         assert_eq!(
             request
                 .inner
@@ -1657,15 +1677,8 @@ mod tests {
             "stable telemetry enablement must not opt into experimental features"
         );
 
-        request.set_telemetry_enabled(false);
-        assert_eq!(
-            request
-                .inner
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(false)
-        );
+        request.set_telemetry_opt_in(false);
+        assert_eq!(request.telemetry_enabled(), Some(false));
         assert!(!request.inner.experimental_enabled);
     }
 
@@ -1679,7 +1692,7 @@ mod tests {
         )
         .expect("build_request_with_containment");
 
-        request.set_telemetry_enabled(true);
+        request.set_telemetry_opt_in(true);
 
         assert_eq!(
             request

@@ -313,14 +313,7 @@ public static class MxcSandbox
     // obsolete CaptureDenials must be copied, or it is silently dropped from
     // any request that carries the legacy field.
     private static SandboxPolicy ClonePolicyWithoutCaptureDenials(SandboxPolicy policy) =>
-        new()
-        {
-            Version = policy.Version,
-            Filesystem = policy.Filesystem,
-            Network = policy.Network,
-            Ui = policy.Ui,
-            TimeoutMs = policy.TimeoutMs,
-        };
+        policy.WithoutLegacyCaptureDenials();
 
     private static bool CaptureDenialsEqual(
         CaptureDenialsPolicy left,

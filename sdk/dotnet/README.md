@@ -484,7 +484,9 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 1. the user has explicitly granted MXC-owned consent, and
 2. the caller opts this invocation in via telemetry settings.
 
-Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
+Telemetry remains off by default unless the caller opts in with
+`SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }` and
+applicable Windows consent/policy gates permit collection.
 
 When a telemetry-enabled Windows ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose artifact, telemetry can include its
@@ -492,21 +494,33 @@ sanitized technical signatures. It does not include commands, credentials,
 complete file paths, usernames, sandbox output, raw ETL, or general logger
 text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
 
-Any .NET consent surface should stay UI-agnostic, present the canonical
-resource verbatim through a host callback, persist only explicit yes/no
-decisions, treat dismissal and failures as non-grants, and follow the rules in
+The .NET consent APIs are UI-agnostic: `MxcTelemetry.RequestConsent` supplies
+the canonical resource to a host callback, while `GetConsentStatus`,
+`NeedsConsentPrompt`, and `WithdrawConsent` provide maintenance operations.
+They persist only explicit yes/no decisions and treat dismissal and failures
+as non-grants. See
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
+
+`RequestConsentAsync` cancellation is best-effort relative to persistence. It
+stops waiting for an unfinished presenter, but once a completed decision wins
+the race and native persistence begins, the persisted outcome is authoritative
+and is returned even if cancellation occurs concurrently. Cancellation does not
+cancel the host's presenter task.
 
 ### Administrative policy
 
 An IT administrator can still block MXC telemetry device-wide via MXC's own
 registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Policy and consent
-queries are not yet exposed by the .NET SDK; any eventual query must fail
-closed rather than upgrading an unreadable device state into collection.
+for the stable registry contract and interaction rules. Read-only queries fail
+closed rather than upgrading an unreadable device state into collection. When
+that fallback hides a native or parsing failure, the SDK reports a bounded set
+of distinct failure signatures through `System.Diagnostics.Trace`. Each
+signature is reported once; if a listener rejects it, a future occurrence may
+try again. Reports include the exception type and HRESULT or native error code,
+but exclude exception messages and stack traces.
 
 ## Projects
 

@@ -144,6 +144,8 @@
 
 mod sandbox;
 
+pub mod telemetry;
+
 pub use mxc_engine::configs;
 pub use mxc_engine::policy;
 pub use mxc_engine::{

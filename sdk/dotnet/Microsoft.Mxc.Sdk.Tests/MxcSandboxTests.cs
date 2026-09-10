@@ -827,6 +827,26 @@ public class MxcSandboxTests
                 .GetString());
     }
 
+    [Fact]
+    public void SerializeRequest_PreservesTelemetryInTheBindingPolicy()
+    {
+        var policy = CreateLegacyCaptureDenialsPolicy(
+            new CaptureDenialsPolicy(),
+            "0.9.0-alpha");
+        policy.Telemetry = new TelemetrySettings { Enabled = true };
+        var request = new SandboxRequest(policy, "echo hi");
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var root = doc.RootElement;
+
+        Assert.True(
+            root.GetProperty("policy")
+                .GetProperty("telemetry")
+                .GetProperty("enabled")
+                .GetBoolean());
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
+    }
+
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(
         CaptureDenialsPolicy captureDenials,
         string version = "0.8.0-alpha")
