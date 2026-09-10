@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk;
@@ -10,7 +9,6 @@ namespace Microsoft.Mxc.Sdk;
 /// A complete one-shot sandbox request. This is the managed counterpart of the
 /// Rust SDK's request built by <c>build_request_with_containment</c>.
 /// </summary>
-[JsonConverter(typeof(SandboxRequestJsonConverter))]
 public sealed class SandboxRequest
 {
     /// <summary>Create a request for <paramref name="command"/> under <paramref name="policy"/>.</summary>
@@ -23,63 +21,46 @@ public sealed class SandboxRequest
     }
 
     /// <summary>The cross-platform restrictions applied to the sandbox.</summary>
+    [JsonPropertyName("policy")]
     public SandboxPolicy Policy { get; }
 
     /// <summary>The command line to run.</summary>
+    [JsonPropertyName("command")]
     public string Command { get; }
 
     /// <summary>The containment backend and its backend-specific configuration.</summary>
+    [JsonPropertyName("containment")]
     public SandboxContainment Containment { get; set; } = new ProcessContainment();
 
     /// <summary>An optional caller-selected container name.</summary>
+    [JsonPropertyName("containerName")]
     public string? ContainerName { get; set; }
 
     /// <summary>An optional initial working directory.</summary>
+    [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables supplied to the sandboxed process.</summary>
+    [JsonPropertyName("environment")]
     public Dictionary<string, string> Environment { get; set; } = new();
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
+    [JsonPropertyName("experimental")]
     public bool Experimental { get; set; }
 }
 
-/// <summary>Reads and writes requests through MXC's canonical wire projection.</summary>
-public sealed class SandboxRequestJsonConverter : JsonConverter<SandboxRequest>
-{
-    /// <inheritdoc />
-    public override SandboxRequest Read(
-        ref Utf8JsonReader reader,
-        Type typeToConvert,
-        JsonSerializerOptions options) =>
-        CanonicalRequestBuilder.Deserialize(ref reader);
-
-    /// <inheritdoc />
-    public override void Write(
-        Utf8JsonWriter writer,
-        SandboxRequest value,
-        JsonSerializerOptions options)
-    {
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(value));
-        document.RootElement.WriteTo(writer);
-    }
-}
-
-/// <summary>
-/// A containment backend selected by a <see cref="SandboxRequest"/>.
-/// This is an authoring model; <see cref="MxcSandbox"/> performs its canonical
-/// wire projection.
-/// </summary>
+/// <summary>A containment backend selected by a <see cref="SandboxRequest"/>.</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
+[JsonDerivedType(typeof(ProcessContainment), "process")]
+[JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
+[JsonDerivedType(typeof(WslcContainment), "wslc")]
 public abstract class SandboxContainment;
 
 /// <summary>
 /// The host's native process-isolation backend: ProcessContainer on Windows,
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
-public sealed class ProcessContainment : SandboxContainment
-{
-    internal ProcessContainerContainment? CanonicalProcessContainer { get; set; }
-}
+public sealed class ProcessContainment : SandboxContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment

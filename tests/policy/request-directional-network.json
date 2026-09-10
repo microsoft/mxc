@@ -1,56 +1,41 @@
 {
-  "version": "0.8.0-alpha",
-  "containerId": "golden-directional-network",
-  "lifecycle": {
-    "destroyOnExit": true,
-    "preservePolicy": false
-  },
-  "process": {
-    "commandLine": "echo network",
-    "timeout": 0
-  },
-  "filesystem": {
-    "readwritePaths": [],
-    "readonlyPaths": [],
-    "deniedPaths": []
-  },
-  "network": {
-    "egress": {
-      "default": "deny",
-      "allow": [
-        {
-          "to": [
-            {
-              "cidr": "10.20.0.0/16",
-              "except": ["10.20.30.0/24"]
-            }
-          ],
-          "ports": [
-            {
-              "protocol": "tcp",
-              "port": 443,
-              "endPort": 444
-            }
-          ]
-        }
-      ]
-    },
-    "ingress": {
-      "default": "deny",
-      "hostLoopback": "deny"
+  "policy": {
+    "version": "0.8.0-alpha",
+    "network": {
+      "allowOutbound": false,
+      "allowLocalNetwork": false,
+      "allowedHosts": [],
+      "blockedHosts": [],
+      "egress": {
+        "default": "deny",
+        "allow": [
+          {
+            "to": [
+              {
+                "cidr": "10.20.0.0/16",
+                "except": ["10.20.30.0/24"]
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "tcp",
+                "port": 443,
+                "endPort": 444
+              }
+            ]
+          }
+        ]
+      },
+      "ingress": {
+        "default": "deny",
+        "hostLoopback": "deny"
+      }
     }
   },
-  "containment": "processcontainer",
-  "processContainer": {
-    "leastPrivilege": false,
-    "capabilities": [
-      "internetClient"
-    ],
-    "ui": {
-      "isolation": "container",
-      "desktopSystemControl": false,
-      "systemSettings": "none",
-      "ime": false
-    }
-  }
+  "command": "echo network",
+  "containment": {
+    "type": "process"
+  },
+  "environment": {},
+  "experimental": false
 }

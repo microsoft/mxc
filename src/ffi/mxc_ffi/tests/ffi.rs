@@ -27,7 +27,7 @@ fn extern_run_rejects_malformed_request() {
     let request = CString::new("not json").unwrap();
     let mut out = zeroed_result();
     // SAFETY: valid C string and a valid out pointer.
-    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
+    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert_eq!(out.status, status);
@@ -102,16 +102,18 @@ fn extern_streaming_warning_and_closer_preconditions_are_safe() {
 fn extern_run_request_maps_capture_denials_to_process_container() {
     let request = CString::new(
         r#"{
-            "version": "0.7.0-alpha",
-            "process": { "commandLine": "echo hi" },
-            "containment": "processcontainer",
-            "processContainer": { "captureDenials": {} }
+            "policy": { "version": "0.7.0-alpha" },
+            "command": "echo hi",
+            "containment": {
+                "type": "processContainer",
+                "captureDenials": {}
+            }
         }"#,
     )
     .unwrap();
     let mut out = zeroed_result();
     // SAFETY: a valid C string and writable result storage.
-    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
+    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     // SAFETY: the message is a valid C string filled by `mxc_run_request`.
@@ -133,7 +135,7 @@ fn extern_run_request_rejects_null_result_before_parsing() {
     // result pointer was checked.
     let invalid_utf8 = [0xff_u8, 0];
     // SAFETY: the byte buffer is NUL-terminated and the result pointer is null.
-    let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), 0, ptr::null_mut()) };
+    let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), ptr::null_mut()) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
 }
@@ -142,10 +144,12 @@ fn extern_run_request_rejects_null_result_before_parsing() {
 fn extern_spawn_request_maps_capture_denials_to_process_container() {
     let request = CString::new(
         r#"{
-            "version": "0.7.0-alpha",
-            "process": { "commandLine": "echo hi" },
-            "containment": "processcontainer",
-            "processContainer": { "captureDenials": {} }
+            "policy": { "version": "0.7.0-alpha" },
+            "command": "echo hi",
+            "containment": {
+                "type": "processContainer",
+                "captureDenials": {}
+            }
         }"#,
     )
     .unwrap();
@@ -153,7 +157,7 @@ fn extern_spawn_request_maps_capture_denials_to_process_container() {
     // SAFETY: `MxcErrorDetail` contains integers and nullable pointers.
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
     // SAFETY: valid request and writable fresh out-parameters.
-    let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut error) };
+    let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut error) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert!(handle.is_null());
@@ -178,15 +182,17 @@ fn extern_spawn_request_maps_capture_denials_to_process_container() {
 fn extern_run_executes_command() {
     let request = CString::new(
         r#"{
-            "version":"0.7.0-alpha",
-            "process":{"commandLine":"cmd /c echo hello-ffi"},
-            "filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}
+            "policy":{
+                "version":"0.7.0-alpha",
+                "filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}
+            },
+            "command":"cmd /c echo hello-ffi"
         }"#,
     )
     .unwrap();
     let mut out = zeroed_result();
     // SAFETY: valid C string and a valid out pointer.
-    let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
+    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS, "status={status}");
     assert_eq!(out.exit_code, 0);

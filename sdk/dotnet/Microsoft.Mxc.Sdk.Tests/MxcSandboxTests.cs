@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
@@ -55,7 +54,7 @@ public class MxcSandboxTests
                 Capabilities = ["internetClient"],
                 CaptureDenials = new CaptureDenialsPolicy
                 {
-                    OutputPath = "C:\\denials.json",
+                    OutputPath = "C:\\logs\\denials.json",
                     RetainEtl = true,
                 },
                 Ui = new ProcessContainerUiPolicy
@@ -113,11 +112,7 @@ public class MxcSandboxTests
                     },
                 },
             },
-            "echo network")
-        {
-            Containment = new ProcessContainerContainment(),
-            ContainerName = "golden-directional-network",
-        };
+            "echo network");
 
         var wslc = new SandboxRequest(
             new SandboxPolicy { Version = "0.8.0-alpha" },
@@ -144,267 +139,6 @@ public class MxcSandboxTests
             MxcSandbox.SerializeRequest(directionalNetwork),
             "request-directional-network.json");
         JsonAssert.MatchesGolden(MxcSandbox.SerializeRequest(wslc), "request-wslc.json");
-    }
-
-    [Fact]
-    public void SandboxRequest_SerializesCanonically()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
-            "printf compatibility")
-        {
-            Containment = new WslcContainment
-            {
-                Image = "alpine:3.20",
-            },
-            ContainerName = "serialization-compatibility",
-            Experimental = true,
-        };
-
-        var json = JsonSerializer.Serialize(request);
-        Assert.Equal(MxcSandbox.SerializeRequest(request), json);
-    }
-
-    [Theory]
-    [InlineData("request-process-container.json", typeof(ProcessContainerContainment))]
-    [InlineData("request-directional-network.json", typeof(ProcessContainerContainment))]
-    [InlineData("request-wslc.json", typeof(WslcContainment))]
-    public void SandboxRequest_DeserializesCanonicalGoldens(
-        string fixtureName,
-        Type expectedContainment)
-    {
-        var request = JsonSerializer.Deserialize<SandboxRequest>(
-            JsonAssert.ReadGolden(fixtureName));
-
-        Assert.NotNull(request);
-        Assert.IsType(expectedContainment, request.Containment);
-        if (expectedContainment == typeof(WslcContainment))
-        {
-            Assert.False(request.Experimental);
-        }
-        JsonAssert.MatchesGolden(JsonSerializer.Serialize(request), fixtureName);
-    }
-
-    [Fact]
-    public void SandboxRequest_RoundTripsCanonicalProcessRequest()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Filesystem = new FilesystemPolicy
-                {
-                    ReadwritePaths = [@"C:\work"],
-                    ClearPolicyOnExit = false,
-                },
-                Network = new NetworkPolicy
-                {
-                    AllowOutbound = true,
-                    AllowLocalNetwork = true,
-                    AllowedHosts = ["example.com"],
-                    Proxy = new LocalhostNetworkProxyPolicy(8080),
-                },
-                Telemetry = new TelemetrySettings { Enabled = true },
-                Ui = new UiPolicy
-                {
-                    AllowWindows = true,
-                    Clipboard = ClipboardPolicy.Write,
-                    AllowInputInjection = true,
-                },
-                TimeoutMs = 1234,
-            },
-            "echo roundtrip")
-        {
-            ContainerName = "roundtrip",
-            WorkingDirectory = @"C:\work",
-            Environment =
-            {
-                ["EMPTY"] = string.Empty,
-                ["WITH_EQUALS"] = "left=right",
-            },
-        };
-
-        var firstJson = JsonSerializer.Serialize(request);
-        var deserialized = JsonSerializer.Deserialize<SandboxRequest>(firstJson);
-
-        Assert.NotNull(deserialized);
-        Assert.Equal("left=right", deserialized.Environment["WITH_EQUALS"]);
-        Assert.True(deserialized.Policy.Telemetry!.Enabled);
-        Assert.Null(deserialized.Policy.Network!.Egress);
-        Assert.Null(deserialized.Policy.Network.Ingress);
-        var secondJson = JsonSerializer.Serialize(deserialized);
-        Assert.True(
-            JsonNode.DeepEquals(JsonNode.Parse(firstJson), JsonNode.Parse(secondJson)),
-            $"Canonical request changed after round trip.{Environment.NewLine}{secondJson}");
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("A=B")]
-    public void SandboxRequest_RejectsInvalidEnvironmentVariableNames(string name)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
-            "echo hi")
-        {
-            Environment = { [name] = "value" },
-        };
-
-        var exception = Assert.Throws<ArgumentException>(
-            () => JsonSerializer.Serialize(request));
-
-        Assert.Contains("environment variable name", exception.Message);
-    }
-
-    [Fact]
-    public void SandboxRequest_PreservesCanonicalProcessContainerForProcessContainment()
-    {
-        const string json = """
-            {
-              "version":"0.8.0-alpha",
-              "process":{"commandLine":"echo hi"},
-              "containment":"process",
-              "processContainer":{"leastPrivilege":false,"capabilities":[]}
-            }
-            """;
-
-        var request = JsonSerializer.Deserialize<SandboxRequest>(json);
-        var serialized = JsonSerializer.Serialize(request);
-
-        Assert.NotNull(request);
-        Assert.IsType<ProcessContainment>(request.Containment);
-        using var document = JsonDocument.Parse(serialized);
-        Assert.Equal(
-            "process",
-            document.RootElement.GetProperty("containment").GetString());
-        Assert.True(document.RootElement.TryGetProperty("processContainer", out _));
-    }
-
-    [Fact]
-    public void SandboxRequest_AcceptsAndIgnoresCanonicalMetadata()
-    {
-        const string json = """
-            {
-              "$schema":"https://example.test/mxc.schema.json",
-              "_comment":{"purpose":"test"},
-              "version":"0.8.0-alpha",
-              "process":{"commandLine":"echo hi"}
-            }
-            """;
-
-        var request = JsonSerializer.Deserialize<SandboxRequest>(json);
-        using var document = JsonDocument.Parse(JsonSerializer.Serialize(request));
-
-        Assert.NotNull(request);
-        Assert.False(document.RootElement.TryGetProperty("$schema", out _));
-        Assert.False(document.RootElement.TryGetProperty("_comment", out _));
-    }
-
-    [Theory]
-    [InlineData(
-        """
-        {
-          "version":"0.8.0-alpha",
-          "version":"0.8.0-alpha",
-          "process":{"commandLine":"echo hi"}
-        }
-        """,
-        "Duplicate canonical property")]
-    [InlineData(
-        """{"policy":{"version":"0.8.0-alpha"},"command":"echo legacy"}""",
-        "Unknown canonical property")]
-    [InlineData(
-        """
-        {
-          "version":"0.8.0-alpha",
-          "lifecycle":{"destroyOnExit":false},
-          "process":{"commandLine":"echo hi"}
-        }
-        """,
-        "destroyOnExit=false")]
-    [InlineData(
-        """
-        {
-          "version":"0.8.0-alpha",
-          "process":{"commandLine":"echo hi","env":["INVALID"]},
-          "containment":"process"
-        }
-        """,
-        "NAME=VALUE")]
-    [InlineData(
-        """
-        {
-          "version":"0.8.0-alpha",
-          "process":{"commandLine":"echo hi"},
-          "containment":"wslc",
-          "experimental":{
-            "wslc":{
-              "portMappings":[
-                {"windowsPort":8080,"containerPort":80,"protocol":"udp"}
-              ]
-            }
-          }
-        }
-        """,
-        "only TCP")]
-    public void SandboxRequest_RejectsUnsupportedDeserialization(
-        string json,
-        string expectedMessage)
-    {
-        var exception = Assert.Throws<JsonException>(
-            () => JsonSerializer.Deserialize<SandboxRequest>(json));
-
-        Assert.Contains(expectedMessage, exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ProcessContainment_PromotesHostRulesToFirewallOnLinux()
-    {
-        Assert.SkipUnless(OperatingSystem.IsLinux(), "Firewall promotion is Linux-specific");
-
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = new NetworkPolicy
-                {
-                    AllowOutbound = true,
-                    AllowedHosts = ["example.com"],
-                },
-            },
-            "echo network");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-
-        Assert.Equal(
-            "firewall",
-            document.RootElement.GetProperty("network").GetProperty("enforcementMode").GetString());
-    }
-
-    [Fact]
-    public void ProcessContainment_LeavesEnforcementModeUnsetForProxyOnLinux()
-    {
-        Assert.SkipUnless(OperatingSystem.IsLinux(), "Firewall promotion is Linux-specific");
-
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = new NetworkPolicy
-                {
-                    AllowOutbound = true,
-                    AllowedHosts = ["example.com"],
-                    Proxy = new UrlNetworkProxyPolicy("http://127.0.0.1:8080"),
-                },
-            },
-            "echo network");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-
-        Assert.False(
-            document.RootElement.GetProperty("network").TryGetProperty(
-                "enforcementMode",
-                out _));
     }
 
     [Fact]
@@ -607,13 +341,14 @@ public class MxcSandboxTests
         };
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = doc.RootElement;
-        var capture = root.GetProperty("processContainer").GetProperty("captureDenials");
+        var containment = root.GetProperty("containment");
+        var capture = containment.GetProperty("captureDenials");
 
-        Assert.Equal("processcontainer", root.GetProperty("containment").GetString());
+        Assert.Equal("processContainer", containment.GetProperty("type").GetString());
         Assert.Equal("block", capture.GetProperty("mode").GetString());
         Assert.False(capture.GetProperty("retainEtl").GetBoolean());
         Assert.False(capture.TryGetProperty("outputPath", out _));
-        Assert.False(root.TryGetProperty("captureDenials", out _));
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
     }
 
     [Fact]
@@ -631,15 +366,15 @@ public class MxcSandboxTests
 
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = doc.RootElement;
-        var processContainer = root.GetProperty("processContainer");
+        var containment = root.GetProperty("containment");
 
-        Assert.Equal("processcontainer", root.GetProperty("containment").GetString());
+        Assert.Equal("processContainer", containment.GetProperty("type").GetString());
         Assert.Equal(
             "allow",
-            processContainer.GetProperty("captureDenials").GetProperty("mode").GetString());
+            containment.GetProperty("captureDenials").GetProperty("mode").GetString());
         Assert.True(
-            processContainer.GetProperty("captureDenials").GetProperty("retainEtl").GetBoolean());
-        Assert.False(root.TryGetProperty("captureDenials", out _));
+            containment.GetProperty("captureDenials").GetProperty("retainEtl").GetBoolean());
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
         Assert.Same(originalContainment, request.Containment);
     }
 
@@ -690,12 +425,12 @@ public class MxcSandboxTests
         };
 
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        var processContainer = doc.RootElement.GetProperty("processContainer");
+        var containment = doc.RootElement.GetProperty("containment");
 
-        Assert.True(processContainer.GetProperty("leastPrivilege").GetBoolean());
+        Assert.True(containment.GetProperty("leastPrivilege").GetBoolean());
         Assert.Equal(
             captureDenials.OutputPath,
-            processContainer.GetProperty("captureDenials").GetProperty("outputPath").GetString());
+            containment.GetProperty("captureDenials").GetProperty("outputPath").GetString());
     }
 
     [Fact]
@@ -736,14 +471,12 @@ public class MxcSandboxTests
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = doc.RootElement;
 
-        Assert.Equal(
-            "echo hi",
-            root.GetProperty("process").GetProperty("commandLine").GetString());
-        Assert.Equal("process", root.GetProperty("containment").GetString());
-        Assert.Equal("test-container", root.GetProperty("containerId").GetString());
-        Assert.Equal(@"C:\work", root.GetProperty("process").GetProperty("cwd").GetString());
-        Assert.Equal("GREETING=hello", root.GetProperty("process").GetProperty("env")[0].GetString());
-        Assert.False(root.TryGetProperty("experimentalOptIn", out _));
+        Assert.Equal("echo hi", root.GetProperty("command").GetString());
+        Assert.Equal("process", root.GetProperty("containment").GetProperty("type").GetString());
+        Assert.Equal("test-container", root.GetProperty("containerName").GetString());
+        Assert.Equal(@"C:\work", root.GetProperty("workingDirectory").GetString());
+        Assert.Equal("hello", root.GetProperty("environment").GetProperty("GREETING").GetString());
+        Assert.True(root.GetProperty("experimental").GetBoolean());
     }
 
     [Fact]
@@ -778,7 +511,7 @@ public class MxcSandboxTests
         };
 
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        var containment = doc.RootElement.GetProperty("processContainer");
+        var containment = doc.RootElement.GetProperty("containment");
 
         Assert.True(containment.GetProperty("leastPrivilege").GetBoolean());
         Assert.True(containment.GetProperty("learningMode").GetBoolean());
@@ -813,10 +546,9 @@ public class MxcSandboxTests
         };
 
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        var root = doc.RootElement;
-        var containment = root.GetProperty("experimental").GetProperty("wslc");
+        var containment = doc.RootElement.GetProperty("containment");
 
-        Assert.Equal("wslc", root.GetProperty("containment").GetString());
+        Assert.Equal("wslc", containment.GetProperty("type").GetString());
         Assert.Equal("python:3.12", containment.GetProperty("image").GetString());
         Assert.Equal(4, containment.GetProperty("cpuCount").GetInt32());
         Assert.Equal(4096, containment.GetProperty("memoryMb").GetInt64());
@@ -825,8 +557,6 @@ public class MxcSandboxTests
             containment.GetProperty("portMappings")[0].GetProperty("windowsPort").GetInt32());
         Assert.Equal(80,
             containment.GetProperty("portMappings")[0].GetProperty("containerPort").GetInt32());
-        Assert.Equal("tcp",
-            containment.GetProperty("portMappings")[0].GetProperty("protocol").GetString());
     }
 
     [Fact]
@@ -886,49 +616,6 @@ public class MxcSandboxTests
             network.GetProperty("ingress").GetProperty("hostLoopback").GetString());
         Assert.Equal("http://127.0.0.1:8080",
             network.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString());
-    }
-
-    [Fact]
-    public void SandboxRequest_RejectsMixedLegacyAndDirectionalNetworking()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = new NetworkPolicy
-                {
-                    AllowOutbound = true,
-                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
-                },
-            },
-            "echo hi");
-
-        var exception = Assert.Throws<MxcException>(
-            () => MxcSandbox.SerializeRequest(request));
-
-        Assert.Equal(ErrorCode.MalformedRequest, exception.Code);
-        Assert.Contains("cannot be combined", exception.Message);
-    }
-
-    [Fact]
-    public void SandboxRequest_RejectsProcessContainerHostRulesWithoutOutbound()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.7.0-alpha",
-                Network = new NetworkPolicy { AllowedHosts = ["example.com"] },
-            },
-            "echo hi")
-        {
-            Containment = new ProcessContainerContainment(),
-        };
-
-        var exception = Assert.Throws<MxcException>(
-            () => MxcSandbox.SerializeRequest(request));
-
-        Assert.Equal(ErrorCode.MalformedRequest, exception.Code);
-        Assert.Contains("require allowOutbound", exception.Message);
     }
 
     [Fact]
@@ -1022,7 +709,7 @@ public class MxcSandboxTests
         var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
-        Assert.Contains("require schema version 0.8", ex.Message);
+        Assert.Contains("network egress/ingress/runtimeConfig", ex.Message);
     }
 
     [Theory]
@@ -1131,17 +818,17 @@ public class MxcSandboxTests
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = doc.RootElement;
 
-        Assert.False(root.TryGetProperty("captureDenials", out _));
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
         Assert.Equal(
             "block",
-            root.GetProperty("processContainer")
+            root.GetProperty("containment")
                 .GetProperty("captureDenials")
                 .GetProperty("mode")
                 .GetString());
     }
 
     [Fact]
-    public void SerializeRequest_PreservesTelemetryWhenMigratingLegacyCaptureDenials()
+    public void SerializeRequest_PreservesTelemetryInTheBindingPolicy()
     {
         var policy = CreateLegacyCaptureDenialsPolicy(
             new CaptureDenialsPolicy(),
@@ -1153,8 +840,11 @@ public class MxcSandboxTests
         var root = doc.RootElement;
 
         Assert.True(
-            root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
-        Assert.False(root.TryGetProperty("captureDenials", out _));
+            root.GetProperty("policy")
+                .GetProperty("telemetry")
+                .GetProperty("enabled")
+                .GetBoolean());
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
     }
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(

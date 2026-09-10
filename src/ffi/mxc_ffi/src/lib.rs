@@ -5,13 +5,12 @@
 //!
 //! This is the flat, panic-safe C surface loaded by language bindings.
 //!
-//! - **Run to completion** — [`mxc_run_request`] accepts a complete canonical
-//!   one-shot request.
+//! - **Run to completion** — [`mxc_run_request`] accepts a binding request.
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
-//!   complete canonical one-shot request and returns an opaque live handle.
+//!   same binding request and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
 //!   drives the envelope phases (provision / start / stop / deprovision), and
 //!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
@@ -35,8 +34,8 @@
 //!   ([`MXC_STATUS_PANIC`]), never an unwind across the boundary.
 //! - **Data contract**: JSON in, captured bytes + status out. The status codes
 //!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
-//! - **Per-invocation telemetry opt-in**: request JSON uses the canonical
-//!   top-level `telemetry.enabled` field.
+//! - **Per-invocation telemetry opt-in**: request JSON uses
+//!   `policy.telemetry.enabled`.
 //! - **Telemetry consent** — [`mxc_telemetry_get_consent`],
 //!   [`mxc_telemetry_get_consent_status`], [`mxc_telemetry_request_consent`],
 //!   [`mxc_telemetry_withdraw_consent`], [`mxc_telemetry_needs_consent_prompt`],
@@ -336,11 +335,7 @@ pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 
 /// Run a complete one-shot request to completion and capture its output.
 ///
-/// `request_json_utf8` is a canonical MXC configuration document.
-/// A nonzero `experimental` is the separate operational opt-in corresponding
-/// to the executor's `--experimental` flag. It is intentionally outside the
-/// document because the canonical `experimental` object carries backend
-/// configuration, not authorization to use experimental features.
+/// `request_json_utf8` is the co-versioned binding request document.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
@@ -349,18 +344,16 @@ pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 #[no_mangle]
 pub unsafe extern "C" fn mxc_run_request(
     request_json_utf8: *const c_char,
-    experimental: i32,
     out: *mut MxcRunResult,
 ) -> i32 {
     if out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
 
-    let result = catch_unwind(|| run_request_inner(request_json_utf8, experimental != 0))
-        .unwrap_or_else(|panic| {
-            report_panic("mxc_run_request", &*panic);
-            MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
-        });
+    let result = catch_unwind(|| run_request_inner(request_json_utf8)).unwrap_or_else(|panic| {
+        report_panic("mxc_run_request", &*panic);
+        MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable.
@@ -368,7 +361,7 @@ pub unsafe extern "C" fn mxc_run_request(
     status
 }
 
-fn run_request_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRunResult {
+fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
     // SAFETY: caller contract on `mxc_run_request`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(value) => value,
@@ -377,7 +370,7 @@ fn run_request_inner(request_json_utf8: *const c_char, experimental: bool) -> Mx
         }
         None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
     };
-    let request = match request::build_request_from_json(request_json, experimental) {
+    let request = match request::build_request_from_json(request_json) {
         Ok(request) => request,
         Err(error) => return MxcRunResult::from_sdk_error(&error),
     };
@@ -872,7 +865,7 @@ mod tests {
         let request = CString::new(request_json).unwrap();
         let mut out = MxcRunResult::empty();
         // SAFETY: a valid CString and out pointer.
-        let status = unsafe { mxc_run_request(request.as_ptr(), 0, &mut out) };
+        let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
         assert_eq!(status, out.status);
         out
     }
@@ -881,19 +874,19 @@ mod tests {
     fn shared_request_builder_propagates_telemetry_enablement() {
         for (request_json, expected) in [
             (
-                r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#,
+                r#"{"policy":{"version":"0.8.0-alpha"},"command":"echo hi"}"#,
                 None,
             ),
             (
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#,
+                r#"{"policy":{"version":"0.9.0-alpha","telemetry":{"enabled":true}},"command":"echo hi"}"#,
                 Some(true),
             ),
             (
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":false}}"#,
+                r#"{"policy":{"version":"0.9.0-alpha","telemetry":{"enabled":false}},"command":"echo hi"}"#,
                 Some(false),
             ),
         ] {
-            let request = request::build_request_from_json(request_json, false)
+            let request = request::build_request_from_json(request_json)
                 .unwrap_or_else(|_| panic!("request builder failed for {request_json}"));
             assert_eq!(
                 request.telemetry_enabled(),
@@ -917,10 +910,9 @@ mod tests {
     #[test]
     fn null_out_pointer_reports_null_argument_without_leaking() {
         let request =
-            CString::new(r#"{"version":"0.7.0-alpha","process":{"commandLine":"echo hi"}}"#)
-                .unwrap();
+            CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":"echo hi"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out pointer.
-        let status = unsafe { mxc_run_request(request.as_ptr(), 0, ptr::null_mut()) };
+        let status = unsafe { mxc_run_request(request.as_ptr(), ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
@@ -1029,18 +1021,18 @@ mod tests {
         result.free_strings();
     }
 
-    /// A structurally valid document with no command reaches the canonical
-    /// parser's SDK error path rather than failing in the FFI string boundary.
+    /// A structurally valid binding document with no command reaches the SDK
+    /// error path rather than failing in the FFI string boundary.
     #[test]
     fn a_failing_build_request_reports_the_sdk_error() {
-        let mut out = run_with(r#"{"version":"0.8.0-alpha","process":{}}"#);
+        let mut out = run_with(r#"{"policy":{"version":""},"command":"echo hi"}"#);
         assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);
         // SAFETY: `out` was filled by `mxc_run_request`.
         let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
             .to_str()
             .unwrap()
             .to_string();
-        assert!(message.contains("commandLine"));
+        assert_eq!(message, "Policy version is required");
         // SAFETY: `out` was filled by `mxc_run_request`.
         unsafe { mxc_run_result_free(&mut out) };
     }

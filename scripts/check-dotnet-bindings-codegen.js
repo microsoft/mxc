@@ -94,15 +94,15 @@ if (missing.length > 0) {
 }
 
 const requiredSignatures = [
-  "mxc_run_request(byte* request_json_utf8, int experimental, MxcRunResult* @out)",
-  "mxc_spawn_request(byte* request_json_utf8, int experimental, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+  "mxc_run_request(byte* request_json_utf8, MxcRunResult* @out)",
+  "mxc_spawn_request(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
 ];
 const missingSignatures = requiredSignatures.filter(
   (signature) => !content.includes(signature)
 );
 if (missingSignatures.length > 0) {
   console.error(
-    "ERROR: generated C# bindings have unexpected canonical request signature(s):\n  " +
+    "ERROR: generated C# bindings have unexpected request signature(s):\n  " +
       missingSignatures.join("\n  ")
   );
   process.exit(1);

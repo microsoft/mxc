@@ -111,8 +111,6 @@ pub struct MxcStreamCloser {
 ///
 /// Uses the same co-versioned request JSON contract as
 /// [`mxc_run_request`](crate::mxc_run_request).
-/// A nonzero `experimental` opts into experimental features separately from
-/// the canonical document's backend-configuration `experimental` object.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
@@ -123,7 +121,6 @@ pub struct MxcStreamCloser {
 #[no_mangle]
 pub unsafe extern "C" fn mxc_spawn_request(
     request_json_utf8: *const c_char,
-    experimental: i32,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -139,25 +136,20 @@ pub unsafe extern "C" fn mxc_spawn_request(
         return MXC_STATUS_NULL_ARGUMENT;
     }
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        spawn_request_inner(request_json_utf8, experimental != 0)
-    }))
-    .unwrap_or_else(|panic| {
-        crate::report_panic("mxc_spawn_request", &*panic);
-        Err((
-            MXC_STATUS_PANIC,
-            MxcErrorDetail::from_message("the mxc engine panicked"),
-        ))
-    });
+    let outcome = catch_unwind(AssertUnwindSafe(|| spawn_request_inner(request_json_utf8)))
+        .unwrap_or_else(|panic| {
+            crate::report_panic("mxc_spawn_request", &*panic);
+            Err((
+                MXC_STATUS_PANIC,
+                MxcErrorDetail::from_message("the mxc engine panicked"),
+            ))
+        });
 
     // SAFETY: `out_handle` is non-null and `out_error` is null or writable.
     unsafe { finish_spawn(outcome, out_handle, out_error) }
 }
 
-fn spawn_request_inner(
-    request_json_utf8: *const c_char,
-    experimental: bool,
-) -> Result<Sandbox, (i32, MxcErrorDetail)> {
+fn spawn_request_inner(request_json_utf8: *const c_char) -> Result<Sandbox, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn_request`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(value) => value,
@@ -174,8 +166,7 @@ fn spawn_request_inner(
             ))
         }
     };
-    let request =
-        request::build_request_from_json(request_json, experimental).map_err(sdk_error_detail)?;
+    let request = request::build_request_from_json(request_json).map_err(sdk_error_detail)?;
     spawn_sandbox(request).map_err(sdk_error_detail)
 }
 
@@ -899,7 +890,7 @@ mod tests {
         let request = request("echo hi");
         // SAFETY: valid string, deliberately-null out_handle.
         let status =
-            unsafe { mxc_spawn_request(request.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
+            unsafe { mxc_spawn_request(request.as_ptr(), ptr::null_mut(), ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
@@ -908,7 +899,7 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: null request pointer is explicitly handled.
-        let status = unsafe { mxc_spawn_request(ptr::null(), 0, &mut handle, &mut err) };
+        let status = unsafe { mxc_spawn_request(ptr::null(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
         assert!(handle.is_null());
         assert!(
@@ -925,7 +916,7 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and valid out pointers.
-        let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut err) };
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
         assert!(!err.message_utf8.is_null());
@@ -938,8 +929,7 @@ mod tests {
         let request = CString::new("{ not json").unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         // SAFETY: valid string; null out_error must be tolerated.
-        let status =
-            unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, ptr::null_mut()) };
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
     }
@@ -1065,7 +1055,7 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut err) };
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
         assert!(!handle.is_null());
 
@@ -1118,7 +1108,7 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut err) };
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
 
         // SAFETY: live handle.
@@ -1177,7 +1167,7 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_spawn_request(request.as_ptr(), 0, &mut handle, &mut err) };
+        let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
 
         // Child should still be running.

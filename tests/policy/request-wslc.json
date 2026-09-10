@@ -1,38 +1,24 @@
 {
-  "version": "0.8.0-alpha",
-  "containerId": "golden-wslc",
-  "lifecycle": {
-    "destroyOnExit": true,
-    "preservePolicy": false
+  "policy": {
+    "version": "0.8.0-alpha"
   },
-  "process": {
-    "commandLine": "printf parity",
-    "timeout": 0
+  "command": "printf parity",
+  "containment": {
+    "type": "wslc",
+    "image": "alpine:3.20",
+    "imageTarPath": "C:\\images\\alpine.tar",
+    "cpuCount": 2,
+    "memoryMb": 1024,
+    "gpu": true,
+    "storagePath": "C:\\wslc",
+    "portMappings": [
+      {
+        "windowsPort": 8080,
+        "containerPort": 80
+      }
+    ]
   },
-  "filesystem": {
-    "readwritePaths": [],
-    "readonlyPaths": [],
-    "deniedPaths": []
-  },
-  "network": {
-    "defaultPolicy": "block"
-  },
-  "containment": "wslc",
-  "experimental": {
-    "wslc": {
-      "image": "alpine:3.20",
-      "imageTarPath": "C:\\images\\alpine.tar",
-      "cpuCount": 2,
-      "memoryMb": 1024,
-      "gpu": true,
-      "storagePath": "C:\\wslc",
-      "portMappings": [
-        {
-          "windowsPort": 8080,
-          "containerPort": 80,
-          "protocol": "tcp"
-        }
-      ]
-    }
-  }
+  "containerName": "golden-wslc",
+  "environment": {},
+  "experimental": true
 }

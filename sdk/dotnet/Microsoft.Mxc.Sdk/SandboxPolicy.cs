@@ -58,7 +58,7 @@ public sealed class SandboxPolicy
     public uint? TimeoutMs { get; set; }
 
     /// <summary>
-    /// Canonical per-invocation telemetry settings serialized as
+    /// Per-invocation telemetry settings serialized in the binding policy as
     /// <c>{"telemetry":{"enabled":...}}</c>.
     /// </summary>
     [JsonPropertyName("telemetry")]
