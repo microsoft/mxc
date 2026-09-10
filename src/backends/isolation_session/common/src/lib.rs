@@ -9,7 +9,11 @@
 //!
 //! Trait impls split by lifecycle shape:
 //! - `one_shot`: `ScriptRunner` — provision → start → exec → stop →
-//!   deprovision in a single process.
+//!   deprovision in a single process, relaying the workload onto this
+//!   process's stdio.
+//! - `sandbox`: `SandboxBackend` — the same one-shot lifecycle for an
+//!   in-process caller, handing back live pipes and reclaiming the session
+//!   when the exec reaches a terminal state.
 //! - `state_aware`: `StatefulSandboxBackend` — per-phase methods called
 //!   across multiple `wxc-exec` invocations by an external orchestrator.
 
@@ -31,6 +35,10 @@ mod pipe_relay;
 mod policy;
 #[cfg(target_os = "windows")]
 mod process_options;
+#[cfg(target_os = "windows")]
+mod sandbox;
+#[cfg(target_os = "windows")]
+pub use sandbox::{spawn_one_shot, OneShotSpawnFailure};
 #[cfg(target_os = "windows")]
 mod sandbox_id;
 #[cfg(target_os = "windows")]

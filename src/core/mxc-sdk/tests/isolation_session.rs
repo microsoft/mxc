@@ -3,9 +3,8 @@
 
 //! IsolationSession reachability from the Rust SDK.
 //!
-//! Host-independent tests pin the refusals; host-dependent ones drive the
-//! state-aware lifecycle against a real isolation session and skip when the
-//! backend is unavailable, so this file is safe to run on any host.
+//! Host-dependent tests skip when the backend is unavailable, so this file is
+//! safe to run on any host.
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
@@ -15,6 +14,13 @@ use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
 /// The network acknowledgment this backend requires; an absent policy is
 /// refused.
 fn iso_policy() -> SandboxPolicy {
+    iso_policy_with_deadline(None)
+}
+
+/// The same policy with a workload deadline, for a test whose workload waits on
+/// the harness: if the handshake never lands, the deadline is what ends the run
+/// instead of the test waiting on a process that will not exit.
+fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
     let mut network = NetworkSection::default();
     network.allow_outbound = true;
     network.allow_local_network = true;
@@ -24,7 +30,7 @@ fn iso_policy() -> SandboxPolicy {
         filesystem: None,
         network: Some(network),
         ui: None,
-        timeout_ms: None,
+        timeout_ms,
     }
 }
 
@@ -105,49 +111,549 @@ fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
     );
 }
 
+/// The experimental gate fires before any host work, so this is
+/// host-independent: it is the same refusal on a machine with no OS-side
+/// service. Both entry points are checked because `run` is `spawn` plus a wait,
+/// and a gate applied to only one of them would still read as covered.
 #[test]
-fn one_shot_run_refuses_the_backend() {
+fn one_shot_requires_the_experimental_optin() {
+    for (name, spawned) in [
+        ("run", {
+            let request = build_request_with_containment(
+                &iso_policy(),
+                &Containment::IsolationSession,
+                "echo hi",
+                None,
+            )
+            .expect("building the request must succeed — the gate is at dispatch");
+            mxc_sdk::run(request).err().map(|e| e.code)
+        }),
+        ("spawn_sandbox", {
+            let request = build_request_with_containment(
+                &iso_policy(),
+                &Containment::IsolationSession,
+                "echo hi",
+                None,
+            )
+            .expect("building the request must succeed — the gate is at dispatch");
+            // `Sandbox` is not `Debug`, so map rather than `expect_err`.
+            match mxc_sdk::spawn_sandbox(request) {
+                Ok(_) => None,
+                Err(err) => Some(err.code),
+            }
+        }),
+    ] {
+        assert_eq!(
+            spawned,
+            Some(ErrorCode::MalformedRequest),
+            "{name} must refuse an experimental backend without the opt-in"
+        );
+    }
+}
+
+/// The one-shot surface reaches the backend and returns the workload's output.
+/// A policy this backend cannot honor is reported as a policy rejection rather
+/// than a generic backend failure.
+///
+/// The refusal is raised before any OS call, so this runs on any host — and the
+/// classification is the point: the library boundary must not flatten a
+/// caller-fixable refusal into an opaque backend error.
+#[test]
+fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
+    let policy = SandboxPolicy {
+        version: "0.7.0-alpha".to_string(),
+        filesystem: None,
+        // The backend cannot filter the container's network, so it accepts only
+        // an explicit acknowledgment; an absent policy reads as a deny it has no
+        // way to enforce.
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
     let mut request = build_request_with_containment(
-        &iso_policy(),
+        &policy,
         &Containment::IsolationSession,
-        "cmd.exe /c echo hi",
+        "echo unreachable",
         None,
     )
-    .expect("building the request must succeed — the refusal is at dispatch, not build");
+    .expect("building the request must succeed");
     request.set_experimental(true);
 
-    let err = mxc_sdk::run(request).expect_err("one-shot run must refuse IsolationSession");
+    let err = match mxc_sdk::spawn_sandbox(request) {
+        Ok(_) => panic!("the policy must be refused"),
+        Err(e) => e,
+    };
     assert_eq!(
         err.code,
-        ErrorCode::UnsupportedContainment,
-        "expected an unsupported-containment refusal, got {:?}: {}",
-        err.code,
-        err.message
+        ErrorCode::PolicyValidation,
+        "a refusal raised before any OS call must keep its own code: {err:?}"
     );
 }
 
 #[test]
-fn one_shot_spawn_refuses_the_backend() {
+fn one_shot_run_captures_output() {
+    skip_unless_supported!();
     let mut request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
-        "cmd.exe /c echo hi",
+        "echo marker-oneshot",
         None,
     )
-    .expect("building the request must succeed — the refusal is at dispatch, not build");
+    .expect("building the request must succeed");
     request.set_experimental(true);
 
-    // `Sandbox` is not `Debug`, so match rather than `expect_err`.
-    match mxc_sdk::spawn_sandbox(request) {
-        Ok(_) => panic!("streaming spawn must refuse IsolationSession"),
-        Err(err) => assert_eq!(
-            err.code,
-            ErrorCode::UnsupportedContainment,
-            "expected an unsupported-containment refusal, got {:?}: {}",
-            err.code,
-            err.message
-        ),
+    let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
+    assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("marker-oneshot"),
+        "the workload's stdout must reach the caller, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// A one-shot exec's exit code reaches the caller unchanged. Paired with the
+/// test above so a backend that always reported success could not satisfy both.
+#[test]
+fn one_shot_run_propagates_a_nonzero_exit() {
+    skip_unless_supported!();
+    let mut request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "exit 7",
+        None,
+    )
+    .expect("building the request must succeed");
+    request.set_experimental(true);
+
+    let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
+    assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(7));
+}
+
+/// What a held sibling established. Kept apart so a failure names which one
+/// broke.
+struct Held {
+    quiet: bool,
+    released: bool,
+    answered: bool,
+    stream_ended: bool,
+}
+
+impl Held {
+    /// Run 0 is never held, so it has nothing to establish.
+    fn not_held() -> Self {
+        Self {
+            quiet: true,
+            released: true,
+            answered: true,
+            stream_ended: false,
+        }
     }
+}
+
+/// The cross-talk this guards is one run's teardown reaching a sibling that is
+/// still executing, which one-shot invites because teardown is automatic rather
+/// than caller-driven.
+///
+/// `whoami` makes the isolation claim checkable: identical accounts would mean a
+/// shared identity that comparing markers could never reveal.
+///
+/// The overlap is ordered rather than assumed. Each sibling blocks *in its own
+/// workload* on a line from stdin. Run 0 does not tear down until every sibling
+/// is running, and no sibling is released until that teardown has returned — so
+/// each was alive across it, not merely near it. A released sibling must then
+/// answer, and nothing may have arrived while it was held, so the answer cannot
+/// be a line produced earlier. A sibling whose session had been reached would
+/// fall silent, lose its marker, or exit non-zero.
+#[test]
+fn concurrent_one_shot_runs_stay_isolated() {
+    skip_unless_supported!();
+    const RUNS: usize = 3;
+    const BEAT: std::time::Duration = std::time::Duration::from_secs(90);
+    /// Written to a held sibling to release it, and echoed back to prove the
+    /// line arrived. Distinct from the variable's name on purpose.
+    const RELEASE_TOKEN: &str = "PROCEED";
+    /// Backstop for the workloads themselves. A sibling waits on the harness,
+    /// so a handshake that never lands would otherwise leave it running and the
+    /// wait for it unbounded. Far above any healthy run.
+    const WORKLOAD_DEADLINE_MS: u32 = 300_000;
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    // Run 0 is held until every sibling has announced, so its teardown happens
+    // while they are known to be running, and it announces when that teardown
+    // has returned so nothing releases a sibling before it has.
+    let (tear_down_tx, tear_down_rx) = std::sync::mpsc::channel::<()>();
+    let tear_down_rx = std::sync::Arc::new(std::sync::Mutex::new(tear_down_rx));
+    let (torn_down_tx, torn_down_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+
+    let threads: Vec<_> = (0..RUNS)
+        .map(|i| {
+            let started_tx = started_tx.clone();
+            let torn_down_tx = torn_down_tx.clone();
+            let tear_down_rx = std::sync::Arc::clone(&tear_down_rx);
+            let release_rx = std::sync::Arc::clone(&release_rx);
+            std::thread::spawn(move || {
+                let marker = format!("marker-concurrent-{i}");
+                // Run 0 finishes immediately so its teardown is what the others
+                // are held across. A sibling announces, blocks on stdin, and
+                // only identifies itself once released. `call echo` forces a
+                // run-time expansion pass, so the echoed value is the one read
+                // rather than the empty string cmd substitutes at parse time.
+                let script = if i == 0 {
+                    format!("echo started-{i} & whoami & echo {marker}")
+                } else {
+                    format!(
+                        "echo started-{i} & set /p GO= & call echo released-%%GO%% \
+                         & whoami & echo {marker}"
+                    )
+                };
+                let mut request = build_request_with_containment(
+                    &iso_policy_with_deadline(Some(WORKLOAD_DEADLINE_MS)),
+                    &Containment::IsolationSession,
+                    &script,
+                    None,
+                )
+                .expect("building the request must succeed");
+                request.set_experimental(true);
+
+                let mut sandbox =
+                    mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+                let mut stdin = sandbox.take_stdin();
+                let stdout = sandbox.take_stdout().expect("stdout");
+
+                // Read on its own thread so the hold can be shown to be silent:
+                // an unread pipe cannot be distinguished from a quiet one.
+                let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+                let pump = std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let mut reader = std::io::BufReader::new(stdout);
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {
+                                if line_tx.send(line).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let mut collected = String::new();
+                let first = line_rx.recv_timeout(BEAT).expect("started marker");
+                collected.push_str(&first);
+                started_tx.send(i).expect("the harness must be listening");
+
+                if i == 0 {
+                    while let Ok(line) = line_rx.recv_timeout(BEAT) {
+                        collected.push_str(&line);
+                    }
+                    // Held until every sibling has announced, so the teardown
+                    // below lands while they are running rather than possibly
+                    // before they exist.
+                    tear_down_rx
+                        .lock()
+                        .expect("teardown gate")
+                        .recv_timeout(BEAT)
+                        .expect("every sibling must announce before run 0 tears down");
+                    let outcome = sandbox.wait().expect("wait");
+                    drop(sandbox);
+                    for _ in 1..RUNS {
+                        let _ = torn_down_tx.send(());
+                    }
+                    let _ = pump.join();
+                    return (marker, outcome, collected, Held::not_held());
+                }
+
+                // Held in its own workload until run 0's teardown has returned.
+                release_rx
+                    .lock()
+                    .expect("release channel")
+                    .recv_timeout(BEAT)
+                    .expect("run 0 must finish and tear down");
+
+                // Silence proof: nothing may have arrived while held. Without
+                // it, a sibling that ignored its gate would have produced its
+                // answer early, and the read below would return that buffered
+                // line rather than a live one.
+                //
+                // A disconnect is neither silence nor speech: the sibling's
+                // stdout has closed, which is what a session reached by run 0's
+                // teardown looks like. Recorded on its own so the report does
+                // not accuse a dead sibling of speaking.
+                use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+                let (quiet, mut stream_ended) = match line_rx.try_recv() {
+                    Err(TryRecvError::Empty) => (true, false),
+                    Err(TryRecvError::Disconnected) => (true, true),
+                    Ok(_) => (false, false),
+                };
+
+                use std::io::Write as _;
+                let stdin = stdin.as_mut().expect("this backend forwards stdin");
+                // A sibling whose session was reached has no reader left, so
+                // this can fail. Recorded rather than raised: a panic here would
+                // take the thread down and lose every diagnostic below.
+                let released = writeln!(stdin, "{RELEASE_TOKEN}")
+                    .and_then(|()| stdin.flush())
+                    .is_ok();
+
+                // The answer arrives only after the release, and the token
+                // differs from the variable's name on purpose: an unset variable
+                // echoes the name back, which would otherwise read as an answer.
+                //
+                // A timeout means the sibling is still blocked in its read and
+                // will not exit on its own. End it before draining, so the drain
+                // completes at EOF rather than waiting out its own timeout. A
+                // disconnect means it is already gone and a reply means it is
+                // past that read, so neither needs ending.
+                let answered = match line_rx.recv_timeout(BEAT) {
+                    Ok(line) => {
+                        let ok = line.contains(RELEASE_TOKEN);
+                        collected.push_str(&line);
+                        ok
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        let _ = sandbox.kill();
+                        false
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        stream_ended = true;
+                        false
+                    }
+                };
+                while let Ok(line) = line_rx.recv_timeout(BEAT) {
+                    collected.push_str(&line);
+                }
+                let outcome = sandbox.wait().expect("wait");
+                let _ = pump.join();
+                (
+                    marker,
+                    outcome,
+                    collected,
+                    Held {
+                        quiet,
+                        released,
+                        answered,
+                        stream_ended,
+                    },
+                )
+            })
+        })
+        .collect();
+
+    // Every run is executing, not merely spawned. Only then is run 0 allowed to
+    // tear down, so its teardown lands while the siblings are running.
+    for _ in 0..RUNS {
+        started_rx
+            .recv_timeout(BEAT)
+            .expect("every run must report that it started");
+    }
+    tear_down_tx
+        .send(())
+        .expect("run 0 must still be waiting to tear down");
+    // Release only once run 0's teardown has returned, so every sibling was
+    // held across it rather than merely near it.
+    torn_down_rx
+        .recv_timeout(BEAT)
+        .expect("run 0 must tear its session down");
+    for _ in 1..RUNS {
+        release_tx
+            .send(())
+            .expect("every sibling must still be waiting");
+    }
+
+    let mut failures = Vec::new();
+    let mut accounts = Vec::new();
+    for thread in threads {
+        let (marker, outcome, stdout, held) = thread.join().expect("a run thread must not panic");
+        if outcome != mxc_sdk::WaitOutcome::Exited(0) {
+            failures.push(format!("{marker}: outcome was {outcome:?}"));
+        }
+        if !stdout.contains(&marker) {
+            failures.push(format!("{marker}: got back {stdout:?}"));
+        }
+        if !held.quiet {
+            failures.push(format!(
+                "{marker}: produced output while it was supposed to be held, so its later \
+                 answer proves nothing"
+            ));
+        }
+        if held.stream_ended {
+            failures.push(format!("{marker}: its output ended before it answered"));
+        }
+        if !held.released {
+            failures.push(format!("{marker}: could not be sent its release"));
+        }
+        if !held.answered {
+            failures.push(format!(
+                "{marker}: did not answer after run 0 tore its session down, got back {stdout:?}"
+            ));
+        }
+        match stdout.lines().find(|l| l.contains('\\')) {
+            Some(line) => accounts.push(account_of(line)),
+            None => failures.push(format!("{marker}: no whoami line in {stdout:?}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "every concurrent run must return its own output: {failures:?}"
+    );
+    accounts.sort();
+    accounts.dedup();
+    assert_eq!(
+        accounts.len(),
+        RUNS,
+        "each concurrent run must get its own agent account"
+    );
+}
+
+/// A handle finished on a single-threaded apartment still tears its session
+/// down.
+///
+/// The handle is `Send`, so a caller may hand it to a thread that has an
+/// apartment — a UI thread is the obvious case. Teardown runs wherever the
+/// handle is finished, and the platform refuses those calls from the wrong
+/// apartment with `RPC_E_WRONG_THREAD` (`0x8001010e`), so it must not run
+/// there. `kill` reports whether the session stopped, which is what that
+/// refusal breaks.
+#[test]
+fn one_shot_finished_on_an_sta_thread_still_tears_down() {
+    skip_unless_supported!();
+    let mut request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "ping -n 300 127.0.0.1",
+        None,
+    )
+    .expect("building the request must succeed");
+    request.set_experimental(true);
+
+    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        enter_sta();
+        let _ = tx.send(sandbox.kill().map_err(|e| e.to_string()));
+    });
+
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .expect("kill on an STA thread must return rather than block")
+        .expect("kill on an STA thread must still stop the session");
+}
+
+/// An abandoned handle's teardown completes without blocking.
+///
+/// A caller that drops the handle without waiting has still provisioned a real
+/// OS account and left a workload running, and nothing else will reach either.
+/// Teardown runs inside the drop, so a bounded return is the assertion. Whether
+/// it *succeeded* is not observable here — the surface returns no identity to
+/// attribute an account to.
+#[test]
+fn an_abandoned_one_shot_handle_completes_teardown() {
+    skip_unless_supported!();
+    let mut request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "ping -n 300 127.0.0.1",
+        None,
+    )
+    .expect("building the request must succeed");
+    request.set_experimental(true);
+
+    let sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(sandbox);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .expect("dropping an abandoned handle must return rather than park");
+}
+/// `kill` ends the workload, and the workload is really gone afterwards.
+///
+/// A kill the platform *accepts* is not a kill that took effect, so the exit
+/// code the handle reports cannot answer "did anything actually stop?". The
+/// workload answers instead: it heartbeats to its own stdout, so a line proves
+/// it was running and **EOF proves it stopped**. The handle is held across that
+/// assertion, because dropping it would tear the session down and produce the
+/// same EOF without `kill` having done anything.
+#[test]
+fn one_shot_kill_stops_the_workload() {
+    skip_unless_supported!();
+    // Long enough that a prompt EOF proves the kill worked, rather than racing
+    // a workload that was about to exit anyway.
+    let mut request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "for /l %i in (1,1,300) do (echo beat & ping -n 2 127.0.0.1 >nul)",
+        None,
+    )
+    .expect("building the request must succeed");
+    request.set_experimental(true);
+
+    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+    let stdout = sandbox.take_stdout().expect("stdout must be available");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let drain = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut first = String::new();
+        let beat = reader
+            .read_line(&mut first)
+            .ok()
+            .filter(|n| *n > 0)
+            .is_some();
+        let _ = tx.send(beat);
+        // Runs to EOF, which only arrives once nothing holds the stream. A read
+        // error is reported rather than collapsed to 0, which would end the
+        // loop and read exactly like the EOF this test is waiting for.
+        let mut rest = Vec::new();
+        loop {
+            match reader.read_until(b'\n', &mut rest) {
+                Ok(0) => return Ok(()),
+                Ok(_) => rest.clear(),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    });
+
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the workload must produce a heartbeat before the kill"),
+        "the workload must be running before the kill, or this test cannot fail"
+    );
+
+    // Bounded, because teardown has been seen to block on a platform call that
+    // never returns. The handle comes back so this test, not the worker, decides
+    // when it drops.
+    let (killed_tx, killed_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = sandbox.kill().map_err(|e| e.to_string());
+        let _ = killed_tx.send((outcome, sandbox));
+    });
+    let (killed, sandbox) = killed_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("kill must return rather than block");
+    killed.expect("kill must be accepted and take effect");
+
+    // A surviving workload keeps its stdout open, so this join is what would
+    // never return; the bound turns that into a failure.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(drain.join());
+    });
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the workload's stdout must reach EOF after the kill, proving it stopped")
+        .expect("the drain thread must not panic")
+        .expect("the workload's stdout must end in EOF, not a read error");
+
+    drop(sandbox);
 }
 
 /// Provision mints a real OS account; a failure before deprovision leaks it onto

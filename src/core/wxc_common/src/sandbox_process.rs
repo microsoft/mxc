@@ -69,10 +69,14 @@ use crate::validator::{validate_common, validate_network_policy_support, Network
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
     /// Warnings associated with this sandbox, such as a policy that
-    /// intentionally relaxes containment or an unavailable telemetry route.
-    /// The default is empty.
-    fn warnings(&self) -> &[String] {
-        &[]
+    /// intentionally relaxes containment, an unavailable telemetry route, or a
+    /// cleanup step that failed after the process exited.
+    ///
+    /// Owned rather than borrowed so a wrapper can merge its own warnings with
+    /// the ones it wraps at the moment of the call. A snapshot taken when the
+    /// wrapper was built would freeze out anything reported later.
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Structured outputs available after the process has reached a terminal

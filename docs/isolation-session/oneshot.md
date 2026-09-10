@@ -228,7 +228,7 @@ versions and stating that the bindings must be regenerated.
 - `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
   in-proc API exposes no session-lifetime knob, so the backend cannot vary
   teardown: the one-shot path always stops the session and removes the agent
-  user before returning. `destroyOnExit: true` (the default) is therefore
+  user. `destroyOnExit: true` (the default) is therefore
   accepted because it matches actual behavior; `false` is refused. There is no
   filesystem or network policy to preserve (both are rejected outright), so
   `preservePolicy: true` is refused as meaningless here.
@@ -356,7 +356,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
-| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
+| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user |
 
 ## Prerequisites
 

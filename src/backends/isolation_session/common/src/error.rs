@@ -196,6 +196,26 @@ pub(super) enum IsolationSessionError {
     Stale(IsoApiFailure),
 }
 
+impl IsolationSessionError {
+    /// Appends context to the message this carries, keeping the variant and
+    /// every structured field.
+    ///
+    /// Rebuilding the error as a message-only variant instead would drop the
+    /// failing API call, its status and its remediation, and would demote a
+    /// stale-id failure to a generic backend error.
+    pub(super) fn with_context(mut self, context: &str) -> Self {
+        let message = match &mut self {
+            Self::Policy(message) => message,
+            Self::ServiceUnavailable(failure) | Self::Stale(failure) => &mut failure.message,
+            Self::Lifecycle(LifecycleFailure::Api(failure)) => &mut failure.message,
+            Self::Lifecycle(LifecycleFailure::Internal(message)) => message,
+            Self::Lifecycle(LifecycleFailure::Refused { message, .. }) => message,
+        };
+        message.push_str(context);
+        self
+    }
+}
+
 impl std::fmt::Display for IsolationSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -458,6 +478,27 @@ pub(super) fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
     }
 }
 
+/// Constructors for tests in sibling modules, which cannot reach the private
+/// failure types directly.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{classify_api_failure, IsoApiFailure, IsolationSessionError, StalePromotion};
+
+    /// A stale-id failure carrying an operation, a status and a remediation —
+    /// the shape that has the most to lose if an error is rebuilt.
+    pub(crate) fn stale_failure() -> IsolationSessionError {
+        classify_api_failure(
+            IsoApiFailure::new(
+                super::op::STOP_SESSION,
+                Some(super::ERROR_NOT_FOUND_HRESULT),
+                Some("agent user not found".to_string()),
+                Some("Re-provision the sandbox.".to_string()),
+            ),
+            StalePromotion::Eligible,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +716,51 @@ mod tests {
     }
 
     // ── Field population and the MxcError invariant ──────────────────────
+
+    /// Appending cleanup context must not cost the failure its classification.
+    ///
+    /// The one-shot launch folds a failed teardown into the error it returns.
+    /// Rebuilding the error as a message-only variant would have been the easy
+    /// way to do that, and would have silently downgraded every structured
+    /// failure on those paths.
+    #[test]
+    fn appending_context_keeps_the_code_and_the_structured_fields() {
+        let err = classify_api_failure(
+            api_failure(Some(ERROR_NOT_FOUND_HRESULT)),
+            StalePromotion::Eligible,
+        )
+        .with_context(" (cleanup: the agent user could not be removed)");
+        let mapped = map_lifecycle_error(err);
+
+        assert_eq!(mapped.code, MxcErrorCode::StaleId);
+        assert_eq!(mapped.operation(), Some("IsoSessionOps.StopSessionAsync"));
+        assert_eq!(mapped.native_code(), Some("0x80070490"));
+        assert_eq!(
+            mapped.remediation.as_deref(),
+            Some("Re-provision the sandbox.")
+        );
+        assert!(
+            mapped.message.starts_with("agent user not found"),
+            "the original message must survive: {}",
+            mapped.message
+        );
+        assert!(
+            mapped.message.contains("could not be removed"),
+            "the cleanup failure must reach the caller: {}",
+            mapped.message
+        );
+    }
+
+    /// A policy refusal keeps its own code when cleanup context is appended.
+    #[test]
+    fn appending_context_keeps_a_policy_refusal_a_policy_refusal() {
+        let mapped = map_lifecycle_error(
+            IsolationSessionError::Policy("no proxy".into()).with_context(" (cleanup: x)"),
+        );
+        assert_eq!(mapped.code, MxcErrorCode::PolicyValidation);
+        assert!(mapped.message.contains("no proxy"), "{}", mapped.message);
+        assert!(mapped.message.contains("cleanup"), "{}", mapped.message);
+    }
 
     #[test]
     fn semantic_failure_populates_all_structured_fields() {
