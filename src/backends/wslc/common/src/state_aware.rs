@@ -452,7 +452,9 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+    };
 
     /// A `Piped` exec is refused before the backend touches the daemon.
     ///
@@ -699,6 +701,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(map_network(&req), NetworkMode::Bridged);
+    }
+
+    #[test]
+    fn build_provision_config_maps_directional_postures_to_daemon_modes() {
+        for (action, expected) in [
+            (NetworkAction::Deny, NetworkMode::None),
+            (NetworkAction::Allow, NetworkMode::Bridged),
+        ] {
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: action,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(NetworkIngressPolicy {
+                        default: action,
+                        host_loopback: action,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let config = build_provision_config(&request, None).unwrap();
+            assert_eq!(config.network, expected);
+        }
     }
 
     #[test]
