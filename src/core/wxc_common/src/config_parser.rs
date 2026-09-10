@@ -918,26 +918,6 @@ fn convert_wire_config(
 
     // Validate the schema version up front so an unsupported version fails fast.
     validate_schema_version(&schema_version)?;
-    if crate::directional_network_support(&schema_version) == Some(false) {
-        if cfg
-            .process_container
-            .as_ref()
-            .is_some_and(|section| section.learning_mode.unwrap_or(false))
-        {
-            return Err(WxcError::ConfigParse(
-                "processContainer.learningMode requires schema version 0.8 or later".to_string(),
-            ));
-        }
-        if cfg
-            .process_container
-            .as_ref()
-            .is_some_and(|section| section.capture_denials.is_some())
-        {
-            return Err(WxcError::ConfigParse(
-                "processContainer.captureDenials requires schema version 0.8 or later".to_string(),
-            ));
-        }
-    }
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
