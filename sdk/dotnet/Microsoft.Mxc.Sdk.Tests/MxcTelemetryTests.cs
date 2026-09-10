@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Runtime.Versioning;
 using Microsoft.Win32;
@@ -411,6 +412,48 @@ public sealed class MxcTelemetryTests
             });
 
         Assert.Equal("locale", exception.ParamName);
+    }
+
+    [Theory]
+    [InlineData("locale")]
+    [InlineData("title.id")]
+    [InlineData("title.text")]
+    [InlineData("body.id")]
+    [InlineData("body.text")]
+    [InlineData("affirmativeLabel.id")]
+    [InlineData("affirmativeLabel.text")]
+    [InlineData("negativeLabel.id")]
+    [InlineData("negativeLabel.text")]
+    [InlineData("learnMoreLabel.id")]
+    [InlineData("learnMoreLabel.text")]
+    [InlineData("learnMoreUrl")]
+    public void ParseConsentPrompt_RejectsNullRequiredStrings(string path)
+    {
+        var root = JsonNode.Parse(
+            """
+            {
+              "resourceVersion": 1,
+              "locale": "en-US",
+              "title": { "id": "title", "text": "Title" },
+              "body": { "id": "body", "text": "Body" },
+              "affirmativeLabel": { "id": "yes", "text": "Yes" },
+              "negativeLabel": { "id": "no", "text": "No" },
+              "learnMoreLabel": { "id": "learn", "text": "Learn more" },
+              "learnMoreUrl": "https://example.com/privacy"
+            }
+            """)!.AsObject();
+        var segments = path.Split('.');
+        var parent = root;
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            parent = parent[segments[index]]!.AsObject();
+        }
+        parent[segments[^1]] = null;
+
+        var error = Assert.Throws<JsonException>(
+            () => MxcTelemetry.ParseConsentPrompt(root.ToJsonString()));
+
+        Assert.Contains(path, error.Message, StringComparison.Ordinal);
     }
 
 #if DEBUG

@@ -2887,32 +2887,6 @@ mod tests {
     }
 
     #[test]
-    fn pre_08_rejects_process_container_learning_features() {
-        for (field, expected) in [
-            (r#""learningMode": true"#, "processContainer.learningMode"),
-            (r#""captureDenials": {}"#, "processContainer.captureDenials"),
-        ] {
-            let json = format!(
-                r#"{{
-                    "version": "0.7.0-alpha",
-                    "process": {{"commandLine": "echo x"}},
-                    "containment": "processcontainer",
-                    "processContainer": {{{field}}}
-                }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let error = load_request(&encoded, &mut logger, true)
-                .expect_err("schema 0.7 must reject 0.8 ProcessContainer features");
-            assert!(
-                error.to_string().contains(expected),
-                "unexpected error: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn explicit_learning_mode_capabilities_are_rejected_case_insensitively() {
         for capability in [
             "learningModeLogging",

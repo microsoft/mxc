@@ -742,28 +742,49 @@ public static class MxcTelemetry
         }
     }
 
-    private static TelemetryConsentPrompt ParseConsentPrompt(string json)
+    internal static TelemetryConsentPrompt ParseConsentPrompt(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         return new TelemetryConsentPrompt
         {
             ResourceVersion = root.GetProperty("resourceVersion").GetUInt32(),
-            Locale = root.GetProperty("locale").GetString() ?? string.Empty,
-            Title = ParseConsentMessage(root.GetProperty("title")),
-            Body = ParseConsentMessage(root.GetProperty("body")),
-            AffirmativeLabel = ParseConsentMessage(root.GetProperty("affirmativeLabel")),
-            NegativeLabel = ParseConsentMessage(root.GetProperty("negativeLabel")),
-            LearnMoreLabel = ParseConsentMessage(root.GetProperty("learnMoreLabel")),
-            LearnMoreUrl = root.GetProperty("learnMoreUrl").GetString() ?? string.Empty,
+            Locale = ParseRequiredString(root, "locale", "locale"),
+            Title = ParseConsentMessage(root.GetProperty("title"), "title"),
+            Body = ParseConsentMessage(root.GetProperty("body"), "body"),
+            AffirmativeLabel = ParseConsentMessage(
+                root.GetProperty("affirmativeLabel"),
+                "affirmativeLabel"),
+            NegativeLabel = ParseConsentMessage(
+                root.GetProperty("negativeLabel"),
+                "negativeLabel"),
+            LearnMoreLabel = ParseConsentMessage(
+                root.GetProperty("learnMoreLabel"),
+                "learnMoreLabel"),
+            LearnMoreUrl = ParseRequiredString(root, "learnMoreUrl", "learnMoreUrl"),
         };
     }
 
-    private static TelemetryConsentMessage ParseConsentMessage(JsonElement value) => new()
+    private static TelemetryConsentMessage ParseConsentMessage(JsonElement value, string path) => new()
     {
-        Id = value.GetProperty("id").GetString() ?? string.Empty,
-        Text = value.GetProperty("text").GetString() ?? string.Empty,
+        Id = ParseRequiredString(value, "id", $"{path}.id"),
+        Text = ParseRequiredString(value, "text", $"{path}.text"),
     };
+
+    private static string ParseRequiredString(
+        JsonElement parent,
+        string propertyName,
+        string path)
+    {
+        var value = parent.GetProperty(propertyName);
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new JsonException(
+                $"Telemetry consent prompt field '{path}' must be a string.");
+        }
+
+        return value.GetString()!;
+    }
 
     private static TelemetryConsentStatus ParseConsentStatus(string json)
     {
