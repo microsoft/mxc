@@ -12,9 +12,10 @@
 //! not validate the remainder of the selected configuration contract.
 //!
 //! This crate must not depend on MXC runtime, execution-engine, or containment
-//! backend crates. It is not yet consumed by the production configuration
-//! parser; version-specific request types and parser dispatch will be added in
-//! later phases.
+//! backend crates. The production configuration parser reuses the development
+//! contract's narrow phase probe when preparing a trailing CLI command.
+//! Version-specific request types and exact parser dispatch remain
+//! non-authoritative until the later cutover phase.
 
 mod registry;
 mod version;

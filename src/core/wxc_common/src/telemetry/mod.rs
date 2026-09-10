@@ -34,7 +34,7 @@ pub use consent::ConsentState;
 pub use events::{
     log_config_rejected, log_enforcement_degraded, log_error, log_execution,
     log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
-    ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext,
+    log_verbose, ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext, VerboseEvent,
 };
 pub use policy::PolicyState;
 
@@ -54,33 +54,6 @@ impl FailureReporter {
             .insert(signature.clone());
         if is_new {
             emit(&signature);
-        }
-    }
-}
-
-#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-pub mod test_support {
-    use super::consent::test_support::LocalAppDataGuard;
-    use super::policy::test_support::PolicyKeyGuard;
-
-    /// Lock-order-safe redirect guard for tests that need both the consent
-    /// store and the policy key redirected away from real user/machine state.
-    pub struct TelemetryTestEnv {
-        _consent: LocalAppDataGuard,
-        policy: PolicyKeyGuard,
-    }
-
-    impl TelemetryTestEnv {
-        /// Redirect both telemetry globals for the lifetime of the guard.
-        pub fn new(store: &std::path::Path) -> Self {
-            let policy = PolicyKeyGuard::new();
-            let _consent = LocalAppDataGuard::set(store);
-            Self { _consent, policy }
-        }
-
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        pub fn set_policy_value(&self, value: u32) {
-            self.policy.set_value(value);
         }
     }
 }
@@ -512,6 +485,20 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
         emit(&auth);
     }
     shutdown();
+}
+
+/// Emit one verbose-document chunk under a fresh live authorization decision.
+///
+/// Returns `false` when collection is no longer authorized, allowing a caller
+/// to stop emitting the remaining chunks immediately.
+pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> Result<bool, u32> {
+    let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
+        return Ok(false);
+    };
+    match log_verbose(event) {
+        0 => Ok(true),
+        status => Err(status),
+    }
 }
 
 /// Record the containment backend for this process so best-effort emit paths
@@ -1068,6 +1055,52 @@ pub fn emit_sdk_cancellation_with_kind(
     });
 }
 
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// A fully isolated telemetry environment: both the administrative policy
+    /// key and the user consent store are redirected to throwaway, per-test
+    /// locations.
+    ///
+    /// This is the **only** supported way to hold both guards at once. They
+    /// protect separate process-global mutexes, so acquiring them in
+    /// inconsistent orders across tests would deadlock under `cargo test`'s
+    /// multithreaded runner. Constructing them here — policy first, then
+    /// consent — is what establishes the total order that makes the pair
+    /// deadlock-free, and a caller cannot get it wrong because a caller never
+    /// sees the individual acquisitions.
+    ///
+    /// Every test that reaches [`super::is_enabled`],
+    /// [`super::consent::needs_consent_prompt`], or [`super::policy::get_policy`]
+    /// must hold this — *including* tests that only care about consent.
+    /// Otherwise they read the real machine policy and fail on an
+    /// administratively managed device.
+    pub struct TelemetryTestEnv {
+        // Fields drop in declaration order, so consent is released before
+        // policy: the exact reverse of the acquisition order below.
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirects the consent store to `store` and the policy key to a
+        /// fresh, empty one (i.e. an unmanaged machine).
+        pub fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        /// Sets the administrative `AllowTelemetry` policy value.
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_support::TelemetryTestEnv;
@@ -1280,6 +1313,37 @@ mod tests {
         assert_eq!(events::test_sink::take_executions().len(), 1);
         assert_eq!(events::test_sink::take_errors().len(), 1);
 
+        reset_for_test();
+    }
+
+    #[test]
+    fn verbose_chunks_recheck_live_authorization() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|active| active.set(true));
+        let event = VerboseEvent {
+            backend: "processcontainer",
+            sandbox_kind: "process",
+            phase: "",
+            correlation_vector: "",
+            document_id: "0123456789abcdef0123456789abcdef",
+            document_version: 2,
+            chunk_index: 0,
+            chunk_count: 1,
+            document_bytes: 64,
+            document_sha256: "abc",
+            content: "[]",
+            summary: r#"{"totalOccurrences":0}"#,
+        };
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(false)));
+        assert!(!emit_verbose(true, &event).unwrap());
+        assert!(events::test_sink::take_verbose().is_empty());
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
+        assert!(emit_verbose(true, &event).unwrap());
+        assert_eq!(events::test_sink::take_verbose().len(), 1);
         reset_for_test();
     }
 

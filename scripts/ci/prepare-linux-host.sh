@@ -25,18 +25,56 @@ apt_update() {
     fi
 }
 
+# Resolves the host's package manager once, so supporting a new distribution
+# family is a case in install_packages rather than another branch in every
+# installer below.
+package_manager=""
+resolve_package_manager() {
+    if [[ -n "$package_manager" ]]; then
+        return 0
+    fi
+
+    local candidate
+    for candidate in apt-get dnf yum microdnf; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            package_manager="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# install_packages <package>...
+# Installs from the feeds the host already has configured, and returns the
+# package manager's own status so each caller decides what a failure means.
+install_packages() {
+    case "$package_manager" in
+        apt-get)
+            # sudo resets the environment, so the frontend setting has to be
+            # applied on the far side of it rather than exported here.
+            sudo env DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y --no-install-recommends "$@"
+            ;;
+        dnf | yum | microdnf)
+            sudo "$package_manager" install -y "$@"
+            ;;
+        *)
+            echo "Unsupported package manager: '$package_manager'." >&2
+            return 1
+            ;;
+    esac
+}
+
 # Red Hat ships no third-party content, so epel-release is not in RHEL's own
 # repos; the documented install is the release RPM straight from Fedora. 
 install_epel() {
-    local package_manager="$1"
-
     if command -v subscription-manager >/dev/null 2>&1; then
         sudo subscription-manager repos \
             --enable "codeready-builder-for-rhel-10-$(arch)-rpms" ||
             echo "WARNING: could not enable the CRB repository; EPEL packages that depend on it may fail to install." >&2
     fi
 
-    sudo "$package_manager" install -y \
+    install_packages \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 }
 
@@ -46,24 +84,25 @@ install_bubblewrap() {
         command -v unshare >/dev/null 2>&1 &&
         command -v nsenter >/dev/null 2>&1 &&
         command -v iptables >/dev/null 2>&1 &&
+
         command -v ip6tables >/dev/null 2>&1 &&
         command -v ip >/dev/null 2>&1; then
         return
     fi
-    if command -v apt-get >/dev/null 2>&1; then
-        apt_update
-        sudo apt-get install -y --no-install-recommends \
-            bubblewrap slirp4netns util-linux iptables iproute2
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y bubblewrap slirp4netns util-linux iptables iproute
-    elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y bubblewrap slirp4netns util-linux iptables iproute
-    elif command -v microdnf >/dev/null 2>&1; then
-        sudo microdnf install -y bubblewrap slirp4netns util-linux iptables iproute
-    else
+
+    if ! resolve_package_manager; then
         echo "No supported package manager found to install Bubblewrap prerequisites." >&2
         exit 1
     fi
+
+    local packages=(bubblewrap slirp4netns util-linux iptables)
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+        packages+=(iproute2)
+    else
+        packages+=(iproute)
+    fi
+    install_packages "${packages[@]}"
 }
 
 # The ingress chain matches on connection state, which iptables can only
@@ -87,27 +126,25 @@ install_lxc() {
     if command -v lxc-start >/dev/null 2>&1; then
         return
     fi
-    if command -v apt-get >/dev/null 2>&1; then
-        apt_update
-        # Debian dropped lxc-utils; Ubuntu still ships it.
-        local packages=(lxc dnsmasq-base iptables bridge-utils)
-        if apt-cache show lxc-utils >/dev/null 2>&1; then
-            packages+=(lxc-utils)
-        fi
-        sudo apt-get install -y --no-install-recommends "${packages[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        install_epel dnf
-        sudo dnf install -y lxc lxc-templates dnsmasq iptables
-    elif command -v yum >/dev/null 2>&1; then
-        install_epel yum
-        sudo yum install -y lxc lxc-templates dnsmasq iptables
-    elif command -v microdnf >/dev/null 2>&1; then
-        install_epel microdnf
-        sudo microdnf install -y lxc lxc-templates dnsmasq iptables
-    else
+
+    if ! resolve_package_manager; then
         echo "No supported package manager found to install LXC." >&2
         exit 1
     fi
+
+    local packages
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+        packages=(lxc dnsmasq-base iptables bridge-utils)
+        # Debian dropped lxc-utils; Ubuntu still ships it.
+        if apt-cache show lxc-utils >/dev/null 2>&1; then
+            packages+=(lxc-utils)
+        fi
+    else
+        install_epel
+        packages=(lxc lxc-templates dnsmasq iptables)
+    fi
+    install_packages "${packages[@]}"
 }
 
 # Start the LXC bridge and wait until it can actually serve containers.
@@ -205,7 +242,67 @@ enable_bridge_netfilter() {
     done
 }
 
+# Verifies the interpreters test suites drive inside the sandbox and reports
+# what the image actually provides, so a tool the image was built without stays
+# visible instead of silently absent. These are baked into the image rather
+# than installed here: unlike a backend's prerequisites, they are ordinary
+# developer tools that every job expects to find already in place.
+#
+# The check is suite-agnostic: it describes what a validation host is expected
+# to provide, not what any one suite consumes, so a future suite that shells out
+# to these programs needs no change here.
+assert_workload_interpreters() {
+    # name|candidates (tried in order)|required|remedy
+    local interpreters=(
+        "pwsh|pwsh|false|install PowerShell 7 in the image"
+        "git|git|false|install Git in the image"
+        "node|node|false|install Node.js in the image"
+        "npm|npm|false|install Node.js in the image (npm ships with it)"
+        "npx|npx|false|install Node.js in the image (npx ships with it)"
+        "python|python3,python|false|install Python in the image"
+        "pip|pip3,pip|false|install Python in the image (pip ships with it)"
+        "dotnet|dotnet|false|install the .NET SDK in the image"
+        "az|az|false|install the Azure CLI in the image"
+        "gh|gh|false|install the GitHub CLI in the image"
+        "openssl|openssl|false|install OpenSSL in the image"
+    )
+
+    local missing="" entry name candidates required remedy resolved candidate
+    local candidate_list
+    for entry in "${interpreters[@]}"; do
+        IFS='|' read -r name candidates required remedy <<<"$entry"
+
+        resolved=""
+        IFS=',' read -r -a candidate_list <<<"$candidates"
+        for candidate in "${candidate_list[@]}"; do
+            # python3 before python: on Unix a bare `python` is usually absent,
+            # and where it does exist it can still be Python 2.
+            if resolved="$(command -v "$candidate" 2>/dev/null)"; then
+                break
+            fi
+            resolved=""
+        done
+
+        if [[ -n "$resolved" ]]; then
+            echo "Workload interpreter '$name' found at $resolved"
+        elif [[ "$required" == "true" ]]; then
+            missing="${missing:+$missing; }$name ($remedy)"
+        else
+            echo "::warning::Workload interpreter '$name' is absent ($remedy)"
+        fi
+    done
+
+    if [[ -n "$missing" ]]; then
+        echo "::error::Workload interpreters missing from this image: $missing"
+        exit 1
+    fi
+}
+
 chmod +x "$binary_directory/lxc-exec"
+
+# Run for every backend: this is host inventory, not a backend prerequisite.
+assert_workload_interpreters
+
 case "$backend" in
     bubblewrap)
         install_bubblewrap

@@ -9,16 +9,18 @@ use mxc_sdk::configs::{
     CaptureDenials, ProcessContainer, ProcessContainerNetwork, ProcessContainerSystemSettings,
     ProcessContainerUi, ProcessContainerUiIsolation,
 };
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
     build_request_with_containment, Containment, Error, ErrorCode, SandboxPolicy, SandboxRequest,
     WslcSection,
 };
-use serde_json::Value;
+use serde::de::{Error as _, IgnoredAny};
+use serde::{Deserialize, Deserializer};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RequestSpec {
-    policy: SandboxPolicy,
+    policy: RequestPolicy,
     command: String,
     #[serde(default)]
     containment: RequestContainment,
@@ -32,6 +34,91 @@ struct RequestSpec {
     inherit_default_env: bool,
     #[serde(default)]
     experimental: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestPolicy {
+    version: String,
+    #[serde(default)]
+    filesystem: Option<FilesystemSection>,
+    #[serde(default)]
+    network: Option<NetworkSection>,
+    #[serde(default)]
+    ui: Option<UiSection>,
+    #[serde(default)]
+    timeout_ms: Option<u32>,
+    #[serde(
+        default,
+        rename = "captureDenials",
+        deserialize_with = "reject_legacy_capture_denials"
+    )]
+    _capture_denials: (),
+    #[serde(default)]
+    telemetry: TelemetryField,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelemetrySpec {
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Default)]
+enum TelemetryField {
+    #[default]
+    Absent,
+    Present(Option<TelemetrySpec>),
+}
+
+impl<'de> Deserialize<'de> for TelemetryField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<TelemetrySpec>::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+fn reject_legacy_capture_denials<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Err(D::Error::custom(
+        "policy.captureDenials is not supported; set containment.type to \
+         processContainer and use containment.captureDenials",
+    ))
+}
+
+impl RequestPolicy {
+    fn into_sdk(self) -> Result<(SandboxPolicy, Option<TelemetrySpec>), Error> {
+        let telemetry = match self.telemetry {
+            TelemetryField::Absent => None,
+            TelemetryField::Present(telemetry) => {
+                if let Ok(version) = semver::Version::parse(&self.version) {
+                    if version.major == 0 && version.minor < 9 {
+                        return Err(Error::new(
+                            ErrorCode::MalformedRequest,
+                            "policy.telemetry requires config schema version 0.9.0-alpha or later",
+                        ));
+                    }
+                }
+                telemetry
+            }
+        };
+        Ok((
+            SandboxPolicy {
+                version: self.version,
+                filesystem: self.filesystem,
+                network: self.network,
+                ui: self.ui,
+                timeout_ms: self.timeout_ms,
+            },
+            telemetry,
+        ))
+    }
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -221,25 +308,38 @@ impl ProcessContainerNetworkSpec {
 
 /// Parse a binding request and build the public Rust SDK request it describes.
 pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, Error> {
-    let value: Value = serde_json::from_str(request_json).map_err(malformed_request)?;
-    if value
-        .get("policy")
-        .and_then(|policy| policy.get("captureDenials"))
-        .is_some()
-    {
+    let mut deserializer = serde_json::Deserializer::from_str(request_json);
+    let mut ignored_paths = Vec::new();
+    let spec: RequestSpec = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored_paths.push(path.to_string().replace(".?.", "."));
+    })
+    .map_err(malformed_request)?;
+    deserializer.end().map_err(malformed_request)?;
+    if let Some(path) = ignored_paths.first() {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
-            "policy.captureDenials is not supported; set containment.type to \
-             processContainer and use containment.captureDenials",
+            format!("unknown request field `{path}`"),
         ));
     }
-
-    let spec: RequestSpec = serde_json::from_value(value).map_err(malformed_request)?;
+    if let Some(name) = spec.environment.as_ref().and_then(|environment| {
+        environment
+            .keys()
+            .find(|name| name.is_empty() || name.contains('='))
+    }) {
+        return Err(Error::new(
+            ErrorCode::MalformedRequest,
+            format!("invalid environment variable name `{name}`"),
+        ));
+    }
+    let (policy, telemetry) = spec.policy.into_sdk()?;
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&spec.policy, &containment, spec.container_name.as_deref())?;
-    request.set_script(spec.command);
+    let mut request = build_request_with_containment(
+        &policy,
+        &containment,
+        &spec.command,
+        spec.container_name.as_deref(),
+    )?;
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
@@ -251,6 +351,9 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
         }
     }
     request.set_experimental(spec.experimental);
+    if let Some(enabled) = telemetry.and_then(|telemetry| telemetry.enabled) {
+        request.set_telemetry_opt_in(enabled);
+    }
     Ok(request)
 }
 
@@ -421,6 +524,208 @@ mod tests {
         )
         .expect("explicitly empty environment builds");
         assert_eq!(explicitly_empty.env(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn telemetry_is_parsed_from_the_binding_policy() {
+        for (telemetry, expected) in [
+            ("", None),
+            (r#","telemetry":{"enabled":true}"#, Some(true)),
+            (r#","telemetry":{"enabled":false}"#, Some(false)),
+            (r#","telemetry":null"#, None),
+            (r#","telemetry":{}"#, None),
+            (r#","telemetry":{"enabled":null}"#, None),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha"
+                        {telemetry}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let request = build_request_from_json(&request_json)
+                .unwrap_or_else(|error| panic!("request failed: {error}"));
+            assert_eq!(request.telemetry_enabled(), expected);
+        }
+    }
+
+    #[test]
+    fn telemetry_rejects_unknown_fields() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": {
+                        "enabled": true,
+                        "unexpected": true
+                    }
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("unknown telemetry fields must fail");
+
+        assert!(
+            error.message.contains("unknown field `unexpected`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn telemetry_rejects_pre_0_9_policies() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.8.0-alpha",
+                    "telemetry": null
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("telemetry must require policy version 0.9 or later");
+
+        assert!(
+            error
+                .message
+                .contains("telemetry requires config schema version 0.9.0-alpha"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn telemetry_rejects_malformed_enabled_values() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": {
+                        "enabled": "yes"
+                    }
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("non-boolean telemetry must fail");
+
+        assert!(
+            error.message.contains("invalid type"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_request_and_telemetry_fields_are_rejected() {
+        for request_json in [
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo first",
+                "command": "echo second"
+            }"#,
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": { "enabled": true },
+                    "telemetry": null
+                },
+                "command": "echo hi"
+            }"#,
+        ] {
+            let error =
+                build_request_from_json(request_json).expect_err("duplicate fields must fail");
+            assert!(
+                error.message.contains("duplicate field"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_policy_fields_are_rejected() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "timeoutMS": 1
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("unknown policy fields must fail");
+
+        assert!(
+            error.message.contains("unknown field `timeoutMS`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_nested_policy_fields_are_rejected() {
+        for (request_json, expected_path) in [
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "filesystem": {
+                            "readwritePaths": [],
+                            "unexpected": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.filesystem.unexpected",
+            ),
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "network": {
+                            "allowOutboud": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.network.allowOutboud",
+            ),
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "ui": {
+                            "unexpected": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.ui.unexpected",
+            ),
+        ] {
+            let error =
+                build_request_from_json(request_json).expect_err("unknown nested fields must fail");
+            assert!(
+                error.message.contains(expected_path),
+                "unexpected error for {expected_path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_environment_variable_names_are_rejected() {
+        for name in ["", "A=B"] {
+            let request_json = serde_json::json!({
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "environment": { name: "value" }
+            })
+            .to_string();
+            let error =
+                build_request_from_json(&request_json).expect_err("invalid names must fail");
+            assert!(
+                error.message.contains("invalid environment variable name"),
+                "unexpected error for {name:?}: {error}"
+            );
+        }
     }
 
     #[test]

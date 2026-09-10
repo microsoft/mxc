@@ -33,7 +33,7 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.experimental, undefined);
   });
 
-  it('preserves an older telemetry version for native validation', () => {
+  it('leaves explicit telemetry schema validation to the native parser', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
       backendKey: 'windows_sandbox',
@@ -202,6 +202,34 @@ describe('buildStateAwareEnvelope', () => {
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.strictEqual(wire.experimental, undefined);
+  });
+
+  it('never emits correlationVector on state-aware envelopes', () => {
+    const nonProvision = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+    });
+    assert.strictEqual(nonProvision.correlationVector, undefined);
+
+    const provision = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+    });
+    assert.strictEqual(provision.correlationVector, undefined);
+  });
+
+  it('places stable telemetry at the envelope top level', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+      config: { telemetry: { enabled: true } },
+    });
+    assert.deepStrictEqual(env.telemetry, { enabled: true });
+    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.experimental, undefined);
   });
 
 });
@@ -382,6 +410,24 @@ describe('startSandbox', { skip: platformSkip }, () => {
     );
   });
 
+  it('does not serialize correlationVector onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+  });
+
+  it('relays stable telemetry from phase config onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, { telemetry: { enabled: false } }, testOptions());
+    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: false });
+    assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+    assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+  });
+
 });
 
 describe('stopSandbox', { skip: platformSkip }, () => {
@@ -408,6 +454,13 @@ describe('stopSandbox', { skip: platformSkip }, () => {
     );
   });
 
+  it('does not serialize correlationVector onto the stop envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await stopSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+  });
 });
 
 describe('deprovisionSandbox', { skip: platformSkip }, () => {
@@ -420,6 +473,14 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
     await deprovisionSandbox(id, undefined, testOptions());
     assert.strictEqual(fake.captured.envelope?.phase, 'deprovision');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
+  });
+
+  it('does not serialize correlationVector onto the deprovision envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await deprovisionSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
 });
 
@@ -479,6 +540,17 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     );
   });
 
+  it('does not serialize correlationVector onto the exec envelope', async () => {
+    const fake = fakeSpawn({ stdout: 'hi\n', stderr: '', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'echo hi' } },
+      testOptions(),
+    );
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+  });
 });
 
 describe('windows_sandbox state-aware lifecycle', () => {
