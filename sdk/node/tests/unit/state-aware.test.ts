@@ -725,6 +725,25 @@ describe('wslc state-aware lifecycle', () => {
     }
   });
 
+  it('distinguishes malformed proxy URLs from unsupported protocols', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        config: { runtimeConfig: { networkProxy: 'not-a-url' } },
+      }),
+      /must be an HTTP\/S URL string/,
+    );
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        config: { runtimeConfig: { networkProxy: 'ftp:\/\/proxy.example' } },
+      }),
+      /must use HTTP or HTTPS/,
+    );
+  });
+
   it('preserves omitted and explicitly empty WSLC network', () => {
     for (const network of [undefined, {}]) {
       const env = buildStateAwareEnvelope({

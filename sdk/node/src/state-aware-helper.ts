@@ -153,13 +153,14 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
       if (typeof value !== 'string' || value.trim() !== value || !value) {
         fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
       }
+      let url!: URL;
       try {
-        const url = new URL(value as string);
-        if (!['http:', 'https:'].includes(url.protocol)) {
-          fail('runtimeConfig.networkProxy must use HTTP or HTTPS.');
-        }
+        url = new URL(value as string);
       } catch {
         fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
+      }
+      if (!['http:', 'https:'].includes(url.protocol)) {
+        fail('runtimeConfig.networkProxy must use HTTP or HTTPS.');
       }
     }
   }
