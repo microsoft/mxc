@@ -43,6 +43,8 @@ mod probe;
 mod run;
 mod state_aware;
 mod state_aware_telemetry;
+#[cfg(target_os = "windows")]
+mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
@@ -63,6 +65,8 @@ pub use state_aware::{
     exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
 };
 pub use state_aware_telemetry::run_state_aware_with_telemetry;
+#[cfg(target_os = "windows")]
+pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
@@ -129,15 +133,15 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
     let extra_warnings = logger.take_warnings();
     let process: Box<dyn SandboxProcess> = ProcessWithWarnings::wrap(process, extra_warnings);
     if telemetry_registration.active() {
-        Ok(Box::new(TelemetryProcess {
-            inner: process,
-            active: telemetry_registration.transfer(),
-            mode: TelemetryMode::OneShot {
+        Ok(Box::new(TelemetryProcess::new(
+            process,
+            telemetry_registration.transfer(),
+            TelemetryMode::OneShot {
                 containment,
                 requested_sandbox_kind,
             },
             started,
-        }))
+        )))
     } else {
         Ok(process)
     }
@@ -194,6 +198,7 @@ impl Drop for TelemetryRegistration {
 struct TelemetryProcess {
     inner: Box<dyn SandboxProcess>,
     active: bool,
+    warnings: Vec<String>,
     mode: TelemetryMode,
     started: std::time::Instant,
 }
@@ -221,31 +226,48 @@ pub(crate) fn wrap_state_aware_telemetry_process_with_kind(
     started: std::time::Instant,
 ) -> Box<dyn SandboxProcess> {
     if active {
-        Box::new(TelemetryProcess {
-            inner: process,
-            active: true,
-            mode: TelemetryMode::StateAware {
+        Box::new(TelemetryProcess::new(
+            process,
+            true,
+            TelemetryMode::StateAware {
                 backend,
                 phase,
                 correlation_vector,
                 requested_sandbox_kind,
             },
             started,
-        })
+        ))
     } else {
         process
     }
 }
 
 impl TelemetryProcess {
-    /// Emit the single terminal event for this invocation and release the
-    /// provider reference. Idempotent — subsequent calls (from another exit
-    /// path or `Drop`) are silent no-ops.
-    fn emit(&mut self, result: &std::io::Result<i32>) {
-        if !self.active {
-            return;
+    fn new(
+        inner: Box<dyn SandboxProcess>,
+        active: bool,
+        mode: TelemetryMode,
+        started: std::time::Instant,
+    ) -> Self {
+        let warnings = inner.warnings().to_vec();
+        Self {
+            inner,
+            active,
+            warnings,
+            mode,
+            started,
         }
-        let response = match result {
+    }
+
+    fn completion_response(
+        &self,
+        result: &std::io::Result<i32>,
+        include_output_metadata: bool,
+    ) -> ScriptResponse {
+        let output_metadata = include_output_metadata
+            .then(|| self.inner.output_metadata().cloned().map(Box::new))
+            .flatten();
+        let mut response = match result {
             Ok(exit_code) => ScriptResponse {
                 exit_code: *exit_code,
                 ..Default::default()
@@ -261,17 +283,64 @@ impl TelemetryProcess {
                 ..Default::default()
             },
         };
-        match &self.mode {
+        response.output_metadata = output_metadata;
+        response
+    }
+
+    fn report_verbose_telemetry_failure(&mut self, error: String) {
+        let warning =
+            format!("telemetry: captureDenials verbose artifact was not emitted: {error}");
+        if !self.warnings.contains(&warning) {
+            self.warnings.push(warning);
+        }
+    }
+
+    /// Emit the single terminal event for this invocation and release the
+    /// provider reference. Idempotent — subsequent calls (from another exit
+    /// path or `Drop`) are silent no-ops.
+    fn emit(&mut self, result: &std::io::Result<i32>) {
+        self.emit_inner(result, true);
+    }
+
+    /// Emit completion after a nonblocking terminal poll without forcing
+    /// backend teardown to finalize capture metadata.
+    fn emit_after_poll(&mut self, result: &std::io::Result<i32>) {
+        self.emit_inner(result, false);
+    }
+
+    fn emit_inner(&mut self, result: &std::io::Result<i32>, include_verbose: bool) {
+        if !self.active {
+            return;
+        }
+        let response = self.completion_response(result, include_verbose);
+        let verbose_error = match &self.mode {
             TelemetryMode::OneShot {
                 containment,
                 requested_sandbox_kind,
-            } => telemetry::emit_sdk_completion_with_kind(
-                true,
-                containment,
-                *requested_sandbox_kind,
-                &response,
-                self.started.elapsed(),
-            ),
+            } => {
+                #[cfg(target_os = "windows")]
+                let verbose_error = include_verbose
+                    .then(|| {
+                        emit_verbose_telemetry(
+                            true,
+                            containment,
+                            *requested_sandbox_kind,
+                            &response,
+                        )
+                        .err()
+                    })
+                    .flatten();
+                #[cfg(not(target_os = "windows"))]
+                let verbose_error: Option<String> = None;
+                telemetry::emit_sdk_completion_with_kind(
+                    true,
+                    containment,
+                    *requested_sandbox_kind,
+                    &response,
+                    self.started.elapsed(),
+                );
+                verbose_error
+            }
             TelemetryMode::StateAware {
                 backend,
                 phase,
@@ -301,7 +370,11 @@ impl TelemetryProcess {
                     self.started.elapsed(),
                     failure_reason,
                 );
+                None
             }
+        };
+        if let Some(error) = verbose_error {
+            self.report_verbose_telemetry_failure(error);
         }
         self.active = false;
     }
@@ -409,7 +482,12 @@ impl Drop for TelemetryProcess {
             return;
         }
         match observe_before_drop(self.inner.as_mut()) {
-            DropDisposition::Exited(exit_code) => self.emit(&Ok(exit_code)),
+            DropDisposition::Exited(exit_code) => {
+                // Finalize backend-owned output metadata after the nonblocking
+                // observation, while preserving the already-observed exit code.
+                let _ = self.inner.wait();
+                self.emit(&Ok(exit_code));
+            }
             DropDisposition::TimedOut => self.emit(&Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "sandbox execution timed out",
@@ -421,7 +499,7 @@ impl Drop for TelemetryProcess {
 
 impl SandboxProcess for TelemetryProcess {
     fn warnings(&self) -> &[String] {
-        self.inner.warnings()
+        &self.warnings
     }
 
     fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
@@ -443,8 +521,12 @@ impl SandboxProcess for TelemetryProcess {
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         let result = self.inner.try_wait();
         match &result {
-            // Exit observed: emit the terminal event now.
-            Ok(Some(exit_code)) => self.emit(&Ok(*exit_code)),
+            // Preserve the nonblocking contract. Capture metadata is finalized
+            // only by backend teardown, so this path emits completion without
+            // attempting the optional verbose artifact.
+            Ok(Some(exit_code)) => {
+                self.emit_after_poll(&Ok(*exit_code));
+            }
             // Still running: leave the invariant to a later `wait` / `kill` / `Drop`.
             Ok(None) => {}
             // Backends use TimedOut only for a settled terminal timeout.
@@ -577,6 +659,9 @@ mod telemetry_process_tests {
         try_wait_result: TryWaitResult,
         wait_result: std::io::Result<i32>,
         kill_fails: bool,
+        finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        metadata_read_before_finalization: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        output_metadata: Option<wxc_common::models::SandboxOutputMetadata>,
     }
 
     impl SandboxProcess for StubProcess {
@@ -617,10 +702,24 @@ mod telemetry_process_tests {
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
+            if let Some(finalized) = &self.finalized {
+                finalized.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             self.wait_result
                 .as_ref()
                 .copied()
                 .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
+        }
+
+        fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+            if let (Some(finalized), Some(read_before_finalization)) =
+                (&self.finalized, &self.metadata_read_before_finalization)
+            {
+                if !finalized.load(std::sync::atomic::Ordering::SeqCst) {
+                    read_before_finalization.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            self.output_metadata.as_ref()
         }
     }
 
@@ -632,21 +731,24 @@ mod telemetry_process_tests {
         try_wait_result: TryWaitResult,
         kill_fails: bool,
     ) -> TelemetryProcess {
-        TelemetryProcess {
-            inner: Box::new(StubProcess {
+        TelemetryProcess::new(
+            Box::new(StubProcess {
                 try_wait_result,
                 wait_result: Ok(0),
                 kill_fails,
+                finalized: None,
+                metadata_read_before_finalization: None,
+                output_metadata: None,
             }),
-            active: true,
-            mode: TelemetryMode::StateAware {
+            true,
+            TelemetryMode::StateAware {
                 backend: "test".to_string(),
                 phase: "exec".to_string(),
                 correlation_vector: String::new(),
                 requested_sandbox_kind: None,
             },
-            started: std::time::Instant::now(),
-        }
+            std::time::Instant::now(),
+        )
     }
 
     #[test]
@@ -714,6 +816,9 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Exited(7),
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
+            output_metadata: None,
         };
         assert_eq!(observe_before_drop(&mut exited), DropDisposition::Exited(7));
 
@@ -721,6 +826,9 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Running,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
+            output_metadata: None,
         };
         assert_eq!(
             observe_before_drop(&mut running),
@@ -731,6 +839,9 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Failed,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
+            output_metadata: None,
         };
         assert_eq!(observe_before_drop(&mut failed), DropDisposition::Abandoned);
 
@@ -738,6 +849,9 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::TimedOut,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
+            output_metadata: None,
         };
         assert_eq!(
             observe_before_drop(&mut timed_out),
@@ -753,5 +867,87 @@ mod telemetry_process_tests {
         assert!(process.active);
         assert_eq!(process.wait().unwrap(), 0);
         assert!(!process.active);
+    }
+
+    #[test]
+    fn terminal_poll_does_not_wait_or_read_output_metadata() {
+        let finalized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata_read_before_finalization =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut process = TelemetryProcess::new(
+            Box::new(StubProcess {
+                try_wait_result: TryWaitResult::Exited(7),
+                wait_result: Ok(7),
+                kill_fails: false,
+                finalized: Some(finalized.clone()),
+                metadata_read_before_finalization: Some(metadata_read_before_finalization.clone()),
+                output_metadata: None,
+            }),
+            true,
+            TelemetryMode::StateAware {
+                backend: "test".to_string(),
+                phase: "exec".to_string(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            std::time::Instant::now(),
+        );
+
+        assert_eq!(process.try_wait().unwrap(), Some(7));
+        assert!(!finalized.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!metadata_read_before_finalization.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!process.active);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wait_error_preserves_finalized_metadata_and_reports_verbose_failure() {
+        use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
+
+        let metadata = SandboxOutputMetadata {
+            capture_denials: Some(CaptureDenialsOutput {
+                kind: CaptureDenialsOutput::KIND.to_string(),
+                output_path: "missing-denials.json".to_string(),
+                exit_code: 0,
+                total_denials: 0,
+                denied_resources_truncated: false,
+                etl_path: None,
+            }),
+            capture_denials_error: None,
+        };
+        let mut process = TelemetryProcess::new(
+            Box::new(StubProcess {
+                try_wait_result: TryWaitResult::Running,
+                wait_result: Err(std::io::Error::other("retention failed")),
+                kill_fails: false,
+                finalized: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    true,
+                ))),
+                metadata_read_before_finalization: Some(std::sync::Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                )),
+                output_metadata: Some(metadata),
+            }),
+            true,
+            TelemetryMode::OneShot {
+                containment: ContainmentBackend::ProcessContainer,
+                requested_sandbox_kind: None,
+            },
+            std::time::Instant::now(),
+        );
+
+        let response =
+            process.completion_response(&Err(std::io::Error::other("retention failed")), true);
+        assert!(response
+            .output_metadata
+            .as_deref()
+            .and_then(|metadata| metadata.capture_denials.as_ref())
+            .is_some());
+
+        process.emit(&Err(std::io::Error::other("retention failed")));
+        assert!(process
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("could not open the verbose artifact")));
     }
 }

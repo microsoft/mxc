@@ -1410,6 +1410,18 @@ fn main() {
         eprintln!("{warning}");
     }
 
+    #[cfg(target_os = "windows")]
+    if let Err(error) = mxc_engine::emit_verbose_telemetry(
+        telemetry_active,
+        &request.containment,
+        requested_sandbox_kind,
+        &response,
+    ) {
+        logger.log_diagnostic_line(&format!(
+            "telemetry: captureDenials verbose artifact was not emitted: {error}"
+        ));
+    }
+
     telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,

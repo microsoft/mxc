@@ -1544,6 +1544,7 @@ version = "0.8.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
+ "getrandom 0.2.17",
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
@@ -1554,6 +1555,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "windows",
  "windows_sandbox_lifecycle",

@@ -486,6 +486,12 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 
 Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
 
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
+
 Any .NET consent surface should stay UI-agnostic, present the canonical
 resource verbatim through a host callback, persist only explicit yes/no
 decisions, treat dismissal and failures as non-grants, and follow the rules in

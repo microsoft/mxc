@@ -498,6 +498,13 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 
 Telemetry is off-by-default unless the caller opts in with top-level `telemetry.enabled: true` and the applicable Windows consent/policy gates permit collection.
 
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the
+[telemetry data inventory](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry.md#data-inventory).
+
 Telemetry consent behavior follows
 [`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md):
 the SDK stays UI-agnostic, renders the canonical resource verbatim through a
