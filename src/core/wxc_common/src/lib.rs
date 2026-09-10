@@ -3,9 +3,11 @@
 
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
+pub mod audit;
 pub mod cmdline;
 mod config_deserialize;
 pub mod config_parser;
+pub mod config_rejection;
 pub mod encoding;
 pub mod error;
 pub mod exec_stream;
@@ -21,6 +23,7 @@ pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
 mod network_parser;
+pub mod policy_identity;
 pub use network_parser::directional_network_support;
 pub use network_parser::host_is_canonical_loopback;
 pub use network_parser::supports_directional_network;

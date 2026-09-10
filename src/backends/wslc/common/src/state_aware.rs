@@ -544,6 +544,122 @@ mod tests {
         assert!(runner.validate_deprovision(id, &request, None).is_err());
     }
 
+    /// Enumerating all five hooks (rather than testing the shared validator) is
+    /// what catches a hook that forgets to call its validator at all.
+    #[test]
+    fn every_validate_hook_rejects_supplied_ui() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        let results = [
+            ("provision", runner.validate_provision(&request, None)),
+            ("start", runner.validate_start(id, &request, None)),
+            ("exec", runner.validate_exec(id, &request, None)),
+            ("stop", runner.validate_stop(id, &request, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision(id, &request, None),
+            ),
+        ];
+        for (phase, result) in results {
+            let err = result.expect_err(&format!("{phase} must reject a supplied ui"));
+            assert_eq!(
+                err.code,
+                wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(
+                err.message.contains("ui section is not supported"),
+                "{phase}: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Refused at provision, the only phase where the network posture is
+    /// settable — so neither can be silently dropped into the daemon's
+    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
+    #[test]
+    fn validate_provision_rejects_unimplementable_network_posture() {
+        let runner = WslcStateAwareRunner::new();
+        for (policy, needle) in [
+            (
+                ContainerPolicy {
+                    allow_local_network: true,
+                    ..Default::default()
+                },
+                "allowLocalNetwork",
+            ),
+            (
+                ContainerPolicy {
+                    network_enforcement_mode: wxc_common::models::NetworkEnforcementMode::Firewall,
+                    ..Default::default()
+                },
+                "enforcementMode",
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            let err = runner
+                .validate_provision(&request, None)
+                .expect_err(&format!("provision must reject {needle}"));
+            assert_eq!(
+                err.code,
+                wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(err.message.contains(needle), "got: {}", err.message);
+        }
+    }
+
+    /// Guards against over-rejection. Each value is the near-miss of a rejected
+    /// one, so a gate that flipped between value- and presence-based would fail
+    /// here only.
+    #[test]
+    fn validate_provision_accepts_the_postures_wslc_can_honour() {
+        let runner = WslcStateAwareRunner::new();
+        for (label, policy) in [
+            (
+                "explicit capabilities enforcement mode",
+                ContainerPolicy {
+                    network_enforcement_mode:
+                        wxc_common::models::NetworkEnforcementMode::Capabilities,
+                    ..Default::default()
+                },
+            ),
+            (
+                "explicit allowLocalNetwork=false",
+                ContainerPolicy {
+                    allow_local_network: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "absent ui",
+                ContainerPolicy {
+                    ui_specified: false,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            assert!(
+                runner.validate_provision(&request, None).is_ok(),
+                "{label} is honoured by WSLc and must not be rejected"
+            );
+        }
+    }
+
     #[test]
     fn map_network_maps_block_to_none() {
         let req = ExecutionRequest {

@@ -6,6 +6,8 @@
 //! `create_process` also drives the ConPTY relay setup + shutdown ladder
 //! against the local console.
 
+use wxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
+use wxc_common::logger::Logger;
 use wxc_common::process_util::{OwnedHandle, PipeReadCanceller};
 use wxc_common::sandbox_process::StreamCloser;
 use wxc_common::state_aware_backend::ExecOutcome;
@@ -362,6 +364,7 @@ impl IsolationSessionManager {
     pub(super) fn start_process(
         &self,
         options: &ProcessOptions,
+        logger: Option<&Logger>,
     ) -> Result<StartedProcess, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
@@ -415,6 +418,14 @@ impl IsolationSessionManager {
             stdout,
             stderr,
             stdin,
+            identity: wxc_common::policy_identity::redact_identity(
+                &self.agent_user_name.to_string(),
+            ),
+            audit_logger: std::sync::Mutex::new(
+                logger
+                    .map(Logger::clone_diagnostic_sink)
+                    .unwrap_or_else(Logger::inherit_thread_diagnostic_sink),
+            ),
         })
     }
 
@@ -428,6 +439,7 @@ impl IsolationSessionManager {
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
+        logger: Option<&mut Logger>,
     ) -> Result<i32, IsolationSessionError> {
         // Everything fallible that does not need the workload runs first, so no
         // failure can strand a running one.
@@ -468,7 +480,7 @@ impl IsolationSessionManager {
         // Lifetime: each relay's param struct is moved to the heap and owned
         // by its thread, which frees it on exit, so joining is not required
         // for memory safety.
-        let started = self.start_process(options)?;
+        let started = self.start_process(options, logger.as_deref())?;
         let process = &started.process;
         let stdout_handle_val = started.stdout;
         let stderr_handle_val = started.stderr;
@@ -595,20 +607,14 @@ impl IsolationSessionManager {
             }
         };
 
-        // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle
-        // — no COM round-trip. On timeout it returns -1; otherwise the exit
-        // code.
-        let _ = process
-            .WaitForExit(options.timeout_ms)
-            .map_err(|e| transport_err(op::RUN_PROCESS, "WaitForExit failed", &e))?;
-
+        let outcome = started.wait(options.timeout_ms)?;
         scope.stop_stdin();
-
-        let exit_code = wait_with_graceful_shutdown(process)?;
-
         scope.finish();
 
-        Ok(exit_code)
+        Ok(match outcome {
+            ExecOutcome::Exited(exit_code) => exit_code,
+            ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
+        })
     }
 
     /// Step 4: Stop the isolation session.
@@ -636,6 +642,57 @@ impl IsolationSessionManager {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TeardownOutcome {
+    pub session_stopped: Option<bool>,
+    pub agent_user_deprovisioned: Option<bool>,
+}
+
+impl TeardownOutcome {
+    fn status(&self) -> TeardownStatus {
+        let steps = [self.session_stopped, self.agent_user_deprovisioned];
+        if steps.contains(&Some(false)) {
+            TeardownStatus::Failure
+        } else if steps.iter().all(Option::is_none) {
+            TeardownStatus::Skipped
+        } else {
+            TeardownStatus::Success
+        }
+    }
+}
+
+pub fn log_sandbox_torn_down(
+    logger: &mut Logger,
+    identity: &str,
+    phase: &str,
+    outcome: TeardownOutcome,
+) {
+    if !logger.has_diagnostic_sink() && !wxc_common::telemetry::is_active() {
+        return;
+    }
+    let identity = wxc_common::policy_identity::redact_identity(identity);
+    wxc_common::telemetry::log_sandbox_torn_down(
+        &identity,
+        outcome.status().as_str(),
+        &format!(
+            "session_stopped={},agent_user_deprovisioned={}",
+            outcome.session_stopped == Some(true),
+            outcome.agent_user_deprovisioned == Some(true),
+        ),
+    );
+    let record = AuditEvent::new(AuditEventName::SandboxTornDown)
+        .str("backend", "isolation_session")
+        .str("identity", &identity)
+        .str("phase", phase)
+        .str("status", outcome.status().as_str())
+        .bool("session_stopped", outcome.session_stopped == Some(true))
+        .bool(
+            "agent_user_deprovisioned",
+            outcome.agent_user_deprovisioned == Some(true),
+        );
+    logger.log_audit_event(&record);
+}
+
 /// A process started inside an isolation session but **not yet awaited**.
 ///
 /// Separating start from wait is what makes streaming possible: the executor
@@ -652,9 +709,64 @@ pub(super) struct StartedProcess {
     pub(super) stdout: u64,
     pub(super) stderr: u64,
     pub(super) stdin: u64,
+    identity: String,
+    audit_logger: std::sync::Mutex<Logger>,
 }
 
 impl StartedProcess {
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", "isolation_session")
+            .str("identity", &self.identity)
+            .u64("pid", 0)
+    }
+
+    fn record_exited(&self, exit_code: i32) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            0,
+            wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+        );
+        let mut logger = self.audit_logger.lock().unwrap_or_else(|e| e.into_inner());
+        logger.log_audit_event(
+            &self
+                .audit(AuditEventName::ProcessExited)
+                .i64("exit_code", exit_code as i64),
+        );
+    }
+
+    fn record_timed_out(&self, timeout_ms: u32) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            0,
+            wxc_common::telemetry::ProcessEvent::TimedOut(timeout_ms as u64),
+        );
+        let mut logger = self.audit_logger.lock().unwrap_or_else(|e| e.into_inner());
+        logger.log_audit_event(
+            &self
+                .audit(AuditEventName::ProcessTimedOut)
+                .u64("timeout_ms", timeout_ms as u64),
+        );
+    }
+
+    fn record_kill_failed(&self, error_code: i32) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            0,
+            wxc_common::telemetry::ProcessEvent::KillFailed(
+                KillMethod::TerminateProcess.as_str(),
+                error_code,
+            ),
+        );
+        let mut logger = self.audit_logger.lock().unwrap_or_else(|e| e.into_inner());
+        logger.log_audit_event(
+            &self
+                .audit(AuditEventName::ProcessKillFailed)
+                .str("kill_method", KillMethod::TerminateProcess.as_str())
+                .i64("error_code", error_code as i64),
+        );
+    }
+
     /// Block until the process exits and yield its exit code, escalating
     /// through the graceful-shutdown ladder if it outlives `timeout_ms`.
     ///
@@ -762,17 +874,27 @@ impl StartedProcess {
         // 259 exit from a live process, which is the ambiguity `plan_wait`
         // exists to resolve while the evidence is still intact.
         match plan {
-            WaitPlan::Exited(exit_code) => return Ok(ExecOutcome::Exited(exit_code)),
+            WaitPlan::Exited(exit_code) => {
+                self.record_exited(exit_code);
+                return Ok(ExecOutcome::Exited(exit_code));
+            }
             // The deadline was spent and the process is already gone, so there
             // is nothing to kill and nothing to confirm — the sample that
             // produced this plan is the confirmation.
-            WaitPlan::TimedOutAfterDeadline => return Ok(ExecOutcome::TimedOut),
+            WaitPlan::TimedOutAfterDeadline => {
+                self.record_timed_out(timeout_ms);
+                return Ok(ExecOutcome::TimedOut);
+            }
             WaitPlan::KillThenReportTimeout => {}
         }
 
         // Timed out: the process was still running, so it must be dead before
         // this reports `TimedOut`, which promises exactly that.
-        wait_with_graceful_shutdown(&self.process)?;
+        self.record_timed_out(timeout_ms);
+        let (_, terminate_error) = wait_with_graceful_shutdown(&self.process)?;
+        if let Some(error_code) = terminate_error {
+            self.record_kill_failed(error_code);
+        }
         let after = self
             .process
             .ExitCode()
@@ -831,9 +953,10 @@ impl StartedProcess {
     /// Confirming the process actually died would need the bounded wait's result
     /// as well, which this type does not carry.
     pub(super) fn terminate(&self) -> Result<(), IsolationSessionError> {
-        self.process
-            .Terminate()
-            .map_err(|e| transport_err(op::RUN_PROCESS, "Terminate failed", &e))?;
+        if let Err(error) = self.process.Terminate() {
+            self.record_kill_failed(error.code().0);
+            return Err(transport_err(op::RUN_PROCESS, "Terminate failed", &error));
+        }
         // Bounded rather than INFINITE so a `Terminate` that was accepted but
         // never took effect cannot park the caller inside this function. The
         // result is discarded because there is nowhere to report it; see the
@@ -1086,35 +1209,37 @@ fn plan_wait(
 /// caller that needs that distinction must establish it separately —
 /// [`StartedProcess::wait`] does, which is why it only calls this once it has
 /// independently determined the process was still running.
-fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, IsolationSessionError> {
+fn wait_with_graceful_shutdown(
+    process: &IsoSessionProcess,
+) -> Result<(i32, Option<i32>), IsolationSessionError> {
     let mut exit_code = process
         .ExitCode()
         .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
     if exit_code != STILL_ACTIVE {
-        return Ok(exit_code);
+        return Ok((exit_code, None));
     }
 
     let _ = process.CloseStandardInput();
     let _ = process.WaitForExit(5000);
     exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
     if exit_code != STILL_ACTIVE {
-        return Ok(exit_code);
+        return Ok((exit_code, None));
     }
 
     let _ = process.SendCtrlClose();
     let _ = process.WaitForExit(3000);
     exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
     if exit_code != STILL_ACTIVE {
-        return Ok(exit_code);
+        return Ok((exit_code, None));
     }
 
-    let _ = process.Terminate();
+    let terminate_error = process.Terminate().err().map(|error| error.code().0);
     let _ = process.WaitForExit(0);
     // Unchanged from before the exec-handle reshape: this path serves the
     // executor, which needs an exit code and has no timeout channel. Failing
     // here on a 259 read would turn a workload that legitimately exited with
     // 259 into a backend error on the CLI.
-    Ok(process.ExitCode().unwrap_or(-1))
+    Ok((process.ExitCode().unwrap_or(-1), terminate_error))
 }
 
 #[cfg(test)]
@@ -1123,6 +1248,51 @@ mod tests {
     use windows::Win32::System::Com::{
         APTTYPEQUALIFIER_NA_ON_MTA, APTTYPEQUALIFIER_NONE, APTTYPE_MTA,
     };
+
+    #[test]
+    fn teardown_status_distinguishes_failure_success_and_skipped() {
+        assert_eq!(TeardownOutcome::default().status(), TeardownStatus::Skipped);
+        assert_eq!(
+            TeardownOutcome {
+                session_stopped: Some(true),
+                agent_user_deprovisioned: Some(true),
+            }
+            .status(),
+            TeardownStatus::Success
+        );
+        assert_eq!(
+            TeardownOutcome {
+                session_stopped: Some(true),
+                ..Default::default()
+            }
+            .status(),
+            TeardownStatus::Success
+        );
+        assert_eq!(
+            TeardownOutcome {
+                session_stopped: Some(true),
+                agent_user_deprovisioned: Some(false),
+            }
+            .status(),
+            TeardownStatus::Failure
+        );
+    }
+
+    #[test]
+    fn teardown_record_satisfies_the_requirement_contract() {
+        let outcome = TeardownOutcome {
+            session_stopped: Some(true),
+            agent_user_deprovisioned: Some(false),
+        };
+        let event = AuditEvent::new(AuditEventName::SandboxTornDown)
+            .str("backend", "isolation_session")
+            .str("identity", "iso:0123456789abcdef")
+            .str("phase", "deprovision")
+            .str("status", outcome.status().as_str())
+            .bool("agent_user_deprovisioned", false);
+        assert!(event.missing_required_fields().is_empty());
+        assert!(event.to_json_line().contains(r#""status":"failure""#));
+    }
 
     /// The process's *first* STA reports `MAINSTA`, not `APTTYPE_STA`; admitting
     /// it deadlocks.

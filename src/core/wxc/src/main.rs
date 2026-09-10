@@ -5,17 +5,18 @@
 mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
-use std::fs;
 use std::process;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
-use wxc_common::config_parser::{
-    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+use wxc_common::audit::RejectionReason;use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
+use wxc_common::config_parser::{LoadOptions, ParseError};
+use wxc_common::config_rejection::{
+    config_rejection_reason_for, log_config_rejected, offending_field_from_message,
 };
+#[cfg(target_os = "windows")]
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
@@ -108,6 +109,39 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Manage telemetry consent without spawning a sandbox.
+    #[arg(
+        long = "telemetry-consent",
+        value_name = "ACTION",
+        conflicts_with_all = [
+            "config_path",
+            "config",
+            "config_base64",
+            "command",
+            "delete",
+            "containername",
+            "experimental",
+            "allow_testing_features",
+            "dry_run",
+            "setup_hyperlight",
+            "force",
+            "setup_wslc",
+            "image",
+            "storage_path",
+            "probe",
+            "force_reclaim"
+        ]
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        arg(conflicts_with_all = ["audit", "audit_verbose"])
+    )]
+    telemetry_consent: Option<telemetry::consent_cli::ConsentAction>,
+
+    /// Preferred BCP 47 locale for a telemetry consent request.
+    #[arg(long = "telemetry-consent-locale", requires = "telemetry_consent")]
+    telemetry_consent_locale: Option<String>,
+
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
     /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
@@ -145,6 +179,27 @@ impl Cli {
             }
         }
         self
+    }
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                error.exit();
+            }
+            let is_consent_command =
+                telemetry::consent_cli::invocation_uses_consent_options(std::env::args_os());
+            if is_consent_command {
+                let _ = error.print();
+                process::exit(64);
+            }
+            error.exit();
+        }
     }
 }
 
@@ -208,6 +263,16 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Read the request source (file path / base64 blob) once, returning the
+/// decoded JSON. Reused by `--probe` and the normal request loader so a single
+/// source is only read once per invocation.
+fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
+    let (input, is_base64) = config_input(cli)?;
+    Some(wxc_common::config_parser::decode_request_input(
+        &input, is_base64,
+    ))
+}
+
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -261,6 +326,47 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
     logger.log_diagnostic_line(&error.to_string());
 }
 
+/// Backend name for a rejection that happened before (or without) backend
+/// resolution.
+const UNKNOWN_BACKEND: &str = "unknown";
+
+/// Resolve the wire backend name for a parsed state-aware request, falling back
+/// to [`UNKNOWN_BACKEND`] when the request is too malformed to name one.
+fn backend_name_for_state_aware(parsed: &ParsedStateAwareRequest) -> String {
+    resolve_backend(parsed)
+        .map(|b| b.wire_name().to_string())
+        .unwrap_or_else(|_| UNKNOWN_BACKEND.to_string())
+}
+
+fn rejection_reason_for(error: &MxcError) -> RejectionReason {
+    config_rejection_reason_for(error).unwrap_or(RejectionReason::RunnerUnavailable)
+}
+
+fn emit_state_aware_early_rejection(
+    telemetry_active: bool,
+    parsed: &ParsedStateAwareRequest,
+    error: &MxcError,
+) {
+    let backend = backend_name_for_state_aware(parsed);
+    let requested_sandbox_kind = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let outcome = Err(error.clone());
+    telemetry::emit_state_aware_with_kind(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: parsed.phase.as_str(),
+            correlation_vector: "",
+        },
+        &outcome,
+        Duration::ZERO,
+    );
+}
+
 /// Drives the state-aware dispatch flow. On envelope success, writes the
 /// JSON to stdout and exits 0. On exec success, exits with the script's
 /// exit code (output already streamed). On failure, writes a JSON error
@@ -270,14 +376,15 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
 fn run_state_aware_main(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
-    experimental: bool,
+    telemetry_active: bool,
     logger: &mut Logger,
 ) -> ! {
-    // Telemetry, correlation-vector, and panic-hook orchestration lives in
-    // `mxc_engine` so the `lxc` executor's entry point shares it verbatim — a
-    // Linux lifecycle is observed exactly like a Windows one, and the two
-    // cannot drift apart.
-    let outcome = mxc_engine::run_state_aware_with_telemetry(parsed, dry_run, experimental, logger);
+    let outcome = mxc_engine::run_state_aware_with_telemetry(
+        parsed,
+        dry_run,
+        telemetry_active,
+        logger,
+    );
 
     // On dispatch failure, route the error to the auxiliary diagnostic sinks
     // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
@@ -285,6 +392,9 @@ fn run_state_aware_main(
     // channel and is not shadowed by a duplicate on stderr.
     if let Err(error) = &outcome {
         log_state_aware_dispatch_error(logger, error);
+    }
+    for warning in logger.take_warnings() {
+        eprintln!("{warning}");
     }
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
@@ -558,7 +668,18 @@ fn install_dacl_ctrl_handler() {
 }
 
 fn main() {
-    let cli = Cli::parse().normalize_named_config_command();
+    let cli = parse_cli().normalize_named_config_command();
+
+    if let Some(action) = cli.telemetry_consent {
+        let outcome = telemetry::consent_cli::handle_consent_command(
+            action,
+            cli.telemetry_consent_locale.as_deref(),
+        );
+        process::exit(outcome.emit());
+    }
+    // Decode the request source (file path / base64) once, up front.
+    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
+        decode_config_input_once(&cli);
 
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
@@ -605,16 +726,25 @@ fn main() {
     // (which probe doesn't need; deferring them shaves cold-start cost
     // off the SDK warm path).
     if cli.probe {
-        let policy = if let Some((data, is_b64)) = config_input(&cli) {
+        let policy = if let Some(decoded) = decoded_config.as_ref() {
             // Parse using the existing pipeline but route logger output to
             // an in-memory buffer that we discard — the probe must not
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
-            match load_request(&data, &mut probe_logger, is_b64) {
-                Ok(r) => r.policy,
+            match decoded {
+                Ok(json) => {
+                    match wxc_common::config_parser::load_request_from_json(json, &mut probe_logger)
+                    {
+                        Ok(r) => r.policy,
+                        Err(_) => {
+                            eprintln!("Error: failed to load probe config");
+                            eprint!("{}", probe_logger.get_buffer());
+                            process::exit(1);
+                        }
+                    }
+                }
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
-                    eprint!("{}", probe_logger.get_buffer());
                     process::exit(1);
                 }
             }
@@ -769,18 +899,27 @@ fn main() {
     // --probe is handled at the top of `main` (before COM init) for
     // SDK first-call latency. See note there.
 
-    // Determine config input and whether it's base64
-    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
-        (b64.clone(), true)
-    } else if let Some(ref path) = cli.config {
-        (path.clone(), false)
-    } else if let Some(ref path) = cli.config_path {
-        (path.clone(), false)
-    } else if !cli.delete {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
-    } else {
-        (String::new(), false)
+    // Determine config input. In delete mode the config is optional; every
+    // other path requires it. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the
+    // decode error). If it's absent, either accept the empty state for
+    // delete mode or report the missing-config error.
+    let config_json: Option<String> = match decoded_config {
+        Some(Ok(json)) => Some(json),
+        Some(Err(error)) => {
+            eprintln!("Request error");
+            eprintln!("{error}");
+            process::exit(1);
+        }
+        None => {
+            if !cli.delete {
+                eprintln!(
+                    "Error: No config provided. Use a positional path, --config, or --config-base64"
+                );
+                process::exit(1);
+            }
+            None
+        }
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -793,6 +932,15 @@ fn main() {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
             eprintln!("Warning: could not open log file '{}': {}", log_path, e);
         }
+    }
+
+    // Initialize the diagnostic console before parsing so early rejection
+    // records have an active sink.
+    #[cfg(target_os = "windows")]
+    let diag_config = DiagnosticConfig::from_environment();
+    #[cfg(target_os = "windows")]
+    if diag_config.console_enabled {
+        logger.enable_diagnostics(&diag_config);
     }
 
     // Delete mode
@@ -809,24 +957,47 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
+    // Non-delete paths always have a config JSON at this point (or exited
+    // above with the missing-config error).
+    let config_json = config_json.expect("config_json is Some on non-delete paths");
+
     // Load request — discriminates state-aware (top-level `phase` field) from
     // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
     // and pre-discrimination failures keep the existing diagnostic-on-stderr
     // convention.
     let has_command_override = has_cli_command(&cli);
     let load_opts = LoadOptions {
-        is_base64,
+        is_base64: false,
         allow_missing_command: has_command_override,
     };
-    let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
+    let parsed_request = wxc_common::config_parser::load_mxc_request_from_json_with_options(
+        &config_json,
+        &mut logger,
+        load_opts,
+    );
+    let request = match parsed_request {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {
+            let telemetry_active = parsed
+                .request
+                .telemetry
+                .as_ref()
+                .map(|config| telemetry::init(config, &mut logger))
+                .unwrap_or(false);
             let context =
                 match command_override_context_for_state_aware(&parsed, has_command_override) {
                     Ok(context) => context,
                     Err(e) => {
+                        log_config_rejected(
+                            &mut logger,
+                            rejection_reason_for(&e),
+                            &backend_name_for_state_aware(&parsed),
+                            "",
+                            parsed.phase.as_str(),
+                        );
                         print_error_envelope(&e);
                         eprint!("{}", logger.get_buffer());
+                        emit_state_aware_early_rejection(telemetry_active, &parsed, &e);
                         process::exit(1);
                     }
                 };
@@ -836,10 +1007,18 @@ fn main() {
             {
                 Ok(command_override) => command_override.flatten(),
                 Err(e) => {
-                    print_error_envelope(&MxcError::malformed_request(format!(
-                        "invalid CLI command override: {e}"
-                    )));
+                    log_config_rejected(
+                        &mut logger,
+                        RejectionReason::InvalidCommandOverride,
+                        &backend_name_for_state_aware(&parsed),
+                        "process.commandLine",
+                        parsed.phase.as_str(),
+                    );
+                    let error =
+                        MxcError::malformed_request(format!("invalid CLI command override: {e}"));
+                    print_error_envelope(&error);
                     eprint!("{}", logger.get_buffer());
+                    emit_state_aware_early_rejection(telemetry_active, &parsed, &error);
                     process::exit(1);
                 }
             };
@@ -858,13 +1037,55 @@ fn main() {
             // `--experimental` on the CLI.
             parsed.request.experimental_enabled = cli.experimental;
             parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
+            run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
         }
-        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
+        Err(ParseError::Decode(_)) => {
+            // The payload could not even be decoded into JSON, so no backend or
+            // field path is known — the record still exists so a rejected run
+            // is never invisible.
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                "",
+                "",
+            );
+            eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::OneShotMalformed(error)) => {
+            let message = error.to_string();
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
+            eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::OneShot(error)) => {
+            let message = error.to_string();
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::SchemaViolation,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
         Err(ParseError::StateAware(e)) => {
+            let offending_field = offending_field_from_message(&e.message);
+            log_config_rejected(
+                &mut logger,
+                rejection_reason_for(&e),
+                UNKNOWN_BACKEND,
+                offending_field,
+                "",
+            );
             print_error_envelope(&e);
             eprint!("{}", logger.get_buffer());
             process::exit(1);
@@ -876,24 +1097,23 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints (also satisfying the "always emit a diagnostic" contract for the
     // panic case). The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -905,11 +1125,19 @@ fn main() {
     ) {
         Ok(command_override) => command_override,
         Err(e) => {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::InvalidCommandOverride,
+                request.containment.wire_name(),
+                "process.commandLine",
+                "",
+            );
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -933,10 +1161,18 @@ fn main() {
     #[cfg(target_os = "windows")]
     if cli.audit {
         if let Err(message) = validate_audit_request(&request) {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::UnsupportedFieldForBackend,
+                request.containment.wire_name(),
+                "containment",
+                "",
+            );
             eprintln!("Error: {message}");
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -946,9 +1182,10 @@ fn main() {
             Ok(context) => context,
             Err(message) => {
                 eprintln!("Error: {message}");
-                telemetry::emit_early_exit(
+                telemetry::emit_early_exit_with_kind(
                     telemetry_active,
                     &request.containment,
+                    requested_sandbox_kind,
                     telemetry::FailureReason::ConfigError,
                 );
                 process::exit(1);
@@ -966,20 +1203,38 @@ fn main() {
     // Final validation: a command line must come from somewhere. If neither
     // the policy nor the CLI supplied one we cannot proceed.
     if request.script_code.is_empty() {
+        log_config_rejected(
+            &mut logger,
+            RejectionReason::MissingCommand,
+            request.containment.wire_name(),
+            "process.commandLine",
+            "",
+        );
         eprintln!(
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
         eprint!("{}", logger.get_buffer());
-        telemetry::emit_early_exit(
+        telemetry::emit_early_exit_with_kind(
             telemetry_active,
             &request.containment,
+            requested_sandbox_kind,
             telemetry::FailureReason::ConfigError,
         );
         process::exit(1);
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
+    let learning_mode_requested = {
+        #[cfg(target_os = "windows")]
+        {
+            DiagnosticConfig::force_learning_mode()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    };
+    let learning_mode_injected = if learning_mode_requested
         && !request.policy.capabilities.iter().any(|c| {
             c.eq_ignore_ascii_case("learningModeLogging")
                 || c.eq_ignore_ascii_case("permissiveLearningMode")
@@ -993,60 +1248,67 @@ fn main() {
         false
     };
 
-    // Initialize diagnostic logging (registry/env-controlled).
-    let diag_config = DiagnosticConfig::from_environment();
-    if diag_config.console_enabled {
-        logger.enable_diagnostics(&diag_config);
-
-        // Log the preamble
-        let exe_path = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "unknown".to_string());
-        let parent_info = wxc_common::diagnostic::get_parent_process_info();
-        let _ = writeln!(
-            logger,
-            "wxc-exec v{} (PID {})",
-            env!("CARGO_PKG_VERSION"),
-            std::process::id()
-        );
-        let _ = writeln!(logger, "\tpath: {}", exe_path);
-        let _ = writeln!(logger, "\tparent: {}", parent_info);
-
-        // Log if we're injecting Learning Mode
-        if learning_mode_injected {
+    // Emit the diagnostic preamble after the request is available.
+    #[cfg(target_os = "windows")]
+    {
+        if diag_config.console_enabled {
+            // Log the preamble
+            let exe_path = std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let parent_info = wxc_common::diagnostic::get_parent_process_info();
             let _ = writeln!(
+                logger,
+                "wxc-exec v{} (PID {})",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            );
+            let _ = writeln!(logger, "\tpath: {}", exe_path);
+            let _ = writeln!(logger, "\tparent: {}", parent_info);
+
+            // Log if we're injecting Learning Mode
+            if learning_mode_injected {
+                let _ = writeln!(
                 logger,
                 "WARNING: injected 'learningModeLogging' capability via ForceLearningMode registry key"
             );
+            }
         }
 
-        // Log the raw input JSON config before any transformation.
-        let raw_json = if is_base64 {
-            wxc_common::encoding::base64_decode(&config_data)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        } else {
-            fs::read_to_string(&config_data).ok()
-        };
-        if let Some(json) = raw_json {
-            let _ = writeln!(logger, "SECTION: JSON Config");
-            let _ = writeln!(logger, "{}", json.trim());
+        // Log the decoded input only when a diagnostic sink is attached.
+        // Reuse the already-decoded value so one-shot input sources are not
+        // read twice, and redact secret-bearing fields before writing it.
+        if logger.has_diagnostic_sink() {
+            let _ = writeln!(logger, "SECTION: JSON Config (redacted)");
+            let _ = writeln!(
+                logger,
+                "{}",
+                wxc_common::diagnostic::redact_raw_config_json(config_json.trim())
+            );
         }
     }
 
     let _ = writeln!(logger, "SECTION: Request simplified");
     log_request(&request, &mut logger);
 
-    // Emit the full (redacted) request policy for diagnostics.
-    let _ = writeln!(
-        logger,
-        "SECTION: Full `ExecutionRequest` configuration (redacted)"
-    );
-    let _ = writeln!(
-        logger,
-        "{}",
-        wxc_common::diagnostic::redacted_request_json(&request)
-    );
+    #[cfg(target_os = "windows")]
+    {
+        // Emit the full (redacted) request policy for diagnostics. Gated on
+        // an attached sink for the same reason as the raw-config block above:
+        // rendering the whole request is comparatively expensive and would
+        // otherwise run unconditionally only to be discarded.
+        if logger.has_diagnostic_sink() {
+            let _ = writeln!(
+                logger,
+                "SECTION: Full `ExecutionRequest` configuration (redacted)"
+            );
+            let _ = writeln!(
+                logger,
+                "{}",
+                wxc_common::diagnostic::redacted_request_json(&request)
+            );
+        }
+    }
 
     // Run script in the selected containment backend. Backend selection and
     // runner construction — including the ProcessContainer BaseContainer /
@@ -1067,11 +1329,19 @@ fn main() {
             resolved.runner
         }
         Err(e) => {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::RunnerUnavailable,
+                request.containment.wire_name(),
+                "containment",
+                "",
+            );
             eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -1140,19 +1410,19 @@ fn main() {
         eprintln!("{warning}");
     }
 
+    telemetry::emit_completion_with_kind(
+        telemetry_active,
+        &request.containment,
+        requested_sandbox_kind,
+        &response,
+        run_elapsed,
+    );
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
 
     display_script_results(&response, &mut logger);
-
-    // ── Telemetry emit (experimental) ───────────────────────────────
-    telemetry::emit_completion(
-        telemetry_active,
-        &request.containment,
-        &response,
-        run_elapsed,
-    );
 
     // Close diagnostic pipe.
     logger.close_diagnostics();
@@ -1190,10 +1460,12 @@ mod tests {
     use super::*;
 
     use clap::{CommandFactory, Parser};
+    use wxc_common::config_parser::load_mxc_request_with_options;
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
+    use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
 
     fn parse_cli(argv: &[&str]) -> Cli {
         Cli::try_parse_from(argv)
@@ -1207,6 +1479,114 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    /// Every rejection reason must come from the error's own closed `code`, not
+    /// from matching its message text — the message is prose that can embed
+    /// paths and is not a stable vocabulary.
+    #[test]
+    fn rejection_reason_is_driven_by_the_error_code() {
+        let cases = [
+            (
+                MxcError::malformed_request("x"),
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                MxcError::malformed_id("x"),
+                RejectionReason::IdentityShapeInvalid,
+            ),
+            (
+                MxcError::policy_validation("x"),
+                RejectionReason::UnsupportedFieldForBackend,
+            ),
+            (
+                MxcError::unsupported_containment("x"),
+                RejectionReason::UnsupportedContainment,
+            ),
+            (
+                MxcError::unsupported_phase("x"),
+                RejectionReason::UnsupportedPhase,
+            ),
+            (
+                MxcError::backend_unavailable("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (MxcError::stale_id("x"), RejectionReason::RunnerUnavailable),
+            (
+                MxcError::not_provisioned("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::not_started("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::already_started("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::already_stopped("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::backend_error("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                rejection_reason_for(&error),
+                expected,
+                "code {:?} mapped to the wrong reason",
+                error.code
+            );
+        }
+    }
+
+    #[test]
+    fn offending_field_is_extracted_without_error_text() {
+        assert_eq!(
+            offending_field_from_message(
+                "Configuration parse error: Invalid configuration at `process.timeout`: invalid number"
+            ),
+            "process.timeout"
+        );
+        assert_eq!(
+            offending_field_from_message("Invalid JSON syntax: expected value at line 1 column 2"),
+            ""
+        );
+    }
+
+    /// The record must carry the bounded reason and the field *path* — never
+    /// the offending value, and never the rich error text.
+    #[test]
+    fn config_rejected_record_carries_no_free_form_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&path).expect("file sink");
+
+        log_config_rejected(
+            &mut logger,
+            RejectionReason::MissingCommand,
+            "processcontainer",
+            "process.commandLine",
+            "",
+        );
+        drop(logger);
+
+        let contents = std::fs::read_to_string(&path).expect("read log");
+        assert!(
+            contents.contains(r#""reason":"missing_command""#),
+            "got: {contents}"
+        );
+        assert!(
+            contents.contains(r#""offending_field":"process.commandLine""#),
+            "got: {contents}"
+        );
+        // A one-shot run has no lifecycle phase, so the field is omitted rather
+        // than emitted as a meaningless empty string.
+        assert!(!contents.contains("\"phase\""), "got: {contents}");
     }
 
     #[test]
@@ -1296,6 +1676,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn config_rejection_reason_classifies_only_validation_errors() {
+        for code in [
+            MxcErrorCode::MalformedRequest,
+            MxcErrorCode::UnsupportedContainment,
+            MxcErrorCode::UnsupportedPhase,
+            MxcErrorCode::MalformedId,
+            MxcErrorCode::PolicyValidation,
+        ] {
+            assert!(
+                config_rejection_reason_for(&MxcError::new(code, "validation")).is_some(),
+                "{code} should emit configuration rejection telemetry"
+            );
+        }
+        for code in [
+            MxcErrorCode::BackendUnavailable,
+            MxcErrorCode::StaleId,
+            MxcErrorCode::NotProvisioned,
+            MxcErrorCode::NotStarted,
+            MxcErrorCode::AlreadyStarted,
+            MxcErrorCode::AlreadyStopped,
+            MxcErrorCode::BackendError,
+        ] {
+            assert!(
+                config_rejection_reason_for(&MxcError::new(code, "runtime")).is_none(),
+                "{code} should remain a runtime error"
+            );
+        }
     }
 
     #[test]
@@ -1401,6 +1811,71 @@ mod tests {
                 .as_deref(),
             Some("python --version")
         );
+    }
+
+    #[test]
+    fn cli_parses_dedicated_telemetry_consent_request() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "--telemetry-consent",
+            "request",
+            "--telemetry-consent-locale",
+            "en-US",
+        ]);
+
+        assert_eq!(
+            cli.telemetry_consent,
+            Some(telemetry::consent_cli::ConsentAction::Request)
+        );
+        assert_eq!(cli.telemetry_consent_locale.as_deref(), Some("en-US"));
+    }
+
+    #[test]
+    fn cli_rejects_execution_config_with_telemetry_consent() {
+        let error = Cli::try_parse_from([
+            "wxc-exec",
+            "--telemetry-consent",
+            "status",
+            "--config",
+            "policy.json",
+        ])
+        .err()
+        .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_rejects_audit_with_telemetry_consent() {
+        for audit_option in ["--audit", "--audit-verbose"] {
+            let error =
+                Cli::try_parse_from(["wxc-exec", "--telemetry-consent", "status", audit_option])
+                    .err()
+                    .unwrap();
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn cli_rejects_consent_locale_without_action() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-locale", "en-US"])
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn cli_rejects_removed_telemetry_consent_status_flag() {
+        let error = Cli::try_parse_from(["wxc-exec", "--telemetry-consent-status"])
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -1586,7 +2061,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-1234".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1643,6 +2117,41 @@ mod tests {
             CLEANED.load(Ordering::SeqCst),
             "cleanup must run even when emit panics"
         );
+    }
+
+    #[test]
+    fn pre_dispatch_vector_is_empty_when_telemetry_inactive() {
+        // Inactive telemetry does no RNG/clock work regardless of phase.
+        assert!(telemetry::correlation_state::pre_dispatch_vector(false, true, None).is_empty());
+        assert!(telemetry::correlation_state::pre_dispatch_vector(
+            false,
+            false,
+            Some("wsb:12345678")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn provision_seeds_and_later_phase_recalls_the_persisted_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let sandbox_id = "wsb:12345678";
+
+        // Active provision seeds a fresh valid vector.
+        let provisioned = telemetry::correlation_state::pre_dispatch_vector(true, true, None);
+        assert!(telemetry::correlation_vector::is_relayable(&provisioned));
+
+        // Persisting it (as `run_state_aware_main` does post-dispatch) lets a
+        // later phase recall it and spin a distinct child off the same base.
+        let outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
+        ));
+        telemetry::correlation_state::on_provision_outcome(true, &provisioned, &outcome);
+
+        let base_prefix = provisioned.split('.').next().unwrap();
+        let spun = telemetry::correlation_state::pre_dispatch_vector(true, false, Some(sandbox_id));
+        assert!(spun.starts_with(&format!("{base_prefix}.")), "{spun:?}");
+        assert_ne!(spun, provisioned);
     }
 
     #[test]

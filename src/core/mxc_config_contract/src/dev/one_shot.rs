@@ -5,7 +5,8 @@ use super::experimental::OneShotExperimental;
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
-    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt, Ui,
+    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
+    Telemetry, Ui,
 };
 use crate::dev::Version;
 
@@ -91,6 +92,9 @@ pub struct Request {
     /// Optional runtime configuration settings.
     #[serde(default)]
     pub runtime_config: OptionalField<RuntimeConfig>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
     /// Optional experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<OneShotExperimental>,

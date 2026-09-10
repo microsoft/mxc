@@ -43,10 +43,7 @@ fn convert_isolation_session_provision(
 fn convert_isolation_session_provision_experimental(
     value: contract::IsolationSessionProvisionExperimental,
 ) -> wire::Experimental {
-    let contract::IsolationSessionProvisionExperimental {
-        isolation_session,
-        telemetry,
-    } = value;
+    let contract::IsolationSessionProvisionExperimental { isolation_session } = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -56,7 +53,6 @@ fn convert_isolation_session_provision_experimental(
             .map(convert_state_aware_isolation_session),
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
@@ -80,7 +76,7 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
 fn convert_windows_sandbox_provision_experimental(
     value: contract::WindowsSandboxExperimental,
 ) -> wire::Experimental {
-    let contract::WindowsSandboxExperimental { telemetry } = value;
+    let contract::WindowsSandboxExperimental {} = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -88,7 +84,6 @@ fn convert_windows_sandbox_provision_experimental(
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
@@ -121,7 +116,7 @@ fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> wire::Wslc {
 fn convert_wslc_provision_experimental(
     value: contract::WslcProvisionExperimental,
 ) -> wire::Experimental {
-    let contract::WslcProvisionExperimental { wslc, telemetry } = value;
+    let contract::WslcProvisionExperimental { wslc } = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -129,12 +124,11 @@ fn convert_wslc_provision_experimental(
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
 fn convert_start_experimental(value: contract::StartExperimental) -> wire::Experimental {
-    let contract::StartExperimental { telemetry } = value;
+    let contract::StartExperimental {} = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -142,12 +136,11 @@ fn convert_start_experimental(value: contract::StartExperimental) -> wire::Exper
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
 fn convert_exec_experimental(value: contract::ExecExperimental) -> wire::Experimental {
-    let contract::ExecExperimental { telemetry } = value;
+    let contract::ExecExperimental {} = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -155,12 +148,11 @@ fn convert_exec_experimental(value: contract::ExecExperimental) -> wire::Experim
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
 fn convert_stop_experimental(value: contract::StopExperimental) -> wire::Experimental {
-    let contract::StopExperimental { telemetry } = value;
+    let contract::StopExperimental {} = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -168,14 +160,13 @@ fn convert_stop_experimental(value: contract::StopExperimental) -> wire::Experim
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
 fn convert_deprovision_experimental(
     value: contract::DeprovisionExperimental,
 ) -> wire::Experimental {
-    let contract::DeprovisionExperimental { telemetry } = value;
+    let contract::DeprovisionExperimental {} = value;
     wire::Experimental {
         test: None,
         windows_sandbox: None,
@@ -183,7 +174,6 @@ fn convert_deprovision_experimental(
         isolation_session: None,
         lxc: None,
         seatbelt: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
     }
 }
 
@@ -209,6 +199,7 @@ fn isolation_session_provision_into_wire(
         phase: contract::ProvisionPhase,
         containment: contract::IsolationSessionContainment,
         network,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -221,13 +212,13 @@ fn isolation_session_provision_into_wire(
             .map(convert_isolation_session_provision_experimental),
         containment: Some(wire::Containment::IsolationSession),
         container_id: None,
-        correlation_vector: None,
         sandbox_id: None,
         process: None,
         filesystem: None,
         fallback: None,
         network: Some(convert_isolation_session_network(network)),
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -246,6 +237,7 @@ fn windows_sandbox_provision_into_wire(
         phase: contract::ProvisionPhase,
         containment: contract::WindowsSandboxContainment,
         filesystem,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -258,13 +250,13 @@ fn windows_sandbox_provision_into_wire(
             .map(convert_windows_sandbox_provision_experimental),
         containment: Some(wire::Containment::WindowsSandbox),
         container_id: None,
-        correlation_vector: None,
         sandbox_id: None,
         process: None,
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: None,
         network: None,
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -282,6 +274,7 @@ fn wslc_provision_into_wire(request: contract::WslcProvisionRequest) -> wire::Mx
         containment: contract::WslcContainment,
         filesystem,
         network,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -294,13 +287,13 @@ fn wslc_provision_into_wire(request: contract::WslcProvisionRequest) -> wire::Mx
             .map(convert_wslc_provision_experimental),
         containment: Some(wire::Containment::Wslc),
         container_id: None,
-        correlation_vector: None,
         sandbox_id: None,
         process: None,
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: None,
         network: network.into_option().map(convert_network),
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -316,7 +309,7 @@ pub(super) fn start_into_wire(request: contract::StartRequest) -> wire::MxcConfi
         version,
         phase: contract::StartPhase,
         sandbox_id,
-        correlation_vector,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -325,7 +318,6 @@ pub(super) fn start_into_wire(request: contract::StartRequest) -> wire::MxcConfi
         version: Some(convert_version(version).to_owned()),
         phase: Some(wire::Phase::Start),
         sandbox_id: Some(sandbox_id),
-        correlation_vector: correlation_vector.into_option(),
         experimental: experimental.into_option().map(convert_start_experimental),
         containment: None,
         container_id: None,
@@ -334,6 +326,7 @@ pub(super) fn start_into_wire(request: contract::StartRequest) -> wire::MxcConfi
         fallback: None,
         network: None,
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -350,8 +343,8 @@ pub(super) fn exec_into_wire(request: contract::ExecRequest) -> wire::MxcConfig 
         phase: contract::ExecPhase,
         sandbox_id,
         process,
-        correlation_vector,
         network,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -360,7 +353,6 @@ pub(super) fn exec_into_wire(request: contract::ExecRequest) -> wire::MxcConfig 
         version: Some(convert_version(version).to_owned()),
         phase: Some(wire::Phase::Exec),
         sandbox_id: Some(sandbox_id),
-        correlation_vector: correlation_vector.into_option(),
         experimental: experimental.into_option().map(convert_exec_experimental),
         containment: None,
         container_id: None,
@@ -369,6 +361,7 @@ pub(super) fn exec_into_wire(request: contract::ExecRequest) -> wire::MxcConfig 
         fallback: None,
         network: network.into_option().map(convert_network),
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -384,7 +377,7 @@ pub(super) fn stop_into_wire(request: contract::StopRequest) -> wire::MxcConfig 
         version,
         phase: contract::StopPhase,
         sandbox_id,
-        correlation_vector,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -393,7 +386,6 @@ pub(super) fn stop_into_wire(request: contract::StopRequest) -> wire::MxcConfig 
         version: Some(convert_version(version).to_owned()),
         phase: Some(wire::Phase::Stop),
         sandbox_id: Some(sandbox_id),
-        correlation_vector: correlation_vector.into_option(),
         experimental: experimental.into_option().map(convert_stop_experimental),
         containment: None,
         container_id: None,
@@ -402,6 +394,7 @@ pub(super) fn stop_into_wire(request: contract::StopRequest) -> wire::MxcConfig 
         fallback: None,
         network: None,
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,
@@ -417,7 +410,7 @@ pub(super) fn deprovision_into_wire(request: contract::DeprovisionRequest) -> wi
         version,
         phase: contract::DeprovisionPhase,
         sandbox_id,
-        correlation_vector,
+        telemetry,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -426,7 +419,6 @@ pub(super) fn deprovision_into_wire(request: contract::DeprovisionRequest) -> wi
         version: Some(convert_version(version).to_owned()),
         phase: Some(wire::Phase::Deprovision),
         sandbox_id: Some(sandbox_id),
-        correlation_vector: correlation_vector.into_option(),
         experimental: experimental
             .into_option()
             .map(convert_deprovision_experimental),
@@ -437,6 +429,7 @@ pub(super) fn deprovision_into_wire(request: contract::DeprovisionRequest) -> wi
         fallback: None,
         network: None,
         runtime_config: None,
+        telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
         process_container: None,

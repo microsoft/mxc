@@ -6,6 +6,7 @@ import {
   FilesystemConfig,
   NetworkConfig,
   ProcessConfig,
+  TelemetryConfig,
 } from './types.js';
 
 /**
@@ -40,6 +41,7 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
 export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
    * Optional identifier for the calling application.
    *
@@ -76,22 +78,26 @@ export interface IsolationSessionProvisionConfig {
 export interface IsolationSessionStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface IsolationSessionStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface IsolationSessionDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface LxcProvisionConfig {
@@ -168,6 +174,7 @@ export interface LxcProvisionMetadata {
 export interface WindowsSandboxProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
@@ -182,22 +189,26 @@ export interface WindowsSandboxProvisionConfig {
 export interface WindowsSandboxStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
 }
 
 export interface WindowsSandboxStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WindowsSandboxDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 // WSLc per-(backend, phase) Configs. WSLc runs each sandbox as a warm
@@ -209,6 +220,7 @@ export interface WindowsSandboxDeprovisionConfig {
 export interface WslcProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
   version?: string;
+  telemetry?: TelemetryConfig;
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
@@ -244,11 +256,13 @@ export interface WslcProvisionConfig {
 export interface WslcStartConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WslcExecConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
   process: ProcessConfig;
   /**
    * Per-exec network overrides. Only `proxy` is honored: it injects a
@@ -266,11 +280,13 @@ export interface WslcExecConfig {
 export interface WslcStopConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface WslcDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
+  telemetry?: TelemetryConfig;
 }
 
 /**
@@ -444,16 +460,6 @@ export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = Met
 export interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
-  /**
-   * Correlation vector (MS-CV) seeded by the executor for this lifecycle when
-   * experimental telemetry is enabled. Relay it verbatim as
-   * {@link SandboxSpawnOptions.correlationVector} on every later phase so all
-   * phases of the lifecycle share a telemetry base prefix. The client relays it
-   * unchanged; the executor derives each phase's own vector from it (spinning a
-   * mutable base or reseeding a missing/malformed value). Absent when telemetry
-   * is not active.
-   */
-  correlationVector?: string;
 }
 
 export interface StartResult<C extends StateAwareContainmentBackend> {
