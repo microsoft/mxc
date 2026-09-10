@@ -10,6 +10,12 @@ from #1125. The rebase added 73 JSON documents and removed one, producing 67
 additional equivalent accepts and five additional shared rejections without
 changing the seven classified exact-stricter results.
 
+This branch is a combined delivery: it makes exact contracts authoritative
+and completes the v0.9 directional-network cutover. The latter is a breaking
+contract/backend migration rather than parser plumbing, and is documented
+separately below so reviewers can evaluate and revert the two concerns
+independently.
+
 ## Summary
 
 | Classification | Documents | Migration |
