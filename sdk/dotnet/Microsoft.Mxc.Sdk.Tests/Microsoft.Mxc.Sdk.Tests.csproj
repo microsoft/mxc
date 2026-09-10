@@ -14,9 +14,9 @@
     <DefineConstants Condition="'$(MxcWithIsolationSession)' == 'true'">$(DefineConstants);MXC_WITH_ISOLATION_SESSION</DefineConstants>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcTestCargoTargetDir>$(MxcSrcDir)/target/dotnet-test-support</MxcTestCargoTargetDir>
-    <MxcTestCargoProfileArg Condition="'$(Configuration)' == 'Release'">--release</MxcTestCargoProfileArg>
-    <MxcTestCargoProfileDir Condition="'$(Configuration)' == 'Release'">release</MxcTestCargoProfileDir>
-    <MxcTestCargoProfileDir Condition="'$(Configuration)' != 'Release'">debug</MxcTestCargoProfileDir>
+    <!-- Test isolation overrides are compiled only with Rust debug assertions,
+         including when the managed tests themselves run in Release. -->
+    <MxcTestCargoProfileDir>debug</MxcTestCargoProfileDir>
     <MxcTestCargoFeatures>test-support</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
@@ -52,7 +52,7 @@
       <MxcTestNativeOutput>$(MxcTestCargoTargetDir)/$(MxcTestRustHostTriple)/$(MxcTestCargoProfileDir)/$(MxcTestNativeFileName)</MxcTestNativeOutput>
     </PropertyGroup>
     <Message Importance="high" Text="mxc: building isolated test-support native library for $(MxcTestRustHostTriple)" />
-    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) $(MxcTestCargoProfileArg) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
+    <Exec Command="cargo build -p mxc_ffi --features &quot;$(MxcTestCargoFeatures)&quot; --target $(MxcTestRustHostTriple) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
     <Error Condition="!Exists('$(MxcTestNativeOutput)')"
            Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
     <Copy SourceFiles="$(MxcTestNativeOutput)"
