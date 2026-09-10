@@ -351,7 +351,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 // Provision. IsolationSession accepts only the canonical unrestricted-network
 // acknowledgment; an absent policy defaults to `block`, which it refuses.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session",
+    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
     false, // dry_run
     true,  // experimental
@@ -360,14 +360,14 @@ let provisioned = run_state_aware_json(
 
 // Start. The exec phase runs against a started session.
 run_state_aware_json(
-    r#"{"phase":"start","sandboxId":"..."}"#,
+    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
     false, // dry_run
     true,  // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = exec_attached(
-    r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
 let _ = outcome;

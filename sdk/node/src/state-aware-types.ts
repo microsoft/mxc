@@ -33,12 +33,15 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+/** The exact contract currently registered for state-aware requests. */
+export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+
+/** Exact contract versions accepted by state-aware config types. */
+export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;
+
 interface StateAwareConfig {
-  /**
-   * Schema version. When omitted, the SDK selects `0.9.0-alpha` if telemetry
-   * is present; otherwise it selects the backend default.
-   */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   /** Optional telemetry request for this phase. */
   telemetry?: TelemetryConfig;
 }
@@ -196,7 +199,7 @@ export type WslcDeprovisionConfig = StateAwareConfig;
  * The five per-phase Config slots every state-aware backend must declare.
  * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
  * no implicit index signature, so a `Record<string, unknown>` base would
- * spuriously reject `{ version?: string }`-shaped configs.
+ * spuriously reject configs carrying an optional schema version.
  */
 type StateAwarePhaseConfigs = Record<Phase, object>;
 

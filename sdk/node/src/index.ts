@@ -101,7 +101,9 @@ export {
 // Export state-aware lifecycle types
 export {
   Phase,
+  STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
+  StateAwareSchemaVersion,
   SandboxId,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
