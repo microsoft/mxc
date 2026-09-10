@@ -374,7 +374,19 @@ where
     T: serde::de::DeserializeOwned,
 {
     config_deserialize::from_str(json).map_err(|error| {
-        let message = format!("Invalid {contract} request: {error}");
+        let mut message = format!("Invalid {contract} request: {error}");
+        let migration = match error.path() {
+            Some("network.defaultPolicy") => Some("use network.egress.default ('allow' or 'deny')"),
+            Some("network.enforcementMode") => Some("use directional network policy; enforcement is selected by the backend"),
+            Some("network.allowedHosts" | "network.blockedHosts") => Some("use network.egress.allow/deny CIDR rules; hostnames cannot be losslessly converted"),
+            Some("network.allowLocalNetwork") => Some("use network.ingress.default and network.ingress.hostLoopback"),
+            Some("network.proxy") => Some("use runtimeConfig.networkProxy with a proxy URL"),
+            Some("network") if contract == "IsolationSession provision" => Some("omit network and supply experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork:true"),
+            _ => None,
+        };
+        if let Some(migration) = migration {
+            message.push_str(&format!("; schema 0.9 migration: {migration}"));
+        }
         if state_aware {
             ParseError::StateAware(MxcError::malformed_request(message))
         } else {
@@ -2391,7 +2403,7 @@ mod tests {
     /// The legacy payload path is the independent *baseline* the exact parser is
     /// characterized against. Pointing it at the live runtime type would let it
     /// silently learn every field added to that type afterwards, so the baseline
-    /// would grow the acknowledgment the exact contract has not yet exposed and
+    /// would grow the acknowledgment now required by the exact contract and
     /// stop being independent. Freezing the shape here keeps the reference
     /// describing the old parser, which is its only job.
     #[derive(Debug, Default, serde::Deserialize)]
@@ -2767,6 +2779,7 @@ mod tests {
         PublishedExperimental,
         PublishedStateAware,
         DevelopmentContractTightening,
+        RemovedDevelopmentNetworkField,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2808,6 +2821,9 @@ mod tests {
                 Self::DevelopmentContractTightening => {
                     "The migrated 0.9 contract intentionally rejects a parse-and-ignore one-shot extension or a phase/backend policy that the rolling parser defers to backend validation."
                 }
+                Self::RemovedDevelopmentNetworkField => {
+                    "The exact 0.9 contract removes legacy network fields; the rolling parser remains an independent legacy-input oracle."
+                }
             }
         }
     }
@@ -2815,6 +2831,26 @@ mod tests {
     fn expected_corpus_divergences(
     ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
         let entries = [
+            (
+                "tests/configs/hyperlight_networking.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
+            (
+                "tests/configs/hyperlight_networking_blocked.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
             (
                 "tests/configs/isolation_session_configid_rejected.json",
                 ExpectedCorpusDivergence {
@@ -2851,8 +2887,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::StateAware,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("network.defaultPolicy"),
-                    message_fragment: "unknown variant `block`, expected `allow`",
+                    path: Some("network"),
+                    message_fragment: "unknown field `network`",
                 },
             ),
             (
@@ -2883,6 +2919,16 @@ mod tests {
                     category: ErrorCategory::TypedStructure,
                     path: Some("filesystem"),
                     message_fragment: "unknown field `filesystem`",
+                },
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("runtimeConfig"),
+                    message_fragment: "unknown field `runtimeConfig`",
                 },
             ),
         ];
@@ -3148,6 +3194,51 @@ mod tests {
 
         let version = object.get("version")?.as_str()?;
         if version == "0.9.0-alpha" {
+            if exact.category == ErrorCategory::TypedStructure {
+                if let Some(field) = exact
+                    .path
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix("network."))
+                {
+                    if matches!(
+                        field,
+                        "defaultPolicy"
+                            | "enforcementMode"
+                            | "allowedHosts"
+                            | "blockedHosts"
+                            | "allowLocalNetwork"
+                            | "proxy"
+                    ) && object
+                        .get("network")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|network| network.contains_key(field))
+                        && exact.message.contains(&format!("unknown field `{field}`"))
+                    {
+                        return Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField);
+                    }
+                }
+                let removed_phase_field = object.get("phase").and_then(serde_json::Value::as_str)
+                    == Some("provision")
+                    && match object
+                        .get("containment")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("isolation_session") => {
+                            exact.path.as_deref() == Some("network")
+                                && object.contains_key("network")
+                                && exact.message.contains("unknown field `network`")
+                        }
+                        Some("wslc") => {
+                            exact.path.as_deref() == Some("runtimeConfig")
+                                && object.contains_key("runtimeConfig")
+                                && exact.message.contains("unknown field `runtimeConfig`")
+                        }
+                        _ => false,
+                    };
+                if removed_phase_field {
+                    return Some(CorpusDivergenceKind::DevelopmentContractTightening);
+                }
+            }
             // The one-shot IsolationSession section is a closed contract that
             // accepts only the unrestricted-network acknowledgment. The rolling
             // parser stores whatever it finds there and lets the backend decide;
@@ -3472,10 +3563,9 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
                     "telemetry":{"enabled":false},
                     "experimental":{
-                        "isolation_session":{"provision":{"appId":"Contoso.App"}}
+                        "isolation_session":{"provision":{"appId":"Contoso.App","acknowledgeUnrestrictedNetwork":true}}
                     }
                 }"#,
             ),
@@ -3486,7 +3576,7 @@ mod tests {
                     "phase":"provision",
                     "containment":"wslc",
                     "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
-                    "network":{"defaultPolicy":"allow"},
+                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
                     "telemetry":{"enabled":true},
                     "experimental":{
                         "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
@@ -3509,7 +3599,7 @@ mod tests {
                     "phase":"exec",
                     "sandboxId":"wslc:abcd1234",
                     "process":{"commandLine":"echo exec","cwd":"/work","env":["C=3"],"timeout":42},
-                    "network":{"proxy":{"url":"http://proxy.example.com:8080"}},
+                    "runtimeConfig":{"networkProxy":"http://proxy.example.com:8080"},
                     "telemetry":{"enabled":false}
                 }"#,
             ),
@@ -3794,7 +3884,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "experimental":{"isolation_session":{"provision":{"appId":null}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -3817,7 +3907,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "experimental":{"isolation_session":{"provision":{"futureField":true}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -4004,7 +4094,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "ui":{"disable":true}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -4322,6 +4412,55 @@ mod tests {
     }
 
     #[test]
+    fn each_removed_network_field_is_a_precise_exact_stricter_divergence() {
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+            ("allowedHosts", "[]"),
+            ("blockedHosts", "[]"),
+            ("allowLocalNetwork", "false"),
+            ("proxy", r#"{"url":"http://localhost:8080"}"#),
+        ] {
+            for root in [
+                r#""containment":"processcontainer","process":{"commandLine":"echo"}"#,
+                r#""phase":"provision","containment":"wslc""#,
+                r#""phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"}"#,
+            ] {
+                let compatible_proxy_posture =
+                    if field == "proxy" && !root.contains("\"phase\":\"exec\"") {
+                        r#","defaultPolicy":"allow""#
+                    } else {
+                        ""
+                    };
+                let source = format!(
+                    r#"{{"version":"0.9.0-alpha",{root},"network":{{"{field}":{value}{compatible_proxy_posture}}}}}"#
+                );
+                let (rolling, exact) = parse_both(&source);
+                assert!(
+                    matches!(rolling, ParserSnapshot::Accepted(_)),
+                    "{source}: {rolling:?}"
+                );
+                let ParserSnapshot::Rejected(exact) = exact else {
+                    panic!("removed field accepted: {source}");
+                };
+                assert_eq!(
+                    exact.diagnostic.path.as_deref(),
+                    Some(format!("network.{field}").as_str())
+                );
+                assert_eq!(
+                    classify_corpus_exact_stricter(
+                        &serde_json::from_str(&source).unwrap(),
+                        &exact.diagnostic
+                    ),
+                    Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField),
+                    "{source}"
+                );
+                assert!(exact.diagnostic.message.contains("schema 0.9 migration"));
+            }
+        }
+    }
+
+    #[test]
     fn differential_repository_corpus_has_no_unclassified_or_exact_looser_results() {
         let root = repository_root();
         let mut files = Vec::new();
@@ -4359,10 +4498,29 @@ mod tests {
 
             let (rolling, exact) = parse_both(&json);
             let mut public_logger = test_logger();
-            let public = snapshot(
-                load_mxc_request_from_json(&json, &mut public_logger),
-                &public_logger,
-            );
+            let public_result = load_mxc_request_from_json(&json, &mut public_logger);
+            if relative == "tests/configs/wslc_state_aware_exec_proxy.json" {
+                let retains_proxy_only_wslc_context = match &public_result {
+                    Ok(MxcRequest::StateAware(parsed)) => {
+                        let request = parsed.request();
+                        request.containment == ContainmentBackend::Wslc
+                            && !request.policy.network_specified
+                            && !request.policy.network_mode_specified
+                            && request.policy.runtime_network_proxy_specified
+                            && request.policy.network_proxy.is_enabled()
+                            && request.policy.network_egress.is_none()
+                            && request.policy.network_ingress.is_none()
+                    }
+                    _ => false,
+                };
+                if !retains_proxy_only_wslc_context {
+                    blockers.push(format!(
+                        "{relative}: valid proxy-only template must preserve the WSLC ID prefix \
+                         and inherit network mode; it must not become a shared rejection"
+                    ));
+                }
+            }
+            let public = snapshot(public_result, &public_logger);
             if !same_parse_outcome(&public, &exact) {
                 blockers.push(format!(
                     "{relative}: public exact dispatch differs from the exact parser oracle\npublic={public:?}\nexact={exact:?}"
@@ -4388,6 +4546,10 @@ mod tests {
                     ParserSnapshot::Rejected(exact_diagnostic),
                 ) => {
                     shared_rejections += 1;
+                    println!(
+                        "shared parser rejection: {relative}: {}",
+                        exact_diagnostic.diagnostic.message
+                    );
                     if let Some(expected) = expected.get(relative.as_str()) {
                         blockers.push(format!(
                             "{relative}: expected {:?} exact-stricter divergence, but both parsers rejected",
@@ -4499,7 +4661,10 @@ mod tests {
         );
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
-            (354, 333, 14),
+            // Phase 10 moves three formerly convergent documents into the
+            // explicit removal inventory. Backend-only policy refusals remain
+            // convergent parser acceptances; no exact-looser case is permitted.
+            (354, 330, 14),
             "the migration corpus inventory changed; regenerate the migration report and explain the delta"
         );
     }
@@ -4785,7 +4950,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "IsolationSession provision",
-            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::IsolationSession),
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -4890,13 +5055,12 @@ mod tests {
                 "phase": "provision",
                 "containment": "isolation_session",
                 "telemetry": {{"enabled": {telemetry_enabled}}},
-                "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }},
                 "experimental": {{
                     "isolation_session": {{
-                        "provision": {{"appId": "Contoso.App"}}
+                        "provision": {{
+                            "appId": "Contoso.App",
+                            "acknowledgeUnrestrictedNetwork": true
+                        }}
                     }}
                 }}
             }}"#
@@ -4909,7 +5073,9 @@ mod tests {
             &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
                 crate::models::IsolationSessionProvisionConfig {
                     app_id: Some("Contoso.App".into()),
-                    ..Default::default()
+                    acknowledge_unrestricted_network: Some(
+                        crate::models::UnrestrictedNetworkAcknowledgment
+                    ),
                 },
             )))
         );
@@ -5144,7 +5310,7 @@ mod tests {
             ),
             (
                 "IsolationSession provision",
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}}"#,
                 true,
             ),
             (
@@ -5249,7 +5415,7 @@ mod tests {
         let error = parse_exact_for_test(json).unwrap_err();
         assert!(matches!(error, ParseError::StateAware(_)));
         let message = error.message();
-        assert!(message.contains("network.defaultPolicy"), "{message}");
+        assert!(message.contains("`network`"), "{message}");
         assert!(message.contains("line 5"), "{message}");
 
         let spoofed =
@@ -5523,6 +5689,39 @@ mod tests {
         assert!(probe_phase(r#"{"phase":"nope"}"#).is_err());
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wslc_proxy_template_migration_keeps_backend_context() {
+        let legacy = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "network":{"proxy":{"url":"http://127.0.0.1:8888"}}
+        }"#;
+        assert!(parse_mxc_request_json(legacy, &mut test_logger()).is_ok());
+
+        let unprefixed = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "runtimeConfig":{"networkProxy":"http://127.0.0.1:8888"}
+        }"#;
+        assert!(parse_mxc_request_json(unprefixed, &mut test_logger()).is_err());
+        let error = parse_exact_for_test(unprefixed).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("ProcessContainer runtimeConfig.networkProxy requires"),
+            "{}",
+            error.message()
+        );
+        println!(
+            "unprefixed WSLC proxy-template rejection: {}",
+            error.message()
+        );
+
+        let prefixed = unprefixed.replace("{{SANDBOX_ID}}", "wslc:{{SANDBOX_ID}}");
+        assert_accepted_models_converge("prefixed WSLC proxy template", &prefixed);
+    }
+
     #[test]
     fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
         let json = r#"{
@@ -5530,7 +5729,7 @@ mod tests {
             "phase": "exec",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
             "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
         }"#;
         let mut logger = test_logger();
 
@@ -5578,7 +5777,9 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::models::IsolationSessionProvisionConfig {
                         app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".into()),
-                        ..Default::default()
+                        acknowledge_unrestricted_network: Some(
+                            crate::models::UnrestrictedNetworkAcknowledgment,
+                        ),
                     },
                 )),
             ),
@@ -5587,7 +5788,9 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::models::IsolationSessionProvisionConfig {
                         app_id: Some(String::new()),
-                        ..Default::default()
+                        acknowledge_unrestricted_network: Some(
+                            crate::models::UnrestrictedNetworkAcknowledgment,
+                        ),
                     },
                 )),
             ),
@@ -5718,10 +5921,11 @@ mod tests {
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"proxy": {"url": "http://proxy.example:8080"}}
+                "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
             }"#,
         );
-        assert!(proxy_only.request().policy.network_specified);
+        assert!(!proxy_only.request().policy.network_specified);
+        assert!(proxy_only.request().policy.runtime_network_proxy_specified);
         assert!(!proxy_only.request().policy.network_mode_specified);
         assert!(proxy_only.request().policy.network_proxy.is_enabled());
 
@@ -5731,14 +5935,19 @@ mod tests {
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"defaultPolicy": "allow"}
+                "network": {"egress": {"default": "allow"}}
             }"#,
         );
         assert!(mode.request().policy.network_specified);
         assert!(mode.request().policy.network_mode_specified);
         assert_eq!(
-            mode.request().policy.default_network_policy,
-            NetworkPolicy::Allow
+            mode.request()
+                .policy
+                .network_egress
+                .as_ref()
+                .unwrap()
+                .default,
+            crate::models::NetworkAction::Allow
         );
         assert!(!mode.request().policy.network_proxy.is_enabled());
     }
@@ -6405,9 +6614,7 @@ mod tests {
         };
         assert_eq!(error.code, crate::mxc_error::MxcErrorCode::MalformedRequest);
         assert!(
-            error
-                .message
-                .contains("must acknowledge that the container's network is unrestricted"),
+            error.message.contains("missing field `experimental`"),
             "{}",
             error.message
         );
@@ -6422,11 +6629,7 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": true},
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
-            "experimental": {"isolation_session": {"provision": {}}}
+            "experimental": {"isolation_session": {"provision": {"acknowledgeUnrestrictedNetwork": true}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
@@ -6439,7 +6642,12 @@ mod tests {
                 assert_eq!(
                     p.operation(),
                     &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-                        crate::models::IsolationSessionProvisionConfig::default(),
+                        crate::models::IsolationSessionProvisionConfig {
+                            acknowledge_unrestricted_network: Some(
+                                crate::models::UnrestrictedNetworkAcknowledgment
+                            ),
+                            ..Default::default()
+                        },
                     ))),
                 );
             }
@@ -7378,7 +7586,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let encoded = base64_encode(
-            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true},"experimental":{"seatbelt":{}}}"#,
+            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"seatbelt":{}}}"#,
         );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
@@ -9694,10 +9902,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "lifecycle": {"destroyOnExit": false}
         }"#;
         let err = match load_mxc(json) {
@@ -9750,10 +9954,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "experimental": {"seatbelt": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
@@ -9769,10 +9969,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "experimental": {"macos_sandbox": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
@@ -9789,10 +9985,9 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            }
+            "experimental": {"isolation_session": {"provision": {
+                "acknowledgeUnrestrictedNetwork": true
+            }}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert_eq!(p.phase(), Phase::Provision),

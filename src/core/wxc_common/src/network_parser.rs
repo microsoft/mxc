@@ -362,7 +362,7 @@ fn apply_directional_network(
             .as_ref()
             .map(ProxyAddress::host)
             .unwrap_or_default();
-        if !host_is_canonical_loopback(host) {
+        if *containment != ContainmentBackend::Wslc && !host_is_canonical_loopback(host) {
             return Err(WxcError::ConfigParse(
                 "runtimeConfig.networkProxy must use localhost, 127.0.0.1, or [::1]".to_string(),
             ));
@@ -370,7 +370,10 @@ fn apply_directional_network(
         policy.network_proxy = proxy;
     }
 
-    if policy.network_mode_specified && policy.network_proxy.is_enabled() {
+    if *containment != ContainmentBackend::Wslc
+        && policy.network_mode_specified
+        && policy.network_proxy.is_enabled()
+    {
         validate_directional_proxy_policy(policy)?;
     }
 

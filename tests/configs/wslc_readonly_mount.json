@@ -9,7 +9,7 @@
     "readonlyPaths": ["C:\\wslcro"]
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

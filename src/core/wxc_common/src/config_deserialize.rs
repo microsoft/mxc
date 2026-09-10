@@ -92,6 +92,11 @@ pub(crate) struct ConfigDeserializeError {
 }
 
 impl ConfigDeserializeError {
+    /// The exact source field that failed structural deserialization.
+    pub(crate) fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
     fn from_path_error(error: serde_path_to_error::Error<serde_json::Error>) -> Self {
         let path = error.path().to_string();
         let path = (path != ".").then_some(path);

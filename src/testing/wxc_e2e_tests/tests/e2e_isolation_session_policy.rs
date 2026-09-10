@@ -141,7 +141,7 @@ fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
         "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
-        "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
+        "experimental": {"isolation_session": {"provision": {"acknowledgeUnrestrictedNetwork": true}}},
         "ui": { "disable": true }
     });
     let result = run_wxc_state_aware("iso provision + ui", &request, &["--experimental"]);
@@ -179,7 +179,7 @@ fn state_aware_provision_accepts_canonical_request_shape() {
         "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
-        "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
+        "experimental": {"isolation_session": {"provision": {"acknowledgeUnrestrictedNetwork": true}}}
     });
     let result = run_wxc_state_aware(
         "iso provision canonical (dry-run)",

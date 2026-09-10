@@ -4,7 +4,8 @@
 import {
   ContainmentBackend,
   FilesystemConfig,
-  NetworkConfig,
+  DirectionalNetworkConfig,
+  RuntimeConfig,
   ProcessConfig,
   TelemetryConfig,
 } from './types.js';
@@ -60,8 +61,7 @@ export interface IsolationSessionProvisionConfig extends StateAwareConfig {
    *
    * This replaces the legacy SDK spelling
    * `network: { defaultPolicy: 'allow', allowLocalNetwork: true }`. Native
-   * v0.9 requests using that legacy spelling remain accepted during Phase 10a,
-   * but new SDK source should use this field. The posture is fixed at
+   * v0.9 requests using that legacy spelling are rejected. The posture is fixed at
    * provision, so neither this acknowledgment nor `network` is accepted on
    * later phases.
    */
@@ -155,15 +155,14 @@ export interface WslcProvisionConfig extends StateAwareConfig {
    */
   filesystem?: FilesystemConfig;
   /**
-   * Network mode applied at provision and frozen thereafter. Only
-   * `defaultPolicy` is honored: `'allow'` provisions a bridged container,
-   * `'block'` (the default when omitted) provisions with no network. Per-host
-   * filtering (`allowedHosts` / `blockedHosts`) and a `proxy` are rejected at
-   * provision (`code: 'policy_validation'`) — WSLc has no in-kernel iptables,
-   * and the cooperative proxy is an exec-phase concern (see
-   * {@link WslcExecConfig.network}).
+   * Network mode applied at provision and frozen thereafter. All three axes
+   * (`egress.default`, `ingress.default`, `ingress.hostLoopback`) must be
+   * `'allow'` for a bridged container, or `'deny'` (the omitted default)
+   * for an isolated container. Mixed postures and filtering rules cannot
+   * be enforced and are rejected. Cooperative proxy injection is an exec-phase concern
+   * (see {@link WslcExecConfig.runtimeConfig}).
    */
-  network?: NetworkConfig;
+  network?: DirectionalNetworkConfig;
   /**
    * Container image reference (e.g. `alpine:latest`). Defaults to
    * `alpine:latest` when omitted. Nested under
@@ -182,16 +181,13 @@ export type WslcStartConfig = StateAwareConfig;
 export interface WslcExecConfig extends StateAwareConfig {
   process: ProcessConfig;
   /**
-   * Per-exec network overrides. Only `proxy` is honored: it injects a
+   * Per-exec runtime values. `networkProxy` injects a
    * cooperative `HTTP_PROXY` / `HTTPS_PROXY` into the command's environment
    * (well-behaved HTTP clients honor it; raw-socket clients can bypass it).
-   * WSLc accepts only the `{ url }` proxy form — its containers run in their
-   * own network namespace, so the `localhost` / `builtinTestServer` loopback
-   * forms are unreachable and rejected. Every other network field — host
-   * filters, a `defaultPolicy` change, and `allowLocalNetwork` — is rejected
-   * with `code: 'policy_validation'` (network mode is fixed at provision).
+   * Supply an HTTP/S URL reachable from the guest. The top-level `network`
+   * section is not accepted on exec: network mode is fixed at provision.
    */
-  network?: NetworkConfig;
+  runtimeConfig?: RuntimeConfig;
 }
 
 export type WslcStopConfig = StateAwareConfig;
@@ -293,8 +289,7 @@ export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : f
  * argument — the config type would advertise a guarantee the call signature did
  * not enforce. IsolationSession depends on it: its explicit
  * `acknowledgeUnrestrictedNetwork: true` marker is mandatory, and the backend
- * refuses a provision without either that marker or the transitional legacy
- * native acknowledgment.
+ * refuses a provision without that marker.
  */
 export type EveryBackendConfigIsOptional<C extends StateAwareContainmentBackend> =
   [C extends unknown ? (HasNoRequiredMembers<ProvisionConfigFor<C>> extends true ? never : C) : never] extends [never]

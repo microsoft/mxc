@@ -9,8 +9,8 @@ use crate::wire;
 use mxc_config_contract::dev as contract;
 
 fn source(backend: &str, fields: &str) -> String {
-    let network = if backend == "isolation_session" {
-        r#","network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#
+    let network = if backend == "isolation_session" && !fields.contains("\"experimental\"") {
+        r#","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}"#
     } else {
         ""
     };
@@ -20,21 +20,15 @@ fn source(backend: &str, fields: &str) -> String {
 }
 
 #[test]
-fn isolation_session_configuration_presence_matches_explicit_values_and_legacy() {
+fn isolation_session_configuration_maps_app_id_and_required_acknowledgment() {
     for (fields, expected) in [
-        ("", None),
-        (r#","experimental":{}"#, None),
-        (r#","experimental":{"isolation_session":{}}"#, None),
+        ("", Some(None)),
         (
-            r#","experimental":{"isolation_session":{"provision":{}}}"#,
-            Some(None),
-        ),
-        (
-            r#","experimental":{"isolation_session":{"provision":{"appId":""}}}"#,
+            r#","experimental":{"isolation_session":{"provision":{"appId":"","acknowledgeUnrestrictedNetwork":true}}}"#,
             Some(Some("")),
         ),
         (
-            r#","experimental":{"isolation_session":{"provision":{"appId":"example"}}}"#,
+            r#","experimental":{"isolation_session":{"provision":{"appId":"example","acknowledgeUnrestrictedNetwork":true}}}"#,
             Some(Some("example")),
         ),
     ] {
@@ -44,12 +38,7 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
         assert_common_matches_legacy(&json, &common);
         assert!(common.filesystem.is_none());
         assert!(common.process.is_none());
-        let network = common.network.unwrap();
-        assert_eq!(network.allow_local_network, Some(true));
-        assert!(matches!(
-            network.default_policy,
-            Some(wire::NetworkPolicy::Allow)
-        ));
+        assert!(common.network.is_none());
         let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) =
             operation
         else {
@@ -69,12 +58,8 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
 
 #[test]
 fn isolation_session_acknowledgment_forms_map_without_synthesizing_network() {
-    // Legacy-only, acknowledgment-only, and both-consistent are all valid
-    // during the additive phase. The acknowledgment-only form must reach the
-    // runtime with NO network section at all: synthesizing a legacy `allow`
-    // would assert a grant the caller never wrote.
+    // The required acknowledgment must not synthesize network grants.
     let acknowledgment = r#","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}"#;
-    let legacy = r#""network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#;
     let request = |fields: &str| {
         format!(
             r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
@@ -82,20 +67,11 @@ fn isolation_session_acknowledgment_forms_map_without_synthesizing_network() {
     };
 
     for (fields, network_present, expected_config) in [
-        (format!(",{legacy}"), true, None),
         (acknowledgment.to_owned(), false, Some((true, None))),
-        (format!(",{legacy}{acknowledgment}"), true, Some((true, None))),
         (
             r#","experimental":{"isolation_session":{"provision":{"appId":"Contoso.App","acknowledgeUnrestrictedNetwork":true}}}"#.to_owned(),
             false,
             Some((true, Some("Contoso.App"))),
-        ),
-        (
-            format!(
-                r#",{legacy},"experimental":{{"isolation_session":{{"provision":{{"appId":"Contoso.App"}}}}}}"#
-            ),
-            true,
-            Some((false, Some("Contoso.App"))),
         ),
     ] {
         let json = request(&fields);
@@ -250,6 +226,9 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             r#","telemetry":{}"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false}"#,
         ] {
+            if backend == "isolation_session" && fields == r#","experimental":{}"# {
+                continue;
+            }
             let json = source(backend, fields);
             let (common, operation) = adapt(&json);
             assert_clean_common(&common);
@@ -296,26 +275,21 @@ fn provision_common_fields_are_independent_of_backend_payload() {
     assert!(network.proxy.is_none());
     let json = source(
         "wslc",
-        r#","network":{"defaultPolicy":"block","enforcementMode":"firewall","allowLocalNetwork":false,"allowedHosts":["allowed"],"blockedHosts":["blocked"],"proxy":{"url":"http://proxy.example"}}"#,
+        r#","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
     );
     let (common, _) = adapt(&json);
     assert_common_matches_legacy(&json, &common);
     let network = common.network.unwrap();
     assert!(matches!(
-        network.default_policy,
-        Some(wire::NetworkPolicy::Block)
+        network.egress.unwrap().default,
+        Some(wire::NetworkAction::Allow)
     ));
     assert!(matches!(
-        network.enforcement_mode,
-        Some(wire::NetworkEnforcement::Firewall)
+        network.ingress.unwrap().host_loopback,
+        Some(wire::NetworkAction::Allow)
     ));
-    assert_eq!(network.allow_local_network, Some(false));
-    assert_eq!(network.allowed_hosts.unwrap(), ["allowed"]);
-    assert_eq!(network.blocked_hosts.unwrap(), ["blocked"]);
-    assert_eq!(
-        network.proxy.unwrap().url.as_deref(),
-        Some("http://proxy.example")
-    );
+    assert!(network.default_policy.is_none());
+    assert!(network.proxy.is_none());
 }
 
 #[test]

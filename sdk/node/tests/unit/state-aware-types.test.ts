@@ -134,10 +134,10 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(numericValue);
   });
 
-  it('does not expose the transitional legacy network spelling', () => {
+  it('does not expose the removed legacy network spelling', () => {
     const legacy: IsolationSessionProvisionConfig = {
       acknowledgeUnrestrictedNetwork: true,
-      // @ts-expect-error — raw native v0.9 requests remain compatible, but new SDK source uses the marker.
+      // @ts-expect-error — v0.9 accepts only the marker, never an IsolationSession network section.
       network: { defaultPolicy: 'allow', allowLocalNetwork: true },
     };
     assert.ok(legacy);
@@ -408,11 +408,32 @@ describe('ProvisionResult<C>', () => {
 });
 
 describe('WslcProvisionConfig', () => {
+  it('excludes each removed field from the v0.9 network type', () => {
+    const fields: Array<NonNullable<WslcProvisionConfig['network']>> = [
+      // @ts-expect-error — legacy fields are not v0.9 network members.
+      { defaultPolicy: 'allow' },
+      // @ts-expect-error — legacy fields are not v0.9 network members.
+      { enforcementMode: 'both' },
+      // @ts-expect-error — legacy fields are not v0.9 network members.
+      { allowedHosts: [] },
+      // @ts-expect-error — legacy fields are not v0.9 network members.
+      { blockedHosts: [] },
+      // @ts-expect-error — legacy fields are not v0.9 network members.
+      { allowLocalNetwork: false },
+      // @ts-expect-error — proxies are runtime values on exec, not provision policy.
+      { proxy: { url: 'http://proxy.example' } },
+    ];
+    assert.strictEqual(fields.length, 6);
+  });
+
   it('accepts version, filesystem, network, and the backend-specific image knobs', () => {
     const cfg: WslcProvisionConfig = {
       version: '0.9.0-alpha',
       filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
-      network: { defaultPolicy: 'allow' },
+      network: {
+        egress: { default: 'allow' },
+        ingress: { default: 'allow', hostLoopback: 'allow' },
+      },
       image: 'alpine:latest',
       imageTarPath: 'C:\\images\\alpine.tar',
     };
@@ -461,15 +482,24 @@ describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
 });
 
 describe('WslcExecConfig', () => {
+  it('rejects the removed network.proxy path at compile time', () => {
+    const cfg: WslcExecConfig = {
+      process: { commandLine: 'echo hi' },
+      // @ts-expect-error — use runtimeConfig.networkProxy without network posture.
+      network: { proxy: { url: 'http://proxy.example' } },
+    };
+    assert.ok(cfg);
+  });
+
   it('requires process and accepts an optional cooperative proxy', () => {
     const cfg: WslcExecConfig = {
       process: { commandLine: 'echo hi' },
-      network: { proxy: { url: 'http://127.0.0.1:8888' } },
+      runtimeConfig: { networkProxy: 'http://proxy.example:8888' },
     };
     assert.strictEqual(cfg.process.commandLine, 'echo hi');
 
     // @ts-expect-error — exec config requires process.
-    const missing: WslcExecConfig = { network: { proxy: { url: 'http://127.0.0.1:8888' } } };
+    const missing: WslcExecConfig = { runtimeConfig: { networkProxy: 'http://proxy.example:8888' } };
     assert.ok(missing);
   });
 });

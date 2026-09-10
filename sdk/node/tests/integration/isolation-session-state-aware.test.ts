@@ -21,7 +21,6 @@ import os from 'os';
 import {
   execInSandboxAsync,
   MxcError,
-  type ProvisionResult,
   provisionSandbox,
   startSandbox,
   stopSandbox,
@@ -41,15 +40,6 @@ import {
  */
 const wellFormedSandboxId = (agentUserName: string): string =>
   `iso:${Buffer.from(JSON.stringify({ version: 1, agentUserName }), 'utf8').toString('base64url')}`;
-
-// Transitional 10a compatibility path: the public IsolationSession-specific
-// config has moved to the final acknowledgment-first shape, while raw native
-// v0.9 requests using the canonical legacy network pair remain accepted.
-const provisionWithLegacyNetwork = provisionSandbox as unknown as (
-  containment: 'isolation_session',
-  config: unknown,
-  options: unknown,
-) => Promise<ProvisionResult<'isolation_session'>>;
 
 const platformSkipReason =
   os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
@@ -77,9 +67,9 @@ const policyValidationSkipReason =
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionWithLegacyNetwork(
+    const provisionResult = await provisionSandbox(
       'isolation_session',
-      { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+      { acknowledgeUnrestrictedNetwork: true },
       { experimental: true },
     );
     const sandboxId = provisionResult.sandboxId;
@@ -248,7 +238,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
   ) => Promise<unknown>;
   const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
 
-  it('exact contract rejects a provision that omits both acknowledgment forms', async () => {
+  it('rejects a provision that omits the mandatory acknowledgment', async () => {
     await assert.rejects(
       () => provisionUntyped('isolation_session', {}, { experimental: true }),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',

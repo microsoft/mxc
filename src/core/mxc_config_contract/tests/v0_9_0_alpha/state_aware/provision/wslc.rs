@@ -61,7 +61,8 @@ fn accepts_provision_request_with_optional_fields() {
                 "deniedPaths": ["C:\\denied"]
             },
             "network": {
-                "defaultPolicy": "block"
+                "egress": {"default": "deny"},
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
             },
             "telemetry": {
                 "enabled": true

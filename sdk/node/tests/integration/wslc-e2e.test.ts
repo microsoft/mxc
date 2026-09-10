@@ -57,7 +57,10 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
     try {
       const policy = {
         version: '0.9.0-alpha',
-        network: { allowOutbound: true },
+        network: {
+          egress: { default: 'allow' as const },
+          ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+        },
         filesystem: { readwritePaths: [mountDir] },
       };
       const config = sdk.createConfigFromPolicy(policy, 'wslc');
@@ -108,7 +111,10 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
 
     const policy = {
       version: '0.9.0-alpha',
-      network: { allowOutbound: true },
+      network: {
+        egress: { default: 'allow' as const },
+        ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+      },
       filesystem: {},
     };
     const config = sdk.createConfigFromPolicy(policy, 'wslc');
@@ -210,7 +216,10 @@ srv.handle_request()
     // exercise the parser path that rejects an out-of-type value at runtime.
     const policy = {
       version: '0.9.0-alpha',
-      network: { allowOutbound: true },
+      network: {
+        egress: { default: 'allow' as const },
+        ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+      },
       filesystem: {},
     };
     const config = sdk.createConfigFromPolicy(policy, 'wslc');

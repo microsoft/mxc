@@ -4,12 +4,12 @@
 # WSLC cooperative HTTP/HTTPS proxy functional test.
 #
 # WSLC has no in-kernel iptables, so per-host network policy is enforced
-# *cooperatively*: the runner translates `network.proxy` into HTTP(S)_PROXY
+# *cooperatively*: the runner translates `runtimeConfig.networkProxy` into HTTP(S)_PROXY
 # env vars and cooperating clients (curl, wget, ...) route through the proxy.
 # This script proves that path end-to-end:
 #
-#   1. Parser accepts the `wslc` backend with a `url`-form proxy.
-#   2. The runner injects HTTP_PROXY/HTTPS_PROXY from network.proxy.url,
+#   1. Parser accepts the `wslc` backend with a runtime proxy URL.
+#   2. The runner injects HTTP_PROXY/HTTPS_PROXY from runtimeConfig.networkProxy,
 #      scrubs the attacker-supplied proxy env vars in the config's process.env,
 #      and neutralizes NO_PROXY/no_proxy to empty (so a caller- or image-baked
 #      exemption like NO_PROXY=* cannot defeat the cooperative proxy).

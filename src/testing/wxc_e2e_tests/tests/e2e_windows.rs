@@ -148,69 +148,23 @@ fn microvm_network() {
     );
 }
 
-/// Discovers a non-loopback IPv4 address of the host. nanvixd proxies guest
-/// `connect()` calls through the host network stack, so a host-routable IP
-/// gives a deterministic, internet-independent target for egress-filter tests.
-fn host_lan_ipv4() -> Option<std::net::Ipv4Addr> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Connecting a UDP socket sends no packets; it just selects the outbound
-    // interface so `local_addr` reports this host's routable address.
-    sock.connect("10.255.255.255:9").ok()?;
-    match sock.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
-        _ => None,
-    }
-}
-
-/// Returns a TCP port that is very likely closed: bind an ephemeral port, read
-/// it, then drop the listener. A guest connecting there while egress is
-/// permitted gets `ECONNREFUSED`, distinguishing "allowed but unreachable"
-/// from "blocked by the filter" (`EACCES`).
-fn likely_closed_tcp_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("read ephemeral port").port();
-    drop(listener);
-    port
-}
-
-/// Builds the guest Python that connects to `host:port` and prints the result
-/// as `RESULT CONNECT_OK` or `RESULT ERRNO <n>`. A blocked egress surfaces as
-/// `PermissionError`/`EACCES` (errno 13); an allowed-but-closed target as
-/// `ECONNREFUSED` (errno 111).
-fn egress_probe_source(host: std::net::Ipv4Addr, port: u16) -> String {
-    format!(
-        "import _socket\n\
-         s = _socket.socket(2, 1, 0)\n\
-         try:\n\
-         \x20   s.connect(('{host}', {port}))\n\
-         \x20   print('RESULT CONNECT_OK', flush=True)\n\
-         except OSError as e:\n\
-         \x20   print('RESULT ERRNO %d' % (e.errno,), flush=True)\n",
-        host = host,
-        port = port
-    )
-}
-
-/// Negative egress test: a blocklisted host must be rejected by the guest
-/// filter (Part B `-block-host`). Drives the host-networking path, asks the
-/// guest to connect to a blocked host IP, and asserts the connection is denied
-/// with `EACCES` (errno 13). A positive control connects to the same target
-/// under an allow-all policy and asserts it is *not* denied, proving the
-/// `EACCES` in the negative case comes from the filter rather than the network.
+/// Full network isolation is supported; directional filtering is separately
+/// rejected because the legacy guest filter does not implement that contract.
 fn microvm_network_blocked() {
-    let Some(host_ip) = host_lan_ipv4() else {
-        println!("SKIPPED: microvm_network_blocked needs a non-loopback host IPv4");
-        return;
-    };
-    let port = likely_closed_tcp_port();
-    let source = egress_probe_source(host_ip, port);
-
-    // Negative case: host is on the blocklist -> guest egress denied (EACCES).
+    let source = "import _socket\n\
+                  try:\n\
+                  \x20   s = _socket.socket(2, 1, 0)\n\
+                  \x20   print('UNEXPECTED_NETWORK', flush=True)\n\
+                  except OSError as e:\n\
+                  \x20   print('RESULT ERRNO %d' % (e.errno,), flush=True)\n";
     let blocked = serde_json::json!({
         "version": "0.9.0-alpha",
         "process": { "commandLine": source, "timeout": 30000 },
         "containment": "microvm",
-        "network": { "blockedHosts": [host_ip.to_string()] }
+        "network": {
+            "egress": { "default": "deny" },
+            "ingress": { "default": "deny", "hostLoopback": "deny" }
+        }
     });
     let blocked_result = run_wxc_config_value(
         "microvm_network_blocked",
@@ -221,45 +175,43 @@ fn microvm_network_blocked() {
     assert_eq!(
         blocked_result.code,
         Some(0),
-        "blocked-egress run should exit cleanly (the guest catches the error)\ncombined: {}",
+        "isolated run should exit cleanly (the guest catches the error)\ncombined: {}",
         blocked_out
     );
     assert!(
-        blocked_out.contains("RESULT ERRNO 13"),
-        "blocklisted host should be denied with EACCES (errno 13)\ncombined: {}",
+        blocked_out.contains("RESULT ERRNO 134"),
+        "isolated guest sockets should remain unavailable (errno 134)\ncombined: {}",
         blocked_out
     );
 
-    // Positive control: allow-all policy -> egress permitted, so the same
-    // closed target yields a connection error other than EACCES (typically
-    // ECONNREFUSED / errno 111), never the filter's EACCES.
-    let allowed = serde_json::json!({
+    let filtered = serde_json::json!({
         "version": "0.9.0-alpha",
-        "process": { "commandLine": source, "timeout": 30000 },
+        "process": { "commandLine": "print('UNEXPECTED_EXECUTION')", "timeout": 30000 },
         "containment": "microvm",
-        "network": { "defaultPolicy": "allow" }
+        "network": {
+            "egress": {
+                "default": "allow",
+                "deny": [{ "to": [{ "cidr": "203.0.113.0/24" }] }]
+            },
+            "ingress": { "default": "allow", "hostLoopback": "allow" }
+        }
     });
-    let allowed_result = run_wxc_config_value(
-        "microvm_network_allowed_control",
-        &allowed,
+    let filtered_result = run_wxc_config_value(
+        "microvm_directional_filter_rejected",
+        &filtered,
         &["--debug", "--experimental"],
     );
-    let allowed_out = allowed_result.combined_output_with_decoded_base64();
-    assert_eq!(
-        allowed_result.code,
+    let filtered_out = filtered_result.combined_output_with_decoded_base64();
+    assert_ne!(
+        filtered_result.code,
         Some(0),
-        "allow-all control run should exit cleanly\ncombined: {}",
-        allowed_out
+        "unsupported directional filtering must fail before execution\ncombined: {}",
+        filtered_out
     );
     assert!(
-        allowed_out.contains("RESULT "),
-        "allow-all control should produce a connect result\ncombined: {}",
-        allowed_out
-    );
-    assert!(
-        !allowed_out.contains("RESULT ERRNO 13"),
-        "allow-all egress must not be denied with EACCES (proves filter, not network, blocks)\ncombined: {}",
-        allowed_out
+        filtered_out.contains("NanVix cannot enforce directional egress rules"),
+        "expected the backend's explicit unsupported-filtering error\ncombined: {}",
+        filtered_out
     );
 }
 

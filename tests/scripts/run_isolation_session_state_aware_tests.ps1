@@ -640,9 +640,9 @@ try {
         Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
     } | Out-Null
 
-    # The exact root encodes the only accepted unrestricted-network
-    # acknowledgment, so `block` is rejected during contract parsing.
-    Run-StateAwareTest "provision (non-canonical network rejected structurally)" {
+    # Provision acknowledges unrestricted networking in its backend section.
+    # Even directional policy is not a field of this exact provision root.
+    Run-StateAwareTest "provision (network rejected structurally)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -650,8 +650,83 @@ try {
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
         Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-        Assert-True ($msg -match 'unknown variant `block`.*expected `allow`') "error.message reports the required allow marker (got '$msg')"
+        Assert-True ($msg -match 'at `network`.*unknown field `network`') "error.message reports the closed network path (got '$msg')"
     } | Out-Null
+
+    # The former unrestricted marker pair is no longer an alternative to the
+    # acknowledgment, even when both old and new forms are present.
+    foreach ($withAcknowledgment in @($false, $true)) {
+        Run-StateAwareTest "provision (legacy network marker rejected; acknowledgment=$withAcknowledgment)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                network = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+            }
+            if ($withAcknowledgment) {
+                $req.experimental = @{ isolation_session = @{ provision = @{ acknowledgeUnrestrictedNetwork = $true } } }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'at `network`.*unknown field `network`') "error.message reports the closed network path (got '$msg')"
+        } | Out-Null
+    }
+
+    foreach ($value in @($false, $null, 'true', 1)) {
+        Run-StateAwareTest "provision (invalid acknowledgment '$value' rejected structurally)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                experimental = @{ isolation_session = @{ provision = @{ acknowledgeUnrestrictedNetwork = $value } } }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains('experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork')) `
+                "error.message identifies the invalid acknowledgment path (got '$msg')"
+        } | Out-Null
+    }
+
+    Run-StateAwareTest "provision (missing acknowledgment rejected structurally)" {
+        $req = @{
+            phase = 'provision'
+            containment = 'isolation_session'
+            experimental = @{ isolation_session = @{ provision = @{} } }
+        }
+        $r = Invoke-StateAware -Request $req -Experimental -DryRun
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg.Contains('experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork')) `
+            "error.message identifies the missing acknowledgment path (got '$msg')"
+    } | Out-Null
+
+    foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+        Run-StateAwareTest "$phase (acknowledgment redeclaration rejected structurally)" {
+            $req = @{
+                phase = $phase
+                sandboxId = 'iso:unused'
+                experimental = @{ isolation_session = @{ acknowledgeUnrestrictedNetwork = $true } }
+            }
+            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'echo ACKNOWLEDGMENT_MUST_NOT_RUN' } }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains('experimental.isolation_session') -and $msg.Contains('unknown field `isolation_session`')) `
+                "error.message identifies the phase-incompatible backend section (got '$msg')"
+        } | Out-Null
+    }
 
     # The exact IsolationSession provision root excludes UI policy. Backend
     # policy unit tests retain the capability-honesty validation coverage.
@@ -715,7 +790,7 @@ try {
             $req = @{
                 phase     = 'start'
                 sandboxId = $script:sandboxId
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
@@ -770,14 +845,14 @@ try {
 
     # Test 3c: exec rejects a request that carries a network policy. The network
     # posture is fixed at provision; any network policy on a post-provision phase
-    # is rejected -- even the canonical acknowledgment.
+    # is rejected -- even an allow policy.
     if ($execedOk) {
         Run-StateAwareTest "exec (network policy rejected post-provision)" {
             $req = @{
                 phase     = 'exec'
                 sandboxId = $script:sandboxId
                 process   = @{ commandLine = 'echo unused' }
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"

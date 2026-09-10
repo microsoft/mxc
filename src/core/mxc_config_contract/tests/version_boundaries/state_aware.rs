@@ -66,15 +66,12 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "telemetry": {"enabled": false},
             "experimental": {
                 "isolation_session": {
                     "provision": {
-                        "appId": "Contoso.Sample_1234567890abc"
+                        "appId": "Contoso.Sample_1234567890abc",
+                        "acknowledgeUnrestrictedNetwork": true
                     }
                 }
             }
@@ -93,10 +90,8 @@ const CASES: &[StateAwareCase] = &[
                 "deniedPaths": ["/secrets"]
             },
             "network": {
-                "defaultPolicy": "block",
-                "enforcementMode": "firewall",
-                "allowedHosts": ["packages.example"],
-                "allowLocalNetwork": false
+                "egress": {"default": "deny"},
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
             },
             "telemetry": {"enabled": true},
             "experimental": {
@@ -133,9 +128,7 @@ const CASES: &[StateAwareCase] = &[
                 "env": ["MODE=test"],
                 "timeout": 30000
             },
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"}
-            },
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"},
             "telemetry": {"enabled": false}
         }"#,
         expected: ExpectedRoot::Exec,

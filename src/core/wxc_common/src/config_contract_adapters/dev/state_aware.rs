@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config,
+    convert_telemetry, convert_version,
 };
 use crate::error::WxcError;
 use crate::models::{
@@ -15,11 +16,9 @@ use mxc_config_contract::dev as contract;
 
 fn convert_state_aware_isolation_session(
     value: contract::StateAwareIsolationSession,
-) -> Option<IsolationSessionProvisionConfig> {
+) -> IsolationSessionProvisionConfig {
     let contract::StateAwareIsolationSession { provision } = value;
-    provision
-        .into_option()
-        .map(convert_isolation_session_provision)
+    convert_isolation_session_provision(provision)
 }
 
 fn convert_isolation_session_provision(
@@ -27,40 +26,19 @@ fn convert_isolation_session_provision(
 ) -> IsolationSessionProvisionConfig {
     let contract::IsolationSessionProvision {
         app_id,
-        acknowledge_unrestricted_network,
+        acknowledge_unrestricted_network: contract::True,
     } = value;
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
-        acknowledge_unrestricted_network: acknowledge_unrestricted_network
-            .into_option()
-            .map(|contract::True| UnrestrictedNetworkAcknowledgment),
+        acknowledge_unrestricted_network: Some(UnrestrictedNetworkAcknowledgment),
     }
 }
 
 fn convert_isolation_session_provision_experimental(
     value: contract::IsolationSessionProvisionExperimental,
-) -> Option<IsolationSessionProvisionConfig> {
+) -> IsolationSessionProvisionConfig {
     let contract::IsolationSessionProvisionExperimental { isolation_session } = value;
-    isolation_session
-        .into_option()
-        .and_then(convert_state_aware_isolation_session)
-}
-
-fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
-    let contract::IsolationSessionNetwork {
-        allow_local_network: contract::True,
-        default_policy: contract::IsolationSessionNetworkDefaultPolicy,
-    } = value;
-    wire::Network {
-        allow_local_network: Some(true),
-        default_policy: Some(wire::NetworkPolicy::Allow),
-        allowed_hosts: None,
-        enforcement_mode: None,
-        blocked_hosts: None,
-        proxy: None,
-        egress: None,
-        ingress: None,
-    }
+    convert_state_aware_isolation_session(isolation_session)
 }
 
 fn consume_windows_sandbox_experimental(value: contract::WindowsSandboxExperimental) {
@@ -152,33 +130,20 @@ pub(super) fn provision_into_input(
 fn isolation_session_provision_into_input(
     request: contract::IsolationSessionProvisionRequest,
 ) -> Result<StateAwareInput, WxcError> {
-    // The conditional acknowledgment requirement is part of deserialization, so
-    // this only matters for a request a caller assembled from the contract's
-    // public fields. Re-checking it here means the adapter cannot be the hole
-    // through which an unacknowledged provision reaches the runtime.
-    request
-        .validate()
-        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
     let contract::IsolationSessionProvisionRequest {
         schema,
         comment,
         version,
         phase: contract::ProvisionPhase,
         containment: contract::IsolationSessionContainment,
-        network,
         telemetry,
         experimental,
     } = request;
-    let provision = experimental
-        .into_option()
-        .and_then(convert_isolation_session_provision_experimental);
-    let mut common = state_aware_common(schema, comment, version, telemetry);
-    // Keep an acknowledgment-only request network-free: synthesizing a legacy
-    // `allow` grant would assert policy the caller never authored.
-    common.network = network.into_option().map(convert_isolation_session_network);
+    let provision = convert_isolation_session_provision_experimental(experimental);
+    let common = state_aware_common(schema, comment, version, telemetry);
     StateAwareInput::new(
         common,
-        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(provision)),
+        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(provision))),
     )
 }
 
@@ -260,6 +225,7 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
         sandbox_id,
         process,
         network,
+        runtime_config,
         telemetry,
         experimental,
     } = request;
@@ -269,6 +235,7 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.process = Some(convert_process(process));
     common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
     StateAwareInput::new(common, StateAwareOperation::Exec { sandbox_id })
 }
 

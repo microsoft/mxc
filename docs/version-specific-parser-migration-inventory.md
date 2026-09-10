@@ -164,6 +164,79 @@ lifecycle evidence is still required on a suitable host. No skipped suite,
 cross-target check, or dry run is counted as live execution. The inherited
 denied-path/debug-output issue is not attributed to this implementation.
 
+## Phase 10B-10D directional cutover
+
+This atomic cutover is based on rebased Phase 10A at `16ed3c81`.
+Exact v0.9 removes the six legacy networking fields from every request root;
+published v0.6/v0.7/v0.8 contracts remain unchanged. IsolationSession requires
+the explicit backend acknowledgment, and state-aware runtime proxy moves to
+top-level `runtimeConfig.networkProxy` on exec.
+
+The user approved a constrained WSLC directional mapping: deny/deny/deny is
+isolated, while explicit allow/allow/allow is unrestricted bridged networking.
+Mixed postures, including allowed egress with implicit denied ingress, are
+rejected rather than claiming independent firewall enforcement. Proxy-only
+exec inherits the provisioned posture, and its endpoint is kept guest-routable.
+
+Review also identified the missing NanVix host-network mapping. The approved
+resolution supports disabled all-deny or explicitly unrestricted all-allow,
+wires that mode into the actual daemon launch, and rejects directional
+filtering that the legacy IPv4/DNS-exception filter cannot faithfully enforce.
+Positive network fixtures declare all three allows; the negative suite checks
+full isolation and explicit unsupported-filter rejection instead of retaining
+removed `blockedHosts` syntax.
+
+Corpus migration retains older published-version fixtures and higher-level
+v0.8 authoring goldens. It updates 65 JSON files and the corresponding request
+producers, including all 15 bridged WSLC fixtures. The final differential
+inventory reported by the native gate is 282 documents: 263 convergent parser
+accepts, nine shared rejects, and ten explicitly classified exact-stricter
+cases.
+
+Three additional schema-negative fixtures are deliberate, not migration
+omissions:
+
+- `hyperlight_networking.json` and `hyperlight_networking_blocked.json`
+  retain unsupported hostname-policy input as removed-syntax rejection tests.
+  The implementation does not resolve DNS at migration time or replace a
+  hostname restriction with allow-all.
+- `wslc_state_aware_provision_rejected_proxy.json` verifies that provision
+  does not accept exec-only `runtimeConfig`; it is not a valid provision
+  template.
+
+The retained rolling model remains a test/reference and compatibility
+representation, not an alternate production parser. Native Unix execution and
+live lifecycle/enforcement evidence are distinct from local compile, unit,
+schema, and dry-run results; unsupported hosts and skipped cases must not be
+reported as successful E2E runs.
+
+### Cutover verification
+
+The final local ladder ran against one unchanged source snapshot after review
+fixes, with actual exit codes retained for each command:
+
+| Check | Result |
+| --- | --- |
+| Rust format / workspace check | Passed |
+| Affected Rust check and clippy | Passed with default, IsolationSession, WSLC, and combined features; microvm feature check also passed |
+| Common parser / documentation | 1,167 unit tests and seven documentation tests passed |
+| Exact contracts / emitter | All contract feature suites and ten emitter tests passed |
+| Backend units | IsolationSession 194; WSLC policy 90 and state-aware 30; NanVix 40 passed |
+| CLI units | 62 passed |
+| Node SDK | Build and integration type-check passed; 343 unit tests passed, 19 skipped |
+| Managed SDK | 64 lifecycle and 81 sandbox tests passed in each of the four native-feature configurations |
+| Versioning logic | 70 tests passed through the existing CI `npm test` command, including the recursive cutover guard |
+| Generated artifacts / corpus | Exact, rolling, SDK-type, version and corpus gates passed; 277 raw configs validated with 11 explicit negatives |
+| Native CLI boundaries | 23 contract/WSLC/IsolationSession dry runs and eight NanVix posture dry runs passed without lifecycle execution |
+| Cross-target checks | Linux/macOS checks passed; native Unix tests and live backend runs were not performed |
+
+Review findings were resolved before publication: shared C# Boolean and
+initialized-list APIs remain source-compatible with published-version
+authoring, including historical serialization defaults; NanVix mode selection
+now drives actual host-network enablement instead of merely advertising
+capability bits. The new schema-guard regressions reside in the existing
+versioning test discovery directory.
+
 ## Documents
 
 | Path | Request kind | Classification | Current version | Target version | Existing schema reference | Owner |

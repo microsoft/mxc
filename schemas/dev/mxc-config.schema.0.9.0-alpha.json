@@ -173,24 +173,6 @@
         }
       ]
     },
-    "DefaultNetworkPolicy": {
-      "oneOf": [
-        {
-          "description": "Allow",
-          "enum": [
-            "allow"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Block",
-          "enum": [
-            "block"
-          ],
-          "type": "string"
-        }
-      ]
-    },
     "DeprovisionExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `deprovision` phase.",
@@ -279,6 +261,10 @@
           "$ref": "#/definitions/Process",
           "description": "Process to execute in the sandbox."
         },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional per-execution runtime values, including the cooperative proxy URL."
+        },
         "sandboxId": {
           "description": "Identifier of the sandbox to execute in.",
           "type": "string"
@@ -345,44 +331,22 @@
       ],
       "type": "string"
     },
-    "IsolationSessionNetwork": {
-      "additionalProperties": false,
-      "description": "The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.",
-      "properties": {
-        "allowLocalNetwork": {
-          "$ref": "#/definitions/True",
-          "description": "Required acknowledgment that local network access is allowed."
-        },
-        "defaultPolicy": {
-          "$ref": "#/definitions/IsolationSessionNetworkDefaultPolicy",
-          "description": "Exact `allow` default network policy marker."
-        }
-      },
-      "required": [
-        "allowLocalNetwork",
-        "defaultPolicy"
-      ],
-      "type": "object"
-    },
-    "IsolationSessionNetworkDefaultPolicy": {
-      "enum": [
-        "allow"
-      ],
-      "type": "string"
-    },
     "IsolationSessionProvision": {
       "additionalProperties": false,
       "description": "IsolationSession settings accepted during provisioning.",
       "properties": {
         "acknowledgeUnrestrictedNetwork": {
           "$ref": "#/definitions/True",
-          "description": "Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid.\n\nProvision-phase only: the posture is fixed for the sandbox's lifetime, so no later phase accepts it."
+          "description": "Required acknowledgment that MXC cannot restrict the container's networking. Only the JSON value `true` is valid; later phases cannot redeclare it."
         },
         "appId": {
           "description": "Optional application identifier carried by the sandbox identity.",
           "type": "string"
         }
       },
+      "required": [
+        "acknowledgeUnrestrictedNetwork"
+      ],
       "type": "object"
     },
     "IsolationSessionProvisionExperimental": {
@@ -391,47 +355,17 @@
       "properties": {
         "isolation_session": {
           "$ref": "#/definitions/StateAwareIsolationSession",
-          "description": "Optional IsolationSession backend settings."
+          "description": "Required IsolationSession backend settings."
         }
       },
+      "required": [
+        "isolation_session"
+      ],
       "type": "object"
     },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
-      "anyOf": [
-        {
-          "required": [
-            "network"
-          ]
-        },
-        {
-          "properties": {
-            "experimental": {
-              "properties": {
-                "isolation_session": {
-                  "properties": {
-                    "provision": {
-                      "required": [
-                        "acknowledgeUnrestrictedNetwork"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "provision"
-                  ]
-                }
-              },
-              "required": [
-                "isolation_session"
-              ]
-            }
-          },
-          "required": [
-            "experimental"
-          ]
-        }
-      ],
-      "description": "A complete state-aware `provision` request for isolation_session. The container's network is unrestricted and MXC cannot filter or deny it, so the request must acknowledge that: supply `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork: true`, the legacy `network` acknowledgment, or both consistent forms. At least one is required; supplying both is valid.",
+      "description": "A complete IsolationSession provision request. The container's network is unrestricted: the required typed acknowledgment cannot be replaced by network policy, and direct construction cannot omit it.",
       "properties": {
         "$schema": {
           "description": "Optional JSON Schema reference for editor validation.",
@@ -442,19 +376,15 @@
         },
         "containment": {
           "$ref": "#/definitions/IsolationSessionContainment",
-          "description": "Exact `isolation_session` containment marker."
+          "description": "Exact IsolationSession containment marker."
         },
         "experimental": {
           "$ref": "#/definitions/IsolationSessionProvisionExperimental",
-          "description": "Optional closed experimental settings."
-        },
-        "network": {
-          "$ref": "#/definitions/IsolationSessionNetwork",
-          "description": "Optional legacy unrestricted-network acknowledgment."
+          "description": "Required backend configuration with the unrestricted-network acknowledgment."
         },
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
-          "description": "Exact `provision` phase marker."
+          "description": "Exact provision phase marker."
         },
         "telemetry": {
           "$ref": "#/definitions/Telemetry",
@@ -467,6 +397,7 @@
       },
       "required": [
         "containment",
+        "experimental",
         "phase",
         "version"
       ],
@@ -528,43 +459,13 @@
       "additionalProperties": false,
       "description": "Network access policy shared by the stable containment backends.",
       "properties": {
-        "allowLocalNetwork": {
-          "description": "Optional permission to bind and accept local network connections.",
-          "type": "boolean"
-        },
-        "allowedHosts": {
-          "description": "Optional hosts allowed when the default policy blocks access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "blockedHosts": {
-          "description": "Optional hosts blocked when the default policy allows access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "defaultPolicy": {
-          "$ref": "#/definitions/DefaultNetworkPolicy",
-          "description": "Optional default network posture."
-        },
         "egress": {
           "$ref": "#/definitions/NetworkEgress",
           "description": "Optional outbound network rules."
         },
-        "enforcementMode": {
-          "$ref": "#/definitions/NetworkEnforcementMode",
-          "description": "Optional network enforcement mechanism."
-        },
         "ingress": {
           "$ref": "#/definitions/NetworkIngress",
           "description": "Optional inbound and host-loopback network rules."
-        },
-        "proxy": {
-          "$ref": "#/definitions/NetworkProxy",
-          "description": "Optional proxy configuration."
         }
       },
       "type": "object"
@@ -611,31 +512,6 @@
         }
       },
       "type": "object"
-    },
-    "NetworkEnforcementMode": {
-      "oneOf": [
-        {
-          "description": "Capabilities",
-          "enum": [
-            "capabilities"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Firewall",
-          "enum": [
-            "firewall"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Both",
-          "enum": [
-            "both"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "NetworkIngress": {
       "additionalProperties": false,
@@ -725,52 +601,6 @@
             "any"
           ],
           "type": "string"
-        }
-      ]
-    },
-    "NetworkProxy": {
-      "description": "One of the proxy configurations accepted by the `0.9.0-alpha` contract.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "Connect to an existing proxy on a non-zero localhost TCP port.",
-          "properties": {
-            "localhost": {
-              "maximum": 65535,
-              "minimum": 1.0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "localhost"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Start and use MXC's built-in test proxy.",
-          "properties": {
-            "builtinTestServer": {
-              "$ref": "#/definitions/True"
-            }
-          },
-          "required": [
-            "builtinTestServer"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Connect through the supplied proxy URL.",
-          "properties": {
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "url"
-          ],
-          "type": "object"
         }
       ]
     },
@@ -1280,7 +1110,7 @@
       "description": "Runtime configuration supplied alongside the sandbox policy.",
       "properties": {
         "networkProxy": {
-          "description": "Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.",
+          "description": "Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.",
           "type": "string"
         }
       },
@@ -1376,9 +1206,12 @@
       "properties": {
         "provision": {
           "$ref": "#/definitions/IsolationSessionProvision",
-          "description": "Optional provision-phase settings."
+          "description": "Required provision settings containing the unrestricted-network acknowledgment."
         }
       },
+      "required": [
+        "provision"
+      ],
       "type": "object"
     },
     "StateAwareWslc": {

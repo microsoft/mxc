@@ -315,7 +315,14 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    if let Some(path) = ignored_paths.first() {
+    // The SDK authoring model recognizes these wire-only legacy names only to
+    // preserve their presence for the version-specific migration diagnostic.
+    if let Some(path) = ignored_paths.iter().find(|path| {
+        !matches!(
+            path.as_str(),
+            "policy.network.defaultPolicy" | "policy.network.enforcementMode"
+        )
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),

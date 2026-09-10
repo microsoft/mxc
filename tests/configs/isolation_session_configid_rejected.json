@@ -2,10 +2,6 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-configid-rejected",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
   "process": {
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",
     "cwd": "C:\\mxc_workdir_test",
@@ -16,6 +12,7 @@
   },
   "experimental": {
     "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true,
       "configurationId": "medium"
     }
   }

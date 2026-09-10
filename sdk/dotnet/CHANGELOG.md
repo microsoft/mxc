@@ -25,11 +25,28 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
 
 ### Changed (breaking)
 
+- Schema `0.9.0-alpha` networking is directional-only. One-shot policies must
+  use `NetworkPolicy.Egress` / `Ingress` and `RuntimeConfig.NetworkProxy`.
+  Explicit legacy flags, host lists, and proxy objects raise migration errors,
+  including `false` and empty lists; published 0.6/0.7/0.8 inputs retain their
+  syntax and semantics. The existing public `bool` and initialized
+  `List<string>` API is preserved; private presence tracking and a JSON
+  converter distinguish omission from explicit legacy authoring. Published
+  versions retain their original emitted default fields.
+- WSLC state-aware provision uses directional `StateAwareNetworkPolicy`
+  fields. Exec uses `WslcExecOptions.RuntimeConfig.NetworkProxy`, serialized as
+  a top-level runtime URL without network posture; `WslcExecOptions.Network`
+  now raises a migration error.
+- IsolationSession provision requires
+  `new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)`.
+  Its legacy network constructor and property have been removed. Compatibility
+  `ProvisionSandboxOptions` raises a migration error instead of emitting
+  an invalid legacy acknowledgment.
 - `MxcLifecycle.ProvisionSandbox` takes the backend as a required leading
   `StateAwareContainment` argument, and its options parameter widened from
   `ProvisionSandboxOptions` to the abstract `StateAwareProvisionOptions`.
-  `ProvisionSandboxOptions` still exists and now derives from that base, so
-  object initializers are unchanged — add the containment argument:
+  `ProvisionSandboxOptions` still exists for migration diagnostics. Replace it
+  with backend-specific options and add the containment argument:
 
   ```csharp
   // 0.8.0
@@ -37,7 +54,7 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   // 0.9.0
   MxcLifecycle.ProvisionSandbox(
       StateAwareContainment.IsolationSession,
-      new ProvisionSandboxOptions { … });
+      new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true));
   ```
 
 - `StartSandbox`, `StopSandbox`, `DeprovisionSandbox`, and `ExecInSandbox`

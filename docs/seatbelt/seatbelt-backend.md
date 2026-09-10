@@ -60,6 +60,13 @@ That denies all network access. To open it up, see
 > [Legacy 0.7 network fields](#legacy-07-network-fields) for the mapping. A
 > single config must use one shape or the other, never both.
 
+For exact `0.9.0-alpha`, only the directional form is accepted: use
+`egress` / `ingress` and `runtimeConfig.networkProxy`. The legacy fields
+documented for published versions below are structurally rejected in v0.9.
+Seatbelt's capability limits are unchanged: in particular, inbound and
+host-loopback postures must agree, and an omitted host-loopback field remains
+deny rather than inheriting ingress allow.
+
 ## What Seatbelt can and can't enforce
 
 | Capability | Supported | Notes |

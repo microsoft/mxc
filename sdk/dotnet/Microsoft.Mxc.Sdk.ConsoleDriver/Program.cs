@@ -84,14 +84,7 @@ internal static class Program
         {
             var provisioned = MxcLifecycle.ProvisionSandbox(
                 StateAwareContainment.IsolationSession,
-                new ProvisionSandboxOptions
-                {
-                    Network = new StateAwareNetworkPolicy
-                    {
-                        DefaultPolicy = StateAwareNetworkDefault.Allow,
-                        AllowLocalNetwork = true,
-                    },
-                });
+                new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true));
             id = provisioned.SandboxId;
         }
         catch (MxcException e)

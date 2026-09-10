@@ -16,13 +16,15 @@
 use std::io::Write;
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy, WslcProvisionConfig};
+#[cfg(test)]
+use wxc_common::models::NetworkPolicy;
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
-use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
+use wxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
@@ -230,7 +232,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         request: &ExecutionRequest,
         _config: Option<&WslcProvisionConfig>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_provision_policy(request)
     }
 
@@ -241,7 +246,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 
@@ -252,7 +260,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_exec_policy(request)
     }
 
@@ -263,7 +274,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 
@@ -274,7 +288,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 }
@@ -414,9 +431,10 @@ fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, 
 /// mode. Per-host filtering is rejected in validation, so only the default
 /// policy participates: `Block` → isolated, `Allow` → bridged NAT.
 fn map_network(request: &ExecutionRequest) -> NetworkMode {
-    match request.policy.default_network_policy {
-        NetworkPolicy::Block => NetworkMode::None,
-        NetworkPolicy::Allow => NetworkMode::Bridged,
+    if crate::policy::network_is_isolated(request) {
+        NetworkMode::None
+    } else {
+        NetworkMode::Bridged
     }
 }
 

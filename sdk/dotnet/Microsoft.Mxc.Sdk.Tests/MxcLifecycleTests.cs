@@ -23,7 +23,12 @@ public class MxcLifecycleTests
                 },
                 Network = new StateAwareNetworkPolicy
                 {
-                    DefaultPolicy = StateAwareNetworkDefault.Allow,
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                    Ingress = new NetworkIngressPolicy
+                    {
+                        Default = NetworkAction.Allow,
+                        HostLoopback = NetworkAction.Allow,
+                    },
                 },
                 Image = "alpine:3.20",
                 ImageTarPath = @"C:\images\alpine.tar",
@@ -36,9 +41,9 @@ public class MxcLifecycleTests
                 WorkingDirectory = "/work",
                 Environment = ["A=1", "B=two"],
                 TimeoutMs = 1234,
-                Network = new WslcExecNetworkPolicy
+                RuntimeConfig = new NetworkRuntimeConfig
                 {
-                    Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"),
+                    NetworkProxy = "http://proxy.example:8080",
                 },
             });
 
@@ -170,7 +175,7 @@ public class MxcLifecycleTests
     [InlineData(StateAwareNetworkDefault.Allow, null)]
     [InlineData(StateAwareNetworkDefault.Block, true)]
     [InlineData(StateAwareNetworkDefault.Allow, false)]
-    public void IsolationSessionProvisionOptions_RejectsNonAcknowledgingNetwork(
+    public void CompatibilityProvisionOptions_RejectsLegacyNetwork(
         StateAwareNetworkDefault? defaultPolicy,
         bool? allowLocalNetwork)
     {
@@ -180,8 +185,11 @@ public class MxcLifecycleTests
             AllowLocalNetwork = allowLocalNetwork,
         };
 
-        Assert.Throws<ArgumentException>(
-            () => new IsolationSessionProvisionOptions(network));
+        var error = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildProvisionEnvelope(
+                StateAwareContainment.IsolationSession,
+                new ProvisionSandboxOptions { Network = network }));
+        Assert.Contains("IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)", error.Message);
     }
 
     [Fact]
@@ -224,39 +232,22 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_PreservesConsistentAcknowledgmentForms()
+    public void IsolationSessionProvisionOptions_ExposesOnlyExplicitAcknowledgmentConstructor()
     {
-        var options = new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)
-        {
-            Network = new StateAwareNetworkPolicy
-            {
-                DefaultPolicy = StateAwareNetworkDefault.Allow,
-                AllowLocalNetwork = true,
-            },
-        };
-        var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.IsolationSession,
-            options);
-        using var document = JsonDocument.Parse(envelope.ToJsonString());
-        var root = document.RootElement;
-        Assert.Equal("allow", root.GetProperty("network").GetProperty("defaultPolicy").GetString());
-        Assert.True(root.GetProperty("network").GetProperty("allowLocalNetwork").GetBoolean());
-        Assert.True(root.GetProperty("experimental")
-            .GetProperty("isolation_session")
-            .GetProperty("provision")
-            .GetProperty("acknowledgeUnrestrictedNetwork")
-            .GetBoolean());
+        var constructor = Assert.Single(typeof(IsolationSessionProvisionOptions).GetConstructors());
+        Assert.Equal(typeof(bool), Assert.Single(constructor.GetParameters()).ParameterType);
+        Assert.Null(typeof(IsolationSessionProvisionOptions).GetProperty("Network"));
     }
 
     [Theory]
     [InlineData(null, null)]
     [InlineData(StateAwareNetworkDefault.Block, true)]
     [InlineData(StateAwareNetworkDefault.Allow, false)]
-    public void BuildProvisionEnvelope_AcknowledgmentDoesNotEraseAuthoredNetwork(
+    public void BuildProvisionEnvelope_CompatibilityCannotEraseAuthoredNetwork(
         StateAwareNetworkDefault? defaultPolicy,
         bool? allowLocalNetwork)
     {
-        var options = new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)
+        var options = new ProvisionSandboxOptions
         {
             Network = new StateAwareNetworkPolicy
             {
@@ -271,34 +262,26 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_RemovingLegacyNetworkDoesNotCreateAcknowledgment()
+    public void BuildProvisionEnvelope_CompatibilityOmissionDoesNotCreateAcknowledgment()
     {
-        var options = new IsolationSessionProvisionOptions(
-            new StateAwareNetworkPolicy
-            {
-                DefaultPolicy = StateAwareNetworkDefault.Allow,
-                AllowLocalNetwork = true,
-            })
-        {
-            Network = null,
-        };
-        Assert.False(options.AcknowledgeUnrestrictedNetwork);
-        Assert.Throws<ArgumentNullException>(
+        var options = new ProvisionSandboxOptions();
+        Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
                 StateAwareContainment.IsolationSession,
                 options));
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_RevalidatesMutatedIsolationSessionNetwork()
+    public void BuildProvisionEnvelope_RejectsCanonicalLegacyAcknowledgment()
     {
-        var options = new IsolationSessionProvisionOptions(
-            new StateAwareNetworkPolicy
+        var options = new ProvisionSandboxOptions
+        {
+            Network = new StateAwareNetworkPolicy
             {
                 DefaultPolicy = StateAwareNetworkDefault.Allow,
                 AllowLocalNetwork = true,
-            });
-        Assert.IsType<StateAwareNetworkPolicy>(options.Network).AllowLocalNetwork = false;
+            },
+        };
 
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
@@ -307,34 +290,28 @@ public class MxcLifecycleTests
     }
 
     [Theory]
-    [InlineData("allowedHosts", false)]
-    [InlineData("blockedHosts", false)]
-    [InlineData("proxy", false)]
-    [InlineData("allowedHosts", true)]
-    [InlineData("blockedHosts", true)]
-    [InlineData("proxy", true)]
-    public void BuildProvisionEnvelope_RejectsMutatedIsolationSessionNetworkRestrictions(
-        string restriction,
-        bool explicitAcknowledgment)
+    [InlineData("defaultPolicy")]
+    [InlineData("allowLocalNetwork")]
+    [InlineData("allowedHosts")]
+    [InlineData("blockedHosts")]
+    [InlineData("proxy")]
+    public void BuildProvisionEnvelope_RejectsEachLegacyWslcField(string restriction)
     {
-        var network = new StateAwareNetworkPolicy
-        {
-            DefaultPolicy = StateAwareNetworkDefault.Allow,
-            AllowLocalNetwork = true,
-        };
-        var options = explicitAcknowledgment
-            ? new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)
-            {
-                Network = network,
-            }
-            : new IsolationSessionProvisionOptions(network);
+        var network = new StateAwareNetworkPolicy();
+        var options = new WslcProvisionOptions { Network = network };
         switch (restriction)
         {
+            case "defaultPolicy":
+                network.DefaultPolicy = StateAwareNetworkDefault.Block;
+                break;
+            case "allowLocalNetwork":
+                network.AllowLocalNetwork = false;
+                break;
             case "allowedHosts":
-                network.AllowedHosts = ["example.com"];
+                network.AllowedHosts = [];
                 break;
             case "blockedHosts":
-                network.BlockedHosts = ["example.com"];
+                network.BlockedHosts = [];
                 break;
             case "proxy":
                 network.Proxy = new UrlNetworkProxyPolicy(
@@ -344,8 +321,25 @@ public class MxcLifecycleTests
 
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                StateAwareContainment.Wslc,
                 options));
+    }
+
+    [Theory]
+    [InlineData("defaultPolicy")]
+    [InlineData("allowLocalNetwork")]
+    [InlineData("allowedHosts")]
+    [InlineData("blockedHosts")]
+    [InlineData("proxy")]
+    public void BuildProvisionEnvelope_RejectsNullLegacyFieldPresence(string field)
+    {
+        var network = JsonSerializer.Deserialize<StateAwareNetworkPolicy>(
+            $"{{\"{field}\":null}}",
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        var error = Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.Wslc,
+            new WslcProvisionOptions { Network = network }));
+        Assert.Contains($"network.{field}", error.Message);
     }
 
     [Fact]
@@ -391,7 +385,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_LiftsNetworkAndFilesystem_NestsAppId()
+    public void BuildProvisionEnvelope_CompatibilityDoesNotSilentlyDiscardPolicies()
     {
         var options = new ProvisionSandboxOptions
         {
@@ -404,30 +398,8 @@ public class MxcLifecycleTests
             AppId = "PFN:Contoso.App_8wekyb3d8bbwe",
         };
 
-        var json = MxcLifecycle
-            .BuildProvisionEnvelope(StateAwareContainment.IsolationSession, options)
-            .ToJsonString();
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
-        Assert.Equal("provision", root.GetProperty("phase").GetString());
-        Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
-
-        // Cross-cutting policy is lifted to the envelope top level. The backend
-        // reads `network` there; nesting it under experimental would leave the
-        // acknowledgment unseen and provision would be refused as default-deny.
-        var network = root.GetProperty("network");
-        Assert.Equal("allow", network.GetProperty("defaultPolicy").GetString());
-        Assert.True(network.GetProperty("allowLocalNetwork").GetBoolean());
-        Assert.Equal(@"C:\Temp",
-            root.GetProperty("filesystem").GetProperty("readwritePaths")[0].GetString());
-
-        // Backend-specific config nests.
-        var provision = root.GetProperty("experimental")
-            .GetProperty("isolation_session")
-            .GetProperty("provision");
-        Assert.Equal("PFN:Contoso.App_8wekyb3d8bbwe", provision.GetProperty("appId").GetString());
+        Assert.Throws<ArgumentException>(() => MxcLifecycle
+            .BuildProvisionEnvelope(StateAwareContainment.IsolationSession, options));
     }
 
     [Fact]
@@ -437,14 +409,15 @@ public class MxcLifecycleTests
         // specify them. Post-provision backends reject mode fields by presence.
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
-                new ProvisionSandboxOptions { Network = new StateAwareNetworkPolicy() })
+                StateAwareContainment.Wslc,
+                new WslcProvisionOptions { Network = new StateAwareNetworkPolicy() })
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
 
         var network = doc.RootElement.GetProperty("network");
         Assert.False(network.TryGetProperty("defaultPolicy", out _));
         Assert.False(network.TryGetProperty("allowLocalNetwork", out _));
+        Assert.Equal("{}", network.GetRawText());
     }
 
     [Fact]
@@ -454,8 +427,8 @@ public class MxcLifecycleTests
         // this type carries only the members it accepts.
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
-                new ProvisionSandboxOptions { Filesystem = new StateAwareFilesystemPolicy() })
+                StateAwareContainment.WindowsSandbox,
+                new WindowsSandboxProvisionOptions { Filesystem = new StateAwareFilesystemPolicy() })
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
 
@@ -525,7 +498,12 @@ public class MxcLifecycleTests
                     ImageTarPath = @"C:\images\alpine.tar",
                     Network = new StateAwareNetworkPolicy
                     {
-                        DefaultPolicy = StateAwareNetworkDefault.Allow,
+                        Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                        Ingress = new NetworkIngressPolicy
+                        {
+                            Default = NetworkAction.Allow,
+                            HostLoopback = NetworkAction.Allow,
+                        },
                     },
                 })
             .ToJsonString();
@@ -536,7 +514,13 @@ public class MxcLifecycleTests
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
-            root.GetProperty("network").GetProperty("defaultPolicy").GetString());
+            root.GetProperty("network").GetProperty("egress").GetProperty("default").GetString());
+        Assert.Equal(
+            "allow",
+            root.GetProperty("network").GetProperty("ingress").GetProperty("default").GetString());
+        Assert.Equal(
+            "allow",
+            root.GetProperty("network").GetProperty("ingress").GetProperty("hostLoopback").GetString());
         var provision = root.GetProperty("experimental")
             .GetProperty("wslc")
             .GetProperty("provision");
@@ -584,9 +568,9 @@ public class MxcLifecycleTests
                     Environment = new List<string> { "A=1", "B=two" },
                     InheritDefaultEnvironment = true,
                     TimeoutMs = 1234,
-                    Network = new WslcExecNetworkPolicy
+                    RuntimeConfig = new NetworkRuntimeConfig
                     {
-                        Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"),
+                        NetworkProxy = "http://proxy.example:8080",
                     },
                 })
             .ToJsonString();
@@ -600,12 +584,12 @@ public class MxcLifecycleTests
         Assert.Equal("B=two", process.GetProperty("env")[1].GetString());
         Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.Equal(1234, process.GetProperty("timeout").GetInt32());
-        var network = root.GetProperty("network");
+        var runtime = root.GetProperty("runtimeConfig");
         Assert.Equal(
             "http://proxy.example:8080",
-            network.GetProperty("proxy").GetProperty("url").GetString());
-        Assert.False(network.TryGetProperty("defaultPolicy", out _));
-        Assert.False(network.TryGetProperty("allowLocalNetwork", out _));
+            runtime.GetProperty("networkProxy").GetString());
+        Assert.False(root.TryGetProperty("network", out _));
+        Assert.False(root.TryGetProperty("experimental", out _));
     }
 
     [Fact]
@@ -632,6 +616,66 @@ public class MxcLifecycleTests
                 new SandboxId("iso:abc"),
                 "echo hi",
                 new WslcExecOptions()));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("not-a-url")]
+    [InlineData("ftp://proxy.example:8080")]
+    [InlineData(" http://proxy.example:8080")]
+    public void BuildExecEnvelope_RejectsInvalidRuntimeProxy(string url)
+    {
+        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+            "echo test",
+            new WslcExecOptions
+            {
+                RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = url },
+            }));
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RejectsLegacyProxyWithoutDroppingIt()
+    {
+        foreach (var network in new[]
+        {
+            new WslcExecNetworkPolicy(),
+            new WslcExecNetworkPolicy { Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080") },
+        })
+        {
+            var error = Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildExecEnvelope(
+                new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+                "echo test",
+                new WslcExecOptions { Network = network }));
+            Assert.Contains("RuntimeConfig.NetworkProxy", error.Message);
+        }
+    }
+
+    [Fact]
+    public void StateAwareTypes_KeepNetworkAndAcknowledgmentOutOfLaterPhases()
+    {
+        foreach (var type in new[] { typeof(StateAwarePhaseOptions), typeof(StateAwareExecOptions) })
+        {
+            Assert.Null(type.GetProperty("Network"));
+            Assert.Null(type.GetProperty("RuntimeConfig"));
+            Assert.Null(type.GetProperty("AcknowledgeUnrestrictedNetwork"));
+        }
+    }
+
+    [Theory]
+    [InlineData("wslc:0123456789abcdef0123456789abcdef")]
+    [InlineData("iso:abc")]
+    [InlineData("wsb:01234567")]
+    public void BuildNonExecEnvelopes_RejectProxyCarriedThroughBaseOptions(string value)
+    {
+        var id = new SandboxId(value);
+        var options = new WslcExecOptions
+        {
+            RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://proxy.example:8080" },
+        };
+        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildStartEnvelope(id, options));
+        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildStopEnvelope(id, options));
+        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildDeprovisionEnvelope(id, options));
     }
 
     [Fact]
@@ -725,12 +769,6 @@ public class MxcLifecycleTests
         IsolationSessionProvisionOptions[] forms =
         [
             new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true),
-            new IsolationSessionProvisionOptions(
-                new StateAwareNetworkPolicy
-                {
-                    DefaultPolicy = StateAwareNetworkDefault.Allow,
-                    AllowLocalNetwork = true,
-                }),
         ];
         foreach (var options in forms)
         {

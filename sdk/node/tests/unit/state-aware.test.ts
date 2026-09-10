@@ -101,14 +101,13 @@ describe('buildStateAwareEnvelope', () => {
         version: '0.9.0-alpha',
         acknowledgeUnrestrictedNetwork: true,
         filesystem: { readwritePaths: ['C:\\workspace'] },
-        network: { defaultPolicy: 'block' },
         ui: { disable: true, clipboard: 'none', injection: false },
       },
     });
     assert.strictEqual(env.phase, 'provision');
     assert.strictEqual(env.containment, 'isolation_session');
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\workspace'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
+    assert.strictEqual(env.network, undefined);
     assert.deepStrictEqual(env.ui, { disable: true, clipboard: 'none', injection: false });
     assert.deepStrictEqual(env.experimental, {
       isolation_session: {
@@ -225,54 +224,36 @@ describe('buildStateAwareEnvelope', () => {
   });
 
   it('does not automatically acknowledge when an untyped caller supplies an empty config', () => {
-    const env = buildStateAwareEnvelope({
+    assert.throws(() => buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {},
-    });
-    const wire = JSON.parse(JSON.stringify(env));
-    assert.strictEqual(wire.experimental, undefined);
-    assert.ok(!('network' in wire));
+    }), /requires acknowledgeUnrestrictedNetwork: true/);
   });
 
-  it('retains explicit empty and legacy network sections alongside the acknowledgment', () => {
+  it('rejects explicit empty and legacy network sections alongside the acknowledgment', () => {
     for (const network of [
       {},
       { defaultPolicy: 'allow', allowLocalNetwork: true },
     ]) {
-      const env = buildStateAwareEnvelope({
+      assert.throws(() => buildStateAwareEnvelope({
         phase: 'provision',
         backendKey: 'isolation_session',
         containment: 'isolation_session',
         config: { acknowledgeUnrestrictedNetwork: true, network },
-      });
-      const wire = JSON.parse(JSON.stringify(env));
-      assert.deepStrictEqual(wire.network, network);
-      assert.deepStrictEqual(
-        wire.experimental.isolation_session.provision,
-        { acknowledgeUnrestrictedNetwork: true },
-      );
+      }), /network is not accepted/);
     }
   });
 
-  it('retains false and null acknowledgment values from untyped callers', () => {
-    for (const acknowledgeUnrestrictedNetwork of [false, null]) {
-      const env = buildStateAwareEnvelope({
+  it('rejects invalid acknowledgment values from untyped callers', () => {
+    for (const acknowledgeUnrestrictedNetwork of [false, null, 'true', 1]) {
+      assert.throws(() => buildStateAwareEnvelope({
         phase: 'provision',
         backendKey: 'isolation_session',
         containment: 'isolation_session',
         config: { acknowledgeUnrestrictedNetwork },
-      });
-      const wire = JSON.parse(JSON.stringify(env));
-      assert.ok(
-        'acknowledgeUnrestrictedNetwork' in wire.experimental.isolation_session.provision,
-      );
-      assert.strictEqual(
-        wire.experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork,
-        acknowledgeUnrestrictedNetwork,
-      );
-      assert.ok(!('network' in wire));
+      }), /requires acknowledgeUnrestrictedNetwork: true/);
     }
   });
 
@@ -288,6 +269,7 @@ describe('buildStateAwareEnvelope', () => {
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
+      config: { acknowledgeUnrestrictedNetwork: true },
     });
     assert.strictEqual(provision.correlationVector, undefined);
   });
@@ -709,6 +691,71 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
+  for (const [field, value] of Object.entries({
+    defaultPolicy: 'block',
+    enforcementMode: 'both',
+    allowedHosts: [],
+    blockedHosts: [],
+    allowLocalNetwork: false,
+    proxy: { url: 'http://proxy.example:8080' },
+  })) {
+    it(`rejects removed network.${field} at provision and exec`, () => {
+      for (const phase of ['provision', 'exec'] as const) {
+        for (const authoredValue of [value, null]) {
+          assert.throws(() => buildStateAwareEnvelope({
+            phase, backendKey: 'wslc',
+            config: { network: { [field]: authoredValue } },
+          }), /network/);
+        }
+      }
+    });
+  }
+
+  it('rejects invalid runtime proxy values rather than masking them', () => {
+    for (const runtimeConfig of [
+      null, false, [], '',
+      { networkProxy: null }, { networkProxy: false }, { networkProxy: 8080 },
+      { networkProxy: '' }, { networkProxy: 'ftp://proxy.example' },
+      { networkProxy: 'not-a-url' }, { networkProxy: ' http://proxy.example' },
+      { proxy: { url: 'http://proxy.example' } },
+    ]) {
+      assert.throws(() => buildStateAwareEnvelope({
+        phase: 'exec', backendKey: 'wslc', config: { runtimeConfig },
+      }), /runtimeConfig/);
+    }
+  });
+
+  it('preserves omitted and explicitly empty WSLC network', () => {
+    for (const network of [undefined, {}]) {
+      const env = buildStateAwareEnvelope({
+        phase: 'provision', backendKey: 'wslc', config: { network },
+      });
+      assert.deepStrictEqual(env.network, network);
+    }
+  });
+
+  it('rejects proxy on other phases and other backends', () => {
+    for (const backendKey of ['wslc', 'isolation_session', 'windows_sandbox'] as const) {
+      for (const phase of ['provision', 'start', 'exec', 'stop', 'deprovision'] as const) {
+        if (backendKey === 'wslc' && phase === 'exec') continue;
+        assert.throws(() => buildStateAwareEnvelope({
+          backendKey, phase,
+          config: { runtimeConfig: { networkProxy: 'http://proxy.example:8080' } },
+        }), /runtimeConfig/);
+      }
+    }
+  });
+
+  it('rejects repeated acknowledgment and network on later IsolationSession phases', () => {
+    for (const phase of ['start', 'exec', 'stop', 'deprovision'] as const) {
+      for (const config of [{ acknowledgeUnrestrictedNetwork: true }, { network: {} }]) {
+        assert.throws(() => buildStateAwareEnvelope({
+          phase, backendKey: 'isolation_session', config,
+        }), /accepted only|not accepted/);
+      }
+    }
+  });
+
   it('defaults the version to the shared 0.9.0-alpha development contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
@@ -740,14 +787,20 @@ describe('wslc state-aware lifecycle', () => {
       containment: 'wslc',
       config: {
         filesystem: { readwritePaths: ['C:\\ws\\rw'] },
-        network: { defaultPolicy: 'allow' },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         image: 'alpine:latest',
         imageTarPath: 'C:\\images\\alpine.tar',
       },
     });
     assert.strictEqual(env.containment, 'wslc');
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\ws\\rw'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'allow' });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
       wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
@@ -759,24 +812,25 @@ describe('wslc state-aware lifecycle', () => {
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
-      config: { network: { defaultPolicy: 'block' } },
+      config: { network: { egress: { default: 'deny' } } },
     });
     assert.strictEqual(env.experimental, undefined);
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
+    assert.deepStrictEqual(env.network, { egress: { default: 'deny' } });
   });
 
-  it('lifts exec process + cooperative proxy network to top-level with no experimental block', () => {
+  it('lifts exec process + runtime proxy without synthesizing network posture', () => {
     const env = buildStateAwareEnvelope({
       phase: 'exec',
       backendKey: 'wslc',
       sandboxId: 'wslc:abc',
       config: {
         process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://127.0.0.1:8888' } },
+        runtimeConfig: { networkProxy: 'http://proxy.example:8888' },
       },
     });
     assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
-    assert.deepStrictEqual(env.network, { proxy: { url: 'http://127.0.0.1:8888' } });
+    assert.deepStrictEqual(env.runtimeConfig, { networkProxy: 'http://proxy.example:8888' });
+    assert.strictEqual(env.network, undefined);
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -788,7 +842,7 @@ describe('wslc state-aware lifecycle', () => {
       _setSpawnImpl(fake.spawn);
       const result = await provisionSandbox(
         'wslc',
-        { image: 'alpine:latest', network: { defaultPolicy: 'block' } },
+        { image: 'alpine:latest', network: { egress: { default: 'deny' } } },
         testOptions(),
       );
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');

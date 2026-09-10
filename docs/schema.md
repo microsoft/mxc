@@ -19,7 +19,7 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
 ```
 
-### Schema 0.8 networking
+### Directional networking (0.8 and 0.9)
 
 Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy
 endpoint into runtime configuration:
@@ -80,6 +80,24 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+Exact `0.9.0-alpha` accepts only the directional form. Its `network` section
+contains `egress` and `ingress`; the six legacy fields below are rejected at
+the exact contract boundary, including when their values are empty or equal
+to defaults. Published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
+contracts retain their original shapes.
+
+| Removed v0.9 field | Migration |
+| --- | --- |
+| `network.defaultPolicy` | Use `network.egress.default` (`block` becomes `deny`) |
+| `network.enforcementMode` | Select a policy shape the backend supports; do not request a legacy enforcement mechanism |
+| `network.allowedHosts` / `blockedHosts` | Use directional CIDR/protocol/port rules where supported; hostname filtering requires an appropriate proxy rather than a guessed CIDR |
+| `network.allowLocalNetwork` | Express ingress and host-loopback intent separately; these are not interchangeable permissions |
+| `network.proxy` | Use the URL at `runtimeConfig.networkProxy`, respecting the selected backend's proxy model |
+
+Omission remains significant: a proxy-only state-aware exec request supplies
+`runtimeConfig` without restating `network`, so it inherits the provisioned
+network posture. Start, stop, and deprovision do not accept a runtime proxy.
+
 ### IsolationSession unrestricted-network acknowledgment (0.9)
 
 IsolationSession cannot restrict networking. Exact v0.9 requests can acknowledge
@@ -110,14 +128,12 @@ acknowledgment.
 }
 ```
 
-During the additive 10a transition, a currently valid legacy acknowledgment
-(`defaultPolicy: "allow"` plus `allowLocalNetwork: true`, with no host rules,
-proxy, or non-default enforcement) remains accepted, alone or consistently
-with the new field. Neither acknowledgment form means rejection. A supplied
-`network: {}` or incompatible policy is not treated as omission or overridden.
-The existing experimental execution opt-in remains required. Published
-v0.6/v0.7/v0.8 contracts and the legacy v0.9 networking vocabulary are unchanged
-by this addition.
+The explicit acknowledgment is required for IsolationSession. The temporary
+10a alternative using `defaultPolicy: "allow"` plus `allowLocalNetwork: true`
+has been removed from v0.9, even when the new field is also supplied.
+State-aware IsolationSession provision has no `network` section. An empty or
+restrictive one-shot network policy is not treated as omission or overridden.
+The experimental execution opt-in remains independently required.
 
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
@@ -126,7 +142,11 @@ replaces `process.commandLine` before schema and typed request validation. That
 entry-point transform does not make the unmodified template a complete request
 that can be executed independently.
 
-### Full Schema
+### Legacy configuration reference (0.6-0.8)
+
+The following reference illustrates legacy policy vocabulary. It is not a
+v0.9 request template; use the exact development schema and directional
+examples above when authoring v0.9.
 
 ```json
 {

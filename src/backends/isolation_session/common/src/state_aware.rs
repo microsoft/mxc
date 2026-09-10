@@ -677,10 +677,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_provision_hook_accepts_canonical_network() {
+    fn validate_provision_hook_rejects_legacy_network() {
         let runner = IsolationSessionRunner::new();
         let req = request_with_canonical_network();
-        runner.validate_provision(&req, None).unwrap();
+        assert_eq!(
+            runner.validate_provision(&req, None).unwrap_err().code,
+            MxcErrorCode::PolicyValidation
+        );
     }
 
     #[test]
@@ -826,7 +829,10 @@ mod tests {
         // Guard against over-rejection.
         let runner = IsolationSessionRunner::new();
         runner
-            .validate_provision(&request_with_canonical_network(), None)
+            .validate_provision(
+                &request_without_authored_network(),
+                Some(&acknowledged_provision_config()),
+            )
             .unwrap();
         let req = ExecutionRequest::default();
         runner
@@ -848,16 +854,16 @@ mod tests {
     fn provision_config_with_app_id(app_id: &str) -> IsolationSessionProvisionConfig {
         IsolationSessionProvisionConfig {
             app_id: Some(app_id.to_string()),
-            ..Default::default()
+            ..acknowledged_provision_config()
         }
     }
 
     #[test]
     fn validate_provision_accepts_an_absent_app_id() {
         let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionProvisionConfig::default();
+        let cfg = acknowledged_provision_config();
         runner
-            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .validate_provision(&request_without_authored_network(), Some(&cfg))
             .unwrap();
     }
 
@@ -897,14 +903,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_provision_accepts_the_acknowledgment_with_the_legacy_form() {
+    fn validate_provision_rejects_the_acknowledgment_with_the_legacy_form() {
         let runner = IsolationSessionRunner::new();
         runner
             .validate_provision(
                 &request_with_canonical_network(),
                 Some(&acknowledged_provision_config()),
             )
-            .unwrap();
+            .unwrap_err();
     }
 
     #[test]
@@ -948,7 +954,7 @@ mod tests {
         let runner = IsolationSessionRunner::new();
         let cfg = provision_config_with_app_id("PFN:Contoso.App_8wekyb3d8bbwe");
         runner
-            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .validate_provision(&request_without_authored_network(), Some(&cfg))
             .unwrap();
     }
 
@@ -959,7 +965,7 @@ mod tests {
         let runner = IsolationSessionRunner::new();
         let cfg = provision_config_with_app_id("");
         runner
-            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .validate_provision(&request_without_authored_network(), Some(&cfg))
             .unwrap();
     }
 

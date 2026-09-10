@@ -795,7 +795,7 @@ mod tests {
         // A non-exec phase must be reported as such even from a non-terminal
         // host, so the caller learns the actionable problem first.
         let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+            "experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}}"#;
 
         let err = exec_state_aware_attached_with(provision, true, || false)
             .expect_err("a non-exec phase must be refused");
@@ -875,10 +875,9 @@ mod tests {
         if phase == Phase::Provision {
             value["containment"] = backend.into();
             if backend == "isolation_session" {
-                value["network"] = serde_json::json!({
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true,
-                });
+                value["experimental"] = serde_json::json!({"isolation_session": {
+                    "provision": {"acknowledgeUnrestrictedNetwork": true}
+                }});
             }
         } else {
             value["sandboxId"] = id.into();

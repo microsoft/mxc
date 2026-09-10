@@ -148,7 +148,7 @@ dry-run behavior, and both exec topologies without requiring live sandboxes.
 This migration changes no registered JSON contract or generated schema/type
 artifact.
 
-### Additive IsolationSession acknowledgment
+### IsolationSession acknowledgment and v0.9 networking
 
 The mutable `0.9.0-alpha` contract now accepts an explicit true-only
 `acknowledgeUnrestrictedNetwork` field under `experimental.isolation_session`
@@ -156,29 +156,33 @@ for one-shot requests, or under its `provision` member for state-aware
 provision. It acknowledges an inherently unrestricted network; it does not
 grant or configure network access.
 
-During Phase 10a, the existing canonical legacy network acknowledgment remains
-accepted, alone or consistently with the new field. The new field with an
-omitted network section is also accepted. An explicitly empty or restrictive
-network policy, proxy, or absence of both acknowledgment forms remains an
-error. State-aware missing-both is a conditional exact-contract failure;
-one-shot retains its existing common/backend-policy validation boundary.
+The additive Phase 10a transition accepted both legacy and explicit
+acknowledgment forms. The completed v0.9 cutover requires the explicit field:
+the old `network.defaultPolicy`/`allowLocalNetwork` pair is no longer valid.
+State-aware provision has no network section, and missing acknowledgment is
+an exact-contract failure. One-shot retains its common/backend-policy
+validation boundary for missing acknowledgment and incompatible authored
+directional policy.
 
 SDK authoring preserves omission before normalization rather than emitting
 `network: null`, `{}`, or a synthesized deny for the acknowledgment-only form.
 Changes are confined to IsolationSession-specific authoring; shared SDK APIs
 and the set of supported backend execution surfaces remain unchanged.
 
-Existing policy hashes stay unchanged. Acknowledgment-bearing requests gain a
+Published-version policy identities remain protected. Acknowledgment-bearing requests carry a
 scoped projection of acknowledgment and network-presence facts, so authored
 policy is not confused with implicit defaults. These are audit/diagnostic
 configuration identities, not authorization tokens or proof that validation
-succeeded. Legacy-only, new-only, and combined forms intentionally need not
-have equal hashes.
+succeeded. During the additive stage, legacy-only, new-only, and combined forms
+intentionally had distinct hashes; legacy v0.9 forms are now rejected rather
+than normalized into a new valid request.
 
-The affected development schema and TypeScript oracles are regenerated from
-their Rust sources. Published v0.6/v0.7/v0.8 contracts are unchanged, and this
-additive step does not remove legacy v0.9 networking fields or retire the
-test-only rolling reference.
+The development schema and TypeScript oracles are regenerated from their Rust
+sources. Every v0.9 root excludes `network.defaultPolicy`, `enforcementMode`,
+`allowedHosts`, `blockedHosts`, `allowLocalNetwork`, and `proxy`.
+Use egress/ingress and `runtimeConfig.networkProxy` instead. Published
+v0.6/v0.7/v0.8 contracts are unchanged. The test-only rolling reference and
+compatibility artifacts remain until Phase 11; they do not authorize requests.
 
 ### Trust boundary vs schema defaults
 

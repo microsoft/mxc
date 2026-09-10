@@ -259,7 +259,15 @@ var request = new SandboxRequest(
     new SandboxPolicy
     {
         Version = "0.9.0-alpha",
-        Network = new NetworkPolicy { AllowOutbound = true },
+        Network = new NetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        },
     },
     "python3 -c 'print(42)'")
 {
@@ -626,17 +634,17 @@ the Rust parser and TypeScript SDK constants.
 deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
-For IsolationSession, prefer
+For IsolationSession, use
 `new IsolationSessionProvisionOptions(acknowledgeUnrestrictedNetwork: true)`.
 The Boolean constructor refuses `false`; there is no implicit acknowledgment.
 It emits `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork`
-and omits the network key entirely unless a network value was supplied.
+and omits the network key entirely.
 
-The existing constructor taking the canonical legacy `StateAwareNetworkPolicy`
-remains available during the additive v0.9 transition. `Network` is now nullable,
-so code reading that IsolationSession-specific property must account for the
-acknowledgment-only form. Any supplied network value is still revalidated;
-empty, restrictive, or proxy-bearing policies are not discarded or overridden.
+The constructor taking `StateAwareNetworkPolicy` and the IsolationSession
+`Network` property have been removed. Replace them with the explicit true-only
+constructor above. Compatibility `ProvisionSandboxOptions` now raises an
+actionable migration error instead of emitting or ignoring legacy network data.
+No network section, even an empty one, is accepted on IsolationSession provision.
 This does not add IsolationSession to the public one-shot run/spawn surface.
 
 ```csharp
@@ -703,12 +711,24 @@ var wslc = new WslcProvisionOptions
     ImageTarPath = @"C:\images\alpine.tar", // optional local import
     Network = new StateAwareNetworkPolicy
     {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
+        Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+        Ingress = new NetworkIngressPolicy
+        {
+            Default = NetworkAction.Allow,
+            HostLoopback = NetworkAction.Allow,
+        },
     },
 };
 ```
 
 All state-aware backends use the exact development schema `0.9.0-alpha`.
+WSLC accepts only fully isolated (all three network axes `Deny`, the default)
+or unrestricted bridged (`Egress.Default`, `Ingress.Default`, and
+`Ingress.HostLoopback` all explicitly `Allow`) posture. Mixed postures and
+filtering rules cannot be enforced and are rejected. A one-shot WSLC runtime
+proxy also requires unrestricted bridged posture; it does not provide proxy-only
+network enforcement.
+
 `Version` may be omitted or explicitly set to that registered value; the SDK
 rejects other values rather than emitting an envelope for an unregistered
 state-aware contract. State-aware exec options expose working directory,
@@ -721,14 +741,37 @@ var options = new WslcExecOptions
     WorkingDirectory = "/work",
     Environment = new List<string> { "MODE=test" },
     TimeoutMs = 30_000,
-    Network = new WslcExecNetworkPolicy
+    RuntimeConfig = new NetworkRuntimeConfig
     {
-        Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"),
+        NetworkProxy = "http://proxy.example:8080",
     },
 };
 SandboxWaitResult outcome =
     MxcLifecycle.ExecInSandboxAttached(id, "make test", options);
 ```
+
+WSLC exec emits top-level `runtimeConfig.networkProxy` without a `network`
+section or any synthesized posture. The URL must be guest-routable HTTP/S;
+WSLC does not inherit ProcessContainer's loopback-only restriction. The old
+`WslcExecOptions.Network` path raises a migration error. Other backends cannot
+accept WSLC exec options.
+
+For one-shot schema 0.9 policies, use `NetworkPolicy.Egress`, `Ingress`, and
+`RuntimeConfig`. The latter remains nested under `NetworkPolicy` in the managed
+authoring JSON sent to FFI; the native exact builder emits top-level
+`runtimeConfig` on the wire. The legacy `AllowOutbound`, `AllowLocalNetwork`,
+`AllowedHosts`, `BlockedHosts`, and `Proxy` properties are rejected on 0.9,
+including explicit `false` and empty lists. The public legacy API retains its
+`bool` flags and initialized `List<string>` properties, including
+`AllowedHosts.Add(...)`. Private presence tracking and a version-selected JSON
+converter keep untouched defaults out of v0.9 authoring JSON while preserving
+the original default fields in published-version authoring JSON. Explicit legacy assignments,
+nonempty mutated host lists, and explicit legacy `null` from deserialization
+are rejected on 0.9; do not author legacy properties on that version.
+Boolean and host-list JSON nulls are invalid on every version; nullable legacy
+`proxy: null` is retained for v0.9 migration validation.
+Published 0.6/0.7/0.8 policies retain their legacy syntax and semantics.
+The SDK never resolves hostnames to CIDRs or silently drops legacy intent.
 
 `ExecInSandbox` and `ExecInSandboxAsync` hand the workload ordinary pipes and
 leave this process's console untouched. On backends that support streaming

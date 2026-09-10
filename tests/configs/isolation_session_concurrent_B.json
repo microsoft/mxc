@@ -2,9 +2,10 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-concurrent-B",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+  "experimental": {
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true
+    }
   },
   "process": {
     "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\B.ps1",

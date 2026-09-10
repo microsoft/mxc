@@ -2,9 +2,10 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-streaming-smoke",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+  "experimental": {
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true
+    }
   },
   "process": {
     "commandLine": "echo line_1 & ping -n 2 127.0.0.1 >nul & echo line_2 & ping -n 2 127.0.0.1 >nul & echo line_3",

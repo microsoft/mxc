@@ -860,8 +860,10 @@ mod tests {
     }
 
     fn provision_json(backend: &str, extra_fields: &str) -> String {
-        let network = if backend == "isolation_session" {
-            r#","network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#
+        let network = if backend == "isolation_session"
+            && !extra_fields.contains("\"experimental\"")
+        {
+            r#","experimental":{"isolation_session":{"provision":{"acknowledgeUnrestrictedNetwork":true}}}"#
         } else {
             ""
         };
@@ -886,6 +888,13 @@ mod tests {
             "phase": phase,
             "config": config,
         });
+        if config.get("acknowledgeUnrestrictedNetwork") == Some(&Value::Bool(true)) {
+            expected["unrestrictedNetworkAcknowledgment"] = serde_json::json!({
+                "networkSpecified": request.policy.network_specified,
+                "networkModeSpecified": request.policy.network_mode_specified,
+                "runtimeNetworkProxySpecified": request.policy.runtime_network_proxy_specified,
+            });
+        }
         hash_canonical_json(&canonical_json(&expected))
     }
 
@@ -893,17 +902,20 @@ mod tests {
     fn state_aware_provision_hash_preserves_exact_config_shape() {
         let mut hashes = std::collections::HashSet::new();
         for (backend, payload, expected_config) in [
-            ("isolation_session", None, Value::Null),
-            ("isolation_session", Some("{}"), serde_json::json!({})),
             (
                 "isolation_session",
-                Some(r#"{"appId":""}"#),
-                serde_json::json!({"appId": ""}),
+                None,
+                serde_json::json!({"acknowledgeUnrestrictedNetwork": true}),
             ),
             (
                 "isolation_session",
-                Some(r#"{"appId":"Contoso.App"}"#),
-                serde_json::json!({"appId": "Contoso.App"}),
+                Some(r#"{"appId":"","acknowledgeUnrestrictedNetwork":true}"#),
+                serde_json::json!({"appId": "", "acknowledgeUnrestrictedNetwork": true}),
+            ),
+            (
+                "isolation_session",
+                Some(r#"{"appId":"Contoso.App","acknowledgeUnrestrictedNetwork":true}"#),
+                serde_json::json!({"appId": "Contoso.App", "acknowledgeUnrestrictedNetwork": true}),
             ),
             ("windows_sandbox", None, Value::Null),
             ("wslc", None, Value::Null),
@@ -1020,13 +1032,16 @@ mod tests {
                 r#","_comment":{"user":{"CLIENTSECRET":"ignored"},"UPN":"alice@example.test"}"#
                     .to_string(),
             ] {
+                if backend == "isolation_session" && extra_fields.contains("\"experimental\"") {
+                    continue;
+                }
                 assert_eq!(
                     baseline,
                     parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
                     "{backend}: {extra_fields}"
                 );
             }
-            if backend != "windows_sandbox" {
+            if backend == "wslc" {
                 let extra_fields = format!(r#","experimental":{{"{backend}":{{}}}}"#);
                 assert_eq!(
                     baseline,
@@ -1056,6 +1071,11 @@ mod tests {
     }
 
     // === Phase 10a identity baselines ===
+    //
+    // Legacy-only and combined IsolationSession forms below are now invalid
+    // production v0.9 inputs. Keep their frozen *typed* projections as test-only
+    // identity baselines; do not re-enable them in exact parsing or refresh the
+    // digests to disguise the intentional contract rejection.
     //
     // These digests were captured from the projection as it stood *before* the
     // Phase 10a acknowledgment work and are pinned as literals on purpose: an
@@ -1424,11 +1444,11 @@ mod tests {
                 "phase":"exec",
                 "sandboxId":"wslc:0123456789abcdef0123456789abcdef",
                 "process":{"commandLine":"echo hello"},
-                "network":{"proxy":{"url":"http://localhost:8080"}}
+                "runtimeConfig":{"networkProxy":"http://localhost:8080"}
             }"#,
         );
         let mut changed = parse_state_aware(
-            r#"{
+            &r#"{
                 "version":"0.9.0-alpha",
                 "phase":"exec",
                 "sandboxId":"wslc:alice@example.test",
@@ -1439,7 +1459,12 @@ mod tests {
                 "network":{"proxy":{"url":"http://alice:synthetic-password@localhost:8080"}},
                 "telemetry":{"enabled":true},
                 "_comment":{"user":{"wamToken":"synthetic-comment-secret"}}
-            }"#,
+            }"#
+            .replace(
+                "\"network\":{\"proxy\":{\"url\":",
+                "\"runtimeConfig\":{\"networkProxy\":",
+            )
+            .replace("localhost:8080\"}}", "localhost:8080\"}"),
         );
         changed.set_dry_run(true);
         assert_eq!(

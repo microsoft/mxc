@@ -16,8 +16,10 @@
 //! | `allowed` / `blocked` hosts | rejected (no host filtering) | rejected                   | rejected                   |
 //! | `allow_local_network`       | rejected if `true`           | rejected                   | rejected                   |
 //! | `network_enforcement_mode`  | rejected if not `capabilities` | rejected                 | rejected                   |
-//! | `default_network_policy`    | honoured (None / Bridged)    | rejected if non-default    | rejected if non-default    |
-//! | `network.proxy`             | rejected (applies at exec)   | rejected                   | honoured (cooperative env) |
+//! | `network.egress.default`    | honoured (None / Bridged)    | rejected (immutable)       | rejected (immutable)       |
+//! | `network.ingress.*`         | must match egress (deny all / allow all) | rejected         | rejected                   |
+//! | `runtimeConfig.networkProxy` | rejected (applies at exec) | rejected                   | honoured (cooperative env) |
+//! | legacy `default_network_policy` / `network.proxy` | compatibility inputs only | rejected | proxy URL only |
 //!
 //! [^1]: a standalone `denied_path` is honoured by container isolation (unlisted
 //! host paths are simply never mounted); only a denied path nested under a
@@ -30,8 +32,9 @@
 //! describe the backend rather than a phase, so the one-shot `validate_runner`
 //! calls them too.
 
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode};
+use wxc_common::models::{ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
+use wxc_common::validator::NetworkPolicySupport;
 
 use crate::policy_mapping::validate_denied_path_overlap;
 
@@ -44,9 +47,9 @@ const ERR_NETWORK_IMMUTABLE: &str =
     "network mode is bound to the provision phase and cannot be changed by the WSLc backend after \
      provisioning";
 const ERR_PROXY_AT_PROVISION: &str =
-    "network.proxy is applied per-exec by the WSLc backend; set it on the exec phase, not provision";
+    "runtimeConfig.networkProxy (legacy network.proxy) is applied per-exec by the WSLc backend; set it on the exec phase, not provision";
 const ERR_PROXY_AT_PHASE: &str =
-    "network.proxy is only honoured on the exec phase by the WSLc backend";
+    "runtimeConfig.networkProxy (legacy network.proxy) is only honoured on the exec phase by the WSLc backend";
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: network.proxy requires the 'url' form (a routable proxy URL); the localhost and \
      builtinTestServer forms are not supported because a WSL container runs in its own network \
@@ -67,6 +70,62 @@ const ERR_ENFORCEMENT_MODE: &str =
      without breaking other security guarantees (e.g. MDE). Remove the field or set it to \
      'capabilities' — WSLc's network is all-or-nothing at the container level";
 
+/// WSLc enforces these axes only as a single all-or-nothing networking mode.
+/// `validate_directional_network` rejects every independently filtered posture.
+pub(crate) fn network_policy_support() -> NetworkPolicySupport {
+    NetworkPolicySupport::EGRESS_DEFAULT
+        | NetworkPolicySupport::INGRESS_DEFAULT
+        | NetworkPolicySupport::HOST_LOOPBACK
+        | NetworkPolicySupport::RUNTIME_PROXY
+}
+
+/// Read the authoritative directional posture, falling back only for legacy input.
+pub(crate) fn network_is_isolated(request: &ExecutionRequest) -> bool {
+    request.policy.network_egress.as_ref().map_or_else(
+        || request.policy.default_network_policy == NetworkPolicy::Block,
+        |egress| egress.default == NetworkAction::Deny,
+    )
+}
+
+/// No firewall is installed inside or outside a WSLc container. NONE denies all
+/// connectivity; BRIDGED cannot promise either inbound or host-loopback filtering.
+pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result<(), MxcError> {
+    let policy = &request.policy;
+    if policy.network_egress.is_none() && policy.network_ingress.is_none() {
+        return Ok(());
+    }
+    if policy
+        .network_egress
+        .as_ref()
+        .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
+    {
+        return Err(MxcError::policy_validation(
+            "WSLc does not support network.egress allow/deny rules; networking is all-or-nothing",
+        ));
+    }
+    let isolated = network_is_isolated(request);
+    let action = if isolated {
+        NetworkAction::Deny
+    } else {
+        NetworkAction::Allow
+    };
+    let ingress = policy.network_ingress.clone().unwrap_or_default();
+    if ingress.default != action || ingress.host_loopback != action {
+        return Err(MxcError::policy_validation(
+            "WSLc cannot filter ingress or host-loopback independently: isolated networking \
+             requires network.egress.default, network.ingress.default and \
+             network.ingress.hostLoopback all 'deny'; bridged networking requires all 'allow'",
+        ));
+    }
+    if isolated && policy.network_proxy.is_enabled() {
+        return Err(MxcError::policy_validation(
+            "WSLc runtimeConfig.networkProxy requires bridged networking; a proxy cannot \
+             create a route in an isolated container",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate the request for the provision phase. `rw` / `ro` paths become
 /// volume mounts and `default_network_policy` selects the container network
 /// mode; both are honoured here. Everything else in the module table is
@@ -82,6 +141,7 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
     reject_host_filtering(request)?;
     reject_provision_allow_local_network(request)?;
     reject_unsupported_enforcement_mode(request)?;
+    validate_directional_network(request)?;
     if request.policy.network_proxy.is_enabled() {
         return Err(MxcError::policy_validation(ERR_PROXY_AT_PROVISION));
     }
@@ -234,6 +294,104 @@ mod tests {
             needle,
             err.message
         );
+    }
+
+    fn parsed(source: &str) -> ExecutionRequest {
+        let request = wxc_common::config_parser::load_mxc_request_from_json(
+            source,
+            &mut wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer),
+        )
+        .unwrap();
+        match request {
+            wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
+            wxc_common::state_aware_request::MxcRequest::StateAware(request) => {
+                request.into_request()
+            }
+        }
+    }
+
+    #[test]
+    fn directional_networking_accepts_only_truthful_all_or_nothing_postures() {
+        for egress in ["allow", "deny"] {
+            for ingress in ["allow", "deny"] {
+                for loopback in ["allow", "deny"] {
+                    let source = format!(
+                        r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
+                    );
+                    let request = parsed(&source);
+                    assert_eq!(network_is_isolated(&request), egress == "deny");
+                    assert_eq!(
+                        validate_provision_policy(&request).is_ok(),
+                        egress == ingress && ingress == loopback,
+                        "{source}"
+                    );
+                }
+            }
+        }
+        let defaults =
+            parsed(r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#);
+        assert!(network_is_isolated(&defaults));
+        validate_provision_policy(&defaults).unwrap();
+    }
+
+    #[test]
+    fn runtime_proxy_only_exec_inherits_mode_and_retains_guest_routable_url() {
+        let request = parsed(
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        );
+        assert!(!request.policy.network_specified);
+        assert!(!request.policy.network_mode_specified);
+        assert!(request.policy.runtime_network_proxy_specified);
+        assert!(request.policy.network_egress.is_none());
+        assert!(request.policy.network_ingress.is_none());
+        wxc_common::validator::validate_state_aware_network_policy_support(
+            &request,
+            network_policy_support(),
+        )
+        .unwrap();
+        validate_exec_policy(&request).unwrap();
+        assert_eq!(exec_proxy_url(&request), Some("http://proxy.example:8080"));
+
+        for network in [r#"{}"#, r#"{"egress":{"default":"deny"}}"#] {
+            let source = format!(
+                r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{{"commandLine":"echo"}},"network":{network},"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
+            );
+            assert_policy_validation(
+                validate_exec_policy(&parsed(&source)).unwrap_err(),
+                "network mode",
+            );
+        }
+    }
+
+    #[test]
+    fn one_shot_runtime_proxy_requires_a_real_route_not_a_proxy_only_firewall_promise() {
+        let bridged = parsed(
+            r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        );
+        validate_directional_network(&bridged).unwrap();
+        assert_eq!(exec_proxy_url(&bridged), Some("http://proxy.example:8080"));
+        let isolated = parsed(
+            r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        );
+        assert_policy_validation(
+            validate_directional_network(&isolated).unwrap_err(),
+            "requires bridged networking",
+        );
+    }
+
+    #[test]
+    fn directional_rules_and_proxy_peer_identity_are_not_advertised_or_ignored() {
+        assert!(!network_policy_support().contains(NetworkPolicySupport::EGRESS_RULES));
+        assert!(!network_policy_support().contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
+        for action in ["allow", "deny"] {
+            let source = format!(
+                r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
+            );
+            assert_policy_validation(
+                validate_provision_policy(&parsed(&source)).unwrap_err(),
+                "allow/deny rules",
+            );
+        }
     }
 
     // ---- provision ----

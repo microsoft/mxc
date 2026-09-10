@@ -15,15 +15,10 @@
 //!
 //! Network policy is honesty-gated. The container runs on an unrestricted
 //! network that MXC cannot filter or deny, so at provision (and one-shot, which
-//! runs the full lifecycle in one call) the caller must acknowledge that. Two
-//! forms are accepted during Phase 10a:
-//!
-//! * the **legacy** canonical acknowledgment — `defaultPolicy=allow` +
-//!   `allowLocalNetwork=true` with no host rules, no proxy, and default
-//!   enforcement; or
-//! * the **explicit** [`UnrestrictedNetworkAcknowledgment`], supplied through
-//!   the backend's own runtime config, over a request that authored no network
-//!   policy at all.
+//! runs the full lifecycle in one call) the caller must supply an explicit
+//! [`UnrestrictedNetworkAcknowledgment`] through the backend's own runtime
+//! config, over a request that authored no network policy at all. The former
+//! legacy allow-policy marker pair is not an acknowledgment.
 //!
 //! Anything else is refused: an absent acknowledgment (the domain default is
 //! the unenforceable `Block`), an explicitly authored but empty network
@@ -52,9 +47,7 @@ const ERR_NETWORK_POLICY: &str = "the network is unrestricted and cannot be filt
     acknowledge that the container is fully network-accessible with no network policy at all — \
     experimental.isolation_session.acknowledgeUnrestrictedNetwork=true on a one-shot request, or \
     experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork=true on a state-aware \
-    provision request — or set network.defaultPolicy=allow and network.allowLocalNetwork=true with \
-    no allowed/blocked hosts, no proxy, and default enforcement, or use a backend that enforces \
-    network policy";
+    provision request — or use a backend that enforces network policy";
 const ERR_PROXY_POLICY: &str =
     "the network cannot be routed through a proxy; remove network.proxy \
     (the container's network is unrestricted and unproxied)";
@@ -65,7 +58,7 @@ const ERR_NETWORK_IMMUTABLE: &str =
 /// Validates the request for the provision phase (also used by the one-shot
 /// runner, which runs the whole lifecycle in one call so provision-phase
 /// semantics apply). Filesystem policy is rejected first, then UI policy, then
-/// the network policy must carry one of the two accepted acknowledgment forms.
+/// the backend configuration must carry the explicit acknowledgment.
 ///
 /// `acknowledgment` is the caller's explicit acknowledgment as it arrived in
 /// the backend's own runtime config — the one-shot `experimental.isolation_session`
@@ -139,23 +132,9 @@ fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), IsolationSessionEr
 /// unrestricted and a process inside can listen on a localhost-reachable port —
 /// and MXC has no primitive to change that.
 ///
-/// Two forms are honest here, and neither invents policy:
-///
-/// * the explicit acknowledgment over a request that authored no network policy
-///   at all. Such a request still carries the parser's implicit directional
-///   deny defaults, which were never authored by the caller, so they are
-///   accepted as the absence they represent rather than as a restriction the
-///   backend would be pretending to enforce; and
-/// * the legacy canonical form `defaultPolicy=allow` + `allowLocalNetwork=true`
-///   with no host rules, no proxy, and default enforcement — accepted on its
-///   own, and also accepted alongside the explicit acknowledgment, which is the
-///   consistent-redundancy case.
-///
-/// An acknowledgment never rescues authored content: with anything authored the
-/// request falls through to the legacy check, which reports the established
-/// diagnostics in the established order. So an explicitly empty network
-/// section, an authored directional deny, host rules, non-default enforcement,
-/// or a proxy stay refused whether or not the acknowledgment is present.
+/// The explicit acknowledgment applies only over an unauthored network. Parser
+/// defaults are not authored restrictions; an empty section, any directional
+/// posture, a proxy, or legacy policy values remain refused.
 fn validate_provision_network_policy(
     request: &ExecutionRequest,
     acknowledgment: Option<UnrestrictedNetworkAcknowledgment>,
@@ -163,7 +142,12 @@ fn validate_provision_network_policy(
     if acknowledgment.is_some() && network_policy_unauthored(request) {
         return Ok(());
     }
-    validate_canonical_allow_network_policy(request)
+    if request.policy.network_proxy.is_enabled() {
+        return Err(IsolationSessionError::Policy(ERR_PROXY_POLICY.to_string()));
+    }
+    Err(IsolationSessionError::Policy(
+        ERR_NETWORK_POLICY.to_string(),
+    ))
 }
 
 /// True when nothing in the request authored any network policy.
@@ -196,28 +180,6 @@ fn network_policy_unauthored(request: &ExecutionRequest) -> bool {
             .network_ingress
             .as_ref()
             .is_none_or(|ingress| *ingress == NetworkIngressPolicy::default())
-}
-
-/// The legacy canonical acknowledgment check, unchanged: `allow` outbound +
-/// `allowLocalNetwork` + no host rules + default enforcement + no proxy.
-fn validate_canonical_allow_network_policy(
-    request: &ExecutionRequest,
-) -> Result<(), IsolationSessionError> {
-    let policy = &request.policy;
-    let is_canonical_allow = policy.default_network_policy == NetworkPolicy::Allow
-        && policy.allow_local_network
-        && policy.allowed_hosts.is_empty()
-        && policy.blocked_hosts.is_empty()
-        && policy.network_enforcement_mode == NetworkEnforcementMode::Capabilities;
-    if !is_canonical_allow {
-        return Err(IsolationSessionError::Policy(
-            ERR_NETWORK_POLICY.to_string(),
-        ));
-    }
-    if policy.network_proxy.is_enabled() {
-        return Err(IsolationSessionError::Policy(ERR_PROXY_POLICY.to_string()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -335,12 +297,15 @@ mod tests {
     }
 
     #[test]
-    fn provision_policy_accepts_canonical_allow() {
+    fn provision_policy_rejects_legacy_allow_without_acknowledgment() {
         let request = ExecutionRequest {
             policy: canonical_allow_policy(),
             ..Default::default()
         };
-        validate_provision_policy(&request, None).unwrap();
+        assert_policy_err_contains(
+            validate_provision_policy(&request, None).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
     }
 
     #[test]
@@ -503,10 +468,10 @@ mod tests {
     fn provision_policy_accepts_absent_ui() {
         // Guard against over-rejection: the canonical request carries no `ui`.
         let request = ExecutionRequest {
-            policy: canonical_allow_policy(),
+            policy: unauthored_directional_policy(),
             ..Default::default()
         };
-        validate_provision_policy(&request, None).unwrap();
+        validate_provision_policy(&request, ACK).unwrap();
     }
 
     #[test]
@@ -585,9 +550,7 @@ mod tests {
     // ====== Explicit unrestricted-network acknowledgment ======
     //
     // The explicit acknowledgment accepts a request that authored no network
-    // policy at all. It never rescues authored content: with anything authored
-    // the request falls back to the legacy canonical check, so the established
-    // diagnostics and their order are unchanged.
+    // policy at all. It never rescues authored content or the removed marker pair.
 
     const ACK: Option<UnrestrictedNetworkAcknowledgment> = Some(UnrestrictedNetworkAcknowledgment);
 
@@ -622,14 +585,16 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgment_accepts_the_consistent_legacy_form() {
-        // Both forms together: consistent redundancy is accepted so a caller
-        // can adopt the new field before dropping the legacy one.
-        validate_provision_policy(&request_with_policy(canonical_allow_policy()), ACK).unwrap();
+    fn acknowledgment_rejects_the_legacy_form_even_for_direct_typed_callers() {
+        assert_policy_err_contains(
+            validate_provision_policy(&request_with_policy(canonical_allow_policy()), ACK)
+                .unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
     }
 
     #[test]
-    fn absent_acknowledgment_still_requires_the_legacy_form() {
+    fn absent_acknowledgment_is_rejected() {
         assert_policy_err_contains(
             validate_provision_policy(&request_with_policy(unauthored_directional_policy()), None)
                 .unwrap_err(),
@@ -696,7 +661,7 @@ mod tests {
         };
         assert_policy_err_contains(
             validate_provision_policy(&request_with_policy(runtime_proxy), ACK).unwrap_err(),
-            ERR_NETWORK_POLICY,
+            ERR_PROXY_POLICY,
         );
 
         let proxy_peer = ContainerPolicy {

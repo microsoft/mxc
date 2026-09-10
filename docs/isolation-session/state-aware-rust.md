@@ -86,7 +86,7 @@ without metadata use `()`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
-| `acknowledgeUnrestrictedNetwork` | `true` \| absent | absent | Explicit acknowledgment that networking is unrestricted and cannot be filtered or denied. When supplied, only JSON `true` is valid. Omit the top-level `network` section for the acknowledgment-only form. During 10a the canonical legacy network acknowledgment remains an alternative, and consistent use of both is accepted. |
+| `acknowledgeUnrestrictedNetwork` | `true` | required | Explicit acknowledgment that networking is unrestricted and cannot be filtered or denied. Only JSON `true` is valid. The provision contract does not accept a top-level `network` section or the old legacy acknowledgment alternative. |
 
 For example, acknowledgment-only provision is:
 
@@ -105,10 +105,10 @@ For example, acknowledgment-only provision is:
 }
 ```
 
-The exact provision contract requires the new acknowledgment or the valid
-legacy network form. Supplying neither remains a structural
-`malformed_request` error. The acknowledgment is not a network setting and
-does not override an explicitly empty or restrictive policy.
+The exact provision contract requires the explicit acknowledgment. Omission
+remains a structural `malformed_request` error. The acknowledgment is not a
+network setting, and a top-level `network` section is structurally rejected
+on this provision surface.
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
@@ -222,12 +222,11 @@ backend has no host-folder-sharing primitive, so there is nothing to honor.
 The container's network is unrestricted (outbound open; a process inside can
 listen on a port reachable from outside via localhost) and MXC has no
 primitive to filter or deny it. **Provision** and one-shot therefore require
-an unrestricted-network acknowledgment. In v0.9, the preferred form is
+an unrestricted-network acknowledgment. In v0.9, the required form is
 `acknowledgeUnrestrictedNetwork: true` in the appropriate backend section,
-with no authored `network` section. The canonical legacy form
-(`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy,
-default enforcement) remains valid during 10a, alone or consistently with the
-new field. An authored `network: {}`, restrictions, or proxy settings remain
+with no authored `network` section. The legacy form permitted during 10a has
+been removed from the exact v0.9 contract. An authored `network: {}`,
+restrictions, or proxy settings remain
 rejected; they are never erased or overridden. The common model's implicit
 deny defaults are not authored policy and are not synthesized into allow
 grants. On **post-provision** phases the posture is fixed: supplied network
@@ -290,8 +289,8 @@ meaning for this backend.
 |---|---|---|---|---|---|---|
 | `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
-| Unrestricted-network acknowledgment, using the new field or canonical legacy form | **required** | **required** | rejected | rejected | rejected | rejected |
-| `policy.network` — canonical legacy `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during 10a | accepted during 10a | rejected | rejected | rejected | rejected |
+| Explicit unrestricted-network acknowledgment | **required** | **required** | rejected | rejected | rejected | rejected |
+| `policy.network` — legacy fields | structurally rejected | structurally rejected | structurally rejected | structurally rejected | structurally rejected | structurally rejected |
 | `policy.network` — any other **supplied** value (host rules, proxy, `defaultPolicy=block`) | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.network` — **absent** | accepted with the new acknowledgment | accepted with the new acknowledgment | inherited from provision | inherited | inherited | inherited |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
@@ -334,9 +333,8 @@ Notes on the rows that are not a simple accept/reject:
 - **`process` on non-exec state-aware phases** is structurally rejected. Supply
   process settings only on exec; other phases do not run a workload.
 
-With a valid legacy network acknowledgment, an absent provision member remains
-`None`, while a present empty object remains a configuration with absent
-fields. An acknowledgment-only request necessarily has a provision object.
+An accepted provision request necessarily has a provision object carrying the
+explicit acknowledgment. An absent or empty provision object is rejected.
 An explicit empty `appId` remains `Some("")`, and exact input rejects
 `appId: null`. These distinctions survive binding unchanged, so application
 identity resolution remains owned by the backend.
@@ -369,7 +367,7 @@ field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
 phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
 per the matrix — provision requires the canonical unrestricted-network
-acknowledgment in either accepted 10a form, and post-provision rejects supplied
+acknowledgment in the required explicit form, and post-provision rejects supplied
 network policy or acknowledgment (inheriting absence). One-shot enforces its
 policy checks via `validate_runner`;
 state-aware enforces it via the `validate_<phase>` hooks.

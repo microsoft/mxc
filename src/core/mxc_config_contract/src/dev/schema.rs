@@ -355,6 +355,57 @@ mod tests {
     }
 
     #[test]
+    fn no_legacy_network_property_is_reachable_from_any_request_root() {
+        let schema = development_schema();
+        let definitions = definitions(&schema);
+        for root in ROOT_NAMES {
+            let mut pending = VecDeque::from([(&definitions[*root], false)]);
+            let mut visited = BTreeSet::new();
+            while let Some((node, network_object)) = pending.pop_front() {
+                let Value::Object(object) = node else {
+                    continue;
+                };
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    if visited.insert((reference, network_object)) {
+                        pending.push_back((
+                            resolve_definition(reference, definitions),
+                            network_object,
+                        ));
+                    }
+                }
+                if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+                    for (name, child) in properties {
+                        assert!(
+                            !network_object
+                                || !matches!(
+                                    name.as_str(),
+                                    "defaultPolicy"
+                                        | "enforcementMode"
+                                        | "allowedHosts"
+                                        | "blockedHosts"
+                                        | "allowLocalNetwork"
+                                        | "proxy"
+                                ),
+                            "{root}: removed network property {name}"
+                        );
+                        pending.push_back((child, name == "network"));
+                    }
+                }
+                for keyword in ["allOf", "anyOf", "oneOf"] {
+                    if let Some(children) = object.get(keyword).and_then(Value::as_array) {
+                        pending.extend(children.iter().map(|child| (child, network_object)));
+                    }
+                }
+                for keyword in ["if", "then", "else", "not", "items", "additionalProperties"] {
+                    if let Some(child) = object.get(keyword) {
+                        pending.push_back((child, network_object));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn definition_names_and_references_are_consistent() {
         let schema = development_schema();
         let definitions = definitions(&schema);

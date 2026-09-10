@@ -42,23 +42,6 @@ pub(super) fn convert_filesystem(value: contract::Filesystem) -> wire::Filesyste
     }
 }
 
-fn convert_default_network_policy(value: contract::DefaultNetworkPolicy) -> wire::NetworkPolicy {
-    match value {
-        contract::DefaultNetworkPolicy::Allow => wire::NetworkPolicy::Allow,
-        contract::DefaultNetworkPolicy::Block => wire::NetworkPolicy::Block,
-    }
-}
-
-fn convert_network_enforcement_mode(
-    value: contract::NetworkEnforcementMode,
-) -> wire::NetworkEnforcement {
-    match value {
-        contract::NetworkEnforcementMode::Capabilities => wire::NetworkEnforcement::Capabilities,
-        contract::NetworkEnforcementMode::Firewall => wire::NetworkEnforcement::Firewall,
-        contract::NetworkEnforcementMode::Both => wire::NetworkEnforcement::Both,
-    }
-}
-
 fn convert_network_action(value: contract::NetworkAction) -> wire::NetworkAction {
     match value {
         contract::NetworkAction::Allow => wire::NetworkAction::Allow,
@@ -145,49 +128,23 @@ fn convert_network_ingress(value: contract::NetworkIngress) -> wire::NetworkIngr
 }
 
 pub(super) fn convert_network(value: contract::Network) -> wire::Network {
-    let contract::Network {
-        default_policy,
-        enforcement_mode,
-        allow_local_network,
-        allowed_hosts,
-        blocked_hosts,
-        proxy,
-        egress,
-        ingress,
-    } = value;
+    let contract::Network { egress, ingress } = value;
     wire::Network {
-        default_policy: default_policy
-            .into_option()
-            .map(convert_default_network_policy),
-        enforcement_mode: enforcement_mode
-            .into_option()
-            .map(convert_network_enforcement_mode),
-        allow_local_network: allow_local_network.into_option(),
-        allowed_hosts: allowed_hosts.into_option(),
-        blocked_hosts: blocked_hosts.into_option(),
-        proxy: proxy.into_option().map(convert_proxy),
+        default_policy: None,
+        enforcement_mode: None,
+        allow_local_network: None,
+        allowed_hosts: None,
+        blocked_hosts: None,
+        proxy: None,
         egress: egress.into_option().map(convert_network_egress),
         ingress: ingress.into_option().map(convert_network_ingress),
     }
 }
 
-fn convert_proxy(value: contract::NetworkProxy) -> wire::Proxy {
-    match value {
-        contract::NetworkProxy::Localhost(port) => wire::Proxy {
-            localhost: Some(port.get()),
-            builtin_test_server: None,
-            url: None,
-        },
-        contract::NetworkProxy::BuiltinTestServer(contract::True) => wire::Proxy {
-            localhost: None,
-            builtin_test_server: Some(true),
-            url: None,
-        },
-        contract::NetworkProxy::Url(url) => wire::Proxy {
-            localhost: None,
-            builtin_test_server: None,
-            url: Some(url),
-        },
+pub(super) fn convert_runtime_config(value: contract::RuntimeConfig) -> wire::RuntimeConfig {
+    let contract::RuntimeConfig { network_proxy } = value;
+    wire::RuntimeConfig {
+        network_proxy: network_proxy.into_option(),
     }
 }
 

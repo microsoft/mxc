@@ -34,6 +34,16 @@ public static class MxcSandbox
         },
     };
 
+    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
+    {
+        Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
+    };
+
+    private static JsonSerializerOptions PolicyJsonOptions(string version) =>
+        version is "0.6.0-alpha" or "0.7.0-alpha" or "0.8.0-alpha"
+            ? PublishedPolicyJsonOptions
+            : JsonOptions;
+
     /// <summary>
     /// The version of the native <c>mxc_ffi</c> library.
     /// </summary>
@@ -239,13 +249,29 @@ public static class MxcSandbox
     internal static string SerializePolicy(SandboxPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        return JsonSerializer.Serialize(policy, JsonOptions);
+        ValidateNetworkVersion(policy);
+        return JsonSerializer.Serialize(policy, PolicyJsonOptions(policy.Version));
     }
 
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
+        ValidateNetworkVersion(request.Policy);
+        return JsonSerializer.Serialize(PrepareRequest(request), PolicyJsonOptions(request.Policy.Version));
+    }
+
+    private static void ValidateNetworkVersion(SandboxPolicy policy)
+    {
+        if (policy.Version == "0.9.0-alpha" && policy.Network is { } network
+            && network.LegacyFieldSpecified is { } field)
+        {
+            throw new ArgumentException(
+                $"Schema 0.9 no longer supports authored network.{field}, including null. Legacy network authoring "
+                    + "(AllowOutbound, AllowLocalNetwork, AllowedHosts, BlockedHosts, Proxy). "
+                    + "Use Network.Egress/Ingress and Network.RuntimeConfig.NetworkProxy explicitly, "
+                    + "or retain schema 0.8.0-alpha. Hostnames are not converted to CIDRs.",
+                nameof(policy));
+        }
     }
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)

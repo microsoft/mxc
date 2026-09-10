@@ -217,15 +217,25 @@ function Run-IsolationSessionTest {
         [int]$ExpectedExit = 0,
         [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
-        [string[]]$OutputLineNotEqual = @()
+        [string[]]$OutputLineNotEqual = @(),
+        [hashtable]$Request,
+        [switch]$DryRun
     )
 
-    $configPath = Join-Path $ConfigDir $ConfigFile
-    if (-not (Test-Path $configPath)) {
-        Write-Host "  $ConfigFile ... " -NoNewline
-        Write-Host "SKIP (file not found)" -ForegroundColor Yellow
-        return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
+    if ($null -ne $Request) {
+        $json = $Request | ConvertTo-Json -Compress -Depth 12
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+        $configArgs = @('--config-base64', $encoded)
+    } else {
+        $configPath = Join-Path $ConfigDir $ConfigFile
+        if (-not (Test-Path $configPath)) {
+            Write-Host "  $ConfigFile ... " -NoNewline
+            Write-Host "SKIP (file not found)" -ForegroundColor Yellow
+            return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
+        }
+        $configArgs = @($configPath)
     }
+    if ($DryRun) { $configArgs += '--dry-run' }
 
     Write-Host "  $ConfigFile ... " -NoNewline
 
@@ -239,7 +249,7 @@ function Run-IsolationSessionTest {
         # stdout. Without --debug, one-shot keeps Logger in Mode::Buffer
         # and never flushes the buffer, so the agent name is lost and
         # leaks cannot be correlated to a specific test.
-        $output = & $WxcExec --debug --experimental $configPath 2>&1 | Out-String
+        $output = & $WxcExec --debug --experimental @configArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevPref
     } catch {
@@ -326,7 +336,7 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
 # that the IsolationSession one-shot surface does not define is rejected.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("unknown field ``isolation_session``")))
+    -OutputContains @("experimental.isolation_session.configurationId", "unknown field ``configurationId``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -348,28 +358,71 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" 
 # contract boundary, before the command can run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("unknown field ``isolation_session``")))
+    -OutputContains @("experimental.isolation_session.unrecognizedSetting", "unknown field ``unrecognizedSetting``")))
 
 # One-shot network rejection: the isolation session container's network is
-# unrestricted and cannot be filtered or denied, so a non-canonical network
-# policy (here defaultPolicy=block) is refused at provision. Only the canonical
-# acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is accepted.
+# unrestricted and cannot be filtered or denied. The explicit acknowledgment
+# cannot override an authored directional deny policy.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
 
-# Inbound axis: `allow` outbound without `allowLocalNetwork` is still refused --
-# a process inside CAN listen on a localhost-reachable port, so the caller must
-# acknowledge inbound too. Both axes must be the unrestricted form.
+# Inbound axis: allowing egress does not make an ingress/host-loopback deny
+# enforceable. A process inside can listen on a localhost-reachable port.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_no_local.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
 
-# Host rules: even with the canonical allow + allowLocalNetwork base, any
-# allowedHosts/blockedHosts entry is refused -- the backend cannot filter hosts.
+# Per-destination rules remain unsupported even with the acknowledgment.
+# The fixture uses a documentation CIDR, not a DNS-derived hostname mapping.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_hosts.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
+
+# Every legacy Network member is rejected by exact v0.9 parsing, including
+# semantically neutral values. These requests must never launch their command.
+$legacyNetworkFields = [ordered]@{
+    defaultPolicy = 'allow'
+    enforcementMode = 'capabilities'
+    allowedHosts = @()
+    blockedHosts = @()
+    allowLocalNetwork = $true
+    proxy = @{ url = 'http://127.0.0.1:8888' }
+}
+foreach ($field in $legacyNetworkFields.Keys) {
+    $request = @{
+        version = '0.9.0-alpha'
+        containment = 'isolation_session'
+        process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
+        experimental = @{ isolation_session = @{ acknowledgeUnrestrictedNetwork = $true } }
+        network = @{ $field = $legacyNetworkFields[$field] }
+    }
+    $null = $results.Add((Run-IsolationSessionTest "legacy network.$field rejected" `
+        -Request $request -DryRun -ExpectedExit 1 `
+        -OutputContains @("network.$field", "unknown field ``$field``")))
+}
+
+$legacyOnlyRequest = @{
+    version = '0.9.0-alpha'
+    containment = 'isolation_session'
+    process = @{ commandLine = 'echo LEGACY_ACKNOWLEDGMENT_MUST_NOT_RUN' }
+    network = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+}
+$null = $results.Add((Run-IsolationSessionTest "legacy-only acknowledgment rejected" `
+    -Request $legacyOnlyRequest -DryRun -ExpectedExit 1 `
+    -OutputContains @("network.defaultPolicy", "unknown field ``defaultPolicy``")))
+
+foreach ($value in @($false, $null, 'true', 1)) {
+    $request = @{
+        version = '0.9.0-alpha'
+        containment = 'isolation_session'
+        process = @{ commandLine = 'echo INVALID_ACKNOWLEDGMENT_MUST_NOT_RUN' }
+        experimental = @{ isolation_session = @{ acknowledgeUnrestrictedNetwork = $value } }
+    }
+    $null = $results.Add((Run-IsolationSessionTest "invalid acknowledgment '$value' rejected" `
+        -Request $request -DryRun -ExpectedExit 1 `
+        -OutputContains @("experimental.isolation_session.acknowledgeUnrestrictedNetwork")))
+}
 
 # One-shot UI rejection: the isolation session is a separate OS session, which
 # isolates the host's UI from the contained code but does not deny it UI

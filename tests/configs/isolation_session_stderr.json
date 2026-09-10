@@ -2,9 +2,10 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-stderr",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+  "experimental": {
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true
+    }
   },
   "process": {
     "commandLine": "echo MARKER_STDOUT & echo MARKER_STDERR 1>&2",

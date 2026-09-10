@@ -32,8 +32,6 @@ export interface CaptureDenials {
 
 export type CaptureDenialsMode = "block" | "allow";
 
-export type DefaultNetworkPolicy = "allow" | "block";
-
 /**
  * Experimental settings accepted by the `deprovision` phase.
  */
@@ -113,6 +111,10 @@ export interface ExecRequest {
    */
   process: Process;
   /**
+   * Optional per-execution runtime values, including the cooperative proxy URL.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
    * Identifier of the sandbox to execute in.
    */
   sandboxId: string;
@@ -157,31 +159,13 @@ export interface Filesystem {
 export type IsolationSessionContainment = "isolation_session";
 
 /**
- * The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.
- */
-export interface IsolationSessionNetwork {
-  /**
-   * Required acknowledgment that local network access is allowed.
-   */
-  allowLocalNetwork: True;
-  /**
-   * Exact `allow` default network policy marker.
-   */
-  defaultPolicy: IsolationSessionNetworkDefaultPolicy;
-}
-
-export type IsolationSessionNetworkDefaultPolicy = "allow";
-
-/**
  * IsolationSession settings accepted during provisioning.
  */
 export interface IsolationSessionProvision {
   /**
-   * Affirmative acknowledgment that the container's network is unrestricted and cannot be filtered or denied. Only the JSON value `true` is valid.
-   *
-   * Provision-phase only: the posture is fixed for the sandbox's lifetime, so no later phase accepts it.
+   * Required acknowledgment that MXC cannot restrict the container's networking. Only the JSON value `true` is valid; later phases cannot redeclare it.
    */
-  acknowledgeUnrestrictedNetwork?: True;
+  acknowledgeUnrestrictedNetwork: True;
   /**
    * Optional application identifier carried by the sandbox identity.
    */
@@ -193,13 +177,13 @@ export interface IsolationSessionProvision {
  */
 export interface IsolationSessionProvisionExperimental {
   /**
-   * Optional IsolationSession backend settings.
+   * Required IsolationSession backend settings.
    */
-  isolation_session?: StateAwareIsolationSession;
+  isolation_session: StateAwareIsolationSession;
 }
 
 /**
- * A complete state-aware `provision` request for isolation_session. The container's network is unrestricted and MXC cannot filter or deny it, so the request must acknowledge that: supply `experimental.isolation_session.provision.acknowledgeUnrestrictedNetwork: true`, the legacy `network` acknowledgment, or both consistent forms. At least one is required; supplying both is valid.
+ * A complete IsolationSession provision request. The container's network is unrestricted: the required typed acknowledgment cannot be replaced by network policy, and direct construction cannot omit it.
  */
 export interface IsolationSessionProvisionRequest {
   /**
@@ -211,19 +195,15 @@ export interface IsolationSessionProvisionRequest {
    */
   _comment?: unknown;
   /**
-   * Exact `isolation_session` containment marker.
+   * Exact IsolationSession containment marker.
    */
   containment: IsolationSessionContainment;
   /**
-   * Optional closed experimental settings.
+   * Required backend configuration with the unrestricted-network acknowledgment.
    */
-  experimental?: IsolationSessionProvisionExperimental;
+  experimental: IsolationSessionProvisionExperimental;
   /**
-   * Optional legacy unrestricted-network acknowledgment.
-   */
-  network?: IsolationSessionNetwork;
-  /**
-   * Exact `provision` phase marker.
+   * Exact provision phase marker.
    */
   phase: ProvisionPhase;
   /**
@@ -271,37 +251,13 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Optional permission to bind and accept local network connections.
-   */
-  allowLocalNetwork?: boolean;
-  /**
-   * Optional hosts allowed when the default policy blocks access.
-   */
-  allowedHosts?: string[];
-  /**
-   * Optional hosts blocked when the default policy allows access.
-   */
-  blockedHosts?: string[];
-  /**
-   * Optional default network posture.
-   */
-  defaultPolicy?: DefaultNetworkPolicy;
-  /**
    * Optional outbound network rules.
    */
   egress?: NetworkEgress;
   /**
-   * Optional network enforcement mechanism.
-   */
-  enforcementMode?: NetworkEnforcementMode;
-  /**
    * Optional inbound and host-loopback network rules.
    */
   ingress?: NetworkIngress;
-  /**
-   * Optional proxy configuration.
-   */
-  proxy?: NetworkProxy;
 }
 
 export type NetworkAction = "allow" | "deny";
@@ -323,8 +279,6 @@ export interface NetworkEgress {
    */
   deny?: NetworkRule[];
 }
-
-export type NetworkEnforcementMode = "capabilities" | "firewall" | "both";
 
 /**
  * Inbound and host-loopback network policy.
@@ -373,11 +327,6 @@ export interface NetworkPort {
 }
 
 export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
-
-/**
- * One of the proxy configurations accepted by the `0.9.0-alpha` contract.
- */
-export type NetworkProxy = { localhost: number; builtinTestServer?: never; url?: never } | { builtinTestServer: True; localhost?: never; url?: never } | { url: string; builtinTestServer?: never; localhost?: never };
 
 /**
  * One outbound rule, matching destinations and ports.
@@ -688,7 +637,7 @@ export type ProvisionPhase = "provision";
  */
 export interface RuntimeConfig {
   /**
-   * Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.
+   * Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.
    */
   networkProxy?: string;
 }
@@ -770,9 +719,9 @@ export interface StartRequest {
  */
 export interface StateAwareIsolationSession {
   /**
-   * Optional provision-phase settings.
+   * Required provision settings containing the unrestricted-network acknowledgment.
    */
-  provision?: IsolationSessionProvision;
+  provision: IsolationSessionProvision;
 }
 
 /**

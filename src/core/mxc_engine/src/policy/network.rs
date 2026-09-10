@@ -54,11 +54,12 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
 
 /// Network section of a [`SandboxPolicy`](super::SandboxPolicy).
 ///
-/// The legacy fields preserve schema 0.6 and 0.7 authoring. The directional
-/// fields model schema 0.8. Legacy fields cannot be combined with either these
-/// fields or ProcessContainer directional network settings.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+/// Legacy fields preserve schema 0.6, 0.7 and 0.8 authoring. Schema 0.9 accepts
+/// only directional fields and runtime configuration; legacy authoring returns
+/// a migration error rather than silently discarding policy. Default-constructed
+/// false/empty legacy members carry no authored intent. Deserialized legacy
+/// properties retain presence, including false, empty arrays and a null proxy.
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct NetworkSection {
     pub allow_outbound: bool,
@@ -72,6 +73,132 @@ pub struct NetworkSection {
     pub ingress: Option<NetworkIngressSection>,
     /// Schema 0.8 runtime values supplied separately from sandbox policy.
     pub runtime_config: Option<RuntimeConfigSection>,
+    pub(crate) legacy_fields_specified: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(field_identifier, rename_all = "camelCase")]
+        enum Field {
+            AllowOutbound,
+            AllowLocalNetwork,
+            AllowedHosts,
+            BlockedHosts,
+            Proxy,
+            Egress,
+            Ingress,
+            RuntimeConfig,
+            DefaultPolicy,
+            EnforcementMode,
+            #[serde(other)]
+            Ignore,
+        }
+
+        struct NetworkVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for NetworkVisitor {
+            type Value = NetworkSection;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct NetworkSection")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut result = NetworkSection::default();
+                let mut seen = 0u8;
+                macro_rules! read_field {
+                    ($field:ident, $name:literal, $index:literal) => {{
+                        let bit = 1 << $index;
+                        if seen & bit != 0 {
+                            return Err(serde::de::Error::duplicate_field($name));
+                        }
+                        seen |= bit;
+                        result.$field = map.next_value()?;
+                    }};
+                }
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::AllowOutbound => read_field!(allow_outbound, "allowOutbound", 0),
+                        Field::AllowLocalNetwork => {
+                            read_field!(allow_local_network, "allowLocalNetwork", 1)
+                        }
+                        Field::AllowedHosts => read_field!(allowed_hosts, "allowedHosts", 2),
+                        Field::BlockedHosts => read_field!(blocked_hosts, "blockedHosts", 3),
+                        Field::Proxy => read_field!(proxy, "proxy", 4),
+                        Field::Egress => read_field!(egress, "egress", 5),
+                        Field::Ingress => read_field!(ingress, "ingress", 6),
+                        Field::RuntimeConfig => read_field!(runtime_config, "runtimeConfig", 7),
+                        Field::DefaultPolicy | Field::EnforcementMode => {
+                            // These wire-only names were ignored by the SDK authoring
+                            // model, including repeated occurrences. Preserve that
+                            // deserialization behavior; the v0.9 builder rejects presence.
+                            result.legacy_fields_specified = true;
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                        Field::Ignore => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                result.legacy_fields_specified |= seen & 0b0001_1111 != 0;
+                Ok(result)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                // Keep the original eight authoring-field positions. Presence
+                // metadata and wire-only migration names are not sequence fields.
+                let allow_outbound = sequence.next_element::<bool>()?;
+                let allow_local_network = sequence.next_element::<bool>()?;
+                let allowed_hosts = sequence.next_element::<Vec<String>>()?;
+                let blocked_hosts = sequence.next_element::<Vec<String>>()?;
+                let proxy = sequence.next_element::<Option<ProxySpec>>()?;
+                let egress = sequence.next_element::<Option<NetworkEgressSection>>()?;
+                let ingress = sequence.next_element::<Option<NetworkIngressSection>>()?;
+                let runtime_config = sequence.next_element::<Option<RuntimeConfigSection>>()?;
+                let legacy_fields_specified = allow_outbound.is_some()
+                    || allow_local_network.is_some()
+                    || allowed_hosts.is_some()
+                    || blocked_hosts.is_some()
+                    || proxy.is_some();
+                Ok(NetworkSection {
+                    allow_outbound: allow_outbound.unwrap_or_default(),
+                    allow_local_network: allow_local_network.unwrap_or_default(),
+                    allowed_hosts: allowed_hosts.unwrap_or_default(),
+                    blocked_hosts: blocked_hosts.unwrap_or_default(),
+                    proxy: proxy.flatten(),
+                    egress: egress.flatten(),
+                    ingress: ingress.flatten(),
+                    runtime_config: runtime_config.flatten(),
+                    legacy_fields_specified,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "NetworkSection",
+            &[
+                "allowOutbound",
+                "allowLocalNetwork",
+                "allowedHosts",
+                "blockedHosts",
+                "proxy",
+                "egress",
+                "ingress",
+                "runtimeConfig",
+            ],
+            NetworkVisitor,
+        )
+    }
 }
 
 impl NetworkSection {
@@ -102,6 +229,38 @@ pub(crate) enum NetworkFormat {
 
 /// Selects one wire format before backend-specific fields are applied.
 pub(super) fn select_network_format(
+    version: &str,
+    network: Option<&NetworkSection>,
+    has_process_container_network: bool,
+) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
+    let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
+    if version == "0.9.0-alpha" {
+        if has_legacy || network.is_some_and(|network| network.legacy_fields_specified) {
+            return Err(wxc_common::mxc_error::MxcError::malformed_request(
+                "schema 0.9.0-alpha no longer accepts legacy network authoring \
+                 (defaultPolicy, enforcementMode, allowOutbound, allowLocalNetwork, \
+                 allowedHosts, blockedHosts, proxy); \
+                 use network.egress, network.ingress, and network.runtimeConfig.networkProxy, \
+                 or select published version 0.8.0-alpha to retain legacy policy semantics",
+            ));
+        }
+        return Ok(NetworkFormat::Directional);
+    }
+
+    select_compatible_network_format(version, network, has_process_container_network)
+}
+
+/// Retained Phase 11 characterization oracle, never used by production builders.
+#[cfg(test)]
+pub(super) fn select_rolling_network_format(
+    version: &str,
+    network: Option<&NetworkSection>,
+    has_process_container_network: bool,
+) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
+    select_compatible_network_format(version, network, has_process_container_network)
+}
+
+fn select_compatible_network_format(
     version: &str,
     network: Option<&NetworkSection>,
     has_process_container_network: bool,
@@ -224,7 +383,8 @@ pub struct NetworkIngressSection {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct RuntimeConfigSection {
-    /// HTTP/S loopback proxy URL.
+    /// HTTP/S proxy URL. Host-process backends require localhost; WSLc requires
+    /// a container-routable endpoint and does not filter egress through it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_proxy: Option<String>,
 }
@@ -262,6 +422,134 @@ mod tests {
     #[test]
     fn network_action_defaults_to_deny() {
         assert_eq!(NetworkAction::default(), NetworkAction::Deny);
+    }
+
+    #[test]
+    fn development_rejects_every_legacy_authoring_field_including_neutral_values() {
+        for field in [
+            r#""defaultPolicy":"allow""#,
+            r#""enforcementMode":"capabilities""#,
+            r#""allowOutbound":false"#,
+            r#""allowOutbound":true"#,
+            r#""allowLocalNetwork":false"#,
+            r#""allowLocalNetwork":true"#,
+            r#""allowedHosts":[]"#,
+            r#""blockedHosts":[]"#,
+            r#""proxy":null"#,
+            r#""proxy":{"url":"http://localhost:8080"}"#,
+        ] {
+            let network: NetworkSection = serde_json::from_str(&format!("{{{field}}}")).unwrap();
+            let error = select_network_format("0.9.0-alpha", Some(&network), false).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("schema 0.9.0-alpha no longer accepts legacy"),
+                "{field}"
+            );
+            assert_eq!(
+                select_network_format("0.8.0-alpha", Some(&network), false).unwrap(),
+                NetworkFormat::Legacy,
+                "published authoring remains unchanged: {field}"
+            );
+        }
+        assert_eq!(
+            select_network_format("0.9.0-alpha", None, false).unwrap(),
+            NetworkFormat::Directional
+        );
+        assert_eq!(
+            select_network_format("0.9.0-alpha", Some(&NetworkSection::default()), false).unwrap(),
+            NetworkFormat::Directional
+        );
+    }
+
+    #[test]
+    fn authoring_deserialization_preserves_the_original_json_semantics() {
+        #[derive(Default, serde::Deserialize)]
+        #[serde(rename = "NetworkSection", rename_all = "camelCase", default)]
+        struct FrozenNetworkSection {
+            allow_outbound: bool,
+            allow_local_network: bool,
+            allowed_hosts: Vec<String>,
+            blocked_hosts: Vec<String>,
+            proxy: Option<ProxySpec>,
+            egress: Option<NetworkEgressSection>,
+            ingress: Option<super::NetworkIngressSection>,
+            runtime_config: Option<RuntimeConfigSection>,
+        }
+
+        for source in [
+            "{}",
+            "[]",
+            "[true]",
+            r#"[false,true,["example.com"],[]]"#,
+            r#"[false,false,[],[],null,{"default":"allow"},{"default":"allow","hostLoopback":"allow"},{"networkProxy":"http://localhost:8080"}]"#,
+            r#"{"allowOutbound":false,"allowLocalNetwork":false,"allowedHosts":[],"blockedHosts":[],"proxy":null,"egress":{"default":"deny"}}"#,
+            r#"{"defaultPolicy":false,"defaultPolicy":[],"enforcementMode":null,"enforcementMode":{}}"#,
+            r#"{"unrecognized":{"nested":[null,true,42]},"defaultPolicy":1e999}"#,
+            r#"{"allowOutbound":null}"#,
+            r#"{"allowLocalNetwork":null}"#,
+            r#"{"allowedHosts":null}"#,
+            r#"{"blockedHosts":null}"#,
+            r#"{"allowOutbound":false,"allowOutbound":true}"#,
+            r#"{"proxy":null,"proxy":null}"#,
+            "[null]",
+            "[false,false,[],[],null,null,null,null,42]",
+        ] {
+            let original = serde_json::from_str::<FrozenNetworkSection>(source);
+            let current = serde_json::from_str::<NetworkSection>(source);
+            match (original, current) {
+                (Ok(original), Ok(current)) => {
+                    assert_eq!(current.allow_outbound, original.allow_outbound, "{source}");
+                    assert_eq!(
+                        current.allow_local_network, original.allow_local_network,
+                        "{source}"
+                    );
+                    assert_eq!(current.allowed_hosts, original.allowed_hosts, "{source}");
+                    assert_eq!(current.blocked_hosts, original.blocked_hosts, "{source}");
+                    assert_eq!(
+                        current.proxy.as_ref().map(proxy_to_wire),
+                        original.proxy.as_ref().map(proxy_to_wire),
+                        "{source}"
+                    );
+                    assert_eq!(current.egress, original.egress, "{source}");
+                    assert_eq!(current.ingress, original.ingress, "{source}");
+                    assert_eq!(current.runtime_config, original.runtime_config, "{source}");
+                }
+                (Err(original), Err(current)) => {
+                    assert_eq!(current.to_string(), original.to_string(), "{source}");
+                }
+                _ => panic!("authoring acceptance changed: {source}"),
+            }
+        }
+    }
+
+    #[test]
+    fn old_version_neutral_defaults_with_directionals_remain_accepted() {
+        let source = r#"{"allowOutbound":false,"allowLocalNetwork":false,"allowedHosts":[],"blockedHosts":[],"proxy":null,"egress":{"default":"deny"},"ingress":{"default":"deny","hostLoopback":"deny"}}"#;
+        let network: NetworkSection = serde_json::from_str(source).unwrap();
+        assert!(network.legacy_fields_specified);
+        assert_eq!(
+            select_network_format("0.8.0-alpha", Some(&network), false).unwrap(),
+            NetworkFormat::Directional
+        );
+        assert!(select_network_format("0.9.0-alpha", Some(&network), false).is_err());
+
+        for source in [
+            "[false,false,[],[],null]",
+            r#"{"defaultPolicy":null,"defaultPolicy":false}"#,
+            r#"{"enforcementMode":[],"enforcementMode":null}"#,
+        ] {
+            let network: NetworkSection = serde_json::from_str(source).unwrap();
+            assert!(network.legacy_fields_specified, "{source}");
+            assert!(
+                select_network_format("0.8.0-alpha", Some(&network), false).is_ok(),
+                "{source}"
+            );
+            assert!(
+                select_network_format("0.9.0-alpha", Some(&network), false).is_err(),
+                "{source}"
+            );
+        }
     }
 
     #[test]

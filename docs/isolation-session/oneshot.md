@@ -144,11 +144,11 @@ only `acknowledgeUnrestrictedNetwork`. Its only valid supplied value is `true`;
 that the backend cannot restrict networking; it does not configure a network
 grant. Omit `network` when using the acknowledgment alone.
 
-During the additive v0.9 transition, the existing canonical `network` form
-(`defaultPolicy: "allow"` and `allowLocalNetwork: true`, with no host rules,
-proxy, or non-default enforcement) remains accepted, either alone or together
-with the new acknowledgment. Neither form means rejection. An explicitly empty
-`network` section or an incompatible policy is not rescued by acknowledgment.
+The explicit acknowledgment is required in v0.9. The temporary 10a legacy
+network alternative has been removed: `network.defaultPolicy` and
+`network.allowLocalNetwork` are rejected even alongside the new field. Omit
+`network` entirely; an explicitly empty section or incompatible policy is
+not rescued by acknowledgment.
 
 `appId` and the nested `provision` section are state-aware-only and are
 rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
@@ -253,9 +253,9 @@ the rationale for each disposition, and the error mapping live in
 | `process.commandLine` | **honored** (required) |
 | `process.cwd` / `process.env` / `process.timeout` | **honored** |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| Unrestricted-network acknowledgment, using the new backend field or the canonical legacy form | **required** |
+| Explicit unrestricted-network acknowledgment in the backend section | **required** |
 | `experimental.isolation_session.acknowledgeUnrestrictedNetwork` | **honored**; supplied value must be `true` |
-| `network` — canonical legacy acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during 10a, alone or consistently alongside the new field |
+| `network` — legacy acknowledgment fields | structurally rejected in v0.9 |
 | `network` — absent | accepted only with the new acknowledgment |
 | `network` — any other supplied policy, including `{}` | rejected; acknowledgment does not override it |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
@@ -301,8 +301,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | The closed one-shot acknowledgment section, true-only values, wrong nesting, and retained legacy request acceptance |
-| Policy validation | `policy.rs` | Filesystem/UI rejection; acknowledgment-only, legacy-only, and consistent combined forms; authored empty/restrictive policy rejection; unchanged post-provision rules |
+| Config parsing | `config_parser.rs` | The closed one-shot acknowledgment section, true-only values, wrong nesting, and rejection of removed legacy networking fields |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; explicit acknowledgment requirement; authored empty/restrictive policy rejection; unchanged post-provision inheritance |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 

@@ -2,9 +2,10 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-hello",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+  "experimental": {
+    "isolation_session": {
+      "acknowledgeUnrestrictedNetwork": true
+    }
   },
   "process": {
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",

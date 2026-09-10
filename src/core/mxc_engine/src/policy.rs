@@ -32,7 +32,7 @@ use wxc_common::mxc_error::MxcError;
 #[cfg(all(test, target_os = "linux"))]
 use network::has_host_rules;
 #[cfg(test)]
-use network::{proxy_to_wire, select_network_format, NetworkFormat};
+use network::{proxy_to_wire, select_rolling_network_format, NetworkFormat};
 pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
     NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
@@ -954,7 +954,7 @@ fn build_wire_config_with_network_format(
             .is_some_and(|peer| !peer.trim().is_empty()),
         _ => false,
     };
-    let network_format = select_network_format(
+    let network_format = select_rolling_network_format(
         &policy.version,
         policy.network.as_ref(),
         has_process_container_network,
@@ -1263,6 +1263,39 @@ mod tests {
     }
 
     #[test]
+    fn development_builder_preserves_absent_empty_and_runtime_only_network_presence() {
+        let mut policy = development_policy();
+        let absent =
+            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                .unwrap();
+        assert!(!absent.inner.policy.network_specified);
+        policy.network = Some(NetworkSection::default());
+        let empty =
+            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                .unwrap();
+        assert!(empty.inner.policy.network_specified);
+        assert!(!empty.inner.policy.network_mode_specified);
+        policy.network = Some(NetworkSection {
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://proxy.example:8080".into()),
+            }),
+            ..Default::default()
+        });
+        // Construction preserves runtime-only intent. Execution still requires
+        // a provisioned bridged route; the backend owns that validation.
+        let runtime_only = build_request_with_containment(
+            &policy,
+            &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
+            None,
+        )
+        .unwrap();
+        assert!(!runtime_only.inner.policy.network_specified);
+        assert!(!runtime_only.inner.policy.network_mode_specified);
+        assert!(runtime_only.inner.policy.runtime_network_proxy_specified);
+    }
+
+    #[test]
     fn exact_policy_builder_matches_the_wire_round_trip_for_every_host_supported_version() {
         for version in host_process_versions() {
             let policy = SandboxPolicy {
@@ -1273,10 +1306,24 @@ mod tests {
                     denied_paths: vec!["C:\\secrets".to_string()],
                     clear_policy_on_exit: Some(false),
                 }),
-                network: Some(NetworkSection {
-                    allow_outbound: true,
-                    allow_local_network: true,
-                    ..Default::default()
+                network: Some(if *version == "0.9.0-alpha" {
+                    NetworkSection {
+                        egress: Some(NetworkEgressSection {
+                            default: Some(NetworkAction::Allow),
+                            ..Default::default()
+                        }),
+                        ingress: Some(NetworkIngressSection {
+                            default: Some(NetworkAction::Allow),
+                            host_loopback: Some(NetworkAction::Allow),
+                        }),
+                        ..Default::default()
+                    }
+                } else {
+                    NetworkSection {
+                        allow_outbound: true,
+                        allow_local_network: true,
+                        ..Default::default()
+                    }
                 }),
                 ui: Some(super::UiSection {
                     allow_windows: true,
@@ -1369,7 +1416,14 @@ mod tests {
             version: "0.9.0-alpha".to_string(),
             filesystem: None,
             network: Some(NetworkSection {
-                allow_outbound: true,
+                egress: Some(NetworkEgressSection {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ingress: Some(NetworkIngressSection {
+                    default: Some(NetworkAction::Allow),
+                    host_loopback: Some(NetworkAction::Allow),
+                }),
                 ..Default::default()
             }),
             ui: None,
@@ -2034,9 +2088,10 @@ mod tests {
             "process": { "commandLine": TEST_COMMAND },
             "containment": "processcontainer",
             "network": {
-                "defaultPolicy": "allow",
-                "proxy": { "localhost": 8080 },
+                "egress": {"default": "deny"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"},
             },
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
             "processContainer": {
                 "captureDenials": { "mode": "allow" },
             },
@@ -2308,7 +2363,8 @@ mod tests {
         )
         .expect_err("WSLc must reject per-host egress filtering");
         assert!(
-            err.message.contains("per-host egress filtering"),
+            err.message
+                .contains("schema 0.9.0-alpha no longer accepts legacy network authoring"),
             "got: {}",
             err.message
         );
@@ -2330,7 +2386,7 @@ mod tests {
         // The one-shot surface takes no backend configuration at all, so the
         // wire config must name the backend and add nothing else — unlike
         // WSLc, which also writes an `experimental.wslc` block.
-        let policy = development_policy_with_network(isolation_session_network());
+        let policy = development_policy();
         let config =
             super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
                 .expect("build_wire_config");
@@ -2342,34 +2398,29 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_carries_the_unrestricted_network_acknowledgment() {
-        // The backend accepts *only* this shape and refuses an absent policy,
-        // so the SDK types must be able to express it.
+    fn isolation_session_rejects_the_removed_legacy_acknowledgment() {
         let policy = development_policy_with_network(isolation_session_network());
-        let config =
+        let legacy =
             super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
-                .expect("build_wire_config");
-        assert_eq!(config["network"]["defaultPolicy"], "allow");
-        assert_eq!(config["network"]["allowLocalNetwork"], true);
-        assert_eq!(
-            config["network"]["allowedHosts"].as_array().map(Vec::len),
-            Some(0)
-        );
-        assert_eq!(
-            config["network"]["blockedHosts"].as_array().map(Vec::len),
-            Some(0)
-        );
-        assert!(
-            config["network"].get("proxy").is_none(),
-            "no proxy expected"
-        );
+                .expect("the test-only rolling builder retains legacy characterization");
+        assert_eq!(legacy["network"]["defaultPolicy"], "allow");
+        let error = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect_err("legacy network values cannot acknowledge v0.9 networking");
+        assert!(error
+            .message
+            .contains("schema 0.9.0-alpha no longer accepts legacy"));
     }
 
     #[test]
     fn isolation_session_is_not_experimental_enabled_by_default() {
         // Selecting an experimental backend must not silently satisfy the
         // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
-        let policy = development_policy_with_network(isolation_session_network());
+        let policy = development_policy();
         let mut request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
@@ -2384,7 +2435,7 @@ mod tests {
 
     #[test]
     fn isolation_session_selects_the_backend() {
-        let policy = development_policy_with_network(isolation_session_network());
+        let policy = development_policy();
         let request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,

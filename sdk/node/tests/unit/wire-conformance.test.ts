@@ -49,6 +49,7 @@ import type {
   LifecycleConfig,
   FilesystemConfig,
   NetworkConfig,
+  DirectionalNetworkConfig,
   NetworkEgressConfig,
   NetworkIngressConfig,
   NetworkPeerConfig,
@@ -100,6 +101,42 @@ import type {
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
+
+import type * as Exact from '../../src/generated/v0_9_0_alpha/wire.js';
+
+// The rolling oracle below retains coverage of published-version authoring.
+// Development networking is checked separately and exactly: no removed-key
+// exemption can make a new legacy field on an exact root invisible.
+type ExactNetworkConformance = [
+  AssertTrue<Equivalent<DirectionalNetworkConfig, Exact.Network>>,
+  AssertTrue<Equivalent<keyof DirectionalNetworkConfig, keyof Exact.Network>>,
+  AssertTrue<Equivalent<NetworkEgressConfig, Exact.NetworkEgress>>,
+  AssertTrue<Equivalent<NetworkIngressConfig, Exact.NetworkIngress>>,
+  AssertTrue<Equivalent<NetworkPeerConfig, Exact.NetworkPeer>>,
+  AssertTrue<Equivalent<NetworkPortConfig, Exact.NetworkPort>>,
+  AssertTrue<Equivalent<NetworkRuleConfig, Exact.NetworkRule>>,
+  AssertTrue<Equivalent<RuntimeConfig, Exact.RuntimeConfig>>,
+  AssertTrue<Equivalent<IsolationSessionConfig, Exact.OneShotIsolationSession>>,
+  AssertTrue<Equivalent<keyof IsolationSessionConfig, keyof Exact.OneShotIsolationSession>>,
+  AssertTrue<Equivalent<
+    {
+      egress: keyof NetworkEgressConfig;
+      ingress: keyof NetworkIngressConfig;
+      peer: keyof NetworkPeerConfig;
+      port: keyof NetworkPortConfig;
+      rule: keyof NetworkRuleConfig;
+      runtime: keyof RuntimeConfig;
+    },
+    {
+      egress: keyof Exact.NetworkEgress;
+      ingress: keyof Exact.NetworkIngress;
+      peer: keyof Exact.NetworkPeer;
+      port: keyof Exact.NetworkPort;
+      rule: keyof Exact.NetworkRule;
+      runtime: keyof Exact.RuntimeConfig;
+    }
+  >>,
+];
 
 import type {
   AssertTrue,

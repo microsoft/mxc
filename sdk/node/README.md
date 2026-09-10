@@ -68,7 +68,7 @@ and state-aware lifecycle require `0.9.0-alpha`; Seatbelt requires
 
 > **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` parser remains only for differential characterization. `--experimental` is still required to activate experimental backends.
 
-> **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
+> **Legacy network fields are published-version syntax only.** Schema 0.9 removes `defaultPolicy`, `enforcementMode`, `allowedHosts`, `blockedHosts`, `allowLocalNetwork`, and `proxy` from `network`. Use directional networking and `runtimeConfig.networkProxy` instead.
 
 <a id="schema-080-networking"></a>
 
@@ -84,6 +84,15 @@ wire shape. With schema 0.8, omitting all network fields leaves the
 as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete cross-platform authoring shape.
+
+**Schema 0.9 directional-only networking:** explicitly supplied legacy SDK
+authoring (`allowOutbound`, `allowLocalNetwork`, host lists, or `proxy`) fails
+with migration guidance, including `false` and empty lists. Choose
+`network.egress` / `network.ingress` and `runtimeConfig.networkProxy` explicitly;
+the SDK does not guess a CIDR from a hostname, resolve DNS, or silently remove
+policy. Published 0.6/0.7/0.8 authoring retains its syntax and behavior. An absent
+network stays absent, and an explicit empty network stays present. Raw
+`ContainerConfig` input is forwarded intact for native exact-contract validation.
 
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
@@ -371,15 +380,35 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 source shape: replace
 `network: { defaultPolicy: 'allow', allowLocalNetwork: true }` with
 `acknowledgeUnrestrictedNetwork: true`. The shared lifecycle signatures and
-other backends are unchanged. During Phase 10a, the native v0.9 contract still
-accepts raw legacy requests using the canonical network pair, as well as
-consistent requests carrying both forms; the SDK's IsolationSession-specific
-type exposes the preferred post-cutover marker. An acknowledgment-only request
-omits the top-level `network` key entirely.
+other backend selections are unchanged. The v0.9 contract rejects every supplied
+IsolationSession provision `network` section, including `{}` and the former
+canonical pair. The true-only acknowledgment is mandatory, omits the top-level
+`network` key entirely, and cannot be repeated on later phases.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. All state-aware requests default to the exact development schema `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` follows the same shape and needs no provision config at all (it defaults
+to an `alpine:latest` container with no network). Provide filesystem mounts
+and/or `image` / `imageTarPath` at provision. Network posture is either fully
+isolated (all three axes `'deny'`, the omitted default) or unrestricted bridged:
+
+```typescript
+network: {
+  egress: { default: 'allow' },
+  ingress: { default: 'allow', hostLoopback: 'allow' },
+}
+```
+
+Mixed postures and filtering rules cannot be enforced and are rejected. Exec
+accepts `runtimeConfig: { networkProxy: 'http://proxy.example:8080' }` at the
+envelope top level, without a `network` section or synthesized posture. This is
+a cooperative URL reachable from the guest, not a ProcessContainer loopback-only
+endpoint. One-shot WSLC runtime proxies also require unrestricted bridged
+posture; they do not provide proxy-only network enforcement. Other lifecycle
+phases reject runtime proxy configuration. All state-aware requests default to
+the exact development schema `0.9.0-alpha`. See
+[`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
+for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 

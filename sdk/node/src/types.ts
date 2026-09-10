@@ -210,9 +210,10 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration
+ * Network access configuration across published versions. The legacy fields
+ * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
  */
-export interface NetworkConfig {
+export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
    * Network enforcement mode:
    * - "capabilities": Use AppContainer capabilities only (no admin required)
@@ -255,6 +256,10 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/** The complete network wire shape for schema 0.9. */
+export interface DirectionalNetworkConfig {
   /** Outbound network policy. */
   egress?: NetworkEgressConfig;
   /** Inbound and host-loopback network policy. */
@@ -313,7 +318,8 @@ export interface NetworkIngressConfig {
 
 /** Runtime values supplied separately from sandbox policy. */
 export interface RuntimeConfig {
-  /** HTTP/S loopback proxy URL. */
+  /** HTTP/S proxy URL. Host-loopback restrictions are backend-specific;
+   * WSLC accepts a guest-routable remote URL. */
   networkProxy?: string;
 }
 

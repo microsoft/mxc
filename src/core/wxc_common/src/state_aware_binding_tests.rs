@@ -325,7 +325,9 @@ fn input<C: Case>(phase: Phase) -> Value {
     if phase == Phase::Provision {
         value["containment"] = json!(C::BACKEND);
         if C::BACKEND == "isolation_session" {
-            value["network"] = json!({"defaultPolicy":"allow","allowLocalNetwork":true});
+            value["experimental"] = json!({"isolation_session": {"provision": {
+                "acknowledgeUnrestrictedNetwork": true
+            }}});
         }
     } else {
         value["sandboxId"] = json!(format!("{}:test-id", C::PREFIX));
@@ -401,9 +403,19 @@ fn lifecycle_matrix<C: Case>() {
         Phase::Deprovision,
     ] {
         let mut value = input::<C>(phase);
-        assert_dispatch::<C>(&value, Config::Absent);
-        value["experimental"] = json!({});
-        assert_dispatch::<C>(&value, Config::Absent);
+        if C::BACKEND == "isolation_session" && phase == Phase::Provision {
+            assert_dispatch::<C>(
+                &value,
+                Config::Isolation {
+                    app_id: None,
+                    acknowledged: true,
+                },
+            );
+        } else {
+            assert_dispatch::<C>(&value, Config::Absent);
+            value["experimental"] = json!({});
+            assert_dispatch::<C>(&value, Config::Absent);
+        }
     }
 }
 
@@ -417,46 +429,15 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
 #[test]
 fn isolation_provision_preserves_each_backend_observable_configuration() {
     let mut value = input::<Isolation>(Phase::Provision);
-    value["experimental"] = json!({"isolation_session": {}});
-    assert_dispatch::<Isolation>(&value, Config::Absent);
-    for (config, expected) in [
-        (
-            json!({}),
-            Config::Isolation {
-                app_id: None,
-                acknowledged: false,
-            },
-        ),
-        (
-            json!({"appId": ""}),
-            Config::Isolation {
-                app_id: Some(String::new()),
-                acknowledged: false,
-            },
-        ),
+    for (mut config, expected_app_id) in [
+        (json!({}), None),
+        (json!({"appId": ""}), Some(String::new())),
         (
             json!({"appId": "PFN:example"}),
-            Config::Isolation {
-                app_id: Some("PFN:example".into()),
-                acknowledged: false,
-            },
+            Some("PFN:example".to_string()),
         ),
     ] {
-        value["experimental"] = json!({"isolation_session": {"provision": config}});
-        assert_dispatch::<Isolation>(&value, expected);
-    }
-
-    value.as_object_mut().unwrap().remove("network");
-    for (config, expected_app_id) in [
-        (json!({"acknowledgeUnrestrictedNetwork": true}), None),
-        (
-            json!({
-                "appId": "PFN:acknowledged",
-                "acknowledgeUnrestrictedNetwork": true
-            }),
-            Some("PFN:acknowledged".to_string()),
-        ),
-    ] {
+        config["acknowledgeUnrestrictedNetwork"] = json!(true);
         value["experimental"] = json!({"isolation_session": {"provision": config}});
         assert_dispatch::<Isolation>(
             &value,

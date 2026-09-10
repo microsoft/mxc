@@ -211,14 +211,7 @@ mod tests {
     // ====== lifecycle (value-based: defaults match actual behavior) ======
 
     fn canonical_request() -> ExecutionRequest {
-        ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        acknowledged_request()
     }
 
     #[test]
@@ -307,13 +300,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_one_shot_accepts_the_acknowledgment_with_the_legacy_form() {
+    fn validate_runner_one_shot_rejects_the_acknowledgment_with_the_legacy_form() {
         let runner = IsolationSessionRunner::new();
         let mut req = canonical_request();
-        req.experimental.isolation_session = Some(IsolationSessionConfig {
-            acknowledge_unrestricted_network: Some(UnrestrictedNetworkAcknowledgment),
-        });
-        runner.validate_runner(&req).unwrap();
+        req.policy.default_network_policy = NetworkPolicy::Allow;
+        req.policy.allow_local_network = true;
+        assert!(runner.validate_runner(&req).is_err());
     }
 
     #[test]
