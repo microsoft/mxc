@@ -163,11 +163,12 @@ fn build_psec_network_policy(
         }
         network.egress = Some(Box::new(egress));
     }
-    if let Some(ingress_policy) = policy
-        .network_ingress
-        .as_ref()
-        .filter(|_| use_ingress_contract)
-    {
+    let ingress_policy = if use_ingress_contract {
+        policy.network_ingress.as_ref()
+    } else {
+        None
+    };
+    if let Some(ingress_policy) = ingress_policy {
         network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
         let mut ingress = PsecIngressPolicy::default();
         ingress.default_action = psec_filter_action(ingress_policy.default);

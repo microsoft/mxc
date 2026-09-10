@@ -111,6 +111,7 @@ MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ing
 `QueryProcessSecurityEnvironmentSupport` advertises ingress support. Otherwise, compatible directional defaults use
 the legacy PSEC 1.0/SBOX capability mapping;
 `hostLoopback: "allow"` is rejected because the legacy contracts cannot represent it.
+Caller-supplied `allowedProxyPeer` values cannot use the reserved `MXC-Loopback` identity.
 
 #### Identity-scoped proxy
 
