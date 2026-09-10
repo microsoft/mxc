@@ -26,6 +26,33 @@ pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PsecContract {
+    V1_0,
+    V1_1,
+}
+
+impl PsecContract {
+    pub(super) fn for_request(request: &ExecutionRequest) -> Self {
+        if unrestricted_host_loopback_allowed(&request.policy) {
+            Self::V1_1
+        } else {
+            Self::V1_0
+        }
+    }
+
+    pub(super) fn version(self) -> SchemaVersionT {
+        match self {
+            Self::V1_0 => SchemaVersionT { major: 1, minor: 0 },
+            Self::V1_1 => SchemaVersionT { major: 1, minor: 1 },
+        }
+    }
+
+    fn supports_ingress(self) -> bool {
+        self == Self::V1_1
+    }
+}
+
 pub(super) fn requires_psec_networking(policy: &ContainerPolicy) -> bool {
     policy
         .network_egress
@@ -39,8 +66,9 @@ pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
-pub(super) fn build_psec_spec(request: &ExecutionRequest, use_ingress_contract: bool) -> Vec<u8> {
+pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
+    let contract = PsecContract::for_request(request);
     let capabilities = effective_capabilities(&request.policy);
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
@@ -50,7 +78,7 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, use_ingress_contract: 
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = psec_contract_version(use_ingress_contract);
+    spec.version = contract.version();
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
@@ -59,19 +87,11 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest, use_ingress_contract: 
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
     spec.network_policy = Some(Box::new(build_psec_network_policy(
         &request.policy,
-        use_ingress_contract,
+        contract,
     )));
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
     builder.finished_data().to_vec()
-}
-
-pub(super) fn psec_contract_version(use_ingress_contract: bool) -> SchemaVersionT {
-    let mut minor = 0;
-    if use_ingress_contract {
-        minor = 1u16;
-    }
-    SchemaVersionT { major: 1, minor }
 }
 
 pub(super) fn build_sbox_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -137,7 +157,7 @@ fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPoli
 
 fn build_psec_network_policy(
     policy: &ContainerPolicy,
-    use_ingress_contract: bool,
+    contract: PsecContract,
 ) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
@@ -163,7 +183,7 @@ fn build_psec_network_policy(
         }
         network.egress = Some(Box::new(egress));
     }
-    let ingress_policy = if use_ingress_contract {
+    let ingress_policy = if contract.supports_ingress() {
         policy.network_ingress.as_ref()
     } else {
         None

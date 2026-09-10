@@ -108,9 +108,9 @@ authorizes both host-loopback directions, although WFP still restricts client-co
 endpoint. Host-loopback clients can reach listeners in the MXC client container.
 MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
 `IsProcessSecurityEnvironmentVersionSupported` reports contract 1.1 or newer and
-`QueryProcessSecurityEnvironmentSupport` advertises ingress support. Otherwise, compatible directional defaults use
-the legacy PSEC 1.0/SBOX capability mapping; `hostLoopback: "allow"` is rejected because the legacy contracts cannot
-represent it.
+`QueryProcessSecurityEnvironmentSupport` advertises ingress support. Requests that do not allow host loopback use the
+PSEC 1.0 capability mapping; `hostLoopback: "allow"` is rejected when the PSEC 1.1 ingress contract is unavailable.
+The legacy SBOX path remains eligible only when its capability mapping can preserve the request.
 
 #### Identity-scoped proxy
 
