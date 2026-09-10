@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 import { spawn } from 'child_process';
-import { parse as semverParse } from 'semver';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
@@ -18,7 +17,6 @@ export const STATE_AWARE_VERSION = '0.6.0-alpha';
 // See `DEFAULT_STATE_AWARE_VERSION`.
 export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
 export const TELEMETRY_STATE_AWARE_VERSION = '0.9.0-alpha';
-export const INHERIT_DEFAULT_ENV_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
@@ -113,18 +111,6 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
     (process as Record<string, unknown>).inheritDefaultEnv !== undefined;
   const requires09 = hasTelemetry || hasInheritDefaultEnv;
   const version = suppliedVersion || (requires09 ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
-  if (requires09 && suppliedVersion) {
-    const parsed = semverParse(suppliedVersion);
-    if (parsed && parsed.major === 0 && parsed.minor < 9) {
-      const feature = hasTelemetry
-        ? 'telemetry'
-        : 'process.inheritDefaultEnv';
-      throw mxcErrorFromCode(
-        'malformed_request',
-        `${feature} requires schema version ${TELEMETRY_STATE_AWARE_VERSION} or later; got ${suppliedVersion}`,
-      );
-    }
-  }
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };

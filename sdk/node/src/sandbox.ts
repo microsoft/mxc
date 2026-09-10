@@ -13,7 +13,6 @@ import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
-const INHERIT_DEFAULT_ENV_VERSION = '0.9.0-alpha';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -502,17 +501,6 @@ export interface SandboxSpawnOptions {
   inheritDefaultEnv?: boolean;
 
   /**
-   * State-aware lifecycle only: the correlation vector (MS-CV) returned by
-   * {@link provisionSandbox} as `correlationVector`. Relay it verbatim on every
-   * later phase (`start` / `exec` / `stop` / `deprovision`) so all phases of one
-   * lifecycle share a telemetry base prefix. The client relays it unchanged; the
-   * executor derives each phase's own vector from it (spinning a mutable base or
-   * reseeding a missing/malformed value). Ignored by one-shot spawns and by
-   * `provision` (which seeds its own).
-   */
-  correlationVector?: string;
-
-  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
@@ -608,18 +596,6 @@ function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOp
   config.process.inheritDefaultEnv = true;
 }
 
-function validateInheritDefaultEnvVersion(config: ContainerConfig): void {
-  if (config.process?.inheritDefaultEnv === undefined) {
-    return;
-  }
-  const parsed = semverParse(config.version);
-  if (!parsed || (parsed.major === 0 && parsed.minor < 9)) {
-    throw new Error(
-      `process.inheritDefaultEnv requires policy version ${INHERIT_DEFAULT_ENV_VERSION} or later`,
-    );
-  }
-}
-
 /**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
@@ -635,7 +611,6 @@ function spawnWithConfig(
     injectEnvIntoConfig(config, env);
   }
   applyInheritDefaultEnv(config, options);
-  validateInheritDefaultEnvVersion(config);
 
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
@@ -753,7 +728,6 @@ export function spawnSandboxFromConfig(
       injectEnvIntoConfig(config, env);
     }
     applyInheritDefaultEnv(config, options);
-    validateInheritDefaultEnvVersion(config);
 
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {

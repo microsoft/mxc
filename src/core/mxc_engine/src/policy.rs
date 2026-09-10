@@ -245,11 +245,11 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
     }
 }
 
-fn environment_keys_equal(left: &str, right: &str) -> bool {
+fn environment_keys_equal(existing_key: &str, override_key: &str) -> bool {
     if cfg!(target_os = "windows") {
-        left.eq_ignore_ascii_case(right)
+        existing_key.eq_ignore_ascii_case(override_key)
     } else {
-        left == right
+        existing_key == override_key
     }
 }
 

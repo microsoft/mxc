@@ -33,19 +33,15 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.experimental, undefined);
   });
 
-  it('rejects telemetry with an explicitly older schema version', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'start',
-        backendKey: 'windows_sandbox',
-        sandboxId: 'wsb:01234567',
-        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
-      }),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'malformed_request' &&
-        error.message.includes('telemetry requires schema version 0.9.0-alpha'),
-    );
+  it('preserves an older telemetry version for native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'windows_sandbox',
+      sandboxId: 'wsb:01234567',
+      config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
+    assert.deepEqual(env.telemetry, { enabled: true });
   });
 
   it('selects schema 0.9 when exec inherits the backend environment', () => {
@@ -79,27 +75,24 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.version, '0.8.0-alpha');
   });
 
-  it('rejects inherited environments with an explicitly older schema version', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'exec',
-        backendKey: 'wslc',
-        sandboxId: 'wslc:abc',
-        config: {
-          version: '0.8.0-alpha',
-          process: {
-            commandLine: 'echo hi',
-            inheritDefaultEnv: true,
-          },
+  it('preserves an older inherited-environment version for native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        version: '0.8.0-alpha',
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
         },
-      }),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'malformed_request' &&
-        error.message.includes(
-          'process.inheritDefaultEnv requires schema version 0.9.0-alpha',
-        ),
-    );
+      },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
+    assert.deepEqual(env.process, {
+      commandLine: 'echo hi',
+      inheritDefaultEnv: true,
+    });
   });
 
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {

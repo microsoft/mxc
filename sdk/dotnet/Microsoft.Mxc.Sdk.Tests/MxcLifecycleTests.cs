@@ -496,23 +496,20 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildExecEnvelope_RejectsInheritedEnvironmentWithOlderVersion()
+    public void BuildExecEnvelope_PreservesOlderVersionForNativeValidation()
     {
-        var exception = Assert.Throws<MxcException>(
-            () => MxcLifecycle.BuildExecEnvelope(
-                new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
-                "echo hi",
-                new WslcExecOptions
-                {
-                    Version = "0.8.0-alpha",
-                    InheritDefaultEnvironment = true,
-                }));
+        var envelope = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+            "echo hi",
+            new WslcExecOptions
+            {
+                Version = "0.8.0-alpha",
+                InheritDefaultEnvironment = true,
+            });
 
-        Assert.Equal(ErrorCode.MalformedRequest, exception.Code);
-        Assert.Contains(
-            "process.inheritDefaultEnv requires schema version 0.9.0-alpha",
-            exception.Message,
-            StringComparison.Ordinal);
+        Assert.Equal("0.8.0-alpha", envelope["version"]!.GetValue<string>());
+        Assert.True(
+            envelope["process"]!["inheritDefaultEnv"]!.GetValue<bool>());
     }
 
     [Fact]

@@ -264,16 +264,9 @@ public static class MxcLifecycle
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
         var version = options?.Version;
-        if (options?.InheritDefaultEnvironment is not null)
+        if (options?.InheritDefaultEnvironment is not null && version is null)
         {
-            if (version is null)
-            {
-                version = InheritDefaultEnvironmentVersion;
-            }
-            else
-            {
-                ValidateInheritDefaultEnvironmentVersion(version);
-            }
+            version = InheritDefaultEnvironmentVersion;
         }
         var envelope = BuildIdEnvelope("exec", id, version);
         var process = new JsonObject { ["commandLine"] = command };
@@ -413,24 +406,6 @@ public static class MxcLifecycle
         containment == StateAwareContainment.Wslc
             ? WslcStateAwareVersion
             : StateAwareVersion;
-
-    private static void ValidateInheritDefaultEnvironmentVersion(string version)
-    {
-        var coreVersion = version.Split('-', 2)[0].Split('.');
-        if (coreVersion.Length < 2
-            || !uint.TryParse(coreVersion[0], out var major)
-            || !uint.TryParse(coreVersion[1], out var minor))
-        {
-            return;
-        }
-        if (major == 0 && minor < 9)
-        {
-            throw new MxcException(
-                ErrorCode.MalformedRequest,
-                $"process.inheritDefaultEnv requires schema version "
-                    + $"{InheritDefaultEnvironmentVersion} or later; got {version}");
-        }
-    }
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,
