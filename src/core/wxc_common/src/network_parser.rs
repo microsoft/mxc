@@ -618,6 +618,79 @@ fn validate_process_container_proxy_policy(
 mod proxy_policy_tests {
     use super::*;
 
+    fn directional_sections(proxy: &str) -> NetworkSections {
+        NetworkSections {
+            network: Some(wire::Network {
+                default_policy: None,
+                enforcement_mode: None,
+                allow_local_network: None,
+                allowed_hosts: None,
+                blocked_hosts: None,
+                proxy: None,
+                egress: Some(wire::NetworkEgress {
+                    default: Some(wire::NetworkAction::Allow),
+                    allow: None,
+                    deny: None,
+                }),
+                ingress: Some(wire::NetworkIngress {
+                    default: Some(wire::NetworkAction::Allow),
+                    host_loopback: Some(wire::NetworkAction::Allow),
+                }),
+            }),
+            runtime: Some(wire::RuntimeConfig {
+                network_proxy: Some(proxy.to_string()),
+            }),
+            process_container: None,
+        }
+    }
+
+    #[test]
+    fn wslc_accepts_a_guest_routable_runtime_proxy() {
+        let mut policy = ContainerPolicy::default();
+        parse_network_policy(
+            &mut policy,
+            "0.9.0-alpha",
+            directional_sections("http://proxy.example:8080"),
+            &ContainmentBackend::Wslc,
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(ProxyAddress::host),
+            Some("proxy.example")
+        );
+    }
+
+    #[test]
+    fn non_wslc_backends_keep_loopback_and_proxy_only_requirements() {
+        let mut policy = ContainerPolicy::default();
+        let error = parse_network_policy(
+            &mut policy,
+            "0.9.0-alpha",
+            directional_sections("http://proxy.example:8080"),
+            &ContainmentBackend::ProcessContainer,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must use localhost"), "{error}");
+
+        let mut policy = ContainerPolicy::default();
+        let error = parse_network_policy(
+            &mut policy,
+            "0.9.0-alpha",
+            directional_sections("http://127.0.0.1:8080"),
+            &ContainmentBackend::ProcessContainer,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("egress.default='deny'"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn reserved_loopback_peer_identity_is_rejected_case_insensitively() {
         let policy = ContainerPolicy {
