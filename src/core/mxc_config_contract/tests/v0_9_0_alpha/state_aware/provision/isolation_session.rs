@@ -133,6 +133,64 @@ fn rejects_unknown_fields_at_every_level_and_foreign_phase_fields() {
 }
 
 #[test]
+fn rejects_invalid_version_phase_and_containment_values() {
+    for (field, values) in [
+        (
+            "version",
+            vec![json!("0.7.0-alpha"), json!("0.9.0"), json!("invalid")],
+        ),
+        (
+            "phase",
+            vec![json!("start"), json!("stop"), json!("startup")],
+        ),
+        (
+            "containment",
+            vec![json!("windows_sandbox"), json!("wslc"), json!("vm")],
+        ),
+    ] {
+        for invalid in values {
+            let mut value = request();
+            value[field] = invalid;
+            assert!(!accepts(&value), "{value}");
+        }
+    }
+}
+
+#[test]
+fn rejects_foreign_backend_sections() {
+    for backend in [
+        "test",
+        "windows_sandbox",
+        "wslc",
+        "seatbelt",
+        "macos_sandbox",
+    ] {
+        let mut value = request();
+        value["experimental"][backend] = json!({});
+        assert!(!accepts(&value), "{value}");
+    }
+    for phase in ["start", "exec", "stop", "deprovision"] {
+        let mut value = request();
+        value["experimental"]["isolation_session"][phase] = json!({});
+        assert!(!accepts(&value), "{value}");
+    }
+}
+
+#[test]
+fn rejects_invalid_schema_and_telemetry_types() {
+    for invalid in [Value::Null, json!(false), json!(42), json!([]), json!({})] {
+        let mut value = request();
+        value["$schema"] = invalid;
+        assert!(!accepts(&value), "{value}");
+    }
+    for invalid in [Value::Null, json!("true"), json!(42), json!([]), json!({})] {
+        let mut value = request();
+        value["telemetry"] = json!({"enabled": invalid});
+        assert!(!accepts(&value), "{value}");
+    }
+}
+
+#[test]
 fn rejects_legacy_network_even_with_acknowledgment() {
     let mut value = request();
     value["network"] = json!({"defaultPolicy": "allow", "allowLocalNetwork": true});
