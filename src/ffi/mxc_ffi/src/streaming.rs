@@ -926,8 +926,7 @@ mod tests {
 
     #[test]
     fn spawn_empty_command_reports_malformed_request() {
-        let request =
-            CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#).unwrap();
+        let request = CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#).unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
 
