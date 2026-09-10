@@ -170,9 +170,10 @@ If `%LOCALAPPDATA%` is unavailable, the equivalent directory is created under
 
 - `denials.json` — actionable denials;
 - `denials.verbose.json` — bounded verbose diagnostics;
-- `trace.etl` — retained, process-scoped Learning Mode events; and
-- a source-config snapshot and `Adjusted_*.json` when source config is
-  available and analysis is not truncated.
+- `trace.etl` — retained, process-scoped Learning Mode events;
+- a source-config snapshot when source config is available; and
+- `Adjusted_*.json` when source config is available, analysis is not truncated,
+  and at least one denial can be merged into the policy.
 
 `--audit-verbose` prints learned-policy post-processing details. It does not
 control whether `denials.verbose.json` is created; every successful denial
