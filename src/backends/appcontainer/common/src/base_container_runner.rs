@@ -742,8 +742,8 @@ impl BaseContainerRunner {
     }
 
     /// Transitional guard for the legacy SBOX fallback. Remove it with the
-    /// remaining `Experimental_CreateProcessInSandbox` path after PSEC adoption
-    /// reaches critical mass post-9D; tracked by #1129.
+    /// remaining `Experimental_CreateProcessInSandbox` path once PSEC adoption
+    /// reaches critical mass; tracked by #1129.
     ///
     /// Fail closed when the selected legacy SBOX contract cannot preserve the
     /// requested network policy; PSEC ingress support is resolved separately.
