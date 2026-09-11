@@ -130,9 +130,20 @@ script and then to the dispatcher, which has one `switch`/`case` per id. Ids tha
 share a suite each keep their own case so they can diverge later without a
 mapping table — `process-t1` and `process-t3` both run
 `WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
-`T3-Workloads.ps1`. Teaching the Process Container test suite to
-accept an explicit tier (so a T1 host can also be exercised
-at the T3 fallback) is a worthwhile future improvement.
+`T3-Workloads.ps1`.
+
+The two ids no longer run an identical command. The suite derives every
+expectation from the tier the host actually selects, which makes it
+self-consistent anywhere — and therefore silently useless on a host that was
+supposed to be T1 and fell back to T3, since it would run the T3 expectations
+and report green. The dispatcher now passes `-RequireTier base-container` for
+`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`, and a
+mismatch aborts the run instead of scoring it.
+
+Both ids also get the same host preparation. A T1 host selects BaseContainer for
+most policies but still exercises the AppContainer fallback tiers, and an
+unprepared host fails the launch outright rather than producing a policy result,
+so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
 
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
@@ -208,8 +219,8 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). |
+| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite, tier-gated to `base-container`. Includes the schema 0.8 directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface) and the legacy 0.7 network lane. Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). The 0.8 networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -227,8 +238,9 @@ every entry.
 
 `prepare-windows-host.ps1`:
 
-- `process-t3` — runs `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`.
+- `process-t1`, `process-t3` — run `wxc-host-prep.exe prepare-system-drive` and
+  `prepare-null-device --no-sacl`. Both ids need it: the suite drives the
+  AppContainer fallback tiers on a T1 host too.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.

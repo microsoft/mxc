@@ -31,6 +31,32 @@
 #   * BaseContainer usable -> `base-container`
 #   * otherwise            -> `appcontainer-dacl`
 # $Script:ExpectedTier (derived once at startup) drives every tier assertion.
+#
+# Schema version:
+#   Configs are authored at 0.8.0-alpha (`$Script:SchemaVersion`). The LEGACY
+#   network fields — defaultPolicy / enforcementMode / allowedHosts /
+#   blockedHosts / allowLocalNetwork / network.proxy — are pinned to
+#   0.7.0-alpha (`$Script:LegacySchemaVersion`), because 0.8 is where the
+#   directional `network.egress` / `network.ingress` shape became the
+#   documented way to express network intent. New-Config switches lanes
+#   automatically when a -Legacy* parameter is supplied.
+#
+# What the network phases assert:
+#   The DOCUMENTED contract, not the current implementation. The authoritative
+#   sources are docs/process-container/networking.md and
+#   docs/sandbox-policy/0.8.0/networking/networking.md, both revised recently.
+#   Where the backend has not caught up, the assertion FAILS — that is the
+#   intended signal. A suite that only encodes present behavior cannot tell
+#   anyone the backend drifted from its spec.
+#
+# Prerequisites are failures, not skips:
+#   * -RequireTier <tier> aborts when the host does not naturally select that
+#     tier. Without it, a mis-provisioned T1 runner silently runs the T3
+#     assertions and reports green having proven nothing about BaseContainer.
+#   * The egress anchor is probed from the HOST before any network phase runs.
+#     A host with no connectivity would read every positive assertion as
+#     "blocked", so an unreachable anchor aborts. -SkipNetwork is the explicit
+#     opt-out for air-gapped bring-up.
 
 [CmdletBinding()]
 param(
@@ -55,6 +81,29 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
+    # Hard prerequisite on the containment tier. When set, the harness ABORTS
+    # if the host does not naturally select this tier. Without it a
+    # mis-provisioned T1 runner silently runs the T3 assertions (every
+    # expectation is derived from $Script:ExpectedTier) and reports green
+    # having proven nothing about BaseContainer. CI passes the tier its job
+    # name claims to cover. Same doctrine as run_seatbelt_all_tests.sh: a
+    # missing prerequisite is a FAILURE, not a skip.
+    [ValidateSet('base-container', 'appcontainer-dacl')]
+    [string]$RequireTier,
+    # Reachability anchor for the positive egress assertions. An egress-allow
+    # test that cannot distinguish "policy blocked it" from "this host has no
+    # internet" proves nothing, so the phase probes this from the HOST first
+    # and fails (never skips) when the host itself cannot reach it.
+    [string]$ExternalAnchorUrl = 'https://dev.azure.com',
+    # A second reachable destination, used as the negative control for the
+    # explicit-egress-rule phase: the allow rules name the anchor and nothing
+    # else, so this one must be blocked INSIDE the container while remaining
+    # reachable from the host. If the host cannot reach it either, a BLOCKED
+    # verdict is unattributable and the phase fails rather than scoring green.
+    [string]$UnlistedDestinationUrl = 'https://example.com',
+    # Opt out of every live-network phase (air-gapped bring-up). The parse-only
+    # rejection phase still runs — it needs no connectivity.
+    [switch]$SkipNetwork,
     # Restrict execution to a subset of phases (build + preflight + scratch
     # init always run). Accepts the phase keys listed in $AllPhases below, e.g.
     # -Phases UiMitigationMatrix runs only Phase 4b. Empty = run all phases.
@@ -362,6 +411,9 @@ function Initialize-Scratch {
     # access-matrix sub-test to confirm AppContainer denies paths that
     # were never granted, not just ones explicitly denied.
     New-Item -ItemType Directory -Path (Join-Path $ScratchRoot 'control') | Out-Null
+    # `alias` holds the path-aliasing fixtures (Phase 10): the same object
+    # reached via `..`, an 8.3 short name, and the \\?\ prefix.
+    New-Item -ItemType Directory -Path (Join-Path $ScratchRoot 'alias')   | Out-Null
 }
 
 function Get-DaclRestoreDir {
@@ -420,7 +472,7 @@ function Assert-NoBfscfg {
     # safety gate WORKING, not of invocation. Match only the
     # spawn-output marker.
     if ($LogContent -match '(?im)Output from bfscfg\.exe') {
-        throw "[$Phase :: $Name] FATAL: log contains 'Output from bfscfg.exe' (real invocation). Aborting to avoid 25H2 deadlock."
+        throw "MXC-FATAL [$Phase :: $Name] log contains 'Output from bfscfg.exe' (real invocation). Aborting to avoid 25H2 deadlock."
     }
     if (-not $AllowBfsTierSelection) {
         # Logger interleaves a `[timestamp] ` token between every
@@ -428,7 +480,7 @@ function Assert-NoBfscfg {
         # serializes as `x: [ts] y`. Use `.*?` instead of `\s*` to
         # bridge that token.
         if ($LogContent -match '(?im)selected isolation tier:.*?appcontainer-bfs') {
-            throw "[$Phase :: $Name] FATAL: log shows 'selected isolation tier: appcontainer-bfs'. Aborting."
+            throw "MXC-FATAL [$Phase :: $Name] log shows 'selected isolation tier: appcontainer-bfs'. Aborting."
         }
     }
 }
@@ -556,6 +608,60 @@ function Test-Win32kMitigationApplied {
     return [bool]($LogContent -match '(?im)win32k_system_calls:.*?blocked')
 }
 
+# Default schema version for generated configs. Everything the 0.8 stable
+# schema can express is authored at 0.8; the LEGACY network fields
+# (defaultPolicy / enforcementMode / allowedHosts / blockedHosts /
+# allowLocalNetwork / network.proxy) stay pinned at 0.7 via -LegacySchema,
+# because 0.8 is where the directional egress/ingress shape became the
+# documented way to express network intent and mixing the two shapes in one
+# config is not a scenario any doc describes.
+$Script:SchemaVersion       = '0.8.0-alpha'
+$Script:LegacySchemaVersion = '0.7.0-alpha'
+
+# Write a config object verbatim. Used by the rejection phase for shapes the
+# typed generator deliberately cannot produce (an explicitly empty `to: []`,
+# a hostname where a CIDR belongs), since the property being asserted is that
+# MXC refuses them.
+function New-RawConfig {
+    param(
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] $Object
+    )
+    $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
+    ($Object | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
+    return $path
+}
+
+# Build an `network.egress.allow[]` / `network.egress.deny[]` rule. `to` and
+# `ports` are omitted (wildcard) unless supplied — per the 0.8 networking spec
+# an omitted array is the wildcard while an explicitly empty one is rejected,
+# so the two cases must stay distinguishable here.
+function New-EgressRule {
+    param(
+        [string[]]$Cidr     = @(),
+        [string[]]$Except   = @(),
+        [string]$Protocol   = $null,
+        [Nullable[int]]$Port    = $null,
+        [Nullable[int]]$EndPort = $null
+    )
+    $rule = [ordered]@{}
+    if ($Cidr.Count -gt 0) {
+        $rule['to'] = @(foreach ($c in $Cidr) {
+            $peer = [ordered]@{ cidr = $c }
+            if ($Except.Count -gt 0) { $peer['except'] = @($Except) }
+            $peer
+        })
+    }
+    if ($Protocol -or $null -ne $Port -or $null -ne $EndPort) {
+        $sel = [ordered]@{}
+        if ($Protocol)          { $sel['protocol'] = $Protocol }
+        if ($null -ne $Port)    { $sel['port']     = [int]$Port }
+        if ($null -ne $EndPort) { $sel['endPort']  = [int]$EndPort }
+        $rule['ports'] = @($sel)
+    }
+    return $rule
+}
+
 function New-Config {
     param(
         [Parameter(Mandatory)] [string]$Name,
@@ -572,17 +678,75 @@ function New-Config {
         [Nullable[bool]]$BpUiIme            = $null,
         [string]$Clipboard                  = $null,
         [Nullable[bool]]$Injection          = $null,
-        [string[]]$Env                      = @()
+        [string[]]$Env                      = @(),
+        [string]$Cwd                        = $null,
+        # processContainer.capabilities — the AppContainer capability list.
+        [string[]]$Capabilities             = @(),
+        [Nullable[bool]]$LeastPrivilege     = $null,
+
+        # --- schema 0.8 directional network (network.egress / network.ingress)
+        # Supplying ANY of these emits a `network` block. Leave them all unset
+        # for the "no network key at all" model-3 form.
+        [ValidateSet('allow', 'deny')] [string]$EgressDefault  = $null,
+        [ValidateSet('allow', 'deny')] [string]$IngressDefault = $null,
+        [ValidateSet('allow', 'deny')] [string]$HostLoopback   = $null,
+        [object[]]$EgressAllow = @(),
+        [object[]]$EgressDeny  = @(),
+        # Emit `"network": {}` — the third documented spelling of model 3.
+        [switch]$EmptyNetwork,
+
+        # --- runtime (not policy)
+        [string]$NetworkProxy    = $null,   # runtimeConfig.networkProxy
+        [string]$AllowedProxyPeer = $null,  # processContainer.network.allowedProxyPeer
+
+        # --- LEGACY network, schema 0.7 only. Setting any of these pins the
+        # config to 0.7.0-alpha, because these fields are the pre-directional
+        # shape and no doc describes combining them with egress/ingress.
+        [ValidateSet('allow', 'block')] [string]$LegacyDefaultPolicy = $null,
+        [ValidateSet('capabilities', 'firewall', 'both')] [string]$LegacyEnforcementMode = $null,
+        [string[]]$LegacyAllowedHosts = @(),
+        [string[]]$LegacyBlockedHosts = @(),
+        [Nullable[bool]]$LegacyAllowLocalNetwork = $null,
+        [string]$LegacyProxyUrl = $null,
+        [Nullable[int]]$LegacyProxyLocalhost = $null,
+        [switch]$LegacyProxyBuiltinTestServer
     )
+
+    $usesLegacyNetwork = ($LegacyDefaultPolicy -or $LegacyEnforcementMode -or
+        $LegacyAllowedHosts.Count -gt 0 -or $LegacyBlockedHosts.Count -gt 0 -or
+        $null -ne $LegacyAllowLocalNetwork -or $LegacyProxyUrl -or
+        $null -ne $LegacyProxyLocalhost -or $LegacyProxyBuiltinTestServer)
+
+    $usesDirectionalNetwork = ($EgressDefault -or $IngressDefault -or $HostLoopback -or
+        ($null -ne $EgressAllow -and $EgressAllow.Count -gt 0) -or
+        ($null -ne $EgressDeny -and $EgressDeny.Count -gt 0) -or
+        $NetworkProxy -or $AllowedProxyPeer -or $EmptyNetwork)
+
+    # A legacy parameter pins the config to 0.7, where none of the directional
+    # keys (network.egress / network.ingress / runtimeConfig.networkProxy /
+    # processContainer.network.allowedProxyPeer) exist and the schema is
+    # closed. Silently dropping them would emit a config that fails for a
+    # schema-shape reason instead of the reason under test, which is the
+    # hardest kind of test bug to notice. Refuse the combination outright;
+    # Phase 8f authors the deliberate legacy/directional mixture as raw JSON.
+    if ($usesLegacyNetwork -and $usesDirectionalNetwork) {
+        throw ("New-Config '$Name': -Legacy* pins the config to $Script:LegacySchemaVersion, " +
+               'which has no egress/ingress/runtimeConfig/allowedProxyPeer keys. ' +
+               'Use one network shape or the other, or author the mixture with New-RawConfig.')
+    }
+
     $obj = [ordered]@{
-        version     = '0.6.0-alpha'
+        version     = $(if ($usesLegacyNetwork) { $Script:LegacySchemaVersion } else { $Script:SchemaVersion })
         containerId = "MxcWinPC-$Name"
-        containment = 'appcontainer'
+        # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
+        # `processcontainer` is the concrete Windows backend on both.
+        containment = 'processcontainer'
         process     = [ordered]@{
             commandLine = $CommandLine
             timeout     = $TimeoutMs
         }
     }
+    if ($Cwd) { $obj['process']['cwd'] = $Cwd }
     if ($null -ne $Env -and $Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
     $hasRw     = ($null -ne $ReadWrite -and $ReadWrite.Count -gt 0)
     $hasRo     = ($null -ne $ReadOnly  -and $ReadOnly.Count  -gt 0)
@@ -597,11 +761,58 @@ function New-Config {
     if ($null -ne $AllowDaclMutation) {
         $obj['fallback'] = [ordered]@{ allowDaclMutation = [bool]$AllowDaclMutation }
     }
+
+    # --- network -------------------------------------------------------
+    if ($usesLegacyNetwork) {
+        $net = [ordered]@{}
+        if ($LegacyDefaultPolicy)   { $net['defaultPolicy']   = $LegacyDefaultPolicy }
+        if ($LegacyEnforcementMode) { $net['enforcementMode'] = $LegacyEnforcementMode }
+        if ($LegacyAllowedHosts.Count -gt 0) { $net['allowedHosts'] = @($LegacyAllowedHosts) }
+        if ($LegacyBlockedHosts.Count -gt 0) { $net['blockedHosts'] = @($LegacyBlockedHosts) }
+        if ($null -ne $LegacyAllowLocalNetwork) { $net['allowLocalNetwork'] = [bool]$LegacyAllowLocalNetwork }
+        if ($LegacyProxyUrl) {
+            $net['proxy'] = [ordered]@{ url = $LegacyProxyUrl }
+        } elseif ($null -ne $LegacyProxyLocalhost) {
+            $net['proxy'] = [ordered]@{ localhost = [int]$LegacyProxyLocalhost }
+        } elseif ($LegacyProxyBuiltinTestServer) {
+            $net['proxy'] = [ordered]@{ builtinTestServer = $true }
+        }
+        $obj['network'] = $net
+    } elseif ($EmptyNetwork) {
+        $obj['network'] = [ordered]@{}
+    } elseif ($EgressDefault -or $IngressDefault -or $HostLoopback -or
+              $EgressAllow.Count -gt 0 -or $EgressDeny.Count -gt 0) {
+        $net = [ordered]@{}
+        if ($EgressDefault -or $EgressAllow.Count -gt 0 -or $EgressDeny.Count -gt 0) {
+            $eg = [ordered]@{}
+            if ($EgressDefault)          { $eg['default'] = $EgressDefault }
+            if ($EgressAllow.Count -gt 0) { $eg['allow']  = @($EgressAllow) }
+            if ($EgressDeny.Count -gt 0)  { $eg['deny']   = @($EgressDeny) }
+            $net['egress'] = $eg
+        }
+        if ($IngressDefault -or $HostLoopback) {
+            $ing = [ordered]@{}
+            if ($IngressDefault) { $ing['default']      = $IngressDefault }
+            if ($HostLoopback)   { $ing['hostLoopback'] = $HostLoopback }
+            $net['ingress'] = $ing
+        }
+        $obj['network'] = $net
+    }
+
+    if ($NetworkProxy) {
+        $obj['runtimeConfig'] = [ordered]@{ networkProxy = $NetworkProxy }
+    }
+
     $ui = [ordered]@{ disable = $(if ($null -ne $UiDisable) { [bool]$UiDisable } else { $false }) }
     if ($Clipboard) { $ui['clipboard'] = $Clipboard }
     if ($null -ne $Injection) { $ui['injection'] = [bool]$Injection }
     $obj['ui'] = $ui
 
+    # --- processContainer ----------------------------------------------
+    $pc = [ordered]@{}
+    if ($Capabilities.Count -gt 0)  { $pc['capabilities']  = @($Capabilities) }
+    if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
+    if ($AllowedProxyPeer) { $pc['network'] = [ordered]@{ allowedProxyPeer = $AllowedProxyPeer } }
     $needBp = ($BpUiIsolation -or $BpUiSystemSettings -or $null -ne $BpUiDesktopControl -or $null -ne $BpUiIme)
     if ($needBp) {
         $bp = [ordered]@{}
@@ -609,11 +820,12 @@ function New-Config {
         if ($null -ne $BpUiDesktopControl) { $bp['desktopSystemControl'] = [bool]$BpUiDesktopControl }
         if ($BpUiSystemSettings)         { $bp['systemSettings']       = $BpUiSystemSettings }
         if ($null -ne $BpUiIme)          { $bp['ime']                  = [bool]$BpUiIme }
-        $obj['processContainer'] = [ordered]@{ ui = $bp }
+        $pc['ui'] = $bp
     }
+    if ($pc.Count -gt 0) { $obj['processContainer'] = $pc }
 
     $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
-    ($obj | ConvertTo-Json -Depth 10) | Out-File -LiteralPath $path -Encoding utf8 -Force
+    ($obj | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
     return $path
 }
 
@@ -658,7 +870,6 @@ function Invoke-Wxc {
         [Parameter(Mandatory)] [string]$Wxc,
         [Parameter(Mandatory)] [string]$ConfigPath,
         [Parameter(Mandatory)] [string]$LogPath,
-        [int]$ExpectExitCode = 0,
         [int]$TimeoutSec     = 60
     )
     # Scrub MXC_FORCE_TIER defensively in case some other process in this
@@ -676,15 +887,379 @@ function Invoke-Wxc {
     $psi.CreateNoWindow = $true
 
     $p = [System.Diagnostics.Process]::Start($psi)
+    # Start draining both pipes BEFORE waiting. With stdout and stderr both
+    # redirected and unread, the child blocks as soon as either 4 KB pipe
+    # buffer fills, WaitForExit reports a timeout, and a perfectly healthy
+    # rejection is recorded as a hang. These phases make that routine rather
+    # than theoretical: every failure path flushes the whole redacted config
+    # echo to stderr, and the proxy phase dumps a full environment block to
+    # stdout — both comfortably exceed the buffer.
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $stderrTask = $p.StandardError.ReadToEndAsync()
     if (-not $p.WaitForExit($TimeoutSec * 1000)) {
         try { $p.Kill() } catch {}
-        return [pscustomobject]@{ ExitCode = -1; Stdout = ''; Stderr = "TIMEOUT after ${TimeoutSec}s" }
+        $partialOut = ''
+        $partialErr = ''
+        try { if ($stdoutTask.Wait(2000)) { $partialOut = $stdoutTask.Result } } catch {}
+        try { if ($stderrTask.Wait(2000)) { $partialErr = $stderrTask.Result } } catch {}
+        return [pscustomobject]@{
+            ExitCode = -1
+            TimedOut = $true
+            Stdout   = $partialOut
+            Stderr   = "TIMEOUT after ${TimeoutSec}s`n$partialErr"
+        }
     }
+    $out = ''
+    $err = ''
+    try { if ($stdoutTask.Wait(5000)) { $out = $stdoutTask.Result } } catch {}
+    try { if ($stderrTask.Wait(5000)) { $err = $stderrTask.Result } } catch {}
     return [pscustomobject]@{
         ExitCode = $p.ExitCode
-        Stdout   = $p.StandardOutput.ReadToEnd()
-        Stderr   = $p.StandardError.ReadToEnd()
+        TimedOut = $false
+        Stdout   = $out
+        Stderr   = $err
     }
+}
+
+# -----------------------------------------------------------------------
+# Tier prerequisite
+#
+# Every expectation in this harness is derived from $Script:ExpectedTier, so
+# the suite is self-consistent on ANY host — which also means a host that
+# silently fell back to T3 runs the T3 assertions and reports green. A CI job
+# named "process-t1" that never touched BaseContainer has proven nothing. When
+# -RequireTier is passed the mismatch is a hard abort, not a skip.
+# -----------------------------------------------------------------------
+function Assert-RequiredTier {
+    if (-not $RequireTier) {
+        Write-Host 'Tier prerequisite: not requested (-RequireTier unset); running against the naturally selected tier.' -ForegroundColor DarkGray
+        return
+    }
+    if ($Script:ExpectedTier -ne $RequireTier) {
+        throw ("Tier prerequisite ABORT: -RequireTier '$RequireTier' but this host naturally selects '$($Script:ExpectedTier)' " +
+               "(baseContainerApiPresent=$($Script:Caps.BaseContainerApiPresent)). " +
+               'Running anyway would exercise the other tier and report a green suite that proves nothing about ' +
+               "'$RequireTier'. Fix host provisioning or run without -RequireTier.")
+    }
+    Record-Result -Phase 'P0' -Name "tier prerequisite: host selects $RequireTier" -Pass $true -Detail "expectedTier=$($Script:ExpectedTier)"
+}
+
+# -----------------------------------------------------------------------
+# Network test infrastructure
+# -----------------------------------------------------------------------
+
+# Documented in docs/process-container/networking.md §2: PSEC is the ONLY
+# ProcessContainer path that receives schema 0.8 egress filters, proxy peer
+# identity, or host-loopback configuration. Legacy SBOX and the AppContainer
+# fallback reject those. The probe does not name the process-creation contract
+# directly, so the tier stands in for it: `base-container` is the only tier
+# that can be on PSEC. On a base-container host that is actually running the
+# transitional SBOX contract the PSEC-only assertions will fail — which is the
+# correct signal, not a false green.
+function Test-PsecEligible {
+    return ($Script:ExpectedTier -eq 'base-container')
+}
+
+# Reachability from the HOST, used as the prerequisite for every positive
+# egress assertion. Uses curl.exe (in System32 on every supported build) so
+# the probe path matches what the contained workload runs.
+function Test-HostCanReachAnchor {
+    param([string]$Url = $ExternalAnchorUrl)
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { return $false }
+    & $curl --silent --show-error --max-time 12 --output NUL $Url 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# A contained command line that fetches the anchor and prints a single
+# unambiguous token. Both branches print, so "no output at all" is
+# distinguishable from a policy verdict — a silent child means the run itself
+# failed and the phase must not read that as "blocked".
+function Get-AnchorFetchCommand {
+    param([string]$Url = $ExternalAnchorUrl, [int]$TimeoutSec = 10)
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    return "$env:SystemRoot\System32\cmd.exe /c `"$curl --silent --show-error --max-time $TimeoutSec --output NUL $Url && echo NET=REACHED || echo NET=BLOCKED`""
+}
+
+# Classify a completed run into REACHED / BLOCKED / NORUN. NORUN covers "the
+# sandbox never got far enough to print", which no network assertion may score.
+#
+# ONLY stdout is examined, and that is load-bearing. On every failure path
+# wxc-exec flushes its diagnostic buffer to stderr, and that buffer contains
+# the redacted config — including `process.commandLine`, which holds the
+# literal text `echo NET=REACHED`. Scanning stderr therefore scores every
+# failed run as REACHED, which makes NORUN unreachable and turns every guard
+# built on it into a no-op. The workload's own output goes to stdout, which
+# carries no config echo.
+function Get-NetVerdict {
+    param([Parameter(Mandatory)] $Result)
+    $out = "$($Result.Stdout)"
+    if ($out -match 'NET=REACHED') { return 'REACHED' }
+    if ($out -match 'NET=BLOCKED') { return 'BLOCKED' }
+    return 'NORUN'
+}
+
+# Strip wxc-exec's redacted config/request echo out of a captured stream.
+#
+# Any assertion that searches a log or stderr for a token is otherwise
+# searching the harness's OWN config text: a config carrying
+# `"timeout": 4000` matches /timeout/, and one carrying
+# `capabilities: ["internetClient"]` matches /internetClient/, so the
+# assertion passes whether or not the backend ever honored the field — the
+# exact silent-drop it was written to catch.
+# Strip wxc-exec's redacted config/request echo out of a captured stream.
+#
+# Any assertion that searches a log or stderr for a token is otherwise
+# searching the harness's OWN config text: a config carrying
+# `"timeout": 4000` matches /timeout/, and one carrying
+# `capabilities: ["internetClient"]` matches /internetClient/, so the
+# assertion passes whether or not the backend ever honored the field — the
+# exact silent-drop it was written to catch.
+#
+# The echo is a PREFIX, not a suffix. wxc-exec writes three sections up front
+# (`SECTION: JSON Config (redacted)`, `SECTION: Request simplified`, and
+# `SECTION: Full \`ExecutionRequest\` configuration (redacted)`) and only then
+# calls resolve_runner, which produces the tier selection, the capability list
+# and every backend line. So the echoed block must be CUT OUT and the tail
+# kept — truncating at the first marker would discard all the real output and
+# leave every log assertion structurally unable to pass.
+#
+# The JSON bodies are skipped by brace depth rather than by matching a closing
+# line: a Windows path can legitimately contain braces (a sandboxed TEMP
+# directory is `...\sandbox.{<guid>}\...`), but they are balanced within the
+# one line that holds them, so the running depth is unaffected.
+function Remove-ConfigEcho {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    $lines = $Text -split "`r?`n"
+    $kept  = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $bare = ($lines[$i] -replace '\[\d{6,}\]', '')
+        if ($bare -match 'SECTION: (JSON Config|Full .?ExecutionRequest)') {
+            $i++
+            $depth = 0
+            $entered = $false
+            while ($i -lt $lines.Count) {
+                $body = ($lines[$i] -replace '\[\d{6,}\]', '')
+                $i++
+                $depth += ([regex]::Matches($body, '\{')).Count
+                $depth -= ([regex]::Matches($body, '\}')).Count
+                if ($depth -gt 0) { $entered = $true }
+                if ($entered -and $depth -le 0) { break }
+            }
+            continue
+        }
+        if ($bare -match 'SECTION: Request simplified') {
+            $i++
+            while ($i -lt $lines.Count) {
+                if (($lines[$i] -replace '\[\d{6,}\]', '') -match 'SECTION: ') { break }
+                $i++
+            }
+            continue
+        }
+        $kept.Add($lines[$i])
+        $i++
+    }
+    return ($kept -join "`n")
+}
+
+# Guard for differential assertions. Comparing two verdicts is only meaningful
+# when both runs actually produced one: three NORUNs "agree" and would score a
+# green that proves nothing, which is exactly the failure mode these phases
+# exist to catch.
+function Test-VerdictsRan {
+    param([Parameter(Mandatory)] [object[]]$Runs)
+    foreach ($r in $Runs) { if ($r.Verdict -eq 'NORUN') { return $false } }
+    return $true
+}
+
+# "The backend refused this policy" — as distinct from "the run fell over".
+#
+# Two different failures are indistinguishable by exit code alone:
+#
+#   * Invoke-Wxc synthesizes ExitCode = -1 with empty stdout on timeout.
+#   * wxc-exec itself exits -1 when the launch API fails (e.g. WIN32_ERROR(5)
+#     on a host that never ran `wxc-host-prep prepare-system-drive`).
+#
+# Either would score every "must be rejected" assertion green on a host where
+# nothing can run at all. The documented contract for an unsupported policy is
+# a typed error raised during validation, BEFORE the container starts, so a
+# run that got as far as calling the launch API did not reject the policy —
+# it accepted it and then died for an unrelated reason, which is the opposite
+# of what the assertion claims.
+function Test-WasRejected {
+    param(
+        [Parameter(Mandatory)] [object]$Run,
+        # Log text (config echo already stripped, or not — the markers matched
+        # here are emitted by the runner, never by a config).
+        [string]$Log
+    )
+    $result = $(if ($Run.PSObject.Properties['Result']) { $Run.Result } else { $Run })
+    if ($result.TimedOut) { return $false }
+    if ($result.ExitCode -eq 0) { return $false }
+    if ($Run.PSObject.Properties['Verdict'] -and $Run.Verdict -ne 'NORUN') { return $false }
+
+    $text = $Log
+    if (-not $text -and $Run.PSObject.Properties['Log']) { $text = $Run.Log }
+    if ($text -and ($text -match '(?i)create_process_failed|CreateProcessInSandbox failed|CreateProcessSecurityEnvironment failed')) {
+        # Reached the launch API, so validation had already accepted the
+        # policy. This is a host-provisioning failure, not a rejection.
+        return $false
+    }
+    return $true
+}
+
+# The non-network counterpart of Get-NetVerdict's NORUN state.
+#
+# Every negative assertion ("the sentinel was NOT printed", "no survivor was
+# left", "the exit code was non-zero") is satisfied by a workload that never
+# started, so on a mis-provisioned host such a phase reports green having
+# proven nothing. New-ProbeCommand prefixes an unconditional marker echo;
+# Test-WorkloadRan then separates "the policy denied it" from "the sandbox
+# never launched". A negative assertion must be AND-ed with this.
+$Script:RanMarker = 'MXCRAN-7b21'
+
+function New-ProbeCommand {
+    param([Parameter(Mandatory)][string]$Body)
+    # `&` (not `&&`) so the marker is printed regardless of what Body does.
+    return "$env:SystemRoot\System32\cmd.exe /c `"echo $Script:RanMarker& $Body`""
+}
+
+function Test-WorkloadRan {
+    param([Parameter(Mandatory)] $Result)
+    return [bool]("$($Result.Stdout)" -match [regex]::Escape($Script:RanMarker))
+}
+
+# Collapse a captured stream into a single short line for a result detail.
+# wxc-exec echoes the whole redacted config on failure, which is hundreds of
+# lines and drowns the summary.
+function Format-Snippet {
+    param([string]$Text, [int]$Max = 200)
+    if (-not $Text) { return '' }
+    $one = ($Text.Trim() -replace '\s+', ' ')
+    if ($one.Length -le $Max) { return $one }
+    return $one.Substring(0, $Max) + '...'
+}
+
+# The host's IPv4 resolvers, needed so an egress allow rule set can permit
+# DNS (name resolution follows the same egress rules). Get-DnsClientServerAddress
+# is CIM-backed and raises a *terminating* exception on hosts that deny CIM, which
+# -ErrorAction cannot suppress, so it is wrapped and backed by an ipconfig parse.
+function Get-HostDnsServers {
+    try {
+        $viaCim = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop |
+            ForEach-Object { $_.ServerAddresses } | Where-Object { $_ } | Select-Object -Unique)
+        if ($viaCim.Count -gt 0) { return $viaCim }
+    } catch {}
+
+    # ipconfig prints resolvers as a hanging-indent list under "DNS Servers",
+    # so continuation lines are collected until a non-indented line ends it.
+    try {
+        $servers = [System.Collections.Generic.List[string]]::new()
+        $inList = $false
+        foreach ($line in (& "$env:SystemRoot\System32\ipconfig.exe" /all 2>$null)) {
+            if ($line -match '^\s*DNS Servers[^:]*:\s*(.*)$') {
+                $inList = $true
+                if ($Matches[1].Trim()) { $servers.Add($Matches[1].Trim()) }
+            }
+            elseif ($inList -and $line -match '^\s{10,}(\S+)\s*$') { $servers.Add($Matches[1]) }
+            elseif ($line -match '\S') { $inList = $false }
+        }
+        return @($servers | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique)
+    } catch { return @() }
+}
+
+# Host-side HTTP listener on 127.0.0.1, used as the host-loopback anchor.
+# Returned object carries Url/Port plus a Stop() closure.
+#
+# A raw TcpListener speaking a hand-written response is used instead of
+# HttpListener: HttpListener goes through http.sys, which requires a URL ACL
+# reservation (`netsh http add urlacl`) that an unelevated account does not
+# have, so it fails to bind on exactly the developer hosts this phase needs to
+# run on. A plain socket needs no reservation. The accept loop runs on a
+# background runspace so the harness thread stays free while the contained
+# child connects.
+function Start-LoopbackListener {
+    $port = Get-FreeTcpPort
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+    try {
+        $listener.Start()
+    } catch {
+        return $null
+    }
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($l)
+        $body = 'MXC-LOOPBACK-ANCHOR'
+        $response = [Text.Encoding]::ASCII.GetBytes(
+            "HTTP/1.1 200 OK`r`nContent-Type: text/plain`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n$body")
+        while ($true) {
+            try {
+                $client = $l.AcceptTcpClient()
+                $stream = $client.GetStream()
+                # Read whatever request line the client sent before replying;
+                # curl will not report success if the peer resets first.
+                $stream.ReadTimeout = 2000
+                $buf = New-Object byte[] 1024
+                try { [void]$stream.Read($buf, 0, $buf.Length) } catch {}
+                $stream.Write($response, 0, $response.Length)
+                $stream.Flush()
+                $client.Close()
+            } catch { break }
+        }
+    }).AddArgument($listener)
+    $handle = $ps.BeginInvoke()
+    return [pscustomobject]@{
+        Port = $port
+        Url  = "http://127.0.0.1:$port/"
+        Stop = {
+            try { $listener.Stop() } catch {}
+            try { [void]$ps.EndInvoke($handle) } catch {}
+            try { $ps.Dispose() } catch {}
+        }.GetNewClosure()
+    }
+}
+
+function Get-FreeTcpPort {
+    $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $l.Start()
+    $port = $l.LocalEndpoint.Port
+    $l.Stop()
+    return $port
+}
+
+# Contained command line that fetches a host-loopback URL. Same two-branch
+# token contract as Get-AnchorFetchCommand.
+function Get-LoopbackFetchCommand {
+    param([Parameter(Mandatory)][string]$Url, [int]$TimeoutSec = 5)
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    return "$env:SystemRoot\System32\cmd.exe /c `"$curl --silent --show-error --max-time $TimeoutSec --output NUL $Url && echo NET=REACHED || echo NET=BLOCKED`""
+}
+
+# Snapshot MXC-installed firewall rules so the legacy `enforcementMode:
+# firewall` phase can assert MXC removes what it installed. The DACL side has
+# a full apply/restore/orphan-reap story; the firewall side had none.
+#
+# NetworkManager::apply_firewall_rules names every rule it creates
+# `WXC_<principal>_<millis>[_<action>_<index>]`, so an anchored `WXC_` prefix
+# is the exact filter. netsh is used instead of Get-NetFirewallRule because the
+# latter is CIM-backed and unavailable on locked-down hosts.
+function Get-MxcFirewallRuleNames {
+    try {
+        $rules = & netsh.exe advfirewall firewall show rule name=all 2>$null
+    } catch {
+        return @()
+    }
+    if (-not $rules) { return @() }
+    # Deliberately NOT anchored on the "Rule Name:" label — that literal is
+    # localized, and on a non-English runner an anchored parse returns an
+    # empty set, which reads as "no rules leaked" and scores green. Match the
+    # rule token itself instead; `WXC_<principal>_<millis>[_<action>_<n>]` is
+    # generated by NetworkManager::apply_firewall_rules and is not localized.
+    @($rules | Select-String -Pattern '(WXC_[A-Za-z0-9_.-]+)' -AllMatches |
+        ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value.Trim() } |
+        Sort-Object -Unique)
 }
 
 # -----------------------------------------------------------------------
@@ -1594,6 +2169,1051 @@ function Invoke-CargoTest {
     return $exit
 }
 
+# =======================================================================
+# Phase 8 — schema 0.8 directional network policy
+#
+# These phases assert the DOCUMENTED contract, not the current code. The
+# authoritative sources, both revised within the last month, are:
+#   * docs/process-container/networking.md          (backend implementation)
+#   * docs/sandbox-policy/0.8.0/networking/networking.md (shared policy)
+# Where the implementation has not caught up, the assertion fails. That is
+# the intended signal — a green suite that only encodes present behavior
+# cannot tell anyone the backend diverged from its spec.
+#
+# Every positive assertion is paired with a negative control on an otherwise
+# identical config, because "reached the anchor" and "blocked by policy" are
+# indistinguishable from a single run on a host with no connectivity.
+# =======================================================================
+
+# Standard filesystem grant for a network test. `curl.exe` needs %SystemRoot%
+# readable and the cwd fallback (documented in the 0.8 schema's `process.cwd`
+# description) needs a readwrite directory to land in, so every network config
+# carries the same pair. Keeping it identical across configs means a
+# reachability difference is attributable to the network policy alone.
+function Get-NetFsGrants {
+    return @{
+        ReadWrite = @((Join-Path $ScratchRoot 'rw'))
+        ReadOnly  = @($env:SystemRoot)
+    }
+}
+
+function Invoke-NetRun {
+    param(
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$ConfigPath,
+        [int]$TimeoutSec = 45
+    )
+    $log = Join-Path $ScratchRoot "logs\$Name.log"
+    $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ConfigPath -LogPath $log -TimeoutSec $TimeoutSec
+    $logContent = Read-Log $log
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P8' -Name $Name
+    return [pscustomobject]@{
+        Result  = $r
+        Log     = $logContent
+        Verdict = (Get-NetVerdict -Result $r)
+    }
+}
+
+# -----------------------------------------------------------------------
+# Phase 8a — the documented egress x ingress capability matrix.
+#
+# docs/process-container/networking.md §1 states the mapping exactly:
+#
+#   egress | ingress | capabilities                 | result
+#   deny   | deny    | none                         | internet + private denied
+#   allow  | deny    | internetClient               | internet out allowed
+#   deny   | allow   | privateNetworkClientServer   | PSEC blocks out via WFP,
+#                                                     permits private inbound;
+#                                                     AppContainer fallback
+#                                                     REJECTS (bidirectional)
+#   allow  | allow   | both                         | both allowed
+#
+# The deny/allow row is the interesting one: it is the single combination the
+# doc says a non-PSEC tier must REFUSE rather than approximate. A tier that
+# quietly accepts it has granted bidirectional private-network access that the
+# caller did not ask for, and nothing else in the suite would notice.
+# -----------------------------------------------------------------------
+function Phase-NetworkCapabilityMatrix {
+    Section 'Phase 8a: schema 0.8 egress/ingress capability matrix'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8a' -Name 'network capability matrix' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $psec = Test-PsecEligible
+
+    # --- deny/deny: no capabilities, everything denied.
+    $cfgDD = New-Config -Name 'net-matrix-deny-deny' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 30000
+    $dd = Invoke-NetRun -Name 'net-matrix-deny-deny' -ConfigPath $cfgDD
+    Record-Result -Phase 'P8a' -Name 'egress=deny ingress=deny -> internet denied' `
+        -Pass ($dd.Verdict -eq 'BLOCKED') `
+        -Detail "verdict=$($dd.Verdict); exit=$($dd.Result.ExitCode)"
+
+    # --- allow/deny: internetClient granted, internet reachable.
+    $cfgAD = New-Config -Name 'net-matrix-allow-deny' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'allow' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 30000
+    $ad = Invoke-NetRun -Name 'net-matrix-allow-deny' -ConfigPath $cfgAD
+    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=deny -> internet REACHED (internetClient granted)' `
+        -Pass ($ad.Verdict -eq 'REACHED') `
+        -Detail "verdict=$($ad.Verdict); exit=$($ad.Result.ExitCode)"
+    # The capability is what makes the grant real. Assert the backend actually
+    # named it, so a run that reached the anchor by some other route (a stale
+    # firewall hole, an unenforced tier) is not scored as a working grant.
+    Record-Result -Phase 'P8a' -Name 'egress=allow logs internetClient capability' `
+        -Pass ([bool]((Remove-ConfigEcho $ad.Log) -match '(?i)internetClient')) `
+        -Detail 'documented capability mapping for egress.default=allow'
+
+    # --- deny/allow: the tier-dependent row.
+    $cfgDA = New-Config -Name 'net-matrix-deny-allow' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' -TimeoutMs 30000
+    $da = Invoke-NetRun -Name 'net-matrix-deny-allow' -ConfigPath $cfgDA
+    if ($psec) {
+        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow -> accepted on PSEC, egress still blocked by WFP' `
+            -Pass ($da.Verdict -eq 'BLOCKED') `
+            -Detail "verdict=$($da.Verdict); exit=$($da.Result.ExitCode)"
+        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow logs privateNetworkClientServer' `
+            -Pass ([bool]((Remove-ConfigEcho $da.Log) -match '(?i)privateNetworkClientServer')) `
+            -Detail 'documented capability mapping for ingress.default=allow'
+    } else {
+        # "The AppContainer fallback rejects this combination because the
+        # capability is bidirectional." A run that merely fails late is not a
+        # rejection: the container must never start.
+        $rejected = Test-WasRejected $da
+        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow -> REJECTED on non-PSEC tier (bidirectional capability)' `
+            -Pass $rejected `
+            -Detail "verdict=$($da.Verdict); exit=$($da.Result.ExitCode); timedOut=$($da.Result.TimedOut); tier=$($Script:ExpectedTier)"
+    }
+
+    # --- allow/allow: both capabilities.
+    $cfgAA = New-Config -Name 'net-matrix-allow-allow' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'allow' -IngressDefault 'allow' -HostLoopback 'deny' -TimeoutMs 30000
+    $aa = Invoke-NetRun -Name 'net-matrix-allow-allow' -ConfigPath $cfgAA
+    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=allow -> internet REACHED (both capabilities)' `
+        -Pass ($aa.Verdict -eq 'REACHED') `
+        -Detail "verdict=$($aa.Verdict); exit=$($aa.Result.ExitCode)"
+    $aaLog = Remove-ConfigEcho $aa.Log
+    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=allow logs both capabilities' `
+        -Pass ([bool]($aaLog -match '(?i)internetClient') -and [bool]($aaLog -match '(?i)privateNetworkClientServer')) `
+        -Detail 'documented capability mapping for allow/allow'
+}
+
+# -----------------------------------------------------------------------
+# Phase 8b — model 3 has three spellings and they must be identical.
+#
+# docs/process-container/networking.md §Model 3 states that an explicit
+# deny-everything block, an omitted `network` key, and `"network": {}` are
+# equivalent. This is exactly the kind of property that rots silently: a
+# parser change that makes an absent section mean "inherit" rather than
+# "deny" opens a default-allow hole that no single-config test would catch,
+# because each config in isolation still behaves plausibly.
+# -----------------------------------------------------------------------
+function Phase-NetworkModel3Equivalence {
+    Section 'Phase 8b: model 3 — explicit deny == omitted network == empty network'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8b' -Name 'model 3 equivalence' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $cmd = Get-AnchorFetchCommand
+
+    $cfgExplicit = New-Config -Name 'net-model3-explicit' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 30000
+    $cfgOmitted = New-Config -Name 'net-model3-omitted' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly -TimeoutMs 30000
+    $cfgEmpty = New-Config -Name 'net-model3-empty' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly -EmptyNetwork -TimeoutMs 30000
+
+    $explicit = Invoke-NetRun -Name 'net-model3-explicit' -ConfigPath $cfgExplicit
+    $omitted  = Invoke-NetRun -Name 'net-model3-omitted'  -ConfigPath $cfgOmitted
+    $empty    = Invoke-NetRun -Name 'net-model3-empty'    -ConfigPath $cfgEmpty
+
+    Record-Result -Phase 'P8b' -Name 'explicit deny/deny/deny blocks egress' `
+        -Pass ($explicit.Verdict -eq 'BLOCKED') -Detail "verdict=$($explicit.Verdict)"
+    Record-Result -Phase 'P8b' -Name 'omitted network block blocks egress (default-deny, not inherit)' `
+        -Pass ($omitted.Verdict -eq 'BLOCKED') -Detail "verdict=$($omitted.Verdict)"
+    Record-Result -Phase 'P8b' -Name 'empty "network": {} blocks egress' `
+        -Pass ($empty.Verdict -eq 'BLOCKED') -Detail "verdict=$($empty.Verdict)"
+    Record-Result -Phase 'P8b' -Name 'all three model-3 spellings agree' `
+        -Pass ((Test-VerdictsRan @($explicit, $omitted, $empty)) -and
+               ($explicit.Verdict -eq $omitted.Verdict) -and ($omitted.Verdict -eq $empty.Verdict)) `
+        -Detail "explicit=$($explicit.Verdict); omitted=$($omitted.Verdict); empty=$($empty.Verdict)"
+}
+
+# -----------------------------------------------------------------------
+# Phase 8c — explicit WFP egress rules (PSEC only).
+#
+# Two properties, from docs/process-container/networking.md §3 and the shared
+# spec's D4:
+#   * an allow rule scoped to a CIDR/port actually permits THAT destination
+#     and still blocks everything else — a rule set that installs cleanly but
+#     filters nothing passes any log-only assertion;
+#   * an explicit deny beats an overlapping explicit allow (D4).
+# On a non-PSEC tier the documented behavior is a typed unsupported-policy
+# rejection, never a silent drop. A silently dropped rule set is the worst
+# outcome available here: the caller believes egress is filtered and it is
+# wide open.
+# -----------------------------------------------------------------------
+function Phase-NetworkEgressRules {
+    Section 'Phase 8c: explicit egress rules (WFP / PSEC-only)'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8c' -Name 'explicit egress rules' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $psec = Test-PsecEligible
+
+    $fs = Get-NetFsGrants
+    $psec = Test-PsecEligible
+
+    # Probe the negative control's destination up front. On a runner behind an
+    # allowlisting proxy that permits the anchor but not this destination, the
+    # control reads BLOCKED and scores green while proving nothing — an
+    # unattributable negative, the exact failure the control exists to prevent.
+    # Recorded as a failure, then used to gate only the assertion that depends
+    # on it: the rest of the phase (including the whole documented rejection
+    # surface on a non-PSEC tier) needs no second destination.
+    $unlistedUsable = Test-HostCanReachAnchor -Url $UnlistedDestinationUrl
+    if (-not $unlistedUsable) {
+        Record-Result -Phase 'P8c' -Name 'prerequisite: host reaches the unlisted-destination control' `
+            -Pass $false `
+            -Detail ("$UnlistedDestinationUrl is unreachable from the host, so a BLOCKED verdict inside the " +
+                     'container would not be attributable to the egress rules. Pass -UnlistedDestinationUrl <reachable-url>.')
+    }
+
+    # Resolve the anchor to an address so an allow rule can name it. DNS
+    # itself follows the same egress rules (documented), so the rule set must
+    # also permit UDP/53 to the resolver for the allow case to be reachable.
+    $anchorHost = ([Uri]$ExternalAnchorUrl).Host
+    $anchorIps = @()
+    try {
+        $anchorIps = @([System.Net.Dns]::GetHostAddresses($anchorHost) |
+            Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+            ForEach-Object { $_.IPAddressToString })
+    } catch {}
+
+    if ($anchorIps.Count -eq 0) {
+        Record-Result -Phase 'P8c' -Name 'resolve anchor for CIDR rules' -Pass $false `
+            -Detail "could not resolve $anchorHost from the host; cannot author an address-scoped rule"
+        return
+    }
+
+    # Allow the anchor's /32 on tcp/443 plus DNS to every resolver the host
+    # uses. Anything else stays denied by the egress default.
+    $dnsServers = Get-HostDnsServers
+    $allowRules = @()
+    foreach ($ip in $anchorIps) {
+        $allowRules += (New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port 443)
+    }
+    foreach ($dns in $dnsServers) {
+        $allowRules += (New-EgressRule -Cidr @("$dns/32") -Protocol 'udp' -Port 53)
+    }
+
+    $cfgAllow = New-Config -Name 'net-rules-allow-anchor' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' `
+        -EgressAllow $allowRules -TimeoutMs 30000
+    $allow = Invoke-NetRun -Name 'net-rules-allow-anchor' -ConfigPath $cfgAllow
+
+    # D4: an explicit deny on the same destination must beat the allow.
+    $denyRules = @(foreach ($ip in $anchorIps) { New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port 443 })
+    $cfgPrecedence = New-Config -Name 'net-rules-deny-precedence' `
+        -CommandLine (Get-AnchorFetchCommand) `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' `
+        -EgressAllow $allowRules -EgressDeny $denyRules -TimeoutMs 30000
+    $precedence = Invoke-NetRun -Name 'net-rules-deny-precedence' -ConfigPath $cfgPrecedence
+
+    # Negative control: same allow rule set, but the workload reaches for a
+    # destination the rules never named. Without this, "allow worked" and
+    # "nothing was filtered" look identical.
+    $unlisted = $null
+    if ($unlistedUsable) {
+        $cfgUnlisted = New-Config -Name 'net-rules-unlisted-dest' `
+            -CommandLine (Get-AnchorFetchCommand -Url $UnlistedDestinationUrl) `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' `
+            -EgressAllow $allowRules -TimeoutMs 30000
+        $unlisted = Invoke-NetRun -Name 'net-rules-unlisted-dest' -ConfigPath $cfgUnlisted
+    }
+
+    if ($psec) {
+        Record-Result -Phase 'P8c' -Name 'egress allow rule permits the named CIDR:443' `
+            -Pass ($allow.Verdict -eq 'REACHED') `
+            -Detail "verdict=$($allow.Verdict); rules=$($allowRules.Count); exit=$($allow.Result.ExitCode)"
+        Record-Result -Phase 'P8c' -Name 'unlisted destination still blocked under the same rule set' `
+            -Pass ($null -ne $unlisted -and $unlisted.Verdict -eq 'BLOCKED') `
+            -Detail $(if ($null -eq $unlisted) { 'not run: the control destination is unreachable from the host' }
+                      else { "verdict=$($unlisted.Verdict)" })
+        Record-Result -Phase 'P8c' -Name 'D4: explicit deny overrides overlapping explicit allow' `
+            -Pass ($precedence.Verdict -eq 'BLOCKED') `
+            -Detail "verdict=$($precedence.Verdict)"
+    } else {
+        # Documented: "Explicit egress rules, proxy peer identity, and
+        # host-loopback allow fail with a typed unsupported-policy error when
+        # PSEC cannot enforce them."
+        foreach ($case in @(
+            @{ Tag = 'allow rules';      Run = $allow },
+            @{ Tag = 'deny rules';       Run = $precedence })) {
+            $rejected = Test-WasRejected $case.Run
+            Record-Result -Phase 'P8c' -Name "non-PSEC tier rejects explicit egress $($case.Tag)" `
+                -Pass $rejected `
+                -Detail "verdict=$($case.Run.Verdict); exit=$($case.Run.Result.ExitCode); timedOut=$($case.Run.Result.TimedOut); tier=$($Script:ExpectedTier)"
+        }
+        $combined = @((Remove-ConfigEcho "$($allow.Result.Stderr)"), (Remove-ConfigEcho "$($allow.Log)")) -join "`n"
+        Record-Result -Phase 'P8c' -Name 'rejection is a typed unsupported-policy error' `
+            -Pass ([bool]($combined -match '(?i)unsupported|not supported|policy_validation|unsupported_policy')) `
+            -Detail 'documented as a typed error, not a silent drop'
+    }
+}
+
+# -----------------------------------------------------------------------
+# Phase 8d — host loopback.
+#
+# The shared spec (D2) blocks host loopback by default and states that an
+# OMITTED `hostLoopback` is `deny`, not an inherit of `ingress.default`. That
+# is the documented trap: `egress.default: allow` with no ingress section
+# reaches the whole internet but not the host's own loopback. Both directions
+# of getting this wrong are user-visible — an unreachable local dev server, or
+# a loopback hole — and only a live run distinguishes them.
+#
+# `hostLoopback: "allow"` is PSEC-1.1-only; every other path must reject it
+# rather than accept it with partial enforcement.
+# -----------------------------------------------------------------------
+function Phase-NetworkHostLoopback {
+    Section 'Phase 8d: host-loopback policy'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8d' -Name 'host loopback' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $listener = Start-LoopbackListener
+    if (-not $listener) {
+        Record-Result -Phase 'P8d' -Name 'host loopback listener' -Pass $false `
+            -Detail 'could not bind an HttpListener on 127.0.0.1; cannot assert either direction'
+        return
+    }
+
+    try {
+        # Prerequisite: the HOST itself must reach its own listener, else every
+        # "blocked" reading below is unattributable.
+        $hostReach = $false
+        try {
+            $resp = Invoke-WebRequest -Uri $listener.Url -TimeoutSec 5 -UseBasicParsing
+            $hostReach = ($resp.Content -match 'MXC-LOOPBACK-ANCHOR')
+        } catch {}
+        Record-Result -Phase 'P8d' -Name 'prerequisite: host reaches its own loopback anchor' `
+            -Pass $hostReach -Detail $listener.Url
+        if (-not $hostReach) { return }
+
+        $fs = Get-NetFsGrants
+        $cmd = Get-LoopbackFetchCommand -Url $listener.Url
+
+        # The documented trap: egress allow, ingress section omitted entirely.
+        $cfgTrap = New-Config -Name 'net-loopback-trap' -CommandLine $cmd `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault 'allow' -TimeoutMs 25000
+        $trap = Invoke-NetRun -Name 'net-loopback-trap' -ConfigPath $cfgTrap
+        Record-Result -Phase 'P8d' -Name 'omitted hostLoopback defaults to deny even under egress=allow' `
+            -Pass ($trap.Verdict -eq 'BLOCKED') `
+            -Detail "verdict=$($trap.Verdict); documented default-deny, not an inherit of egress/ingress default"
+
+        # Explicit deny, spelled out.
+        $cfgDeny = New-Config -Name 'net-loopback-deny' -CommandLine $cmd `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault 'allow' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 25000
+        $deny = Invoke-NetRun -Name 'net-loopback-deny' -ConfigPath $cfgDeny
+        Record-Result -Phase 'P8d' -Name 'explicit hostLoopback=deny blocks container -> host loopback' `
+            -Pass ($deny.Verdict -eq 'BLOCKED') -Detail "verdict=$($deny.Verdict)"
+        Record-Result -Phase 'P8d' -Name 'omitted and explicit hostLoopback=deny agree' `
+            -Pass ((Test-VerdictsRan @($trap, $deny)) -and ($trap.Verdict -eq $deny.Verdict)) `
+            -Detail "omitted=$($trap.Verdict); explicit=$($deny.Verdict)"
+
+        # hostLoopback=allow. `ingress.default: allow` accompanies it because
+        # the private-network capability is what the doc pairs with the
+        # loopback grant; the specific value overrides the default for the
+        # loopback path.
+        $cfgAllow = New-Config -Name 'net-loopback-allow' -CommandLine $cmd `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault 'allow' -IngressDefault 'allow' -HostLoopback 'allow' -TimeoutMs 25000
+        $allow = Invoke-NetRun -Name 'net-loopback-allow' -ConfigPath $cfgAllow
+
+        if (Test-PsecEligible) {
+            # On a PSEC 1.1 host this must work. On a PSEC 1.0 host the
+            # documented behavior is rejection — so either outcome is
+            # defensible, but "accepted and silently unenforced" is not.
+            $accepted = ($allow.Verdict -eq 'REACHED')
+            $rejected = Test-WasRejected $allow
+            Record-Result -Phase 'P8d' -Name 'hostLoopback=allow is either enforced or rejected, never silently dropped' `
+                -Pass ($accepted -or $rejected) `
+                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); accepted=$accepted rejected=$rejected"
+            if ($accepted) {
+                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow reaches the host loopback anchor (PSEC 1.1)' `
+                    -Pass $true -Detail 'bidirectional host-loopback grant honored'
+            } else {
+                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow rejected (PSEC 1.1 ingress contract unavailable)' `
+                    -Status 'skip' -Detail "exit=$($allow.Result.ExitCode); documented fallback when contract 1.1 is absent"
+            }
+        } else {
+            $rejected = Test-WasRejected $allow
+            Record-Result -Phase 'P8d' -Name 'non-PSEC tier rejects hostLoopback=allow' `
+                -Pass $rejected `
+                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
+        }
+    } finally {
+        & $listener.Stop
+    }
+}
+
+# -----------------------------------------------------------------------
+# Phase 8e — schema 0.8 runtime proxy (model 2).
+#
+# docs/process-container/networking.md is explicit and testable here:
+#   * MXC sets HTTP_PROXY / HTTPS_PROXY and their lowercase variants to the
+#     loopback endpoint;
+#   * NO_PROXY is a bypass list and must NOT carry the proxy endpoint;
+#   * direct egress is blocked while the proxy is configured;
+#   * "Direct egress allow and deny rules do not apply when
+#     runtimeConfig.networkProxy is present";
+#   * identity-scoped (allowedProxyPeer present) keeps hostLoopback deny;
+#     identity-less REQUIRES hostLoopback allow;
+#   * schema 0.8 proxy requests never fall back to SBOX or AppContainer.
+#
+# The env-var contract is asserted by having the contained workload print its
+# own environment. That is the only way to see what actually reached the
+# child; a log line saying MXC configured a proxy does not prove the child
+# received it.
+# -----------------------------------------------------------------------
+function Phase-NetworkProxy {
+    Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8e' -Name 'runtime proxy' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $psec = Test-PsecEligible
+    $port = Get-FreeTcpPort
+    $proxyUrl = "http://127.0.0.1:$port"
+
+    # Identity-less deployment: no allowedProxyPeer, so the doc requires
+    # ingress.default=allow AND hostLoopback=allow. Workload dumps its env.
+    $envDump = "$env:SystemRoot\System32\cmd.exe /c set"
+    $cfgEnv = New-Config -Name 'net-proxy-envvars' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $envRun = Invoke-NetRun -Name 'net-proxy-envvars' -ConfigPath $cfgEnv
+
+    if ($psec) {
+        $out = $envRun.Result.Stdout
+        $ran = [bool]($out -match '(?im)^SystemRoot=')
+        Record-Result -Phase 'P8e' -Name 'identity-less proxy config runs (ingress=allow + hostLoopback=allow)' `
+            -Pass $ran -Detail "exit=$($envRun.Result.ExitCode)"
+        if ($ran) {
+            foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
+                # cmd.exe `set` upper-cases nothing, but Windows env lookup is
+                # case-insensitive and duplicate-insensitive, so a variable set
+                # twice in different cases collapses. Match case-insensitively
+                # on the name and require the endpoint as the value.
+                $hit = [bool]($out -match ("(?im)^" + [regex]::Escape($v) + "=.*" + [regex]::Escape("127.0.0.1:$port")))
+                Record-Result -Phase 'P8e' -Name "child env carries $v = proxy endpoint" `
+                    -Pass $hit -Detail "endpoint=127.0.0.1:$port"
+            }
+            # NO_PROXY is a bypass list. Carrying the endpoint there would tell
+            # cooperating clients to bypass the very proxy they must use.
+            $noProxyPoisoned = [bool]($out -match ("(?im)^no_proxy=.*" + [regex]::Escape("127.0.0.1:$port")))
+            Record-Result -Phase 'P8e' -Name 'NO_PROXY does NOT carry the proxy endpoint' `
+                -Pass (-not $noProxyPoisoned) -Detail 'NO_PROXY is a bypass list, not a proxy setting'
+        }
+
+        # Direct egress must be blocked while the proxy is configured. The
+        # proxy is not actually listening, so a REACHED verdict here means the
+        # workload went straight out — the exact bypass the model forbids.
+        $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
+            -CommandLine (Get-AnchorFetchCommand) `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+            -NetworkProxy $proxyUrl -TimeoutMs 25000
+        $direct = Invoke-NetRun -Name 'net-proxy-direct-blocked' -ConfigPath $cfgDirect
+        Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' `
+            -Pass ($direct.Verdict -eq 'BLOCKED') `
+            -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
+    } else {
+        # "schema 0.8 runtime proxy requests do not fall back because neither
+        # SBOX nor AppContainer can preserve their peer or host-loopback
+        # requirements."
+        $rejected = Test-WasRejected $envRun
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects schema 0.8 runtime proxy (no fallback)' `
+            -Pass $rejected `
+            -Detail "exit=$($envRun.Result.ExitCode); timedOut=$($envRun.Result.TimedOut); tier=$($Script:ExpectedTier)"
+    }
+
+    # --- Model-2 shape requirements, independent of tier. -----------------
+    # Identity-scoped: allowedProxyPeer present, hostLoopback stays deny.
+    $cfgPeer = New-Config -Name 'net-proxy-identity-scoped' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' `
+        -NetworkProxy $proxyUrl -AllowedProxyPeer 'Contoso.Proxy_8wekyb3d8bbwe' -TimeoutMs 25000
+    $peer = Invoke-NetRun -Name 'net-proxy-identity-scoped' -ConfigPath $cfgPeer
+    if ($psec) {
+        # The peer does not exist on this host, so a launch failure is
+        # expected; what must NOT happen is the config being refused as an
+        # invalid SHAPE. "No rejection message" alone is not evidence — an
+        # empty stderr, a harness timeout, or a binary that never started all
+        # look the same — so positive proof that the config cleared validation
+        # is required too.
+        $peerLog = Remove-ConfigEcho $peer.Log
+        $shapeRejected = [bool]("$($peer.Result.Stderr)" -match '(?i)policy_validation|unsupported.*polic|invalid.*(polic|config|network)')
+        $gotPastValidation = ($peer.Result.ExitCode -eq 0) -or ($peerLog -match '(?i)selected isolation tier')
+        Record-Result -Phase 'P8e' -Name 'identity-scoped proxy shape (peer + hostLoopback=deny) is a valid policy' `
+            -Pass ($gotPastValidation -and -not $shapeRejected) `
+            -Detail ("exit=$($peer.Result.ExitCode); pastValidation=$gotPastValidation; " +
+                     "stderr=$(Format-Snippet $peer.Result.Stderr)")
+    } else {
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects allowedProxyPeer' `
+            -Pass (Test-WasRejected $peer) `
+            -Detail "exit=$($peer.Result.ExitCode); timedOut=$($peer.Result.TimedOut); tier=$($Script:ExpectedTier)"
+    }
+
+    # The two shape rules below are only meaningful on PSEC. On a non-PSEC
+    # tier the phase has already asserted that EVERY schema 0.8 runtime-proxy
+    # config is refused, so asserting "this particular one is refused" would be
+    # green by construction and would test nothing about the rule it names.
+    if (-not $psec) {
+        Record-Result -Phase 'P8e' -Name 'model-2 shape rules (hostLoopback / ingress.default)' -Status 'skip' `
+            -Detail "tier=$($Script:ExpectedTier) refuses all 0.8 runtime proxies, so a shape-specific rejection is not attributable"
+        return
+    }
+
+    # Identity-less proxy WITHOUT hostLoopback=allow. The doc says this
+    # deployment requires it, so the configuration is incomplete and must be
+    # refused rather than run with a proxy the container cannot reach.
+    $cfgNoLoopback = New-Config -Name 'net-proxy-identityless-no-loopback' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $noLoopback = Invoke-NetRun -Name 'net-proxy-identityless-no-loopback' -ConfigPath $cfgNoLoopback
+    Record-Result -Phase 'P8e' -Name 'identity-less proxy without hostLoopback=allow is rejected' `
+        -Pass (Test-WasRejected $noLoopback) `
+        -Detail "exit=$($noLoopback.Result.ExitCode); timedOut=$($noLoopback.Result.TimedOut); doc requires hostLoopback=allow when allowedProxyPeer is omitted"
+
+    # Model 2 requires ingress.default=allow. Without it the client container
+    # never gets privateNetworkClientServer and cannot reach a loopback proxy.
+    $cfgNoIngress = New-Config -Name 'net-proxy-no-ingress-allow' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'allow' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $noIngress = Invoke-NetRun -Name 'net-proxy-no-ingress-allow' -ConfigPath $cfgNoIngress
+    Record-Result -Phase 'P8e' -Name 'runtime proxy without ingress.default=allow is rejected' `
+        -Pass (Test-WasRejected $noIngress) `
+        -Detail "exit=$($noIngress.Result.ExitCode); timedOut=$($noIngress.Result.TimedOut); model 2 requires egress deny + ingress allow"
+}
+
+# -----------------------------------------------------------------------
+# Phase 8f — the documented reject surface.
+#
+# Every case here must be refused during validation, before any container
+# exists. These resolve without network, privilege, or fixtures — the same
+# property that makes run_seatbelt_rejections_test.sh the cheapest suite in
+# the tree. A policy that is "enforced" by the workload failing afterwards is
+# not enforcement, so each case asserts the run failed AND the workload never
+# produced its marker.
+# -----------------------------------------------------------------------
+function Phase-NetworkRejections {
+    Section 'Phase 8f: documented network reject surface'
+
+    $marker = 'REJECT-PROBE-RAN'
+    $cmd = "$env:SystemRoot\System32\cmd.exe /c echo $marker"
+    $rw = Join-Path $ScratchRoot 'rw'
+
+    # Shapes the typed generator deliberately cannot produce, authored raw.
+    $rawBase = {
+        param($id, $network, $extra)
+        $o = [ordered]@{
+            version     = $Script:SchemaVersion
+            containerId = "MxcWinPC-$id"
+            containment = 'processcontainer'
+            process     = [ordered]@{ commandLine = $cmd; timeout = 20000 }
+            filesystem  = [ordered]@{ readwritePaths = @($rw); readonlyPaths = @($env:SystemRoot) }
+            ui          = [ordered]@{ disable = $false }
+        }
+        if ($network) { $o['network'] = $network }
+        if ($extra) { foreach ($k in $extra.Keys) { $o[$k] = $extra[$k] } }
+        return $o
+    }
+
+    $cases = @(
+        @{
+            Name   = 'egress rule with explicitly empty to[] is rejected (not broadened to wildcard)'
+            Config = (New-RawConfig -Name 'rej-empty-to' -Object (& $rawBase 'rej-empty-to' ([ordered]@{
+                        egress = [ordered]@{ default = 'deny'; allow = @([ordered]@{ to = @() }) }
+                     }) $null))
+            Why    = '0.8 spec: an explicit empty array is rejected rather than broadened into a wildcard'
+        },
+        @{
+            Name   = 'egress rule with explicitly empty ports[] is rejected'
+            Config = (New-RawConfig -Name 'rej-empty-ports' -Object (& $rawBase 'rej-empty-ports' ([ordered]@{
+                        egress = [ordered]@{ default = 'deny'; allow = @([ordered]@{ ports = @() }) }
+                     }) $null))
+            Why    = 'same rule, ports side'
+        },
+        @{
+            Name   = 'DNS name where a CIDR belongs is rejected'
+            Config = (New-RawConfig -Name 'rej-dns-name' -Object (& $rawBase 'rej-dns-name' ([ordered]@{
+                        egress = [ordered]@{ default = 'deny'; allow = @([ordered]@{ to = @([ordered]@{ cidr = 'example.com' }) }) }
+                     }) $null))
+            Why    = 'D3: IP literals and CIDRs only, no DNS names'
+        },
+        @{
+            Name   = 'endPort without port is rejected'
+            Config = (New-RawConfig -Name 'rej-endport' -Object (& $rawBase 'rej-endport' ([ordered]@{
+                        egress = [ordered]@{ default = 'deny'; allow = @([ordered]@{ ports = @([ordered]@{ protocol = 'tcp'; endPort = 500 }) }) }
+                     }) $null))
+            Why    = 'endPort requires a numeric port'
+        },
+        @{
+            Name   = 'non-loopback runtimeConfig.networkProxy is rejected'
+            Config = (New-RawConfig -Name 'rej-proxy-remote' -Object (& $rawBase 'rej-proxy-remote' ([ordered]@{
+                        egress  = [ordered]@{ default = 'deny' }
+                        ingress = [ordered]@{ default = 'allow'; hostLoopback = 'allow' }
+                     }) ([ordered]@{ runtimeConfig = [ordered]@{ networkProxy = 'http://proxy.example.com:8080' } })))
+            Why    = 'MXC must reject a networkProxy endpoint that is not loopback'
+        },
+        @{
+            Name   = 'mixing legacy defaultPolicy with directional egress is rejected'
+            Config = (New-RawConfig -Name 'rej-mixed-shapes' -Object (& $rawBase 'rej-mixed-shapes' ([ordered]@{
+                        defaultPolicy = 'block'
+                        egress        = [ordered]@{ default = 'allow' }
+                     }) $null))
+            Why    = 'the legacy and directional shapes are alternatives; combining them has no defined meaning'
+        }
+    )
+
+    foreach ($case in $cases) {
+        $log = Join-Path $ScratchRoot ('logs\' + (Split-Path -Leaf $case.Config) + '.log')
+        $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $case.Config -LogPath $log -TimeoutSec 30
+        $ranAnyway = [bool]("$($r.Stdout)" -match $marker)
+        $logText = $(if (Test-Path $log) { Get-Content $log -Raw -ErrorAction SilentlyContinue } else { '' })
+        Record-Result -Phase 'P8f' -Name $case.Name `
+            -Pass ((Test-WasRejected -Run $r -Log $logText) -and (-not $ranAnyway)) `
+            -Detail "exit=$($r.ExitCode); timedOut=$($r.TimedOut); workloadRan=$ranAnyway; $($case.Why)"
+    }
+
+    # Positive control. Every case above asserts "this config failed", which is
+    # also true on a host where NOTHING runs — so without a control the whole
+    # phase reports green having proven nothing about the reject surface. The
+    # control is the same fixture with no offending field: it must succeed and
+    # print the marker. If it does not, the six negatives above are
+    # unattributable and this phase says so explicitly.
+    $ctlPath = New-RawConfig -Name 'rej-positive-control' `
+        -Object (& $rawBase 'rej-positive-control' ([ordered]@{
+            egress  = [ordered]@{ default = 'allow' }
+            ingress = [ordered]@{ default = 'deny'; hostLoopback = 'deny' }
+        }) $null)
+    $ctlLog = Join-Path $ScratchRoot 'logs\rej-positive-control.log'
+    $ctl = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ctlPath -LogPath $ctlLog -TimeoutSec 30
+    $ctlRan = [bool]("$($ctl.Stdout)" -match $marker)
+    Record-Result -Phase 'P8f' -Name 'positive control: the same fixture without an offending field RUNS' `
+        -Pass (($ctl.ExitCode -eq 0) -and $ctlRan) `
+        -Detail ("exit=$($ctl.ExitCode); timedOut=$($ctl.TimedOut); workloadRan=$ctlRan; " +
+                 'without this, the six rejections above are indistinguishable from a host on which nothing launches')
+}
+
+# -----------------------------------------------------------------------
+# Phase 9 — LEGACY network fields, pinned at schema 0.7.
+#
+# The 0.6/0.7 shape (defaultPolicy / enforcementMode / allowedHosts /
+# blockedHosts) is a different parse path from the directional shape and stays
+# on 0.7 deliberately. os-version-support.md states capability- and
+# firewall-based enforcement works on every release, so these run on any tier.
+#
+# The firewall lane also closes the teardown asymmetry: the DACL side asserts
+# apply -> restore -> orphan reap in three phases, while nothing ever checked
+# that `netsh advfirewall` rules created for a container are removed when it
+# exits. A leaked allow rule outlives the sandbox it was scoped to.
+# -----------------------------------------------------------------------
+function Phase-NetworkLegacy07 {
+    Section 'Phase 9: legacy network fields (schema 0.7)'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P9' -Name 'legacy network' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $cmd = Get-AnchorFetchCommand
+
+    # defaultPolicy allow vs block, capability enforcement. The pair is the
+    # assertion: either verdict alone is unattributable.
+    $cfgAllow = New-Config -Name 'net07-cap-allow' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'capabilities' -TimeoutMs 30000
+    $cfgBlock = New-Config -Name 'net07-cap-block' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -LegacyDefaultPolicy 'block' -LegacyEnforcementMode 'capabilities' -TimeoutMs 30000
+
+    $allow = Invoke-NetRun -Name 'net07-cap-allow' -ConfigPath $cfgAllow
+    $block = Invoke-NetRun -Name 'net07-cap-block' -ConfigPath $cfgBlock
+
+    Record-Result -Phase 'P9' -Name 'schema 0.7 config is accepted (version pinned to 0.7.0-alpha)' `
+        -Pass ($allow.Verdict -ne 'NORUN' -or $allow.Result.ExitCode -eq 0) `
+        -Detail "exit=$($allow.Result.ExitCode)"
+    Record-Result -Phase 'P9' -Name 'legacy defaultPolicy=allow reaches the anchor' `
+        -Pass ($allow.Verdict -eq 'REACHED') -Detail "verdict=$($allow.Verdict)"
+    Record-Result -Phase 'P9' -Name 'legacy defaultPolicy=block does not reach the anchor' `
+        -Pass ($block.Verdict -eq 'BLOCKED') -Detail "verdict=$($block.Verdict)"
+    Record-Result -Phase 'P9' -Name 'legacy allow/block differ (policy is what changed the outcome)' `
+        -Pass ((Test-VerdictsRan @($allow, $block)) -and ($allow.Verdict -ne $block.Verdict)) `
+        -Detail "allow=$($allow.Verdict); block=$($block.Verdict)"
+
+    # Explicit internetClient capability, and the negative control that makes
+    # the grant meaningful: same policy, capability withheld.
+    $cfgCap = New-Config -Name 'net07-explicit-capability' -CommandLine $cmd `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'capabilities' `
+        -Capabilities @('internetClient') -TimeoutMs 30000
+    $cap = Invoke-NetRun -Name 'net07-explicit-capability' -ConfigPath $cfgCap
+    Record-Result -Phase 'P9' -Name 'explicit processContainer.capabilities=[internetClient] reaches the anchor' `
+        -Pass ($cap.Verdict -eq 'REACHED') -Detail "verdict=$($cap.Verdict)"
+    Record-Result -Phase 'P9' -Name 'explicit capability is named in the log' `
+        -Pass ([bool]((Remove-ConfigEcho $cap.Log) -match '(?i)internetClient')) `
+        -Detail 'capability list reached the backend (config echo stripped)'
+
+    # enforcementMode matrix. `firewall` and `both` need admin for netsh; a
+    # non-admin host cannot exercise them, which is a skip rather than a pass.
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    foreach ($mode in @('firewall', 'both')) {
+        if (-not $isAdmin) {
+            Record-Result -Phase 'P9' -Name "enforcementMode=$mode" -Status 'skip' `
+                -Detail 'netsh advfirewall rule authoring requires an elevated host'
+            continue
+        }
+        $before = Get-MxcFirewallRuleNames
+        $cfgMode = New-Config -Name "net07-mode-$mode" -CommandLine $cmd `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -LegacyDefaultPolicy 'block' -LegacyEnforcementMode $mode `
+            -LegacyAllowedHosts @(([Uri]$ExternalAnchorUrl).Host) `
+            -Capabilities @('internetClient') -TimeoutMs 40000
+
+        # Sample the rule set WHILE the container is alive. Comparing only
+        # before/after cannot tell "rules were applied and cleaned up" from
+        # "enforcementMode was silently ignored and no rule ever existed" —
+        # and the second is exactly the drift this phase exists to catch, so
+        # without a mid-run sample the leak assertion cannot fail in the
+        # interesting direction. The workload fetches for up to 40s, which is
+        # the window this poll runs in.
+        $sampler = [PowerShell]::Create()
+        [void]$sampler.AddScript({
+            param($deadlineSec)
+            $seen = [System.Collections.Generic.HashSet[string]]::new()
+            $end = (Get-Date).AddSeconds($deadlineSec)
+            while ((Get-Date) -lt $end) {
+                $rules = & netsh.exe advfirewall firewall show rule name=all 2>$null
+                foreach ($m in ($rules | Select-String -Pattern '(WXC_[A-Za-z0-9_.-]+)' -AllMatches |
+                                ForEach-Object { $_.Matches })) {
+                    [void]$seen.Add($m.Groups[1].Value.Trim())
+                }
+                Start-Sleep -Milliseconds 400
+            }
+            return @($seen)
+        }).AddArgument(55)
+        $samplerHandle = $sampler.BeginInvoke()
+
+        $run = Invoke-NetRun -Name "net07-mode-$mode" -ConfigPath $cfgMode -TimeoutSec 60
+        $after = Get-MxcFirewallRuleNames
+        $duringRaw = @()
+        try { $duringRaw = @($sampler.EndInvoke($samplerHandle)) } catch {}
+        try { $sampler.Dispose() } catch {}
+        $during = @($duringRaw | Where-Object { $_ -notin $before })
+
+        Record-Result -Phase 'P9' -Name "enforcementMode=${mode}: allowedHosts entry is reachable" `
+            -Pass ($run.Verdict -eq 'REACHED') `
+            -Detail "verdict=$($run.Verdict); allowedHosts=$(([Uri]$ExternalAnchorUrl).Host)"
+        Record-Result -Phase 'P9' -Name "enforcementMode=${mode}: firewall rules are actually installed during the run" `
+            -Pass ($during.Count -gt 0) `
+            -Detail ("observed=$($during.Count); " +
+                     'a zero here means the mode was accepted and silently not enforced, which also makes the leak check below vacuous')
+        # The teardown assertion the DACL side has had all along. Only
+        # meaningful once something was installed to leak.
+        $leaked = @($after | Where-Object { $_ -notin $before })
+        Record-Result -Phase 'P9' -Name "enforcementMode=${mode}: no firewall rules leaked after the run" `
+            -Pass (($during.Count -gt 0) -and ($leaked.Count -eq 0)) `
+            -Detail "installed=$($during.Count); leaked=$($leaked.Count)$(if ($leaked.Count) { ': ' + ($leaked -join ', ') })"
+    }
+
+    # blockedHosts under an allow default: the destination named is the one
+    # that must fail while the default still permits everything else.
+    if ($isAdmin) {
+        $cfgBlocked = New-Config -Name 'net07-blockedhosts' -CommandLine $cmd `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'firewall' `
+            -LegacyBlockedHosts @(([Uri]$ExternalAnchorUrl).Host) `
+            -Capabilities @('internetClient') -TimeoutMs 40000
+        $blocked = Invoke-NetRun -Name 'net07-blockedhosts' -ConfigPath $cfgBlocked -TimeoutSec 60
+        Record-Result -Phase 'P9' -Name 'blockedHosts entry is unreachable under an allow default' `
+            -Pass ($blocked.Verdict -eq 'BLOCKED') -Detail "verdict=$($blocked.Verdict)"
+    } else {
+        Record-Result -Phase 'P9' -Name 'blockedHosts under allow default' -Status 'skip' `
+            -Detail 'firewall enforcement requires an elevated host'
+    }
+}
+
+# -----------------------------------------------------------------------
+# Phase 10 — path aliasing and most-specific-wins.
+#
+# Three Linux/macOS backends have dedicated suites for this because a grant
+# that resolves to a different object than the caller wrote is either a hole
+# or a mystery denial, and neither is visible from the config text. Windows
+# has MORE ways to alias a path than any of them — `..` traversal, 8.3 short
+# names, the `\\?\` prefix, and junctions all reach the same object that the
+# DACL ACEs are applied to.
+# -----------------------------------------------------------------------
+function Phase-PathAliasing {
+    Section 'Phase 10: path aliasing and most-specific-wins'
+
+    if (-not $Script:Caps.SupportsDeniedPaths) {
+        Record-Result -Phase 'P10' -Name 'path aliasing' -Status 'skip' `
+            -Detail "deniedPaths not supported on tier=$($Script:ExpectedTier)"
+        return
+    }
+
+    $rw      = Join-Path $ScratchRoot 'rw'
+    $alias   = Join-Path $ScratchRoot 'alias'
+    $secret  = Join-Path $alias 'secret'
+    New-Item -ItemType Directory -Force -Path $secret | Out-Null
+    $sentinel = 'ALIAS-SENTINEL-9f31'
+    Set-Content -LiteralPath (Join-Path $secret 'data.txt') -Value $sentinel -Encoding ascii
+
+    $read = New-ProbeCommand -Body "type `"$secret\data.txt`""
+
+    # 1. `..` traversal reaching a denied directory. The policy denies the
+    #    canonical path; the workload addresses it through a parent hop. Both
+    #    spellings name the same object, so the deny must hold.
+    $dotdot = Join-Path $alias 'secret\..\secret'
+    $cfgDotDot = New-Config -Name 'alias-dotdot' `
+        -CommandLine (New-ProbeCommand -Body "type `"$dotdot\data.txt`"") `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -Denied @($secret) -TimeoutMs 25000
+    $logDotDot = Join-Path $ScratchRoot 'logs\alias-dotdot.log'
+    $rDotDot = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgDotDot -LogPath $logDotDot -TimeoutSec 40
+    Record-Result -Phase 'P10' -Name 'denied path is still denied through a `..` alias' `
+        -Pass ((Test-WorkloadRan $rDotDot) -and -not ($rDotDot.Stdout -match $sentinel)) `
+        -Detail "ran=$(Test-WorkloadRan $rDotDot); sawSentinel=$([bool]($rDotDot.Stdout -match $sentinel)); exit=$($rDotDot.ExitCode)"
+
+    # 2. `\\?\` extended-length prefix. Same object, different spelling.
+    $cfgExt = New-Config -Name 'alias-extended-prefix' `
+        -CommandLine (New-ProbeCommand -Body "type `"\\?\$secret\data.txt`"") `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -Denied @($secret) -TimeoutMs 25000
+    $logExt = Join-Path $ScratchRoot 'logs\alias-extended-prefix.log'
+    $rExt = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgExt -LogPath $logExt -TimeoutSec 40
+    Record-Result -Phase 'P10' -Name 'denied path is still denied through a \\?\ alias' `
+        -Pass ((Test-WorkloadRan $rExt) -and -not ($rExt.Stdout -match $sentinel)) `
+        -Detail "ran=$(Test-WorkloadRan $rExt); sawSentinel=$([bool]($rExt.Stdout -match $sentinel)); exit=$($rExt.ExitCode)"
+
+    # 3. 8.3 short name. Only meaningful where the volume generates them.
+    $shortPath = $null
+    try {
+        $fso = New-Object -ComObject Scripting.FileSystemObject
+        $shortPath = $fso.GetFolder($secret).ShortPath
+    } catch {}
+    if ($shortPath -and ($shortPath -ne $secret)) {
+        $cfgShort = New-Config -Name 'alias-shortname' `
+            -CommandLine (New-ProbeCommand -Body "type `"$shortPath\data.txt`"") `
+            -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -Denied @($secret) -TimeoutMs 25000
+        $logShort = Join-Path $ScratchRoot 'logs\alias-shortname.log'
+        $rShort = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgShort -LogPath $logShort -TimeoutSec 40
+        Record-Result -Phase 'P10' -Name 'denied path is still denied through an 8.3 short-name alias' `
+            -Pass ((Test-WorkloadRan $rShort) -and -not ($rShort.Stdout -match $sentinel)) `
+            -Detail "short=$shortPath; ran=$(Test-WorkloadRan $rShort); sawSentinel=$([bool]($rShort.Stdout -match $sentinel))"
+    } else {
+        Record-Result -Phase 'P10' -Name '8.3 short-name alias' -Status 'skip' `
+            -Detail '8.3 name generation is disabled on this volume'
+    }
+
+    # 4. Conflicting intents on the SAME object. The object is named readwrite
+    #    and denied at once; the documented resolution is most-restrictive-wins
+    #    (deny > ro > rw), so the deny must hold.
+    $cfgConflict = New-Config -Name 'alias-conflicting-intent' -CommandLine $read `
+        -ReadWrite @($rw, $secret) -ReadOnly @($env:SystemRoot) -Denied @($secret) -TimeoutMs 25000
+    $logConflict = Join-Path $ScratchRoot 'logs\alias-conflicting-intent.log'
+    $rConflict = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgConflict -LogPath $logConflict -TimeoutSec 40
+    Record-Result -Phase 'P10' -Name 'same object as both readwrite and denied resolves to denied' `
+        -Pass ((Test-WorkloadRan $rConflict) -and -not ($rConflict.Stdout -match $sentinel)) `
+        -Detail "ran=$(Test-WorkloadRan $rConflict); sawSentinel=$([bool]($rConflict.Stdout -match $sentinel)); deny > rw"
+
+    # 5. Most-specific-wins: denied PARENT with a readwrite CHILD. The child
+    #    must remain usable, and a non-regranted sibling must stay denied.
+    $child   = Join-Path $secret 'child'
+    $sibling = Join-Path $secret 'sibling'
+    New-Item -ItemType Directory -Force -Path $child, $sibling | Out-Null
+    Set-Content -LiteralPath (Join-Path $sibling 'data.txt') -Value $sentinel -Encoding ascii
+    $probe = New-ProbeCommand -Body (
+        "(echo CHILD-WRITE> `"$child\w.txt`" && type `"$child\w.txt`" && echo CHILD=OK) & " +
+        "(type `"$sibling\data.txt`" >nul 2>&1 && echo SIBLING=LEAK || echo SIBLING=DENIED)")
+    $cfgSpecific = New-Config -Name 'alias-most-specific' -CommandLine $probe `
+        -ReadWrite @($rw, $child) -ReadOnly @($env:SystemRoot) -Denied @($secret) -TimeoutMs 25000
+    $logSpecific = Join-Path $ScratchRoot 'logs\alias-most-specific.log'
+    $rSpecific = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgSpecific -LogPath $logSpecific -TimeoutSec 40
+    Record-Result -Phase 'P10' -Name 'readwrite child punches through a denied parent' `
+        -Pass ([bool]($rSpecific.Stdout -match 'CHILD=OK')) `
+        -Detail "ran=$(Test-WorkloadRan $rSpecific); stdout=$(($rSpecific.Stdout).Trim() -replace '\s+', ' ')"
+    Record-Result -Phase 'P10' -Name 'non-regranted sibling of the denied parent stays denied' `
+        -Pass ((Test-WorkloadRan $rSpecific) -and ($rSpecific.Stdout -match 'SIBLING=DENIED')) `
+        -Detail "ran=$(Test-WorkloadRan $rSpecific); stdout=$(($rSpecific.Stdout).Trim() -replace '\s+', ' ')"
+}
+
+# -----------------------------------------------------------------------
+# Phase 11 — process plumbing.
+#
+# Cheap properties that nothing asserted. Each is a silent-drop failure mode:
+# a config field that never reaches the child looks identical to one that was
+# honored, from outside.
+# -----------------------------------------------------------------------
+function Phase-ProcessPlumbing {
+    Section 'Phase 11: process plumbing (env / cwd / exit code / timeout / teardown)'
+
+    $rw = Join-Path $ScratchRoot 'rw'
+    $ro = Join-Path $ScratchRoot 'ro'
+
+    # --- env delivery. The harness has always DELIVERED process.env (the
+    # destructive-probe override) but never asserted it arrives, so the T3
+    # env-replacement behavior documented at the top of this file is untested.
+    # Values with spaces and an embedded `=` catch the two classic parse bugs.
+    $envCfg = New-Config -Name 'plumb-env' `
+        -CommandLine "$env:SystemRoot\System32\cmd.exe /c echo FOO=[%MXC_TEST_FOO%] EQ=[%MXC_TEST_EQ%]" `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) `
+        -Env (@("SystemRoot=$env:SystemRoot", "MXC_TEST_FOO=a b c", "MXC_TEST_EQ=k=v")) -TimeoutMs 20000
+    $envLog = Join-Path $ScratchRoot 'logs\plumb-env.log'
+    $rEnv = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $envCfg -LogPath $envLog -TimeoutSec 40
+    Record-Result -Phase 'P11' -Name 'process.env value with spaces reaches the child intact' `
+        -Pass ([bool]($rEnv.Stdout -match '\[a b c\]')) -Detail "stdout=$(($rEnv.Stdout).Trim())"
+    Record-Result -Phase 'P11' -Name 'process.env value with an embedded = reaches the child intact' `
+        -Pass ([bool]($rEnv.Stdout -match '\[k=v\]')) -Detail "stdout=$(($rEnv.Stdout).Trim())"
+
+    # --- cwd. Explicit process.cwd must be honored.
+    $cwdCfg = New-Config -Name 'plumb-cwd' `
+        -CommandLine (New-ProbeCommand -Body 'cd') `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -Cwd $rw -TimeoutMs 20000
+    $cwdLog = Join-Path $ScratchRoot 'logs\plumb-cwd.log'
+    $rCwd = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cwdCfg -LogPath $cwdLog -TimeoutSec 40
+    $cwdRan = Test-WorkloadRan $rCwd
+    Record-Result -Phase 'P11' -Name 'explicit process.cwd is honored' `
+        -Pass ($cwdRan -and ($rCwd.Stdout -match [regex]::Escape((Split-Path -Leaf $rw)))) `
+        -Detail "ran=$cwdRan; requested=$rw; stdout=$(Format-Snippet $rCwd.Stdout)"
+
+    # --- omitted cwd. docs/schema.md (revised this month) documents the
+    # substitution precedence: first readwritePaths entry that is an existing
+    # directory, else the first such readonlyPaths entry, else the system
+    # drive root. Never the launcher's cwd.
+    $cwdDefaultCfg = New-Config -Name 'plumb-cwd-default' `
+        -CommandLine (New-ProbeCommand -Body 'cd') `
+        -ReadWrite @($rw) -ReadOnly @($ro, $env:SystemRoot) -TimeoutMs 20000
+    $cwdDefaultLog = Join-Path $ScratchRoot 'logs\plumb-cwd-default.log'
+    $rCwdDefault = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cwdDefaultCfg -LogPath $cwdDefaultLog -TimeoutSec 40
+    $cwdDefaultRan = Test-WorkloadRan $rCwdDefault
+    Record-Result -Phase 'P11' -Name 'omitted process.cwd falls back to the first readwritePaths entry' `
+        -Pass ($cwdDefaultRan -and ($rCwdDefault.Stdout -match [regex]::Escape((Split-Path -Leaf $rw)))) `
+        -Detail "ran=$cwdDefaultRan; expected leaf=$(Split-Path -Leaf $rw); stdout=$(Format-Snippet $rCwdDefault.Stdout)"
+    # The guard here cannot be "stdout is non-empty": wxc-exec prints a JSON
+    # error envelope to stdout when the launch fails, so a run in which nothing
+    # executed still has non-whitespace stdout that trivially fails to contain
+    # the launcher's path, scoring this green for the wrong reason.
+    Record-Result -Phase 'P11' -Name 'omitted process.cwd does NOT inherit the launcher cwd' `
+        -Pass ($cwdDefaultRan -and -not ($rCwdDefault.Stdout -match [regex]::Escape($PWD.Path))) `
+        -Detail "ran=$cwdDefaultRan; launcher cwd=$($PWD.Path); stdout=$(Format-Snippet $rCwdDefault.Stdout)"
+
+    # --- exit-code propagation. Nothing asserted this; `Invoke-Wxc` even
+    # carried an unused $ExpectExitCode parameter.
+    foreach ($code in @(0, 1, 42)) {
+        $ecCfg = New-Config -Name "plumb-exit-$code" `
+            -CommandLine "$env:SystemRoot\System32\cmd.exe /c exit $code" `
+            -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -TimeoutMs 20000
+        $ecLog = Join-Path $ScratchRoot "logs\plumb-exit-$code.log"
+        $rEc = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ecCfg -LogPath $ecLog -TimeoutSec 40
+        Record-Result -Phase 'P11' -Name "child exit code $code propagates to wxc-exec" `
+            -Pass ($rEc.ExitCode -eq $code) -Detail "got=$($rEc.ExitCode)"
+    }
+
+    # --- timeout enforcement plus the survivor check. The workload
+    # backgrounds a uniquely-named sleep that far outlasts the deadline: if it
+    # is still running afterwards, teardown left a survivor.
+    #
+    # The survivor is identified by PROCESS NAME, via a copy of powershell.exe
+    # renamed to a unique token. Matching on MainWindowTitle does not work —
+    # the child is started by a sandboxed parent with no window and redirected
+    # handles, so MainWindowTitle is always empty and the check can never find
+    # a survivor (it would be tautologically green). Win32_Process.CommandLine
+    # would work but is CIM-backed, and CIM is unavailable on locked-down
+    # hosts. A renamed copy needs neither.
+    $unique = "MXCLEAK$((Get-Random -Maximum 99999))"
+    $survivorExe = Join-Path $rw "$unique.exe"
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -Destination $survivorExe -Force
+    $timeoutCfg = New-Config -Name 'plumb-timeout' `
+        -CommandLine (New-ProbeCommand -Body (
+            "start /b `"`" `"$survivorExe`" -NoProfile -Command `"Start-Sleep -Seconds 120`" & ping -n 120 127.0.0.1")) `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -TimeoutMs 4000
+    $timeoutLog = Join-Path $ScratchRoot 'logs\plumb-timeout.log'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $rTimeout = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $timeoutCfg -LogPath $timeoutLog -TimeoutSec 60
+    $sw.Stop()
+    $timeoutRan = Test-WorkloadRan $rTimeout
+
+    # Every assertion below is AND-ed with $timeoutRan: a sandbox that never
+    # launched also exits non-zero, finishes fast, and leaves no survivor, so
+    # without the guard this whole block scores green on a broken host.
+    Record-Result -Phase 'P11' -Name 'process.timeout kills a runaway child' `
+        -Pass ($timeoutRan -and ($rTimeout.ExitCode -ne 0)) `
+        -Detail "ran=$timeoutRan; exit=$($rTimeout.ExitCode)"
+    # 4s deadline; allow generous teardown headroom but still catch "ran to
+    # completion" (the workload would take 120s).
+    Record-Result -Phase 'P11' -Name 'process.timeout fires near the deadline (not after the workload finishes)' `
+        -Pass ($timeoutRan -and ($sw.Elapsed.TotalSeconds -lt 45)) `
+        -Detail ("ran={0}; elapsed={1:N1}s; timeout=4s; workload=120s" -f $timeoutRan, $sw.Elapsed.TotalSeconds)
+    # Match the runner's own timeout message, not the generic word: the
+    # config carries `"timeout": 4000` and wxc-exec's request dump prints
+    # `Script timeout: 4000`, both of which /timed?\s*out/ matches (time + out),
+    # so the loose pattern is green whether or not anything was ever killed.
+    # Streams are cleaned individually — a single joined string would be cut at
+    # the first echo boundary and discard everything appended after it.
+    $timeoutSignal = @(
+        (Remove-ConfigEcho "$($rTimeout.Stdout)"),
+        (Remove-ConfigEcho "$($rTimeout.Stderr)"),
+        (Remove-ConfigEcho (Read-Log $timeoutLog))
+    ) -join "`n"
+    Record-Result -Phase 'P11' -Name 'timeout is reported, not silent' `
+        -Pass ($timeoutRan -and ($timeoutSignal -match '(?i)(script )?timed out after \d+\s*ms')) `
+        -Detail "ran=$timeoutRan; a killed workload must say why"
+
+    Start-Sleep -Seconds 2
+    $survivors = @(Get-Process -Name $unique -ErrorAction SilentlyContinue)
+    Record-Result -Phase 'P11' -Name 'no descendant survives teardown after a timeout' `
+        -Pass ($timeoutRan -and ($survivors.Count -eq 0)) `
+        -Detail "ran=$timeoutRan; survivors=$($survivors.Count); marker=$unique"
+    foreach ($s in $survivors) { try { Stop-Process -Id $s.Id -Force -ErrorAction SilentlyContinue } catch {} }
+    Remove-Item -LiteralPath $survivorExe -Force -ErrorAction SilentlyContinue
+}
+
 function Phase-UnitTests {
     Section 'Phase 7: cargo test'
     # Truncate the cargo log at the start of each run.
@@ -1627,21 +3247,50 @@ try {
     Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5}" -f `
         $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths) -ForegroundColor Cyan
     Initialize-Scratch
+    Assert-RequiredTier
+
+    # Live-network prerequisite. A positive egress assertion on a host with no
+    # connectivity reads every result as "blocked" and reports a green suite
+    # having proven nothing, so this is checked once, up front, and FAILS
+    # rather than skips — the same doctrine as run_seatbelt_all_tests.sh.
+    # -SkipNetwork is the explicit opt-out for air-gapped bring-up.
+    $Script:AnchorReachable = $false
+    if ($SkipNetwork) {
+        Write-Host 'Network phases: DISABLED (-SkipNetwork).' -ForegroundColor Yellow
+    } else {
+        $Script:AnchorReachable = Test-HostCanReachAnchor
+        if (-not $Script:AnchorReachable) {
+            throw ("Network prerequisite ABORT: the HOST cannot reach the egress anchor '$ExternalAnchorUrl'. " +
+                   'Every positive egress assertion would read as "blocked" and the suite would pass having ' +
+                   'proven nothing. Fix host connectivity, pass -ExternalAnchorUrl <reachable-url>, or pass ' +
+                   '-SkipNetwork to run the parse-only network phases alone.')
+        }
+        Write-Host ("Network anchor: {0} (reachable from host)" -f $ExternalAnchorUrl) -ForegroundColor Cyan
+    }
 
     # Phase registry. Build + preflight + scratch init above always run; this
     # table is filtered by the -Phases parameter (empty = run all). Phase 4b is
     # 'UiMitigationMatrix'; Phase 4c is 'GlobalAtomIsolation'.
     $AllPhases = [ordered]@{
-        'UnitTests'           = { Phase-UnitTests }
-        'Probes'              = { Phase-Probes }
-        'EmptyRelease'        = { Phase-EmptyRelease }
-        'DeniedRelease'       = { Phase-DeniedRelease }
-        'T3Forced'            = { Phase-T3Forced }
-        'T1DenyForced'        = { Phase-T1DenyForced }
-        'UiMitigationMatrix'  = { Phase-UiMitigationMatrix }
-        'GlobalAtomIsolation' = { Phase-GlobalAtomIsolation }
-        'DaclDisabled'        = { Phase-DaclDisabled }
-        'CrashRecovery'       = { Phase-CrashRecovery }
+        'UnitTests'                = { Phase-UnitTests }
+        'Probes'                   = { Phase-Probes }
+        'EmptyRelease'             = { Phase-EmptyRelease }
+        'DeniedRelease'            = { Phase-DeniedRelease }
+        'T3Forced'                 = { Phase-T3Forced }
+        'T1DenyForced'             = { Phase-T1DenyForced }
+        'UiMitigationMatrix'       = { Phase-UiMitigationMatrix }
+        'GlobalAtomIsolation'      = { Phase-GlobalAtomIsolation }
+        'DaclDisabled'             = { Phase-DaclDisabled }
+        'CrashRecovery'            = { Phase-CrashRecovery }
+        'NetworkCapabilityMatrix'  = { Phase-NetworkCapabilityMatrix }
+        'NetworkModel3Equivalence' = { Phase-NetworkModel3Equivalence }
+        'NetworkEgressRules'       = { Phase-NetworkEgressRules }
+        'NetworkHostLoopback'      = { Phase-NetworkHostLoopback }
+        'NetworkProxy'             = { Phase-NetworkProxy }
+        'NetworkRejections'        = { Phase-NetworkRejections }
+        'NetworkLegacy07'          = { Phase-NetworkLegacy07 }
+        'PathAliasing'             = { Phase-PathAliasing }
+        'ProcessPlumbing'          = { Phase-ProcessPlumbing }
     }
     if ($Phases.Count -gt 0) {
         $unknown = $Phases | Where-Object { $_ -notin $AllPhases.Keys }
@@ -1649,7 +3298,25 @@ try {
     }
     foreach ($key in $AllPhases.Keys) {
         if ($Phases.Count -eq 0 -or $Phases -contains $key) {
-            & $AllPhases[$key]
+            # Fault-isolate each phase. An unexpected exception inside one
+            # phase (a host-dependent cmdlet, a probe that throws) used to
+            # abort the whole run, discarding every phase after it. Recording
+            # it as a failure keeps the rest of the matrix reportable.
+            #
+            # Safety aborts are exempt and re-thrown. Assert-NoBfscfg throws
+            # when it detects a real bfscfg invocation, which on 25H2 deadlocks
+            # the host; swallowing that and continuing to spawn wxc-exec is
+            # precisely what the gate exists to prevent.
+            try {
+                & $AllPhases[$key]
+            }
+            catch {
+                if ("$_" -match 'MXC-FATAL') { throw }
+                Write-Host ("PHASE '{0}' THREW: {1}" -f $key, $_) -ForegroundColor Red
+                Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+                Record-Result -Phase $key -Name 'phase threw an unhandled exception' `
+                    -Pass $false -Detail "$_"
+            }
         }
     }
 }

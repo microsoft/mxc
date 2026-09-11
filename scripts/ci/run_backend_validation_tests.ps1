@@ -92,7 +92,15 @@ function Invoke-ProcessContainerTests {
     # Out-Null does not touch), so discarding the success stream keeps the
     # return value a scalar even if a phase leaks a stray object.
     [OutputType([int])]
-    param()
+    param(
+        # The tier this matrix entry exists to exercise. Passed through to the
+        # harness, which aborts when the host selects a different one. Without
+        # it a mis-provisioned process-t1 runner would silently run the T3
+        # assertions and report green, proving nothing about BaseContainer.
+        [Parameter(Mandatory)]
+        [ValidateSet('base-container', 'appcontainer-dacl')]
+        [string]$RequireTier
+    )
 
     # The existing harness expects separate debug and release layouts. CI
     # intentionally tests one release artifact, so stage it in both slots.
@@ -119,12 +127,24 @@ function Invoke-ProcessContainerTests {
         'UiMitigationMatrix',
         'GlobalAtomIsolation',
         'DaclDisabled',
-        'CrashRecovery'
+        'CrashRecovery',
+        # Schema 0.8 directional networking, the documented reject surface, and
+        # the legacy 0.7 lane (including firewall-rule teardown).
+        'NetworkCapabilityMatrix',
+        'NetworkModel3Equivalence',
+        'NetworkEgressRules',
+        'NetworkHostLoopback',
+        'NetworkProxy',
+        'NetworkRejections',
+        'NetworkLegacy07',
+        'PathAliasing',
+        'ProcessPlumbing'
     )
     $global:LASTEXITCODE = 0
     & $script `
         -SkipBuild `
         -SkipReleaseLane `
+        -RequireTier $RequireTier `
         -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
         -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
         -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
@@ -155,7 +175,7 @@ Redirect-TempToRunnerTemp
 
 switch ($Backend) {
     'process-t1' {
-        $primitives = Invoke-ProcessContainerTests
+        $primitives = Invoke-ProcessContainerTests -RequireTier 'base-container'
         if ($primitives -ne 0) {
             throw "Process Container tests failed with exit code $primitives."
         }
@@ -163,7 +183,7 @@ switch ($Backend) {
     'process-t3' {
         # Run both suites before reporting. Stopping at the first failure would
         # hide the other suite's result, costing an extra nightly run to triage.
-        $primitives = Invoke-ProcessContainerTests
+        $primitives = Invoke-ProcessContainerTests -RequireTier 'appcontainer-dacl'
         $workloads = Invoke-T3WorkloadTests
         if ($primitives -ne 0 -or $workloads -ne 0) {
             throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."
