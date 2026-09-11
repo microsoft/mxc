@@ -130,7 +130,12 @@ export function applyLinuxNetworkPolicy(config: ContainerConfig): void {
     );
   }
   // LXC cannot enforce Windows AppContainer capabilities, so legacy policies use firewall.
-  if (config.containment === 'lxc' && config.network.enforcementMode === undefined) {
+  if (
+    config.containment === 'lxc' &&
+    config.network.egress === undefined &&
+    config.network.ingress === undefined &&
+    config.network.enforcementMode === undefined
+  ) {
     config.network.enforcementMode = 'firewall';
   }
   const hasProxy = !!config.network.proxy;
