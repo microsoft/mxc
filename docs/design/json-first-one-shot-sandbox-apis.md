@@ -88,16 +88,17 @@ flowchart TB
     class RR,CC,NN,KF,FF,JJ new
     class Q,WM,ER,DD,OO same
 ```
-The existing parser remains: version-specific `mxc_config_contract` types and
-adapters produce `wire::MxcConfig`, then semantic parsing produces
-`ExecutionRequest`. This proposal does not change that pipeline.
+The existing one-shot parser remains: typed deserialization produces
+`wire::MxcConfig`, then semantic parsing produces `ExecutionRequest`. This
+proposal does not change that pipeline.
 
 ## Proposed API
 
 The JSON contains the complete versioned one-shot request. `RunOptions` holds
 `experimental` and `dryRun`; `SpawnOptions` holds only `experimental`.
 Options are reserved for host-controlled execution flags and must not duplicate
-versioned config fields. C option structs include `size` for future extension.
+versioned config fields. Testing-only CLI authorization, including
+`--allow-testing-features`, remains unavailable through the in-process SDKs.
 
 **Rust (`mxc-sdk`)**
 
@@ -109,9 +110,31 @@ pub fn spawn_config(json: &str, options: SpawnOptions) -> Result<Sandbox, Error>
 **C ABI (`mxc_ffi`)**
 
 ```c
-int32_t mxc_run_config(const char* json, const MxcRunOptions*, MxcRunResult*);
-int32_t mxc_spawn_config(const char* json, const MxcSpawnOptions*, MxcSandbox**, MxcErrorDetail*);
+typedef struct MxcRunOptions {
+    int32_t experimental;
+    int32_t dry_run;
+} MxcRunOptions;
+
+typedef struct MxcSpawnOptions {
+    int32_t experimental;
+} MxcSpawnOptions;
+
+int32_t mxc_run_config(
+    const uint8_t* json,
+    size_t json_length,
+    const MxcRunOptions* options,
+    MxcRunResult* result);
+
+int32_t mxc_spawn_config(
+    const uint8_t* json,
+    size_t json_length,
+    const MxcSpawnOptions* options,
+    MxcSandbox** sandbox,
+    MxcErrorDetail* error);
 ```
+
+The JSON arguments are an explicit UTF-8 byte span. The C ABI does not depend
+on NUL termination and forwards exactly `json_length` bytes to `mxc-sdk`.
 
 **C# (`Microsoft.Mxc.Sdk`)**
 
@@ -125,7 +148,7 @@ MxcSandboxProcess SpawnConfig(string json, SpawnOptions? options = null);
 
 ```typescript
 runConfigAsync(json: string, options?: RunOptions): Promise<RunResult>;
-spawnConfig(json: string, options?: SpawnOptions): SandboxProcess;
+spawnConfig(json: string, options?: SpawnOptions): Promise<SandboxProcess>;
 ```
 
 ### Node Koffi adapter
@@ -161,7 +184,8 @@ without changing the JSON-first API or C ABI.
 
 ## Success criteria
 
-- The same config behaves the same through CLI, Rust, C#, and Node.
+- The same supported production config behaves the same through CLI, Rust, C#,
+  and Node.
 - New paths require no binding-specific config model or extra JSON round trip.
 - Validation errors retain the same category and path in every language.
 - Existing callers continue to work during migration.
