@@ -76,8 +76,30 @@ assert_workload_interpreters() {
     fi
 }
 
+# Records how this host refuses a write to the sealed system volume. The
+# seatbelt filesystem suite accepts either answer -- EPERM (rootless) or EROFS
+# (read-only volume) -- and this says which one a runner actually gives.
+# Diagnostic only: it never fails the job.
+report_system_volume_protection() {
+    echo "SIP: $(csrutil status 2>&1 | head -1)"
+    echo "root mount: $(mount 2>/dev/null | grep -E ' on / \(' | head -1)"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import errno, os
+p = "/usr/mxc-sip-probe"
+try:
+    os.close(os.open(p, os.O_CREAT | os.O_WRONLY, 0o600))
+    os.unlink(p)
+    print("unsandboxed /usr write: CREATED")
+except OSError as e:
+    print("unsandboxed /usr write:", errno.errorcode.get(e.errno, e.errno))
+' 2>&1 || true
+    fi
+}
+
 # Runs for every backend: this is host inventory, not a backend prerequisite.
 assert_workload_interpreters
+report_system_volume_protection
 
 case "$backend" in
     seatbelt)
