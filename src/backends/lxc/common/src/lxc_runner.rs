@@ -1136,10 +1136,18 @@ mod tests {
         LxcScriptRunner::new(&config, "mxc-network-test", &lifecycle)
     }
 
+    /// What a failed readiness probe left behind: the response the caller
+    /// gets, and which release the runner chose for the container.
+    struct ReadinessFailure {
+        response: ScriptResponse,
+        destroyed: bool,
+        stopped: bool,
+    }
+
     fn fail_network_readiness(
         runner: &LxcScriptRunner,
         container_created: bool,
-    ) -> (ScriptResponse, bool, bool) {
+    ) -> ReadinessFailure {
         let mut logger = Logger::new(Mode::Buffer);
         let mut destroyed = false;
         let mut stopped = false;
@@ -1159,7 +1167,11 @@ mod tests {
                 },
             )
             .expect("a failing readiness probe should return an error response");
-        (response, destroyed, stopped)
+        ReadinessFailure {
+            response,
+            destroyed,
+            stopped,
+        }
     }
 
     /// What the 0.8 parser produces for a config stating only `network.egress`:
@@ -1285,7 +1297,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_returns_the_fail_closed_error_response() {
         let runner = runner_for_network_readiness_tests(false);
-        let (response, _, _) = fail_network_readiness(&runner, false);
+        let response = fail_network_readiness(&runner, false).response;
 
         assert!(
             response
@@ -1303,7 +1315,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_preserves_a_reused_container_when_destroy_on_exit_is_false() {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed, _) = fail_network_readiness(&runner, false);
+        let destroyed = fail_network_readiness(&runner, false).destroyed;
 
         assert!(
             !destroyed,
@@ -1314,7 +1326,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_stops_a_reused_container_when_destroy_on_exit_is_false() {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, _, stopped) = fail_network_readiness(&runner, false);
+        let stopped = fail_network_readiness(&runner, false).stopped;
 
         assert!(
             stopped,
@@ -1326,7 +1338,9 @@ mod tests {
     #[test]
     fn network_readiness_timeout_does_not_stop_a_container_it_destroys() {
         let runner = runner_for_network_readiness_tests(true);
-        let (_, destroyed, stopped) = fail_network_readiness(&runner, false);
+        let ReadinessFailure {
+            destroyed, stopped, ..
+        } = fail_network_readiness(&runner, false);
 
         assert!(destroyed, "destroyOnExit=true must destroy the container");
         assert!(
@@ -1362,7 +1376,7 @@ mod tests {
     fn network_readiness_timeout_destroys_newly_created_container_even_when_destroy_on_exit_is_false(
     ) {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed, _) = fail_network_readiness(&runner, true);
+        let destroyed = fail_network_readiness(&runner, true).destroyed;
 
         assert!(
             destroyed,
@@ -1373,7 +1387,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_destroys_a_reused_container_when_destroy_on_exit_is_true() {
         let runner = runner_for_network_readiness_tests(true);
-        let (_, destroyed, _) = fail_network_readiness(&runner, false);
+        let destroyed = fail_network_readiness(&runner, false).destroyed;
 
         assert!(
             destroyed,
