@@ -152,6 +152,13 @@ wins" is not true without them:
   The guarantee holds for *addresses*, not for names. Use literal IPs or CIDRs
   when a destination must be denied deterministically.
 
+All three are about which rule in the chain wins. A fourth limit is of a
+different kind: the chain can be stepped around entirely. A workload holding
+`CAP_NET_RAW` can open a packet socket and transmit below the point these rules
+hook, reaching a destination the chain drops. MXC retains that capability, for
+the reasons given under [Inbound (ingress) policy](#inbound-ingress-policy);
+closing the route needs a syscall filter rather than a firewall rule.
+
 `allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Host-list rules match all ports and protocols. Port- and protocol-specific egress rules are a schema 0.8 feature, described below; the legacy host lists cannot express them.
 
 An entry that resolves to nothing — an unknown hostname, or a CIDR prefix out
