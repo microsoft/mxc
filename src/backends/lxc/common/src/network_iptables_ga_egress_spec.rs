@@ -655,19 +655,11 @@ fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<V
 /// A generated rule always names a destination, unlike the legacy port 53
 /// exemption pair this checks for.
 fn opens_dns_unconditionally(rules: &[Vec<String>]) -> bool {
-    // The prefix of the chain is the base rules and the lease-maintenance
-    // exemptions; the policy-generated host rules start at the first rule
-    // naming a destination of its own.  The DHCP exemptions also name one, but
-    // theirs is link-scoped and fixed, so they belong to the prefix.
-    let is_link_scoped_dhcp = |rule: &Vec<String>| {
-        matches!(
-            argument_after(rule, "-d"),
-            Some("255.255.255.255") | Some("ff02::1:2")
-        )
-    };
+    // The prefix of the chain is the base rules; the policy-generated host
+    // rules start at the first rule naming a destination of its own.
     let generated = rules
         .iter()
-        .position(|rule| argument_after(rule, "-d").is_some() && !is_link_scoped_dhcp(rule))
+        .position(|rule| argument_after(rule, "-d").is_some())
         .unwrap_or(rules.len());
     let exempts = |protocol: &str| {
         rules[..generated].iter().any(|rule| {

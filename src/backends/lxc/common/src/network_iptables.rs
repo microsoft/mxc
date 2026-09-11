@@ -669,38 +669,6 @@ impl NetworkIptablesManager {
         ]
     }
 
-    /// The exemption keeping a container's own DHCP client alive.
-    ///
-    /// Most clients never reach this chain: `dhcpcd` and `udhcpc` drive the
-    /// exchange over an `AF_PACKET` raw socket, which bypasses netfilter
-    /// entirely.
-    fn build_dhcp_client_exemption_rule_args(
-        chain_name: &str,
-        family: IpFamily,
-    ) -> Vec<Vec<String>> {
-        let (destination, client_port, server_port) = match family {
-            IpFamily::V4 => ("255.255.255.255", "68", "67"),
-            IpFamily::V6 => ("ff02::1:2", "546", "547"),
-        };
-        vec![vec![
-            "-A",
-            chain_name,
-            "-d",
-            destination,
-            "-p",
-            "udp",
-            "--sport",
-            client_port,
-            "--dport",
-            server_port,
-            "-j",
-            "ACCEPT",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect()]
-    }
-
     /// Accept UDP and TCP port 53 to any destination.
     ///
     /// The accept names no destination because the resolver's address is not
@@ -1883,9 +1851,6 @@ impl NetworkIptablesManager {
         } else {
             let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
 
-            // Lease maintenance keeps the address every other rule is written
-            // against, so both schemas carry it.  It is emitted per family:
-            // the IPv4 chain has no business carrying DHCPv6 ports.
             let mut tail_rules: Vec<Vec<String>> = Vec::new();
 
             // Only a closed chain naming hosts to allow gets DNS: an open chain
@@ -1900,19 +1865,11 @@ impl NetworkIptablesManager {
             }
 
             self.run_iptables_rule_args(&base_rules, logger)?;
-            self.run_iptables_rule_args(
-                &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V4),
-                logger,
-            )?;
             if !tail_rules.is_empty() {
                 self.run_iptables_rule_args(&tail_rules, logger)?;
             }
             if ipv6_enabled {
                 self.run_ip6tables_rule_args(&base_rules, logger)?;
-                self.run_ip6tables_rule_args(
-                    &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V6),
-                    logger,
-                )?;
                 if !tail_rules.is_empty() {
                     self.run_ip6tables_rule_args(&tail_rules, logger)?;
                 }
@@ -2995,73 +2952,6 @@ mod tests {
         for rule in base.iter().chain(dns.iter()) {
             assert!(!rule.iter().any(|arg| arg == "icmp"));
             assert!(!rule.iter().any(|arg| arg == "icmpv6"));
-        }
-    }
-
-    #[test]
-    fn the_dhcp_exemption_is_scoped_by_family_destination_and_port_pair() {
-        let v4 =
-            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V4);
-        let v6 =
-            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V6);
-
-        assert_eq!(
-            v4,
-            vec![strings(&[
-                "-A",
-                "MXC-dhcp",
-                "-d",
-                "255.255.255.255",
-                "-p",
-                "udp",
-                "--sport",
-                "68",
-                "--dport",
-                "67",
-                "-j",
-                "ACCEPT",
-            ])],
-            "IPv4 opens the link-scoped broadcast and the client port pair only"
-        );
-        assert_eq!(
-            v6,
-            vec![strings(&[
-                "-A",
-                "MXC-dhcp",
-                "-d",
-                "ff02::1:2",
-                "-p",
-                "udp",
-                "--sport",
-                "546",
-                "--dport",
-                "547",
-                "-j",
-                "ACCEPT",
-            ])],
-            "IPv6 opens the all-servers multicast group and the client port pair only"
-        );
-    }
-
-    #[test]
-    fn the_dhcp_exemption_never_names_an_unscoped_destination() {
-        // The bypass this guards: an ACCEPT matching the DHCP port pair with no
-        // destination lets container root send UDP from port 68 to *any*
-        // off-box host on port 67, straight through a default-deny policy.
-        for family in [IpFamily::V4, IpFamily::V6] {
-            for rule in
-                NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", family)
-            {
-                let destination = rule
-                    .iter()
-                    .position(|arg| arg == "-d")
-                    .and_then(|i| rule.get(i + 1))
-                    .unwrap_or_else(|| panic!("every DHCP rule must name a destination: {rule:?}"));
-                assert!(
-                    !NetworkIptablesManager::covers_every_address(destination),
-                    "a DHCP rule must not match every address: {rule:?}"
-                );
-            }
         }
     }
 

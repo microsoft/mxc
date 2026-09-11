@@ -396,116 +396,40 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
     );
 }
 
-// A chain hanging off OUTPUT inside the container's namespace sees the
-// container's own DHCP renewal, which a default-deny egress chain would
-// otherwise drop -- costing the container the address the rest of the policy
-// is written against.
+// The egress chain is installed after the container already holds its address,
+// so no rule in it is what obtains one.  An ACCEPT on the DHCP port pair would
+// only widen the policy: container root can bind port 68 and reach any host on
+// port 67 through a chain written to deny exactly that.
 #[test]
-fn a_filtered_chain_lets_the_dhcp_client_renew_its_lease() {
-    let policy = ContainerPolicy {
+fn no_chain_opens_a_dhcp_port() {
+    let filtered = ContainerPolicy {
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
         default_network_policy: NetworkPolicy::Block,
         allowed_hosts: vec!["10.1.1.1".to_string()],
         ..Default::default()
     };
 
-    let (manager, issued, result) = apply_and_collect("dhcp-renew", &policy);
-    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+    for (name, policy) in [
+        ("dhcp-filtered", filtered),
+        ("dhcp-proxied", policy_with_proxy("10.9.8.7", 3128)),
+    ] {
+        let (manager, issued, result) = apply_and_collect(name, &policy);
+        assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let v4 = appended_rules(&issued, "iptables", manager.chain_name());
-    let v6 = appended_rules(&issued, "ip6tables", manager.chain_name());
-    assert!(
-        !v4.is_empty() && !v6.is_empty(),
-        "both chains must have been programmed; issued: {issued:?}"
-    );
-
-    let dhcp_v4 = |rule: &Vec<String>| has_pair(rule, "--sport", "68");
-    let dhcp_v6 = |rule: &Vec<String>| has_pair(rule, "--sport", "546");
-
-    let renewal = v4
-        .iter()
-        .find(|rule| dhcp_v4(rule))
-        .expect("the IPv4 chain must let the DHCPv4 client through");
-    assert!(
-        has_pair(renewal, "-d", "255.255.255.255") && has_pair(renewal, "--dport", "67"),
-        "the DHCPv4 exemption must be scoped to the link broadcast; actual: {renewal:?}"
-    );
-
-    let renewal6 = v6
-        .iter()
-        .find(|rule| dhcp_v6(rule))
-        .expect("the IPv6 chain must let the DHCPv6 client through");
-    assert!(
-        has_pair(renewal6, "-d", "ff02::1:2") && has_pair(renewal6, "--dport", "547"),
-        "the DHCPv6 exemption must be scoped to the all-servers group; actual: {renewal6:?}"
-    );
-
-    // Each family carries only its own ports -- the other family's pair would
-    // be a rule that can never match.
-    assert!(
-        !v4.iter().any(|rule| dhcp_v6(rule)),
-        "the IPv4 chain must not carry the DHCPv6 ports; actual: {v4:?}"
-    );
-    assert!(
-        !v6.iter().any(|rule| dhcp_v4(rule)),
-        "the IPv6 chain must not carry the DHCPv4 ports; actual: {v6:?}"
-    );
-}
-
-// The DHCP exemption must not become an egress bypass: an ACCEPT on the port
-// pair with no destination lets container root send UDP from port 68 to any
-// off-box host on port 67, through a policy that denies exactly that.
-#[test]
-fn no_dhcp_rule_reaches_an_off_box_destination() {
-    let policy = ContainerPolicy {
-        network_enforcement_mode: NetworkEnforcementMode::Firewall,
-        default_network_policy: NetworkPolicy::Block,
-        allowed_hosts: vec!["10.1.1.1".to_string()],
-        ..Default::default()
-    };
-
-    let (manager, issued, result) = apply_and_collect("dhcp-noexfil", &policy);
-    assert!(result.is_ok(), "apply must succeed, got {result:?}");
-
-    for binary in ["iptables", "ip6tables"] {
-        for rule in appended_rules(&issued, binary, manager.chain_name()) {
-            let is_dhcp = has_pair(rule, "--dport", "67") || has_pair(rule, "--dport", "547");
-            if !is_dhcp {
-                continue;
+        let mut programmed = false;
+        for binary in ["iptables", "ip6tables"] {
+            for rule in appended_rules(&issued, binary, manager.chain_name()) {
+                programmed = true;
+                assert!(
+                    !has_pair(rule, "--dport", "67") && !has_pair(rule, "--dport", "547"),
+                    "{name} must not open a DHCP port; actual: {rule:?}"
+                );
             }
-            let destination = rule
-                .iter()
-                .position(|arg| arg == "-d")
-                .and_then(|i| rule.get(i + 1))
-                .unwrap_or_else(|| panic!("a DHCP rule must name a destination: {rule:?}"));
-            assert!(
-                destination == "255.255.255.255" || destination == "ff02::1:2",
-                "a DHCP rule may only name a link-scoped destination; actual: {rule:?}"
-            );
         }
-    }
-}
-
-// Proxy mode is "the proxy and nothing else", and a client that cannot
-// unicast a renewal falls back to broadcast rebinding, which udhcpc drives
-// over an AF_PACKET raw socket that never reaches netfilter at all.
-#[test]
-fn proxy_mode_opens_no_dhcp_port() {
-    let policy = policy_with_proxy("10.9.8.7", 3128);
-
-    let (manager, issued, result) = apply_and_collect("proxy-nodhcp", &policy);
-    assert!(result.is_ok(), "apply must succeed, got {result:?}");
-
-    let rules = appended_rules(&issued, "iptables", manager.chain_name());
-    assert!(
-        !rules.is_empty(),
-        "the proxied chain must have been programmed at all; issued: {issued:?}"
-    );
-
-    for rule in rules {
         assert!(
-            !has_pair(rule, "--dport", "67") && !has_pair(rule, "--dport", "547"),
-            "a proxied chain must not open DHCP; actual: {rule:?}"
+            programmed,
+            "{name} never reached the rule builder, so this assertion would hold \
+             vacuously; issued: {issued:?}"
         );
     }
 }
