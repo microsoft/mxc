@@ -712,8 +712,6 @@ mod tests {
         );
     }
 
-    // ---- managed mount entries -------------------------------------------
-
     /// Build a container whose config file lives in a fresh temp directory
     /// seeded with `body`.
     fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {

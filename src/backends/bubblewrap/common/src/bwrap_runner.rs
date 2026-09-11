@@ -881,10 +881,8 @@ impl Drop for BubblewrapSandboxProcess {
 /// Unprivileged bwrap has no container network namespace MXC can enforce in:
 /// the sandbox either shares the host's, where a chain would filter the host
 /// itself, or holds a private one bwrap created and MXC does not manage (see
-/// `local_network_diagnostic` in `bwrap_command`). The chain is therefore
-/// built and never hooked, which leaves this backend's egress policy
-/// unenforced -- the same outcome this backend has had all along, now stated
-/// at the call site rather than reached by a missing lookup.
+/// `local_network_diagnostic` in `bwrap_command`). The chain is built and
+/// never hooked, which leaves this backend's egress policy unenforced.
 fn build_firewall_manager(container_name: &str) -> NetworkIptablesManager {
     NetworkIptablesManager::new(container_name, EgressHookPoint::Unhooked)
 }
