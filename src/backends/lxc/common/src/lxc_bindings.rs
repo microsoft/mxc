@@ -1,11 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Safe Rust wrappers around the liblxc C API.
-
-/// Fences the `lxc.mount.entry` lines this backend owns.  A reused container's
-/// block can be rewritten without disturbing entries a template or an operator
-/// added by hand.
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
 
@@ -36,10 +31,9 @@ where
     "/var/lib/lxc".to_string()
 }
 
-/// Resolve the default LXC storage path for the current process.
 pub fn resolve_default_lxcpath() -> String {
-    // The crate compiles workspace-wide (the clippy lane runs on
-    // windows-latest), where this is never called; a non-root EUID stands in.
+    // The windows-latest clippy lane compiles this and never calls it, so a
+    // non-root EUID stands in.
     #[cfg(target_os = "linux")]
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
     fn current_euid() -> u32 {
@@ -53,21 +47,14 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
-/// The keep-env argv shape, for tests that do not exercise env control.
 #[cfg(test)]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
     build_attach_args_with_env_control(env, working_directory, command, false)
 }
 
-/// Build the post-binary argv for `lxc-attach` (the args after the
-/// `-n NAME -P lxcpath` flags `lxc_command` already appended).
-///
 /// An empty `env` is ambiguous: the caller expressed no opinion, or a scrub
 /// removed every entry there was.  `force_clear_env` distinguishes them; only
 /// the second must still shut the host environment out.
-///
-/// Gated to `test` and Linux: `attach_run` is a Windows stub that never calls
-/// this, and the windows-latest clippy lane would otherwise flag it dead.
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args_with_env_control(
     env: &[String],
@@ -95,10 +82,6 @@ fn build_attach_args_with_env_control(
     if working_directory.is_empty() {
         args.push(command.to_string());
     } else {
-        // cwd and command travel through sh as positional `$1`/`$2`, needing
-        // no shell-escaping; `_` fills sh's `$0`.  `cd --` guards a
-        // leading-dash cwd.  `exec` makes signals and timeout delivery reach
-        // the user process, not this wrapper sh.
         args.push("cd -- \"$1\" && exec /bin/sh -c \"$2\"".to_string());
         args.push("_".to_string());
         args.push(working_directory.to_string());
@@ -108,7 +91,6 @@ fn build_attach_args_with_env_control(
     args
 }
 
-/// Permanently drops network-admin capability from the workload when none is requested.
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -129,7 +111,6 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
-/// Whether to start the container with its configured network or with none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
     FromContainerConfig,
@@ -140,7 +121,6 @@ impl StartNetwork {
     fn to_start_args(self) -> &'static [&'static str] {
         match self {
             StartNetwork::FromContainerConfig => &[],
-            // `up` keeps 127.0.0.1 available to a workload that binds it.
             StartNetwork::NoInterface => {
                 &["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"]
             }
@@ -148,16 +128,12 @@ impl StartNetwork {
     }
 }
 
-/// Safe wrapper around an LXC container.
 pub struct LxcContainer {
     name: String,
-
-    /// Resolved LXC storage path, passed via `-P` to every `lxc-*` invocation.
     lxc_path: String,
 }
 
 impl LxcContainer {
-    /// Create a new LXC container handle.
     pub fn new(name: &str, lxc_path: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
@@ -167,26 +143,20 @@ impl LxcContainer {
         }
     }
 
-    /// Get the container name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Get the resolved LXC storage path (the "lxcpath") used by this handle.
     pub fn lxc_path(&self) -> &str {
         &self.lxc_path
     }
 
-    /// Build a `Command` for an `lxc-*` tool with `-P <lxc_path> -n <name>`
-    /// already populated.
     fn lxc_command(&self, tool: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new(tool);
         cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
         cmd
     }
 
-    /// Run a prepared `lxc-*` command, mapping spawn / non-zero-exit failures
-    /// to a `String` error tagged with the tool name.
     fn run_tool(mut cmd: std::process::Command) -> Result<(), String> {
         let tool = cmd.get_program().to_string_lossy().into_owned();
         let output = cmd
@@ -202,13 +172,11 @@ impl LxcContainer {
         Ok(())
     }
 
-    /// Check if the container exists.
     pub fn is_defined(&self) -> bool {
         let output = self.lxc_command("lxc-info").output();
         matches!(output, Ok(o) if o.status.success())
     }
 
-    /// Check if the container is running.
     pub fn is_running(&self) -> bool {
         let output = self.lxc_command("lxc-info").arg("-s").output();
         match output {
@@ -217,8 +185,6 @@ impl LxcContainer {
         }
     }
 
-    /// Return the PID of the container's init process, or `None` if the
-    /// container is not running or the PID cannot be parsed.
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -237,7 +203,6 @@ impl LxcContainer {
         None
     }
 
-    /// Create the container from a template/distribution.
     pub fn create(&self, distribution: &str, release: &str) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-create");
         cmd.args(["-t", "download", "--", "-d"])
@@ -249,9 +214,8 @@ impl LxcContainer {
         Self::run_tool(cmd)
     }
 
-    /// Sets the mount points so the container can see
-    /// allowed file system locations.
-    /// Does remove existing mount points so they don't accumulate on a reused container.
+    /// Removes existing mount points so they do not accumulate on a reused
+    /// container.
     pub fn set_filesystem_access_points(&self, entries: &[String]) -> Result<(), String> {
         let config_path = self.config_file_path();
         let existing = std::fs::read_to_string(&config_path).map_err(|e| {
@@ -314,14 +278,12 @@ impl LxcContainer {
         out
     }
 
-    /// Start the container with `network`.
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
         cmd.args(network.to_start_args());
         Self::run_tool(cmd)
     }
 
-    /// Execute a command inside the container, capturing stdout/stderr.
     pub fn exec(
         &self,
         command: &str,
@@ -343,16 +305,8 @@ impl LxcContainer {
         ))
     }
 
-    /// Run a command inside the running container.
-    ///
     /// Output streams go straight to the host; both returned strings are always
     /// empty.
-    ///
-    /// An empty `env` leaves this process's own environment in place, proxy
-    /// variables and host credentials included.
-    ///
-    /// The unblocked signals are ones this process blocks for its cleanup
-    /// watchdog; left blocked, the inner shell would ignore Ctrl-C.
     #[cfg(target_os = "linux")]
     pub fn attach_run(
         &self,
@@ -364,6 +318,8 @@ impl LxcContainer {
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
+        // This process blocks these for its cleanup watchdog; left blocked, the
+        // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd = self.lxc_command("lxc-attach");
@@ -374,7 +330,6 @@ impl LxcContainer {
             force_clear_env,
         ));
 
-        // Must run before the command is spawned; it registers a pre-exec hook.
         confine_network_capabilities(&mut cmd);
 
         let options = PtyOptions {
@@ -413,28 +368,23 @@ impl LxcContainer {
         Self::run_tool(self.stop_command())
     }
 
-    /// The command [`Self::stop`] runs, built without running it.
     fn stop_command(&self) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-stop");
 
-        // -k kills the container outright.  Asking it to exit instead waits 60
-        // seconds for a SIGPWR reply that systemd as PID 1 in an unprivileged
-        // userns never sends.
+        // -k kills outright.  Asking it to exit instead waits 60 seconds for a
+        // SIGPWR reply that systemd as PID 1 in an unprivileged userns never
+        // sends.
         cmd.arg("-k");
         cmd
     }
 
-    /// Destroy the container, removing its rootfs and config.
     pub fn destroy(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
 
-        // -f force-stops a running container rather than waiting for it to
-        // shut down on its own.
         cmd.arg("-f");
         Self::run_tool(cmd)
     }
 
-    /// Get the path to the container's config file.
     fn config_file_path(&self) -> String {
         format!("{}/{}/config", self.lxc_path, self.name)
     }
@@ -633,8 +583,6 @@ mod tests {
         assert_eq!(c.config_file_path(), "/var/lib/lxc/box/config");
     }
 
-    /// Build a container whose config file lives in a fresh temp directory
-    /// seeded with `body`.
     fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!(
             "mxc-lxc-cfg-{}-{}",
@@ -773,8 +721,6 @@ mod tests {
             "the staging file must not outlive a successful rewrite"
         );
     }
-
-    // ---- build_attach_args ----------------------------------------------
 
     #[test]
     fn build_attach_args_no_env_no_cwd_is_unchanged_legacy_shape() {
