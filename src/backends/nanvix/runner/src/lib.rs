@@ -37,8 +37,9 @@
 //!
 //! Host networking is **off by default** and is enabled per-run by passing
 //! `-allow-host-networking` to `nanvixd`. The runner adds that flag when the
-//! request sets `network.defaultPolicy = "allow"`, or when `allowedHosts` /
-//! `blockedHosts` is present (forwarded as `-allow-host` / `-block-host`).
+//! request sets `network.defaultPolicy = "allow"` or an `allowedHosts` allowlist
+//! is present. A `blockedHosts` blocklist is supported only with an `"allow"`
+//! default and is forwarded as `-block-host`.
 //! Network proxies are not supported and are rejected at validation time.
 //!
 //! Auto-discovery
@@ -103,6 +104,10 @@ const ERR_NETWORK_HOSTS: &str = concat!(
     "allowedHosts and blockedHosts are mutually exclusive for the NanVix backend -- ",
     "the guest egress filter is allow-XOR-block. Specify an allowlist (allowedHosts) ",
     "or a blocklist (blockedHosts), not both",
+);
+const ERR_BLOCKED_HOSTS_REQUIRE_ALLOW: &str = concat!(
+    "blockedHosts requires network.defaultPolicy = \"allow\" for the NanVix backend -- ",
+    "a blocklist is allow-by-default and cannot be combined with a block default",
 );
 const ERR_HOSTS_UNRESOLVED: &str = concat!(
     "none of the specified allowedHosts/blockedHosts resolved to an IPv4 address -- ",
@@ -521,15 +526,15 @@ impl NanVixScriptRunner {
 
     /// Returns whether the request opts in to host networking.
     ///
-    /// Host networking is enabled when `network.defaultPolicy = "allow"` OR when
-    /// a per-host allow/block list is present (a list always implies networking,
-    /// regardless of `defaultPolicy`). When enabled, the runner passes
-    /// `-allow-host-networking` to nanvixd; per-host lists are additionally
-    /// forwarded as `-allow-host`/`-block-host` (see [`Self::spawn_nanvixd`]).
+    /// Host networking is enabled when `network.defaultPolicy = "allow"` or an
+    /// allowlist is present. A blocklist cannot independently enable networking:
+    /// validation requires it to be paired with an allow default. When enabled,
+    /// the runner passes `-allow-host-networking` to nanvixd; per-host lists are
+    /// additionally forwarded as `-allow-host`/`-block-host` (see
+    /// [`Self::spawn_nanvixd`]).
     fn host_networking_enabled(request: &ExecutionRequest) -> bool {
         request.policy.default_network_policy == NetworkPolicy::Allow
             || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
     }
 
     /// Resolves a host entry list into IPv4/CIDR literals for nanvixd's
@@ -640,12 +645,18 @@ impl NanVixScriptRunner {
         if !request.policy.denied_paths.is_empty() {
             return Err(NanVixError::Preflight(ERR_DENIED_PATHS.to_string()));
         }
-        // Per-host filtering is supported (forwarded to nanvixd as
-        // -allow-host/-block-host). The guest egress filter is allow-XOR-block,
-        // so the two lists are mutually exclusive; defaultPolicy is ignored when
-        // either list is present.
+        // The guest egress filter is allow-XOR-block, so the two lists are
+        // mutually exclusive. A blocklist is meaningful only for allow-by-default
+        // networking; an allowlist supplies the exceptions to a block default.
         if !request.policy.allowed_hosts.is_empty() && !request.policy.blocked_hosts.is_empty() {
             return Err(NanVixError::Preflight(ERR_NETWORK_HOSTS.to_string()));
+        }
+        if !request.policy.blocked_hosts.is_empty()
+            && request.policy.default_network_policy != NetworkPolicy::Allow
+        {
+            return Err(NanVixError::Preflight(
+                ERR_BLOCKED_HOSTS_REQUIRE_ALLOW.to_string(),
+            ));
         }
         if request.policy.network_proxy.is_enabled() {
             return Err(NanVixError::Preflight(ERR_PROXY_POLICY.to_string()));
@@ -689,9 +700,10 @@ impl NanVixScriptRunner {
         // Per-host egress filtering. The two lists are mutually exclusive
         // (validated upstream), so at most one of these loops emits flags.
         // nanvixd requires `-allow-host-networking` for these to take effect,
-        // which is guaranteed because a non-empty list forces host_networking
-        // on (see `host_networking_enabled`). The guest daemon auto-exempts the
-        // DNS port in allowlist mode, so no resolver IPs are added here.
+        // which is guaranteed for valid requests: allowlists enable networking
+        // directly, while blocklists require an allow default. The guest daemon
+        // auto-exempts the DNS port in allowlist mode, so no resolver IPs are
+        // added here.
         for host in allow_hosts {
             cmd.arg("-allow-host").arg(host);
         }
@@ -1140,20 +1152,36 @@ mod tests {
     }
 
     #[test]
-    fn policy_accepts_blocklist_only() {
-        // A bare blocklist is now supported (forwarded as -block-host).
+    fn policy_rejects_blocklist_with_block_default() {
         let request = ExecutionRequest {
-            script_code: "echo test".to_string(),
             policy: ContainerPolicy {
                 blocked_hosts: vec!["93.184.216.34".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
+
+        let err = NanVixScriptRunner::validate_policies(&request).unwrap_err();
         assert!(
-            NanVixScriptRunner::validate_policies(&request).is_ok(),
-            "a bare blocklist should pass validation"
+            err.to_string().contains(ERR_BLOCKED_HOSTS_REQUIRE_ALLOW),
+            "blocklist with block default should be rejected, got: {}",
+            err
         );
+        assert!(!NanVixScriptRunner::host_networking_enabled(&request));
+    }
+
+    #[test]
+    fn policy_accepts_blocklist_with_allow_default() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                blocked_hosts: vec!["93.184.216.34".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(NanVixScriptRunner::validate_policies(&request).is_ok());
         assert!(NanVixScriptRunner::host_networking_enabled(&request));
     }
 
@@ -1291,6 +1319,7 @@ mod tests {
         // be resolved -- silently dropping it would let blocked traffic flow.
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["10.0.0.1".to_string(), "::1".to_string()],
                 ..Default::default()
             },
@@ -1313,6 +1342,7 @@ mod tests {
     fn resolve_host_lists_accepts_fully_resolved_blocklist() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["10.0.0.1".to_string(), "192.168.0.0/16".to_string()],
                 ..Default::default()
             },
