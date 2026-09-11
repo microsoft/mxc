@@ -1,7 +1,5 @@
 # JSON-first one-shot sandbox APIs
 
-> **Status:** Proposal
-
 This proposal updates only the dataflow for one-shot sandbox run and spawn.
 
 ## Proposal
