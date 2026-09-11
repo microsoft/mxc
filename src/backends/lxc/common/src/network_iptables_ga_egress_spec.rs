@@ -154,6 +154,23 @@ fn new_connection_action<'a>(
         })
 }
 
+/// The action a connection reaches: the first matching rule's verdict, or
+/// `default` when nothing in `rules` matches -- the chain's closing policy
+/// rule is programmed separately and is never part of `rules`, so a
+/// destination outside every explicit entry has to fall through here rather
+/// than panic.
+fn connection_action_or_default<'a>(
+    rules: &'a [Vec<String>],
+    destination: std::net::IpAddr,
+    protocol: &str,
+    port: Option<u16>,
+    default: &'a str,
+) -> &'a str {
+    matching_emitted_rule(rules, destination, protocol, port)
+        .and_then(|rule| argument_after(rule, "-j"))
+        .unwrap_or(default)
+}
+
 #[test]
 fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
     let ipv4 = "198.51.100.0/24";
@@ -181,7 +198,7 @@ fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
 }
 
 #[test]
-fn an_allow_peer_exclusion_is_denied_before_its_parent_cidr_is_allowed() {
+fn an_allow_peer_exclusion_falls_through_to_the_default_deny() {
     let parent = "10.0.0.0/8";
     let exclusion = "10.10.0.0/16";
     let policy = directional_policy(
@@ -190,16 +207,29 @@ fn an_allow_peer_exclusion_is_denied_before_its_parent_cidr_is_allowed() {
         Vec::new(),
     );
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
-    let exclusion_position = rule_position(&rules.ipv4, exclusion, "DROP");
-    let parent_position = rule_position(&rules.ipv4, parent, "ACCEPT");
 
-    assert!(
-        matches!(
-            (exclusion_position, parent_position),
-            (Some(exclusion_position), Some(parent_position))
-                if exclusion_position < parent_position
+    assert_eq!(
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443),
+            "DROP",
         ),
-        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; expected exclusion DROP before parent ACCEPT; positions={exclusion_position:?}/{parent_position:?}; output={:?}",
+        "DROP",
+        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; the exclusion is not matched by this rule and falls through to the direction default; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.20.1.1"),
+            "tcp",
+            Some(443),
+            "DROP",
+        ),
+        "ACCEPT",
+        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.20.1.1/tcp/443; an address inside the parent and outside the exclusion is allowed; output={:?}",
         rules.ipv4
     );
 }
@@ -216,22 +246,24 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(
+        connection_action_or_default(
             &rules.ipv4,
             packet_address("10.10.1.1"),
             "tcp",
-            Some(443)
+            Some(443),
+            "ACCEPT",
         ),
         "ACCEPT",
         "input=default allow, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; output={:?}",
         rules.ipv4
     );
     assert_eq!(
-        new_connection_action(
+        connection_action_or_default(
             &rules.ipv4,
             packet_address("10.20.1.1"),
             "tcp",
-            Some(443)
+            Some(443),
+            "ACCEPT",
         ),
         "DROP",
         "input=default allow, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.20.1.1/tcp/443; output={:?}",
@@ -251,15 +283,21 @@ fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443),
+            "ACCEPT",
+        ),
         "ACCEPT",
-        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
+        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; the exclusion narrows this rule but the direction default still allows it; output={:?}",
         rules.ipv4
     );
     assert!(
         rule_position(&rules.ipv4, exclusion, "DROP").is_none()
             && rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none(),
-        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out of either action belongs in the chain; output={:?}",
+        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion is carved out of the allow rule and installs no rule of its own; output={:?}",
         rules.ipv4
     );
 }
@@ -276,15 +314,62 @@ fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443),
+            "DROP",
+        ),
         "DROP",
-        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
+        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; the exclusion narrows this rule but the direction default still blocks it; output={:?}",
         rules.ipv4
     );
     assert!(
         rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none()
             && rule_position(&rules.ipv4, exclusion, "DROP").is_none(),
-        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out of either action belongs in the chain; output={:?}",
+        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion is carved out of the deny rule and installs no rule of its own; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn a_narrower_later_deny_is_not_defeated_by_an_earlier_wider_denys_exclusion() {
+    let wide_deny = "10.0.0.0/8";
+    let wide_exclusion = "10.10.0.0/16";
+    let narrow_deny = "10.10.1.0/24";
+    let policy = directional_policy(
+        NetworkAction::Allow,
+        Vec::new(),
+        vec![
+            rule(vec![peer(wide_deny, &[wide_exclusion])], Vec::new()),
+            rule(vec![peer(narrow_deny, &[])], Vec::new()),
+        ],
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.10.1.5"),
+            "tcp",
+            Some(443),
+            "ACCEPT",
+        ),
+        "DROP",
+        "input=default allow, deny=[{{cidr:{wide_deny}, except:[{wide_exclusion}]}}, {{cidr:{narrow_deny}}}], packet=10.10.1.5/tcp/443; the exclusion on the wider deny must not short-circuit the narrower deny that follows it; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        connection_action_or_default(
+            &rules.ipv4,
+            packet_address("10.10.2.5"),
+            "tcp",
+            Some(443),
+            "ACCEPT",
+        ),
+        "ACCEPT",
+        "input=default allow, deny=[{{cidr:{wide_deny}, except:[{wide_exclusion}]}}, {{cidr:{narrow_deny}}}], packet=10.10.2.5/tcp/443; an address inside the exclusion but outside the narrower deny stays reachable; output={:?}",
         rules.ipv4
     );
 }

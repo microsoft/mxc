@@ -643,6 +643,15 @@ fn lxc_network_policy_support() -> NetworkPolicySupport {
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, lxc_network_policy_support())?;
+
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+        if let Some(refusal) =
+            IngressManager::permissive_inbound_refusal(&request.policy, uses_directional_schema)
+        {
+            return Err(ScriptResponse::error(&refusal));
+        }
+
         Ok(())
     }
 

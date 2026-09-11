@@ -538,6 +538,44 @@ impl IngressManager {
         policy.allow_local_network.then_some("allowLocalNetwork")
     }
 
+    /// Why LXC cannot honor `field`.
+    ///
+    /// `network.ingress.default` governs inbound from private networks, which
+    /// is a different ask from host loopback and needs its own account.
+    fn permissive_inbound_reason(field: &str) -> &'static str {
+        if field == "network.ingress.default" {
+            return "Accepting inbound from private networks needs a rule scoped to those \
+                    sources, and this backend cannot express that scope today; the only rule \
+                    available accepts new inbound connections from every interface and \
+                    source, LAN and WAN alike, which is broader than requested.";
+        }
+
+        "Scoping inbound to host loopback requires a loopbackPorts policy field and an \
+         MXC-owned host-loopback forwarder that do not exist yet; the only rule available \
+         accepts new inbound connections from every interface and source, LAN and WAN alike, \
+         which is broader than requested."
+    }
+
+    /// The refusal owed to a policy asking for permissive inbound.
+    ///
+    /// `validate_runner` calls this before the container starts.  Refusing
+    /// later left a preserved egress chain behind on a request that failed.
+    pub(crate) fn permissive_inbound_refusal(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> Option<String> {
+        if !installs_firewall(policy, uses_directional_schema) {
+            return None;
+        }
+
+        let field = Self::permissive_inbound_field(policy, uses_directional_schema)?;
+        Some(format!(
+            "{field} is not yet implemented for the LXC firewall path. {} Refusing rather \
+             than installing an over-broad accept.",
+            Self::permissive_inbound_reason(field)
+        ))
+    }
+
     /// Apply the inbound firewall rules for `policy`.
     ///
     /// Delegates argv construction to the pure [`Self::build_ingress_rules`]
@@ -559,15 +597,8 @@ impl IngressManager {
         // claimed is a promise to either enforce the field or reject it.
         // Unconditional: we always have a real container netns to hook (the PID
         // is mandatory), so there is no inert path that could safely emit it.
-        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_schema) {
-            return Err(format!(
-                "{field} (permissive host-loopback inbound) is not yet implemented for the \
-                 LXC firewall path. Scoping inbound to host loopback requires a loopbackPorts \
-                 policy field and an MXC-owned host-loopback forwarder that do not exist yet; \
-                 the only rule available today would accept new inbound connections from every \
-                 interface and source (LAN and WAN), which is broader than requested. Refusing \
-                 rather than installing an over-broad accept."
-            ));
+        if let Some(refusal) = Self::permissive_inbound_refusal(policy, uses_directional_schema) {
+            return Err(refusal);
         }
 
         logger.log_line(&format!(

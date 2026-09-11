@@ -1466,30 +1466,22 @@ impl NetworkIptablesManager {
     /// and fixes no order between them.
     fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
         let mut entries = Vec::new();
-        let default_action = match egress.default {
-            NetworkAction::Allow => RuleAction::Allow,
-            NetworkAction::Deny => RuleAction::Deny,
-        };
         for rule in &egress.deny {
-            Self::lower_rule(rule, RuleAction::Deny, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Deny, &mut entries);
         }
         for rule in &egress.allow {
-            Self::lower_rule(rule, RuleAction::Allow, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Allow, &mut entries);
         }
         entries
     }
 
-    /// Expand one 0.8 rule into one entry per (peer, port selector) pair.
+    /// Expand one 0.8 rule into one entry per (peer minus its exclusions,
+    /// port selector) pair.
     ///
     /// An omitted `to` selects every destination; the parser rejects an
     /// explicit empty array, leaving the omitted form as the only way an
     /// empty `to` reaches here.
-    fn lower_rule(
-        rule: &NetworkRule,
-        action: RuleAction,
-        default_action: RuleAction,
-        entries: &mut Vec<EgressEntry>,
-    ) {
+    fn lower_rule(rule: &NetworkRule, action: RuleAction, entries: &mut Vec<EgressEntry>) {
         let matches = Self::lower_port_selectors(&rule.ports);
         let wildcard_peers;
         let peers = if rule.to.is_empty() {
@@ -1500,27 +1492,163 @@ impl NetworkIptablesManager {
         };
 
         for peer in peers {
-            for matching in &matches {
-                // The carve-out takes the direction's default verdict rather
-                // than the rule's own — `except` excludes the range from the
-                // rule; it does not reverse it. Nothing is pushed when the
-                // two verdicts already agree.
-                if default_action != action {
-                    for excluded in &peer.except {
-                        entries.push(EgressEntry {
-                            destination: Self::cidr_destination(excluded),
-                            action: default_action,
-                            matching: *matching,
-                        });
-                    }
+            // `except` narrows the peer this rule matches; it never reverses
+            // the rule's own action, so the reachable set below carries the
+            // rule's `action` and nothing else.
+            let reachable = Self::subtract_cidrs(&peer.cidr, &peer.except);
+            for destination in &reachable {
+                for matching in &matches {
+                    entries.push(EgressEntry {
+                        destination: Self::cidr_destination(destination),
+                        action,
+                        matching: *matching,
+                    });
                 }
-                entries.push(EgressEntry {
-                    destination: Self::cidr_destination(&peer.cidr),
-                    action,
-                    matching: *matching,
-                });
             }
         }
+    }
+
+    /// The number of address bits a CIDR's family carries.
+    fn address_bit_width(address: &IpAddr) -> u8 {
+        match address {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        }
+    }
+
+    /// An address's numeric value, widened to `u128` so IPv4 and IPv6 share
+    /// one bitwise representation.
+    fn address_bits(address: &IpAddr) -> u128 {
+        match address {
+            IpAddr::V4(v4) => u32::from(*v4).into(),
+            IpAddr::V6(v6) => u128::from(*v6),
+        }
+    }
+
+    /// The inverse of [`Self::address_bits`]: rebuild the address that holds
+    /// `value` within `width` bits.
+    fn bits_to_address(value: u128, width: u8) -> IpAddr {
+        if width == 32 {
+            IpAddr::V4(std::net::Ipv4Addr::from(value as u32))
+        } else {
+            IpAddr::V6(std::net::Ipv6Addr::from(value))
+        }
+    }
+
+    /// The bitmask selecting a prefix's network bits within `width` total
+    /// bits.
+    fn prefix_mask(prefix_length: u8, width: u8) -> u128 {
+        if prefix_length == 0 {
+            0
+        } else {
+            let family_mask = if width == 128 {
+                u128::MAX
+            } else {
+                (1u128 << width) - 1
+            };
+            (family_mask << (width - prefix_length)) & family_mask
+        }
+    }
+
+    /// Whether the range at `outer_prefix` covers every address the range at
+    /// `inner_prefix` reaches: `outer` has to be the shorter or equal prefix,
+    /// and their network bits have to agree once masked to it.
+    fn cidr_range_contains(
+        outer: u128,
+        outer_prefix: u8,
+        inner: u128,
+        inner_prefix: u8,
+        width: u8,
+    ) -> bool {
+        outer_prefix <= inner_prefix && {
+            let mask = Self::prefix_mask(outer_prefix, width);
+            outer & mask == inner & mask
+        }
+    }
+
+    /// Subtract one excepted range from one candidate range, splitting the
+    /// candidate only as far as the exclusion's own prefix requires.
+    ///
+    /// Standard CIDR punch-out: while the exclusion sits inside the
+    /// candidate, bisect the candidate at the next prefix length, keep
+    /// whichever half the exclusion does not touch, and recurse into the
+    /// half that still contains it.
+    fn subtract_one_range(candidate: (u128, u8), except: (u128, u8), width: u8) -> Vec<(u128, u8)> {
+        let (candidate_value, candidate_prefix) = candidate;
+        let (except_value, except_prefix) = except;
+
+        if except_prefix <= candidate_prefix {
+            let except_contains_candidate = Self::cidr_range_contains(
+                except_value,
+                except_prefix,
+                candidate_value,
+                candidate_prefix,
+                width,
+            );
+            if except_contains_candidate {
+                Vec::new()
+            } else {
+                vec![candidate]
+            }
+        } else if !Self::cidr_range_contains(
+            candidate_value,
+            candidate_prefix,
+            except_value,
+            except_prefix,
+            width,
+        ) {
+            vec![candidate]
+        } else {
+            let child_prefix = candidate_prefix + 1;
+            let distinguishing_bit = 1u128 << (width - child_prefix);
+            let high_child = candidate_value | distinguishing_bit;
+            let (excepted_child, kept_child) = if except_value & distinguishing_bit == 0 {
+                (candidate_value, high_child)
+            } else {
+                (high_child, candidate_value)
+            };
+
+            let mut result = vec![(kept_child, child_prefix)];
+            result.extend(Self::subtract_one_range(
+                (excepted_child, child_prefix),
+                except,
+                width,
+            ));
+            result
+        }
+    }
+
+    /// Subtract `excepts` from `parent`, returning the minimal set of
+    /// prefixes covering every address in `parent` that no exclusion covers.
+    ///
+    /// Mirrors Kubernetes `ipBlock.except`: an excepted address is not
+    /// matched by this peer and remains free for whatever rule considers it
+    /// next; it is never short-circuited to a direction default. An except in
+    /// a different address family, or disjoint from `parent`, subtracts
+    /// nothing. An except equal to or containing `parent` subtracts all of
+    /// it, leaving no entries for that peer.
+    fn subtract_cidrs(parent: &NetworkCidr, excepts: &[NetworkCidr]) -> Vec<NetworkCidr> {
+        let width = Self::address_bit_width(&parent.address);
+        let mut ranges = vec![(Self::address_bits(&parent.address), parent.prefix_length)];
+
+        for except in excepts {
+            if Self::address_bit_width(&except.address) != width {
+                continue;
+            }
+            let except_range = (Self::address_bits(&except.address), except.prefix_length);
+            ranges = ranges
+                .into_iter()
+                .flat_map(|range| Self::subtract_one_range(range, except_range, width))
+                .collect();
+        }
+
+        ranges
+            .into_iter()
+            .map(|(value, prefix_length)| NetworkCidr {
+                address: Self::bits_to_address(value, width),
+                prefix_length,
+            })
+            .collect()
     }
 
     /// The peer list standing in for an omitted `to`: every address in both
@@ -1630,7 +1758,10 @@ impl NetworkIptablesManager {
         uses_directional_schema: bool,
         logger: &mut Logger,
     ) -> Result<FirewallRuleArgs, String> {
-        let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+        let default_permits = matches!(
+            Self::effective_default_policy(policy, uses_directional_schema),
+            NetworkPolicy::Allow
+        );
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
@@ -2997,6 +3128,151 @@ mod tests {
         }
     }
 
+    fn cidr(text: &str) -> NetworkCidr {
+        text.parse()
+            .unwrap_or_else(|error| panic!("invalid test CIDR {text:?}: {error}"))
+    }
+
+    /// A single address, at the widest prefix its family allows, for checking
+    /// whether `subtract_cidrs`'s output covers it.
+    fn host_cidr(address: &str) -> NetworkCidr {
+        let address: IpAddr = address
+            .parse()
+            .unwrap_or_else(|error| panic!("invalid test address {address:?}: {error}"));
+        let prefix_length = if address.is_ipv4() { 32 } else { 128 };
+        NetworkCidr {
+            address,
+            prefix_length,
+        }
+    }
+
+    fn covers(fragments: &[NetworkCidr], address: &str) -> bool {
+        let host = host_cidr(address);
+        fragments
+            .iter()
+            .any(|fragment| fragment.contains_cidr(&host))
+    }
+
+    #[test]
+    fn subtract_cidrs_excludes_an_exception_in_the_middle_of_the_parent() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("10.0.0.128/28"); // 10.0.0.128 - 10.0.0.143
+        let fragments = NetworkIptablesManager::subtract_cidrs(&parent, &[except]);
+
+        assert!(!covers(&fragments, "10.0.0.128"), "fragments={fragments:?}");
+        assert!(!covers(&fragments, "10.0.0.143"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.0"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.127"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.144"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.255"), "fragments={fragments:?}");
+    }
+
+    #[test]
+    fn subtract_cidrs_excludes_an_exception_at_the_parents_low_edge() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("10.0.0.0/28"); // the parent's first 16 addresses
+        let fragments = NetworkIptablesManager::subtract_cidrs(&parent, &[except]);
+
+        assert!(!covers(&fragments, "10.0.0.0"), "fragments={fragments:?}");
+        assert!(!covers(&fragments, "10.0.0.15"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.16"), "fragments={fragments:?}");
+        assert!(covers(&fragments, "10.0.0.255"), "fragments={fragments:?}");
+    }
+
+    #[test]
+    fn subtract_cidrs_removes_everything_when_the_exception_equals_the_parent() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("10.0.0.0/24");
+
+        assert!(
+            NetworkIptablesManager::subtract_cidrs(&parent, &[except]).is_empty(),
+            "an exception equal to the parent must subtract all of it"
+        );
+    }
+
+    #[test]
+    fn subtract_cidrs_removes_everything_when_the_exception_contains_the_parent() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("10.0.0.0/16"); // wider than the parent, containing it
+
+        assert!(
+            NetworkIptablesManager::subtract_cidrs(&parent, &[except]).is_empty(),
+            "an exception containing the parent must subtract all of it"
+        );
+    }
+
+    #[test]
+    fn subtract_cidrs_removes_two_disjoint_exceptions_independently() {
+        let parent = cidr("10.0.0.0/24");
+        let first_except = cidr("10.0.0.16/28"); // 16 - 31
+        let second_except = cidr("10.0.0.192/28"); // 192 - 207
+        let fragments =
+            NetworkIptablesManager::subtract_cidrs(&parent, &[first_except, second_except]);
+
+        for excluded in ["10.0.0.16", "10.0.0.31", "10.0.0.192", "10.0.0.207"] {
+            assert!(!covers(&fragments, excluded), "fragments={fragments:?}");
+        }
+        for reachable in [
+            "10.0.0.0",
+            "10.0.0.15",
+            "10.0.0.32",
+            "10.0.0.191",
+            "10.0.0.208",
+            "10.0.0.255",
+        ] {
+            assert!(covers(&fragments, reachable), "fragments={fragments:?}");
+        }
+    }
+
+    #[test]
+    fn subtract_cidrs_ignores_an_exception_outside_the_parent() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("192.168.0.0/24"); // same family, disjoint range
+
+        assert_eq!(
+            NetworkIptablesManager::subtract_cidrs(&parent, &[except]),
+            vec![parent],
+            "an exception disjoint from the parent must subtract nothing"
+        );
+    }
+
+    #[test]
+    fn subtract_cidrs_ignores_an_exception_in_a_different_address_family() {
+        let parent = cidr("10.0.0.0/24");
+        let except = cidr("2001:db8::/32");
+
+        assert_eq!(
+            NetworkIptablesManager::subtract_cidrs(&parent, &[except]),
+            vec![parent],
+            "an exception in a different address family must subtract nothing"
+        );
+    }
+
+    #[test]
+    fn subtract_cidrs_excludes_an_exception_from_an_ipv6_parent() {
+        let parent = cidr("2001:db8::/32");
+        let except = cidr("2001:db8:1::/48");
+        let fragments = NetworkIptablesManager::subtract_cidrs(&parent, &[except]);
+
+        assert!(
+            !covers(&fragments, "2001:db8:1::"),
+            "fragments={fragments:?}"
+        );
+        assert!(
+            !covers(&fragments, "2001:db8:1:ffff:ffff:ffff:ffff:ffff"),
+            "fragments={fragments:?}"
+        );
+        assert!(covers(&fragments, "2001:db8::"), "fragments={fragments:?}");
+        assert!(
+            covers(&fragments, "2001:db8:2::"),
+            "fragments={fragments:?}"
+        );
+        assert!(
+            covers(&fragments, "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"),
+            "fragments={fragments:?}"
+        );
+    }
+
     // Bubblewrap has no veth at all, so the fail-closed path that protects LXC
     // would refuse to start every Bubblewrap sandbox asking for firewall mode.
     // A caller that declares the absence up front must still get its chain
@@ -4159,6 +4435,68 @@ mod tests {
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
+    }
+
+    /// A directional deny rule whose destination is a CIDR with a prefix
+    /// length out of range for its family, so `destination_family` rejects it
+    /// and `resolve_host` returns no address for it.
+    fn directional_policy_with_unresolvable_deny(default: NetworkAction) -> ContainerPolicy {
+        ContainerPolicy {
+            network_mode_specified: true,
+            // Left at its legacy default deliberately. The 0.8 parser leaves
+            // this field at `Block` for every config, and the fix under test
+            // is that the chain's closing rule must come from
+            // `network_egress.default` rather than from this field.
+            default_network_policy: NetworkPolicy::Block,
+            network_egress: Some(NetworkEgressPolicy {
+                default,
+                deny: vec![NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: NetworkCidr {
+                            address: IpAddr::from([10u8, 0, 0, 0]),
+                            prefix_length: 33,
+                        },
+                        except: Vec::new(),
+                    }],
+                    ports: Vec::new(),
+                }],
+                allow: Vec::new(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_accepting_egress_default_refuses_an_unresolvable_deny() {
+        // `effective_default_policy` must read `network_egress.default`
+        // rather than the legacy `default_network_policy` field, which stays
+        // `Block` here. Reading the legacy field would take the warn-only
+        // path while the chain's closing rule actually accepts, leaving the
+        // denied destination reachable -- the fail-open this guard exists to
+        // prevent.
+        let policy = directional_policy_with_unresolvable_deny(NetworkAction::Allow);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err =
+            NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, true, &mut logger)
+                .expect_err("an accepting egress default must not tolerate an unresolvable deny");
+
+        assert!(
+            err.contains("10.0.0.0/33"),
+            "error should name the unresolvable destination, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_denying_egress_default_leaves_an_unresolvable_deny_as_a_warning() {
+        // The chain's closing DROP already covers whatever the unresolvable
+        // destination turns out to be, so this must stay a warning rather
+        // than a hard failure.
+        let policy = directional_policy_with_unresolvable_deny(NetworkAction::Deny);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, true, &mut logger)
+            .expect("a denying egress default's closing DROP already covers the unresolved deny");
     }
 
     #[test]

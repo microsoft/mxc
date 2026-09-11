@@ -65,6 +65,7 @@ V08_DENY_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_v08_deny_ingress.json"
 [ -f "$DENY_CONFIG" ] || skip "missing config $DENY_CONFIG."
 [ -f "$PERMISSIVE_CONFIG" ] || skip "missing config $PERMISSIVE_CONFIG."
 [ -f "$DIRECTIONAL_CONFIG" ] || skip "missing config $DIRECTIONAL_CONFIG."
+[ -f "$V08_DENY_CONFIG" ] || skip "missing config $V08_DENY_CONFIG."
 
 fail() {
     echo "FAIL: $1"

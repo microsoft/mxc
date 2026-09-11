@@ -183,7 +183,7 @@ CIDRs only; the shape has no hostname form.
 | `egress.deny[]` | Denies the traffic each rule names | A destination named by both lists is denied |
 | `egress.allow[]` | Permits the traffic each rule names | |
 | `to[].cidr` | Scopes the rule to one destination range | Omitting `to` applies the rule to every destination |
-| `to[].except[]` | Removes addresses from the peer's range | Excepted addresses fall through to `egress.default`, so an `except` whose rule already agrees with the default changes nothing |
+| `to[].except[]` | Removes addresses from the peer's range | An excepted address is not matched by this rule and continues through the remaining `deny`/`allow` rules; it is not forced to `egress.default` |
 | `ports[].protocol` | Scopes the rule to TCP, UDP, or ICMP | `any` paired with a port covers TCP and UDP only, since ICMP carries no port; an ICMP rule covers both IPv4 and IPv6 |
 | `ports[].port`, `ports[].endPort` | Scopes the rule to a single port or an inclusive range | Omitting `ports` applies the rule to every port and protocol |
 
