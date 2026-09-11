@@ -45,7 +45,7 @@ contract (including fields not yet exposed via the SDK).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
+| `version` | `0.9.0-alpha` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
 | `network` | `{ defaultPolicy: 'allow'; allowLocalNetwork: true }` | — (**required**) | Unrestricted-network acknowledgment. The container runs on a network MXC cannot filter or deny (outbound open; a process inside can listen on a port reachable from outside via localhost), so the caller must explicitly acknowledge it. This exact value is the only one accepted; any other network policy (or omission) is rejected at provision, and `network` is not accepted on the post-provision phases (the posture is fixed at provision). |
 | `appId` | string | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated structurally only (no control characters, at most 256 characters); rejections surface as `MxcError` with `code: 'policy_validation'`. Whitespace and case are preserved exactly, and an explicitly supplied empty string is a **distinct** value from omitting the field. Provision-phase only — it is fixed for the sandbox's lifetime, and the `IsolationSessionStartConfig` type rejects it at compile time. |
 
@@ -68,7 +68,7 @@ in the SDK parses past the `iso:` prefix.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
+| `version` | `0.9.0-alpha` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
 
 **Metadata:** none.
 
@@ -78,7 +78,7 @@ in the SDK parses past the `iso:` prefix.
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string | Schema-version override. |
+| `version` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
 | `process` | `ProcessConfig` (required) | Cross-cutting process info — `commandLine`, `cwd`, `env`, `timeout`. |
 
 **Metadata:** n/a — exec returns an exit code and streamed stdio, not a structured result.

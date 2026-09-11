@@ -49,6 +49,10 @@ pub(crate) fn adapt_request(
     }
 }
 
+pub(crate) fn one_shot_into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
+    one_shot::into_wire(request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

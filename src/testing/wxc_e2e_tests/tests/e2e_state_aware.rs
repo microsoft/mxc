@@ -55,6 +55,7 @@ fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
     // a state-aware request — exercises the parser-level rejection branch of
     // the wire-format error contract.
     let request = json!({
+        "version": "0.9.0-alpha",
         "containment": "totally_made_up",
         "phase": "provision"
     });
@@ -84,6 +85,7 @@ fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() 
     // `backend_unavailable` instead, so a non-experimental GA backend is used
     // here to exercise the fallback.
     let request = json!({
+        "version": "0.9.0-alpha",
         "containment": "processcontainer",
         "phase": "provision"
     });

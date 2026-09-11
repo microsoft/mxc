@@ -6,18 +6,19 @@ import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import { diagLog } from './diagnostic.js';
-import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
+import {
+  Phase,
+  STATE_AWARE_VERSION,
+  StateAwareContainmentBackend,
+} from './state-aware-types.js';
 import { TelemetryConfig } from './types.js';
 
-export const STATE_AWARE_VERSION = '0.6.0-alpha';
+export { STATE_AWARE_VERSION };
 
-// WSLc's state-aware surface shipped at a later schema version than the
-// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
-// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
-// backends were promoted independently, so WSLc carries its own later default.
-// See `DEFAULT_STATE_AWARE_VERSION`.
-export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
-export const TELEMETRY_STATE_AWARE_VERSION = '0.9.0-alpha';
+// Keep the WSLC constant separate because it is part of the public SDK surface
+// and remains independently versioned, even though every state-aware backend
+// currently uses the exact 0.9 development contract.
+export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
@@ -107,18 +108,16 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
-  const suppliedVersion =
-    typeof backendSpecific.version === 'string' ? backendSpecific.version : undefined;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
-  const hasTelemetry = telemetry !== undefined;
-  const process = backendSpecific.process;
-  const hasInheritDefaultEnv =
-    typeof process === 'object' &&
-    process !== null &&
-    Object.prototype.hasOwnProperty.call(process, 'inheritDefaultEnv') &&
-    (process as Record<string, unknown>).inheritDefaultEnv !== undefined;
-  const requires09 = hasTelemetry || hasInheritDefaultEnv;
-  const version = suppliedVersion || (requires09 ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
+  const requestedVersion = backendSpecific.version;
+  if (requestedVersion !== undefined && requestedVersion !== defaultVersion) {
+    throw mxcErrorFromCode(
+      'malformed_request',
+      `State-aware ${backendKey} requests require schema version '${defaultVersion}', ` +
+      `got '${String(requestedVersion)}'.`,
+    );
+  }
+  const version = defaultVersion;
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };

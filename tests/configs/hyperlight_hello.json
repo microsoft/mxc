@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "import sys\nprint(f'Hello from Hyperlight! Python {sys.version.split()[0]} on {sys.platform}')",
         "timeout": 30000

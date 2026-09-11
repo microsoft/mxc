@@ -32,7 +32,7 @@ fn run_state_aware_json_rejects_one_shot_config() {
 fn run_state_aware_json_rejects_non_dry_run_exec() {
     // A non-dry-run exec streams; it must be routed through exec_sandbox, not
     // the envelope entry point.
-    let json = r#"{"phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err =
         run_state_aware_json(json, false, false).expect_err("non-dry-run exec must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
@@ -48,7 +48,7 @@ fn run_state_aware_json_malformed_json_is_malformed_request() {
 
 #[test]
 fn exec_sandbox_rejects_non_exec_phase() {
-    let json = r#"{"phase":"provision","containment":"isolation_session"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
     // `Sandbox` is not `Debug`, so match rather than `expect_err`.
     match exec_sandbox(json, false) {
         Ok(_) => panic!("a provision request is not an exec"),
@@ -75,7 +75,7 @@ fn exec_sandbox_rejects_one_shot_config() {
 // covered by the host-gated executor E2E suites.)
 #[test]
 fn unregistered_backend_prefix_is_unsupported_containment() {
-    let json = r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
     let err = run_state_aware_json(json, false, false)
         .expect_err("an unregistered sandbox-id prefix has no backend");
     assert_eq!(err.code, ErrorCode::UnsupportedContainment);
@@ -86,7 +86,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 /// before backend dispatch on every platform.
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
@@ -107,7 +107,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 /// this fails. A dry run keeps it side-effect-free.
 #[test]
 fn the_optin_admits_an_experimental_backend() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     if let Err(err) = run_state_aware_json(json, true, true) {
         assert_ne!(
             err.code,
@@ -123,7 +123,7 @@ fn the_optin_admits_an_experimental_backend() {
 /// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
@@ -142,7 +142,7 @@ fn the_refusal_carries_no_api_call_detail() {
 /// `backend_unavailable`, which is the very code the gate returns.)
 #[test]
 fn exec_honours_the_optin_on_its_own_path() {
-    let json = r#"{"phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
     match exec_sandbox(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),

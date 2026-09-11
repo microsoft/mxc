@@ -239,7 +239,7 @@ pub use network::{
     NetworkIngress, NetworkPeer, NetworkPort, NetworkProtocol, NetworkProxy, NetworkRule,
 };
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
-pub use primitives::{NonEmptyString, OptionalField, True};
+pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use request::{parse_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;

@@ -2458,6 +2458,7 @@ mod tests {
     fn state_aware_exec_cli_command_overrides_policy_command_line() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {
@@ -2480,6 +2481,7 @@ mod tests {
     fn state_aware_exec_cli_command_fills_absent_policy_command_line_without_override_log() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234"
         }"#;
@@ -2499,6 +2501,7 @@ mod tests {
     fn state_aware_non_exec_cli_command_error_routes_to_envelope() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "iso:abcd1234"
         }"#;
@@ -2525,6 +2528,7 @@ mod tests {
             "hidden\0payload",
         ];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234"
         }"#;
