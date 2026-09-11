@@ -108,8 +108,7 @@ fn build_attach_args_with_env_control(
     args
 }
 
-/// Permanently drops network-admin capability from the workload; a capability
-/// given up here cannot return for this process tree.
+/// Permanently drops network-admin capability from the workload when none is requested.
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -220,16 +219,6 @@ impl LxcContainer {
 
     /// Return the PID of the container's init process, or `None` if the
     /// container is not running or the PID cannot be parsed.
-    ///
-    /// The firewall rules are enforced inside the container's network namespace
-    /// via `nsenter -t <pid> -n`; each network namespace carries its own
-    /// complete firewall ruleset.
-    ///
-    /// The kernel's only handle to a namespace is a process already inside it,
-    /// and a PID names one.
-    ///
-    /// `lxc-info -p` prints the container's PID as either a bare number or a
-    /// `PID: <n>` line depending on the LXC version; both forms are accepted.
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -260,37 +249,12 @@ impl LxcContainer {
         Self::run_tool(cmd)
     }
 
-    /// Set a configuration item on the container.
-    ///
-    /// This appends and never replaces.  It is the wrong primitive for per-run
-    /// policy a reused container must not accumulate; a container preserved by
-    /// `destroyOnExit = false` keeps every item earlier runs wrote.  Use
-    /// [`Self::set_managed_mount_entries`] for a replaceable block.
-    pub fn set_config_item(&self, key: &str, value: &str) -> Result<(), String> {
-        let config_path = self.config_file_path();
-        let entry = format!("{} = {}\n", key, value);
-
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&config_path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(entry.as_bytes())
-            })
-            .map_err(|e| {
-                format!(
-                    "Failed to set config item {} = {}: {} (config file: {})",
-                    key, value, e, config_path
-                )
-            })
-    }
-
     /// Replace the block of `lxc.mount.entry` items this backend owns.
     ///
-    /// A container preserved by `destroyOnExit = false` is reused, and
-    /// `set_config_item` only appends; without this replace step a later run
-    /// granted no filesystem policy could still read a directory an earlier run
-    /// was handed.
+    /// A container preserved by `destroyOnExit = false` is reused, and its
+    /// config file outlives the run that wrote it.  Replacing this block
+    /// rather than adding to it stops a later run granted no filesystem
+    /// policy from reading a directory an earlier run was handed.
     ///
     /// Only the marker-fenced lines this backend wrote are touched.  Entries a
     /// template or operator added by hand, and entries in files the config
@@ -679,37 +643,6 @@ mod tests {
     fn config_file_path_uses_resolved_path() {
         let c = LxcContainer::new("box", Some("/var/lib/lxc"));
         assert_eq!(c.config_file_path(), "/var/lib/lxc/box/config");
-    }
-
-    #[test]
-    fn set_config_item_error_includes_key_value_and_path() {
-        let bogus_base = std::env::temp_dir().join(format!(
-            "mxc-nonexistent-lxc-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let container = LxcContainer::new("ghost", Some(bogus_base.to_str().unwrap()));
-        let key = "lxc.mount.entry";
-        let value = "/host /target none bind,create=dir 0 0";
-
-        let err = container
-            .set_config_item(key, value)
-            .expect_err("set_config_item should fail when config file is missing");
-
-        assert!(err.contains(key), "error must mention key, got: {}", err);
-        assert!(
-            err.contains(value),
-            "error must mention value, got: {}",
-            err
-        );
-        assert!(
-            err.contains("ghost/config"),
-            "error must mention container config path, got: {}",
-            err
-        );
     }
 
     /// Build a container whose config file lives in a fresh temp directory
