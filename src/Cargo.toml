@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "backends/appcontainer/common",
+    "backends/process_container/common",
     "backends/bubblewrap/common",
     "backends/hyperlight/common",
     "backends/isolation_session/bindings",
@@ -64,7 +64,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-appcontainer_common = { path = "backends/appcontainer/common" }
+appcontainer_common = { path = "backends/process_container/common" }
 base64 = "0.22"
 bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
