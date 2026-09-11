@@ -27,6 +27,25 @@ pub struct AvailableBackend {
     /// and the field is omitted from JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Optional backend features usable on this host. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<BackendCapability>,
+    /// Why an optional capability is absent from `capabilities`. Omitted when
+    /// empty. This is the only place the API says why something is *not*
+    /// available, and it is scoped to optional capabilities — a backend that is
+    /// unusable outright is still simply absent (§2).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Optional feature supported by a containment backend on the current host.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[non_exhaustive]
+pub enum BackendCapability {
+    /// Windows ProcessContainer denial capture.
+    CaptureDenials,
+    /// Bubblewrap proxy-only egress in a private network namespace.
+    ProxyEnforcement,
 }
 
 /// Probe the host and return only the backends it can currently run.
@@ -35,6 +54,12 @@ pub struct AvailableBackend {
 /// macOS without `sandbox-exec`) — it is a normal result, not an error.
 pub fn available_backends() -> Vec<AvailableBackend>;
 ```
+
+A backend is reported as available whenever it can run *at all*; an optional
+capability it cannot provide on this host is reported by omission from
+`capabilities` (with the reason in `warnings`), not by dropping the backend.
+This keeps §2's "absence means unusable" rule intact while still letting a
+caller pre-flight a policy that depends on an optional capability.
 
 Example results:
 > **"Stock Windows"** here means a clean Windows install with only the default
@@ -131,6 +156,13 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 - Every non-`None` `tier` is one of the canonical `IsolationTier::as_str()` strings,
 guarding against drift between this API and the tier ladder.
 - On Linux, `bubblewrap` and `lxc` each appear when their check passes (`bwrap --version` / `lxc-ls --version`).
+- On Linux, `bubblewrap` carries the `proxyEnforcement` capability when the private-namespace
+dependencies are present, and a `warnings` entry naming the missing dependency when they are not;
+the backend itself still appears either way. Both directions are covered by exercising the pure
+`bubblewrap_backend(Result<(), String>)` helper, so the assertion does not depend on whether the
+test host happens to have `slirp4netns` installed.
+- A serde snapshot pins the camelCase capability name (`"proxyEnforcement"`) and verifies that
+`capabilities` and `warnings` are **omitted** when empty.
 - `wslc` appears when `WslcSdk::load()` resolves `wslcsdk.dll`; the remaining VM group
 (`windows_sandbox`, `isolation_session`, `microvm`, `hyperlight`) never appears until its detector lands.
 - The TypeScript `getPlatformSupport()` output matches the native probe (parity by projection, §4.2),
@@ -150,6 +182,15 @@ side-effect-free transport (e.g. a new `wxc-exec --available-backends` mode hand
 layers can't drift (§4.2, step 2). Do **not** extend the existing `--probe` flag: it runs after
 `recover_orphaned_state()`, which can restore/prune DACL state and would violate the read-only
 contract of this API.
+
+   **Partially landed (Linux).** `lxc-exec --available-backends` serializes
+   `available_backends()` and exits, handled immediately after argument parsing so it stays
+   read-only with respect to host state. The SDK uses it on Linux to populate
+   `PlatformSupport.bubblewrapNetwork`.
+
+   Still open: it is not yet the transport for the rest of `getPlatformSupport()` on Linux,
+   so the drift risk in step 2 stands, and Windows is untouched.
+
 ---
 
 ## 7. Appendix - Decisions & Notes

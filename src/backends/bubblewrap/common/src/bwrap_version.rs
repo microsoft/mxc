@@ -14,19 +14,14 @@
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::process::Child;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use crate::probe_exec::{self, CapturedOutput};
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
 ///
@@ -49,9 +44,8 @@ pub const MIN_BWRAP_VERSION: BwrapVersion = BwrapVersion::new(0, 5, 0);
 pub const MIN_BWRAP_VERSION_REASON: &str = "the sandbox uses `--clearenv`, added in bwrap 0.5.0";
 
 const BWRAP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_BWRAP_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
-const INITIAL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
-const MAX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// The shared probe cap, named locally so the user-facing message can cite it.
+const MAX_BWRAP_VERSION_OUTPUT_BYTES: usize = probe_exec::MAX_PROBE_OUTPUT_BYTES;
 
 static CACHED_BWRAP_VERSION: OnceLock<BwrapVersion> = OnceLock::new();
 static CACHED_BWRAP_PROBE_GATE: OnceLock<ProbeGate> = OnceLock::new();
@@ -300,12 +294,6 @@ struct ProbeOutput {
     stderr: Vec<u8>,
 }
 
-#[derive(Debug)]
-struct CapturedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
 fn run_bwrap_version_until(
     deadline: Instant,
     timeout: Duration,
@@ -362,165 +350,38 @@ fn run_version_command_until(
     deadline: Instant,
     timeout: Duration,
 ) -> Result<ProbeOutput, BwrapUnavailable> {
-    if Instant::now() >= deadline {
-        return Err(probe_timeout(timeout));
-    }
-
     // The public probe runs this entire operation in a deadline-watched worker,
     // so PATH lookup and spawn are bounded without assuming a fixed `env` path.
-    // A dedicated process group handles wrappers and inherited probe pipes. On
-    // timeout/failure paths this worker waits for child reaping before it
-    // returns, so the single-flight gate stays held until cleanup completes.
+    // `probe_exec` owns the process group, the poll-bounded readers and the
+    // termination sweep; this layer only decides what each outcome *means* for
+    // `bwrap` specifically.
     let mut command = Command::new(executable);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|err| classify_spawn_failure(executable, err))?;
-    let process_group = child.id();
+    command.args(args);
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| probe_internal_error("stdout pipe was not captured"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| probe_internal_error("stderr pipe was not captured"))?;
-    let (stdout_reader, stdout_rx) = match spawn_reader(stdout, deadline) {
-        Ok(reader) => reader,
-        Err(err) => {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
-            return Err(probe_internal_error(&format!(
-                "failed to start stdout reader: {err}"
-            )));
+    match probe_exec::run_bounded(&mut command, deadline) {
+        Ok(captured) => finish_probe(
+            captured.status,
+            captured.stdout,
+            captured.stderr,
+            captured.cleanup_error,
+        ),
+        Err(probe_exec::ProbeFailure::Spawn(err)) => Err(classify_spawn_failure(executable, err)),
+        Err(probe_exec::ProbeFailure::TimedOut { cleanup_error }) => {
+            let suffix = cleanup_error
+                .map(|err| format!("; failed to terminate it: {err}"))
+                .unwrap_or_default();
+            Err(BwrapUnavailable::ProbeFailed {
+                status: None,
+                detail: format!("timed out after {}ms{suffix}", timeout.as_millis()),
+            })
         }
-    };
-    let (stderr_reader, stderr_rx) = match spawn_reader(stderr, deadline) {
-        Ok(reader) => reader,
-        Err(err) => {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            return Err(probe_internal_error(&format!(
-                "failed to start stderr reader: {err}"
-            )));
+        Err(probe_exec::ProbeFailure::Wait { stage, error }) => {
+            Err(BwrapUnavailable::ProbeFailed {
+                status: None,
+                detail: format!("failed while {} `bwrap --version`: {error}", stage.as_str()),
+            })
         }
-    };
-    let mut status = None;
-    let mut stdout = None;
-    let mut stderr = None;
-    #[cfg(target_os = "linux")]
-    let mut group_cleanup_error: Option<io::Error> = None;
-    #[cfg(target_os = "linux")]
-    let mut leader_exited = false;
-    let mut poll_interval = INITIAL_WAIT_POLL_INTERVAL;
-    loop {
-        if let Err(err) = receive_reader(&stdout_rx, &mut stdout, timeout)
-            .and_then(|_| receive_reader(&stderr_rx, &mut stderr, timeout))
-        {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(err);
-        }
-
-        #[cfg(target_os = "linux")]
-        if status.is_none() && !leader_exited {
-            match child_exited_without_reaping(&child) {
-                Ok(true) => {
-                    // Keep the exited leader unreaped until both readers have
-                    // closed. Its reserved PID keeps the process-group ID from
-                    // being recycled while descendant cleanup is still possible.
-                    group_cleanup_error = terminate_probe_group(process_group).err();
-                    leader_exited = true;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    let _ = terminate_probe_tree(&mut child, process_group);
-                    let _ = child.wait();
-                    drop(stdout_reader);
-                    drop(stderr_reader);
-                    return Err(BwrapUnavailable::ProbeFailed {
-                        status: None,
-                        detail: format!("failed while waiting for `bwrap --version`: {err}"),
-                    });
-                }
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        if leader_exited && stdout.is_some() && stderr.is_some() {
-            match child.wait() {
-                Ok(exit_status) => status = Some(exit_status),
-                Err(err) => {
-                    drop(stdout_reader);
-                    drop(stderr_reader);
-                    return Err(BwrapUnavailable::ProbeFailed {
-                        status: None,
-                        detail: format!("failed while reaping `bwrap --version`: {err}"),
-                    });
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(Some(exit_status)) => status = Some(exit_status),
-                Ok(None) => {}
-                Err(err) => {
-                    let _ = terminate_probe_tree(&mut child, process_group);
-                    let _ = child.wait();
-                    drop(stdout_reader);
-                    drop(stderr_reader);
-                    return Err(BwrapUnavailable::ProbeFailed {
-                        status: None,
-                        detail: format!("failed while waiting for `bwrap --version`: {err}"),
-                    });
-                }
-            }
-        }
-
-        if status.is_some() && stdout.is_some() && stderr.is_some() {
-            let status = status.take().expect("checked above");
-            let stdout = stdout.take().expect("checked above");
-            let stderr = stderr.take().expect("checked above");
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            #[cfg(target_os = "linux")]
-            let cleanup_error = group_cleanup_error.take();
-            #[cfg(not(target_os = "linux"))]
-            let cleanup_error = None;
-            return finish_probe(status, stdout, stderr, cleanup_error);
-        }
-
-        if Instant::now() < deadline {
-            thread::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())));
-            poll_interval = poll_interval.saturating_mul(2).min(MAX_WAIT_POLL_INTERVAL);
-            continue;
-        }
-
-        let kill_error = terminate_probe_tree(&mut child, process_group).err();
-        let _ = child.wait();
-        let _ = stdout_reader.join();
-        let _ = stderr_reader.join();
-        #[cfg(target_os = "linux")]
-        let kill_error = kill_error.or(group_cleanup_error);
-        let suffix = kill_error
-            .map(|err| format!("; failed to terminate it: {err}"))
-            .unwrap_or_default();
-        return Err(BwrapUnavailable::ProbeFailed {
-            status: None,
-            detail: format!("timed out after {}ms{suffix}", timeout.as_millis()),
-        });
+        Err(probe_exec::ProbeFailure::Internal(detail)) => Err(probe_internal_error(&detail)),
     }
 }
 
@@ -597,176 +458,6 @@ fn command_is_on_path(executable: &Path) -> bool {
 
 fn path_contains_executable(executable: &Path, path: &OsStr) -> bool {
     std::env::split_paths(path).any(|entry| entry.join(executable).is_file())
-}
-
-#[cfg(target_os = "linux")]
-fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
-    use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
-    use nix::unistd::Pid;
-
-    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
-    match waitid(Id::Pid(Pid::from_raw(child.id() as i32)), flags) {
-        Ok(WaitStatus::StillAlive) => Ok(false),
-        Ok(_) => Ok(true),
-        Err(err) => Err(io::Error::from_raw_os_error(err as i32)),
-    }
-}
-
-#[cfg(any(not(unix), test))]
-fn read_bounded(mut reader: impl Read) -> io::Result<CapturedOutput> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_BWRAP_VERSION_OUTPUT_BYTES.saturating_sub(bytes.len());
-        let retained = read.min(remaining);
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
-    }
-    Ok(CapturedOutput { bytes, truncated })
-}
-
-#[cfg(unix)]
-fn spawn_reader(
-    reader: impl Read + AsRawFd + Send + 'static,
-    deadline: Instant,
-) -> io::Result<(
-    thread::JoinHandle<()>,
-    mpsc::Receiver<io::Result<CapturedOutput>>,
-)> {
-    let (sender, receiver) = mpsc::channel();
-    let handle = thread::Builder::new()
-        .name("bwrap-probe-reader".to_string())
-        .spawn(move || {
-            let _ = sender.send(read_bounded_until(reader, deadline));
-        })?;
-    Ok((handle, receiver))
-}
-
-#[cfg(not(unix))]
-fn spawn_reader(
-    reader: impl Read + Send + 'static,
-    _deadline: Instant,
-) -> io::Result<(
-    thread::JoinHandle<()>,
-    mpsc::Receiver<io::Result<CapturedOutput>>,
-)> {
-    let (sender, receiver) = mpsc::channel();
-    let handle = thread::Builder::new()
-        .name("bwrap-probe-reader".to_string())
-        .spawn(move || {
-            let _ = sender.send(read_bounded(reader));
-        })?;
-    Ok((handle, receiver))
-}
-
-#[cfg(unix)]
-fn read_bounded_until(
-    mut reader: impl Read + AsRawFd,
-    deadline: Instant,
-) -> io::Result<CapturedOutput> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "probe output remained open past the deadline",
-            ));
-        }
-        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let mut descriptor = nix::libc::pollfd {
-            fd: reader.as_raw_fd(),
-            events: nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR,
-            revents: 0,
-        };
-        // SAFETY: `descriptor` points to one initialized pollfd for this call.
-        let result = unsafe { nix::libc::poll(&mut descriptor, 1, timeout_ms) };
-        if result == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "probe output remained open past the deadline",
-            ));
-        }
-        if result < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        let remaining_capacity = MAX_BWRAP_VERSION_OUTPUT_BYTES.saturating_sub(bytes.len());
-        let retained = read.min(remaining_capacity);
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
-    }
-    Ok(CapturedOutput { bytes, truncated })
-}
-
-fn receive_reader(
-    receiver: &mpsc::Receiver<io::Result<CapturedOutput>>,
-    output: &mut Option<CapturedOutput>,
-    timeout: Duration,
-) -> Result<(), BwrapUnavailable> {
-    if output.is_none() {
-        match receiver.try_recv() {
-            Ok(result) => {
-                *output = Some(result.map_err(|err| {
-                    if err.kind() == io::ErrorKind::TimedOut {
-                        BwrapUnavailable::ProbeFailed {
-                            status: None,
-                            detail: format!("timed out after {}ms", timeout.as_millis()),
-                        }
-                    } else {
-                        probe_internal_error(&format!("failed reading probe output: {err}"))
-                    }
-                })?);
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(probe_internal_error("probe output reader disconnected"));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn terminate_probe_tree(child: &mut std::process::Child, process_group: u32) -> io::Result<()> {
-    let child_result = child.kill();
-    let group_result = terminate_probe_group(process_group);
-    match (child_result, group_result) {
-        (_, Err(err)) | (Err(err), Ok(())) => Err(err),
-        (Ok(()), Ok(())) => Ok(()),
-    }
-}
-
-#[cfg(unix)]
-fn terminate_probe_group(process_group: u32) -> io::Result<()> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{killpg, Signal};
-    use nix::unistd::Pid;
-
-    match killpg(Pid::from_raw(process_group as i32), Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(err) => Err(io::Error::from_raw_os_error(err as i32)),
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_probe_tree(child: &mut std::process::Child, _process_group: u32) -> io::Result<()> {
-    child.kill()
 }
 
 fn probe_internal_error(detail: &str) -> BwrapUnavailable {
@@ -1075,14 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reader_drains_but_does_not_retain_excess_output() {
-        let input = vec![b'x'; MAX_BWRAP_VERSION_OUTPUT_BYTES + 17];
-        let captured = read_bounded(std::io::Cursor::new(input)).unwrap();
-        assert_eq!(captured.bytes.len(), MAX_BWRAP_VERSION_OUTPUT_BYTES);
-        assert!(captured.truncated);
-    }
-
-    #[test]
     fn probe_gate_serializes_callers_within_their_deadline() {
         let gate = std::sync::Arc::new(ProbeGate::default());
         assert!(gate.acquire_until(Instant::now() + Duration::from_secs(1)));
@@ -1233,18 +916,6 @@ mod tests {
                 detail,
             } if detail.contains("timed out after 250ms")
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bounded_reader_times_out_when_the_writer_stays_open() {
-        use std::os::unix::net::UnixStream;
-
-        let (reader, _writer) = UnixStream::pair().unwrap();
-        let error =
-            read_bounded_until(reader, Instant::now() + Duration::from_millis(100)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(error.to_string().contains("remained open"));
     }
 
     #[cfg(target_os = "linux")]

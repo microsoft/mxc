@@ -31,8 +31,8 @@ export const supportedVersions = [
 
 // SDK package location
 
-/** Resolve the root directoryof the installed @microsoft/mxc-sdk package. */
-function getSdkPackageRoot(): string {
+/** Resolve the root directory of the installed @microsoft/mxc-sdk package. */
+export function getSdkPackageRoot(): string {
   const sdkPkg = require.resolve('@microsoft/mxc-sdk/package.json');
   return path.dirname(sdkPkg);
 }

@@ -60,6 +60,9 @@ public enum BackendCapability
 
     /// <summary>Windows ProcessContainer denial capture.</summary>
     CaptureDenials,
+
+    /// <summary>Bubblewrap proxy-only egress in a private network namespace.</summary>
+    ProxyEnforcement,
 }
 
 /// <summary>One host-available backend and its probed capabilities.</summary>
@@ -77,6 +80,18 @@ public sealed class AvailableBackend
     /// <summary>Optional backend features usable on this host.</summary>
     public IReadOnlyList<BackendCapability> Capabilities { get; init; } =
         Array.Empty<BackendCapability>();
+
+    /// <summary>
+    /// Diagnostics for a capability this host cannot offer.
+    /// </summary>
+    /// <remarks>
+    /// Not populated for every absent capability — only checks that produce a
+    /// reason contribute. Bubblewrap's
+    /// <see cref="BackendCapability.ProxyEnforcement"/> does, carrying which
+    /// dependency is missing or unusable; Windows omits
+    /// <see cref="BackendCapability.CaptureDenials"/> without a warning.
+    /// </remarks>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>Support for the containment backends the public SDK can launch.</summary>
@@ -103,6 +118,9 @@ internal sealed class NativeAvailableBackend
 
     [JsonPropertyName("capabilities")]
     public string[] Capabilities { get; init; } = [];
+
+    [JsonPropertyName("warnings")]
+    public string[] Warnings { get; init; } = [];
 }
 
 internal sealed class NativePlatformSupport
