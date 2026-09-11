@@ -798,33 +798,45 @@ fn a_parsed_legacy_request_keeps_the_dns_exemption() {
     );
 }
 
+// A directional posture reaches the rule builder through the parser, not only
+// through a hand-built policy. A deny default that carves out one destination
+// still has to leave DNS shut.
 #[test]
 fn a_parsed_directional_request_drops_the_dns_exemption() {
     let policy = policy_from_json(
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"},
-            "network": {"egress": {"default": "deny"}}}"#,
+            "network": {"egress": {"default": "deny",
+                                   "allow": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}}"#,
     );
     let rules = appended_ipv4_chain_rules("parsed-directional", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
-        "input=0.8 egress.default=deny; expected no port 53 accept; output={rules:?}"
+        "input=0.8 egress.default=deny with one allow rule; expected no port 53 accept; \
+         output={rules:?}"
     );
 }
 
 // An omitted network section on 0.8 is a directional deny default, not a
-// legacy request.
+// legacy request. A legacy request would have built a chain here, and that
+// chain would have opened DNS; a deny that admits nothing is instead met by
+// withholding the container's network, which builds no chain at all.
 #[test]
-fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
+fn a_parsed_v08_request_without_a_network_section_installs_no_chain() {
     let policy = policy_from_json(
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy, true);
 
     assert!(
-        !opens_dns_unconditionally(&rules),
-        "input=0.8 with no network section; expected no port 53 accept; output={rules:?}"
+        crate::network_iptables::isolates_network(&policy, true),
+        "input=0.8 with no network section; expected the deny-everything posture that is \
+         satisfied by giving the container no network"
+    );
+    assert!(
+        !crate::network_iptables::installs_firewall(&policy, true),
+        "input=0.8 with no network section; a container with no network has no traffic \
+         for a chain to judge, and a chain here would be the legacy fallback that opens DNS"
     );
 }

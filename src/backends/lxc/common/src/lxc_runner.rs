@@ -17,7 +17,9 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
+use crate::network_iptables::{
+    installs_firewall, isolates_network, needs_network, NetworkIptablesManager,
+};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -248,6 +250,46 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+
+        // A policy that shuts the network in both directions is met by handing
+        // the container no network device, rather than by attaching one to the
+        // bridge and then filtering everything back off it. The device has to
+        // be withheld before the container starts.
+        let isolate_network = isolates_network(&request.policy, uses_directional_schema);
+
+        if isolate_network {
+            if container.is_running() {
+                if self.destroy_on_exit {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Network policy error: this policy denies all inbound and outbound \
+                     traffic, which this backend enforces by giving the container no network \
+                     device. Container {} is already running with the device it started \
+                     with, and a running container cannot have its network taken away. \
+                     Refusing to report success for an unenforceable policy.",
+                    container_name
+                ));
+            }
+            if let Err(e) = container.disable_network() {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Network policy error: failed to withhold the container's network for a \
+                     policy that denies all traffic: {}. Refusing to report success for an \
+                     unenforceable policy.",
+                    e
+                ));
+            }
+            let _ = writeln!(
+                logger,
+                "Network policy denies all traffic; container starts with loopback only."
+            );
+        }
+
         // Ensure the container is running so that the veth interface exists
         if !container.is_running() {
             let _ = writeln!(logger, "Starting LXC container...");
@@ -261,9 +303,6 @@ impl LxcScriptRunner {
         } else {
             let _ = writeln!(logger, "Container already running.");
         }
-
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
 
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 

@@ -190,6 +190,30 @@ CIDRs only; the shape has no hostname form.
 A connection already open when the policy takes effect keeps running;
 enforcement governs connections opened afterwards.
 
+**A posture that admits nothing gets no network at all.** Where `egress.default`
+is `deny` with both rule lists empty, `ingress.default` and
+`ingress.hostLoopback` are both `deny`, and there is no proxy, no chain is
+installed and no veth is created. The container is started with a network
+namespace of its own holding only loopback. This is the posture the parser
+produces for a 0.8 config that carries no `network` section at all, so it is the
+common case rather than a corner.
+
+Withholding the device rather than filtering it is what the policy asks for,
+expressed in the primitive the policy is asking about: nothing may enter or
+leave, and nothing does. It also drops the requirements the chains carry.
+There is no veth for the `physdev` match, no bridge, no dependency on
+`br_netfilter`, and nothing to wait for a DHCP lease on, so this posture runs on
+hosts where the bridged-veth requirements below cannot be met. The Bubblewrap
+backend answers the same shape the same way with `--unshare-net`.
+
+Every other 0.8 posture keeps the chains. An `allow` on either direction, a
+single rule in either list, a proxy to reach, or a permissive
+`ingress.hostLoopback` all describe traffic that has to arrive and then be
+judged, which needs both the device and the rules. A permissive inbound field in
+particular stays on the chain path so it still earns the explicit refusal
+described under [Inbound (ingress) policy](#inbound-ingress-policy) rather than
+being silently answered by an absent network.
+
 **DNS is not exempt.** A resolver the policy does not allow is a resolver the
 container cannot reach, and reaching one takes an `egress.allow` rule naming its
 address. That is the GA decision:
@@ -201,6 +225,8 @@ resolver's IP.
 whatever the policy says, and no egress rule can block it. A container keeps
 ordinary name resolution; what a directional posture takes away is the
 unasked-for route to an *external* resolver. Closing that gap is not done here.
+A container that was given no network reaches no resolver at all, that one
+included.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
@@ -240,6 +266,13 @@ that could never be reached. When the IPv6 chain is programmed,
 `/proc/sys/net/bridge/bridge-nf-call-ip6tables` is checked separately and to
 the same standard.
 
+This is a requirement of the chains, not of the backend. A run that installs no
+chain never reads either file, so the 0.8 posture that admits nothing — and with
+it a 0.8 config carrying no `network` section — runs on a host where
+`br_netfilter` is unavailable. Every other posture asks for traffic to be
+filtered, and on such a host that request cannot be honored, so refusing it is
+the correct answer and the host is the thing to fix.
+
 If MXC cannot discover the container veth at all, firewall setup **fails** and
 the partially created chains are rolled back. An unhooked chain is never
 traversed, so reporting success would hand the caller a deny-all chain that
@@ -251,12 +284,14 @@ Egress firewall state is torn down automatically with best-effort removal of the
 
 ### Inbound (ingress) policy
 
-Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
+Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. Bubblewrap reaches the same place from the other direction: it gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide. LXC now matches the first of those for the 0.8 posture that admits nothing, described above; where it does install a chain, that chain is per-container because the namespace is.
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
 Under 0.7.0, inbound filtering is installed only when the configuration
-requests a firewall enforcement mode. Under 0.8.0 it is always installed.
+requests a firewall enforcement mode. Under 0.8.0 it is installed for every
+posture except the one that admits no traffic in either direction, which is
+enforced by the absent network device instead and needs no chain.
 
 | 0.7.0 | 0.8.0 | Effect | Notes |
 |-------|-------|--------|-------|
@@ -271,7 +306,7 @@ The signal differs because a container is not a long-running host. Egress reads 
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
-Inbound default-deny is not a containment boundary against the sandboxed workload. Because the chain lives in the container's own network namespace, the workload can reach it: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chain lives in, where it can flush or delete it. The egress chains are not exposed this way: they sit on the host and hook into `FORWARD` by the container's host-side veth, out of the workload's reach. The asymmetry follows from where each chain is installed. Inbound default-deny therefore closes off external reachability — including for services the workload itself starts — for any workload that does not deliberately tear it down, and does not survive one that does. Making inbound enforcement tamper-proof is tracked in issue #854.
+Inbound default-deny is not a containment boundary against the sandboxed workload. Because the chain lives in the container's own network namespace, the workload can reach it: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chain lives in, where it can flush or delete it. The egress chains are not exposed this way: they sit on the host and hook into `FORWARD` by the container's host-side veth, out of the workload's reach. The asymmetry follows from where each chain is installed. Inbound default-deny therefore closes off external reachability — including for services the workload itself starts — for any workload that does not deliberately tear it down, and does not survive one that does. Making inbound enforcement tamper-proof is tracked in issue #854. The 0.8 posture that admits nothing is outside this: there is no chain to flush, and `CAP_NET_ADMIN` over a namespace holding only loopback grants no route out of it.
 
 Unlike egress, the inbound chain honors the lifecycle's `preservePolicy`: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 

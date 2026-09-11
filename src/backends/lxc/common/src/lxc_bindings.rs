@@ -284,6 +284,22 @@ impl LxcContainer {
         Self::run_status(self.lxc_command("lxc-start"), "lxc-start")
     }
 
+    /// Give the container a network namespace of its own containing nothing but
+    /// loopback.
+    ///
+    /// Must be called before the container starts. A running container keeps
+    /// the devices it was started with.
+    pub fn disable_network(&self) -> Result<(), String> {
+        // `lxc.net` with no value clears the network entries the container
+        // inherited from the system defaults, which name a veth on the LXC
+        // bridge.  `lxc.net.0.type = empty` then asks for a namespace holding
+        // only loopback.  Clearing without asking would leave the result to
+        // whatever liblxc does with a container naming no network at all,
+        // which its documentation does not state.
+        self.set_config_item("lxc.net", "")?;
+        self.set_config_item("lxc.net.0.type", "empty")
+    }
+
     /// Execute a command inside the container, capturing stdout/stderr.
     /// Returns (exit_code, stdout, stderr).
     pub fn exec(

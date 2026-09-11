@@ -1247,7 +1247,8 @@ mod tests {
     use super::*;
     use crate::network_iptables::installs_firewall;
     use wxc_common::models::{
-        NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
+        NetworkAction, NetworkEgressPolicy, NetworkEnforcementMode, NetworkIngressPolicy,
+        NetworkPolicy,
     };
 
     /// The 0.8 ingress posture as the parser delivers it.
@@ -2983,8 +2984,47 @@ mod tests {
     fn a_stated_directional_posture_installs_the_inbound_chain() {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
-        policy.network_egress = Some(Default::default());
+        policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
 
         assert!(installs_firewall(&policy, true));
+    }
+
+    // The one 0.8 posture that needs no inbound chain: nothing may leave,
+    // nothing may arrive, and no rule says otherwise. The container is given
+    // no network device, which denies inbound by leaving nothing to arrive on.
+    #[test]
+    fn a_directional_posture_denying_everything_needs_no_inbound_chain() {
+        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        policy.network_egress = Some(NetworkEgressPolicy::default());
+
+        assert!(
+            !installs_firewall(&policy, true),
+            "a posture that admits no traffic in either direction is enforced by the \
+             absent network device, not by a chain"
+        );
+    }
+
+    // Isolation is the stronger action and must not be reached by a posture
+    // that asked for inbound traffic. Such a policy keeps the chain path,
+    // where it earns the explicit refusal this backend already gives it.
+    #[test]
+    fn a_permissive_inbound_posture_still_takes_the_chain_path() {
+        for (default, host_loopback) in [
+            (NetworkAction::Allow, NetworkAction::Deny),
+            (NetworkAction::Deny, NetworkAction::Allow),
+        ] {
+            let label = format!("default={default:?} hostLoopback={host_loopback:?}");
+            let mut policy = directional_ingress(default, host_loopback);
+            policy.network_egress = Some(NetworkEgressPolicy::default());
+
+            assert!(
+                installs_firewall(&policy, true),
+                "{label}: a permissive inbound field must not be silently answered by \
+                 withholding the network"
+            );
+        }
     }
 }

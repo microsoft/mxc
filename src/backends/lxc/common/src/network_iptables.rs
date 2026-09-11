@@ -19,13 +19,49 @@ use wxc_common::models::{
     ProxyHostPin,
 };
 
+/// True when a 0.8 posture shuts the network in both directions and carves out
+/// no exception.
+///
+/// The container is given no network device at all for such a policy, so there
+/// is no traffic for a chain to judge. Every term is required: a stated allow,
+/// a single rule, a proxy, or a permissive inbound field each describes traffic
+/// that has to reach the container and then be filtered, which needs both the
+/// device and the chains.
+///
+/// A posture that is not stated in full leaves this false and keeps the run on
+/// the path it has always taken. Withholding the network is the stronger
+/// action, and it is taken only on an explicit posture that asks for nothing.
+pub(crate) fn isolates_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    if !uses_directional_schema {
+        return false;
+    }
+
+    let (Some(egress), Some(ingress)) = (
+        policy.network_egress.as_ref(),
+        policy.network_ingress.as_ref(),
+    ) else {
+        return false;
+    };
+
+    egress.default == NetworkAction::Deny
+        && egress.allow.is_empty()
+        && egress.deny.is_empty()
+        && ingress.default == NetworkAction::Deny
+        && ingress.host_loopback == NetworkAction::Deny
+        && !policy.network_proxy.is_enabled()
+        && policy.allowed_hosts.is_empty()
+        && policy.blocked_hosts.is_empty()
+}
+
 /// True when this run installs firewall chains.
 ///
-/// A run carries one schema. 0.8 states a posture with no mode to opt out of,
-/// so it always enforces; 0.7 enforces only where the config asked for it.
+/// A run carries one schema. A 0.7 config enforces only where it named a mode
+/// that asks for it. A 0.8 config has no such mode to name, and its stated
+/// posture enforces on its own -- unless [`isolates_network`] already satisfies
+/// that posture by leaving the container no network to filter.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
     if uses_directional_schema {
-        true
+        !isolates_network(policy, uses_directional_schema)
     } else {
         NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode)
     }
@@ -2041,7 +2077,12 @@ impl NetworkIptablesManager {
                         .to_string(),
                 );
             }
-            logger.log_line("Network policy requests no firewall; skipping iptables.");
+            logger.log_line(if isolates_network(policy, uses_directional_schema) {
+                "Network policy denies traffic in both directions; the container holds no \
+                 network device and there is nothing to filter."
+            } else {
+                "Network policy requests no firewall; skipping iptables."
+            });
             return Ok(true);
         }
 
@@ -4613,6 +4654,138 @@ mod tests {
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
+    }
+
+    /// The 0.8 posture the parser produces for a config with no network
+    /// section: deny everything, both directions, no exceptions.
+    fn directional_deny_everything() -> ContainerPolicy {
+        ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(wxc_common::models::NetworkIngressPolicy::default()),
+            ..Default::default()
+        }
+    }
+
+    // The shape the ADO lane runs: a 0.8 config with no network section. The
+    // container is given no network device, so there is nothing to filter and
+    // nothing to wait for an address on.
+    #[test]
+    fn a_directional_posture_denying_everything_is_met_without_a_network() {
+        let policy = directional_deny_everything();
+
+        assert!(isolates_network(&policy, true));
+        assert!(
+            !installs_firewall(&policy, true),
+            "a container with no network device has no traffic for a chain to judge"
+        );
+        assert!(
+            !needs_network(&policy, true),
+            "withholding the network also withdraws the wait for an address that will \
+             never arrive"
+        );
+    }
+
+    // The isolated path is reachable only from a posture stated in the 0.8
+    // shape. A legacy run keeps the mode it named.
+    #[test]
+    fn a_legacy_run_is_never_isolated() {
+        assert!(!isolates_network(&directional_deny_everything(), false));
+
+        for (mode, _) in enforcement_modes_with_firewall_contract() {
+            let label = format!("{mode:?}");
+            let policy = policy_with_enforcement_mode(mode);
+            assert!(
+                !isolates_network(&policy, false),
+                "{label}: a 0.7 run is answered by the mode it named"
+            );
+        }
+    }
+
+    // Every term of the posture is load-bearing. Each of these describes
+    // traffic that has to reach the container and then be judged, which needs
+    // the device the isolated path withholds.
+    #[test]
+    fn any_traffic_the_policy_admits_keeps_the_run_on_the_firewall_path() {
+        let allow_rule = NetworkRule {
+            to: vec![NetworkPeer {
+                cidr: "10.0.0.0/8".parse().expect("valid test CIDR"),
+                except: vec![],
+            }],
+            ports: vec![],
+        };
+
+        let mut cases: Vec<(&str, ContainerPolicy)> = Vec::new();
+
+        let mut egress_allows = directional_deny_everything();
+        egress_allows.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        cases.push(("egress.default=allow", egress_allows));
+
+        let mut carries_allow_rule = directional_deny_everything();
+        carries_allow_rule.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![allow_rule.clone()],
+            deny: vec![],
+        });
+        cases.push(("an allow rule under a deny default", carries_allow_rule));
+
+        let mut carries_deny_rule = directional_deny_everything();
+        carries_deny_rule.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![],
+            deny: vec![allow_rule],
+        });
+        cases.push(("a deny rule under a deny default", carries_deny_rule));
+
+        let mut inbound_allowed = directional_deny_everything();
+        inbound_allowed.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+        cases.push(("ingress.default=allow", inbound_allowed));
+
+        let mut loopback_allowed = directional_deny_everything();
+        loopback_allowed.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
+        cases.push(("ingress.hostLoopback=allow", loopback_allowed));
+
+        let mut proxied = directional_deny_everything();
+        proxied.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
+        cases.push(("a proxy to reach", proxied));
+
+        let mut allows_a_host = directional_deny_everything();
+        allows_a_host.allowed_hosts = vec!["example.com".to_string()];
+        cases.push(("an allowed host", allows_a_host));
+
+        let mut blocks_a_host = directional_deny_everything();
+        blocks_a_host.blocked_hosts = vec!["example.com".to_string()];
+        cases.push(("a blocked host", blocks_a_host));
+
+        let mut ingress_unstated = directional_deny_everything();
+        ingress_unstated.network_ingress = None;
+        cases.push(("an unstated inbound posture", ingress_unstated));
+
+        let mut egress_unstated = directional_deny_everything();
+        egress_unstated.network_egress = None;
+        cases.push(("an unstated outbound posture", egress_unstated));
+
+        for (label, policy) in cases {
+            assert!(
+                !isolates_network(&policy, true),
+                "{label}: this posture is not answered by withholding the network"
+            );
+            assert!(
+                installs_firewall(&policy, true),
+                "{label}: this posture is owed the firewall path"
+            );
+        }
     }
 
     // Resolving a host name and reaching a proxy both need the interface up,
