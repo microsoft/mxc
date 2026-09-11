@@ -1740,9 +1740,13 @@ rejected.
 > **LXC `network` constraints.** `network.proxy` and `allowLocalNetwork` are
 > rejected at start.  LXC enforces network policy through iptables whenever
 > `defaultPolicy` is `"block"`, either host list is non-empty, or proxy is
-> enabled.  The value of `enforcementMode` is accepted but ignored by LXC; it
-> does not disable enforcement.  The veth is not discovered after start: the name
-> is derived from the container name and pinned by a container-global
+> enabled.  `enforcementMode` must name `"firewall"` or `"both"`: a
+> configuration that states a network posture under `"capabilities"` is refused
+> rather than run unenforced, because this backend filters with iptables and has
+> no capability mechanism for the network.  A configuration that states no
+> posture is not asking for enforcement and runs unchanged.  The veth is not
+> discovered after start: the name is derived from the container name and
+> pinned by a container-global
 > `lxc.hook.start-host` installed before start, so the chain is scoped before the
 > interface exists. The hook resolves the container's peer interface from
 > `$LXC_PID` and renames it to that name; if it cannot find one it exits

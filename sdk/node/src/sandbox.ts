@@ -153,13 +153,36 @@ function buildBubblewrapConfig(
  */
 function buildLinuxProcessConfig(
     config: ContainerConfig,
+    policy: SandboxPolicy,
 ): ContainerConfig {
     config.lxc = {
         distribution: 'alpine',
         release: '3.23',
     };
     applyLinuxNetworkPolicy(config);
+    if (!usesDirectionalNetwork(policy)) {
+        applyLxcEnforcementMode(config);
+    }
     return config;
+}
+
+/**
+ * Names the enforcement mode LXC acts on, for a legacy network block that does
+ * not already name one.
+ *
+ * LXC enforces network policy only through the host firewall, and refuses a
+ * posture it cannot enforce rather than reporting success for enforcement that
+ * did not happen.  The legacy mapping supplies `defaultPolicy: 'block'` for a
+ * caller who requested no network at all, so leaving the mode unset would have
+ * the backend refuse a request whose caller stated no posture.  A directional
+ * block carries no enforcement mode by design, and a mode the caller stated is
+ * left alone.
+ */
+function applyLxcEnforcementMode(config: ContainerConfig): void {
+    if (!config.network || config.network.enforcementMode !== undefined) {
+        return;
+    }
+    config.network.enforcementMode = 'firewall';
 }
 
 /**
@@ -407,7 +430,7 @@ export function createConfigFromPolicy(
     if (containment === 'lxc') {
         diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
         config.containment = 'lxc';
-        return buildLinuxProcessConfig(config);
+        return buildLinuxProcessConfig(config, policy);
     }
 
     if (containment === 'process') {
