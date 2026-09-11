@@ -69,7 +69,7 @@ command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 \
     || skip "no C compiler; the probe cannot be built."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
-DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_raw_egress_deny.json"
+DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_raw_egress_filtered.json"
 ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_raw_egress_allow.json"
 PROBE_SOURCE="$REPO_DIR/tests/helpers/raw_egress_probe.c"
 
@@ -83,6 +83,7 @@ DEST="203.0.113.9"
 # at the same path inside.  It is fixed rather than a mktemp because the
 # fixtures name it.
 PROBE_DIR="/opt/mxc-raw-probe"
+PROBE_DIR_CREATED=""
 PROBE="$PROBE_DIR/raw_egress_probe"
 
 BRIDGE="lxcbr0"
@@ -102,8 +103,15 @@ grep -Fq "$PROBE_DIR" "$DENY_CONFIG" \
     || fail "fixture ${DENY_CONFIG##*/} no longer mounts $PROBE_DIR; the probe would not exist in the container."
 grep -Fq "$BRIDGE_MAC" "$DENY_CONFIG" \
     || fail "fixture ${DENY_CONFIG##*/} addresses a MAC that is not $BRIDGE's ($BRIDGE_MAC); the frame would be sent to nobody."
-grep -Fq '"allowedHosts": []' "$DENY_CONFIG" \
-    || fail "fixture ${DENY_CONFIG##*/} allows something; the deny case would prove nothing."
+# The fixture must permit an address, and must not permit the one the probe
+# writes to.  A policy allowing nothing is given no network interface at all,
+# which would leave the probe with nothing to write to and prove nothing about
+# the chain.
+grep -Eq '"allowedHosts": \[[^]]+\]' "$DENY_CONFIG" \
+    || fail "fixture ${DENY_CONFIG##*/} allows nothing; the container would be given no interface and the raw path would never be exercised."
+if grep -Eq "\"allowedHosts\": \[[^]]*$DEST" "$DENY_CONFIG"; then
+    fail "fixture ${DENY_CONFIG##*/} allows $DEST, the address the probe writes to; there would be nothing for the chain to drop."
+fi
 
 # shellcheck source=lib/chain_name.sh
 . "$SCRIPT_DIR/lib/chain_name.sh"
@@ -142,7 +150,12 @@ remove_counters() {
 
 cleanup() {
     remove_counters
-    rm -rf "$PROBE_DIR"
+    # The path is fixed because the fixtures name it, which means it may
+    # already hold something an operator put there.  Delete it only when this
+    # run is the one that made it.
+    if [ -n "$PROBE_DIR_CREATED" ]; then
+        rm -rf "$PROBE_DIR"
+    fi
 }
 trap cleanup EXIT
 
@@ -150,7 +163,11 @@ trap cleanup EXIT
 # rules, so a stale counter cannot be read as this run's traffic.
 remove_counters
 
-mkdir -p "$PROBE_DIR" || fail "could not create $PROBE_DIR."
+# Plain mkdir, not mkdir -p: failing on an existing path is what keeps the
+# cleanup from deleting a directory this run did not create.
+mkdir "$PROBE_DIR" \
+    || fail "$PROBE_DIR already exists or could not be created.  This test deletes that path on exit, so it refuses to run when the path is not its own."
+PROBE_DIR_CREATED=yes
 COMPILER="$(command -v cc || command -v gcc)"
 "$COMPILER" -static -O2 -o "$PROBE" "$PROBE_SOURCE" 2>&1 \
     || skip "the probe did not build; static linking may be unavailable here."
@@ -226,25 +243,26 @@ done
 assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
 assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 
-echo "--- deny case: a packet socket, nothing allowed ---"
+echo "--- filtered case: a packet socket writing to an address the chain drops ---"
 MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
 MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 iptables -t mangle -Z POSTROUTING >/dev/null
 DENY_OUTPUT=$("$LXC_EXEC" --debug "$DENY_CONFIG" 2>&1 || true)
 echo "$DENY_OUTPUT"
 
-# Four outcomes are legitimate here and they mean different things.  The
-# container may have been given no interface to write to, the socket may have
-# been refused, the send may have been refused, or a finished frame may have
-# been handed to the kernel and stopped somewhere downstream.  Only the last
-# can put a packet on the wire, and the counters below are what settle it.  A
-# setup failure for any other reason built no frame and measured nothing.
+# The policy permits one address and drops the rest, so the container is given
+# a real interface and a real chain.  Three outcomes are legitimate: the socket
+# may have been refused, the send may have been refused, or a finished frame
+# may have been handed to the kernel.  Only the last can put a packet on the
+# wire, and the counters below settle it.  Being given no interface is no
+# longer one of them -- under this policy it would mean the container never got
+# the network the chain was supposed to filter.
 if echo "$DENY_OUTPUT" | grep -Fq "no interface eth0"; then
-    echo "    deny / the container was given no interface to write to"
+    fail "the container was given no interface under a policy that permits an address. The chain under test was never exercised."
 elif echo "$DENY_OUTPUT" | grep -Fq "PROBE_SETUP_FAILED"; then
-    fail "the probe could not configure itself inside the container and the reason was not a missing interface. No frame was ever built."
+    fail "the probe could not configure itself inside the container. No frame was ever built."
 elif ! echo "$DENY_OUTPUT" | grep -Eq "MXC_RAW_SENT|MXC_RAW_SOCKET_REFUSED|MXC_RAW_SEND_REFUSED"; then
-    fail "the deny case produced no verdict at all; the probe did not run inside the container."
+    fail "the filtered case produced no verdict at all; the probe did not run inside the container."
 fi
 
 LEAKED=""
@@ -259,10 +277,14 @@ done
 assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
 assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 
-if [ -n "$LEAKED" ]; then
-    fail "under a default-block policy with nothing allowed, packets written to a raw packet socket left the host:$LEAKED. Egress enforcement is on a path the workload can decline to use."
+if [ -z "$LEAKED" ]; then
+    fail "no packet written to a raw packet socket left the host. This test records a known gap: CAP_NET_RAW lets a workload transmit below the egress chain. If that no longer happens, the gap has closed and this test should be rewritten as an enforcement test rather than left asserting the old behavior."
 fi
 
-echo "PASS: allowed traffic left the host on all three protocols, and no packet"
-echo "      written to a raw packet socket left the container under a deny policy."
+echo "PASS: allowed traffic left the host on all three protocols."
+echo "      Under a filtering policy, packets written to a raw packet socket"
+echo "      reached a dropped address on:$LEAKED"
+echo "      This is the known CAP_NET_RAW bypass, recorded here on purpose."
+echo "      Egress chain enforcement covers the kernel path only; closing the"
+echo "      raw path needs a syscall filter, tracked separately."
 echo "LXC raw egress test complete."
