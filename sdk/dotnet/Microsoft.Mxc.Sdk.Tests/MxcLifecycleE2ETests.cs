@@ -17,6 +17,7 @@ namespace Microsoft.Mxc.Sdk.Tests;
 /// rather than only through the engine: the identity and workspace that
 /// provision reports, and the output and exit code an exec returns.
 /// </remarks>
+[Collection("MxcLiveHost")]
 public class MxcLifecycleE2ETests
 {
     private const string Cmd = @"C:\Windows\System32\cmd.exe";

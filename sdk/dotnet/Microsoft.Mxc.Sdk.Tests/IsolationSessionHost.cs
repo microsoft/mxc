@@ -6,6 +6,12 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
+// These suites share one OS-side service.
+[CollectionDefinition("MxcLiveHost", DisableParallelization = true)]
+public sealed class MxcLiveHostCollectionDefinition
+{
+}
+
 /// <summary>
 /// The live-host gate the isolation-session suites share. A live run needs
 /// Windows, the OS-side service, and a native library built with the
