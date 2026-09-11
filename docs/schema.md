@@ -201,7 +201,6 @@ that can be executed independently.
     "seatbelt": {                          // macOS Seatbelt settings (macOS only)
         "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
-        "launchMethod": "exec",            // "exec" or "open"; removed in 0.9.0-alpha — see note below
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
         "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
