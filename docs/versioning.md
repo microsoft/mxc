@@ -104,6 +104,11 @@ transition:
   does not become authoritative until exact dispatch replaces the rolling
   parser.
 
+The Rust SDK policy builders use the rolling production path, keeping the SDK,
+FFI, executor, and state-aware surfaces under one authority. Test-only
+per-version builders construct the published or development exact root selected
+by the declared version and compare its runtime model with the rolling builder.
+
 Both files are generated development artifacts rather than released schemas.
 See [Schema Code Generation](schema-codegen.md) for their regeneration commands
 and independent drift gates.
