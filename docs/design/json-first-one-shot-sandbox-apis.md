@@ -4,7 +4,7 @@
 
 This proposal updates only the dataflow for one-shot sandbox run and spawn.
 
-## Decision
+## Proposal
 
 - Make the versioned MXC config JSON the configuration currency.
 - Add one-shot run and spawn JSON entry points to `mxc-sdk` and `mxc_ffi`.
