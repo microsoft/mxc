@@ -249,17 +249,10 @@ impl LxcContainer {
         Self::run_tool(cmd)
     }
 
-    /// Replace the block of `lxc.mount.entry` items this backend owns.
-    ///
-    /// A container preserved by `destroyOnExit = false` is reused, and its
-    /// config file outlives the run that wrote it.  Replacing this block
-    /// rather than adding to it stops a later run granted no filesystem
-    /// policy from reading a directory an earlier run was handed.
-    ///
-    /// Only the marker-fenced lines this backend wrote are touched.  Entries a
-    /// template or operator added by hand, and entries in files the config
-    /// `lxc.include`s, are left untouched.
-    pub fn set_managed_mount_entries(&self, entries: &[String]) -> Result<(), String> {
+    /// Sets the mount points so the container can see
+    /// allowed file system locations.
+    /// Does remove existing mount points so they don't accumulate on a reused container.
+    pub fn set_filesystem_access_points(&self, entries: &[String]) -> Result<(), String> {
         let config_path = self.config_file_path();
         let existing = std::fs::read_to_string(&config_path).map_err(|e| {
             format!(
@@ -300,11 +293,6 @@ impl LxcContainer {
         })
     }
 
-    /// Drop the marker-fenced managed block from a container config body.
-    ///
-    /// An opening marker with no closing one -- the shape an interrupted
-    /// rewrite leaves -- is treated as fenced to end of file, clearing the
-    /// leftovers rather than inheriting them.
     fn strip_managed_mount_entries(config: &str) -> String {
         let mut out = String::with_capacity(config.len());
         let mut inside = false;
@@ -674,7 +662,9 @@ mod tests {
         let (container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
-            .set_managed_mount_entries(&["/tmp/secret tmp/secret none bind,create=dir 0 0".into()])
+            .set_filesystem_access_points(&[
+                "/tmp/secret tmp/secret none bind,create=dir 0 0".into()
+            ])
             .expect("first run programs its mount");
         let after_first = std::fs::read_to_string(&config).expect("read config");
         assert!(
@@ -683,7 +673,7 @@ mod tests {
         );
 
         container
-            .set_managed_mount_entries(&[])
+            .set_filesystem_access_points(&[])
             .expect("second run grants nothing");
         let after_second = std::fs::read_to_string(&config).expect("read config");
         assert!(
@@ -697,10 +687,10 @@ mod tests {
         let (container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
-            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .set_filesystem_access_points(&["/data data none bind,create=dir 0 0".into()])
             .expect("program mounts");
         container
-            .set_managed_mount_entries(&[])
+            .set_filesystem_access_points(&[])
             .expect("clear mounts");
 
         let body = std::fs::read_to_string(&config).expect("read config");
@@ -723,7 +713,7 @@ mod tests {
 
         for _ in 0..3 {
             container
-                .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+                .set_filesystem_access_points(&["/data data none bind,create=dir 0 0".into()])
                 .expect("program mounts");
         }
 
@@ -749,7 +739,7 @@ mod tests {
         let (container, config) = container_with_config(&truncated);
 
         container
-            .set_managed_mount_entries(&[])
+            .set_filesystem_access_points(&[])
             .expect("clear mounts");
 
         let body = std::fs::read_to_string(&config).expect("read config");
@@ -767,7 +757,7 @@ mod tests {
     fn a_failed_rewrite_leaves_no_temporary_file_behind() {
         let (container, config) = container_with_config(TEMPLATE_CONFIG);
         let err = LxcContainer::new("ghost", Some("/nonexistent-mxc-base"))
-            .set_managed_mount_entries(&[])
+            .set_filesystem_access_points(&[])
             .expect_err("a missing config must fail loudly");
         assert!(
             err.contains("ghost/config"),
@@ -775,7 +765,7 @@ mod tests {
         );
 
         container
-            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .set_filesystem_access_points(&["/data data none bind,create=dir 0 0".into()])
             .expect("program mounts");
         let temp = format!("{}.mxc-tmp", config.display());
         assert!(

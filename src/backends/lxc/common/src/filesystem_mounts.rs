@@ -310,7 +310,7 @@ pub fn configure_filesystem_mounts(
     // Write the whole set at once, replacing whatever an earlier run left
     // behind. A reused container must carry this run's grants and no others,
     // including when this run grants nothing at all.
-    container.set_managed_mount_entries(&entries)?;
+    container.set_filesystem_access_points(&entries)?;
 
     Ok(())
 }
