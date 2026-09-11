@@ -1713,7 +1713,7 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.lxc!.distribution, 'alpine');
     });
 
-    it('should use firewall enforcement for legacy policies with or without network access', () => {
+    it('should use firewall enforcement for legacy LXC policies with or without network access', () => {
       for (const version of ['0.6.0-alpha', '0.7.0-alpha'] as const) {
         const noNetwork = createConfigFromPolicy({ version }, 'lxc');
         assert.strictEqual(noNetwork.network!.defaultPolicy, 'block');

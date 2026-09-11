@@ -129,6 +129,7 @@ export function applyLinuxNetworkPolicy(config: ContainerConfig): void {
       "for unprivileged Bubblewrap enforcement)."
     );
   }
+  // LXC cannot enforce Windows AppContainer capabilities, so legacy policies use firewall.
   if (config.containment === 'lxc' && config.network.enforcementMode === undefined) {
     config.network.enforcementMode = 'firewall';
   }
