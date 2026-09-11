@@ -8,7 +8,8 @@ This proposal updates only the dataflow for one-shot sandbox run and spawn.
 
 - Make the versioned MXC config JSON the configuration currency.
 - Add one-shot run and spawn JSON entry points to `mxc-sdk` and `mxc_ffi`.
-- Make C# and Node thin wrappers over the C ABI.
+- Make C# and Node thin wrappers over the C ABI, with Koffi providing Node's
+  asynchronous foreign-function integration.
 - Keep the parser, engine, backends, and existing APIs.
 
 ## Problem
@@ -61,7 +62,8 @@ flowchart TB
         NN[Node: JSON string + typed options]
     end
     subgraph AD["Native adapters — new entry paths"]
-        FF[C ABI: pass UTF-8; do not parse]
+        KF[Node Koffi adapter]
+        FF[mxc_ffi: pass UTF-8; do not parse]
     end
     subgraph SDK["mxc-sdk — new JSON entry points"]
         JJ[Forward JSON unchanged]
@@ -76,7 +78,7 @@ flowchart TB
     end
 
     CC -->|UTF-8 unchanged| FF --> JJ
-    NN -->|Node FFI binding| FF
+    NN -->|UTF-8 unchanged| KF --> FF
     RR -->|borrow unchanged| JJ
     JJ -->|versioned MXC config JSON| Q
     Q -->|deserialize| WM
@@ -85,7 +87,7 @@ flowchart TB
     DD --> OO[Strongly typed output or handle]
     classDef new fill:#0f5132,color:#fff
     classDef same fill:#343a40,color:#fff
-    class RR,CC,NN,FF,JJ new
+    class RR,CC,NN,KF,FF,JJ new
     class Q,WM,ER,DD,OO same
 ```
 The existing parser remains: version-specific `mxc_config_contract` types and
@@ -128,11 +130,24 @@ runConfigAsync(json: string, options?: RunOptions): Promise<RunResult>;
 spawnConfig(json: string, options?: SpawnOptions): SandboxProcess;
 ```
 
+### Node Koffi adapter
+
+Node uses Koffi as a thin adapter over the shared `mxc_ffi` C ABI rather than
+maintaining a separate native binding. Koffi declares the C functions, structs,
+and opaque handles and runs blocking calls off the JavaScript event-loop
+thread. TypeScript only adapts results and handles to promises and Node streams
+while enforcing the C ABI's ownership and concurrency rules.
+
+Before migration, validate run, streaming, cancellation, cleanup, and worker
+capacity on Windows, Linux, and macOS. The built-in `node:ffi` module was
+introduced in Node.js 26 and remains experimental; it may replace Koffi later
+without changing the JSON-first API or C ABI.
+
 ## Scope
 
 | Scope | Decision |
 | --- | --- |
-| Add | One-shot run and spawn JSON APIs, plus C# and Node wrappers. |
+| Add | One-shot run and spawn JSON APIs, C# wrappers, and a thin Node Koffi adapter over the C ABI. |
 | Keep | Published schemas, version adapters, `wire::MxcConfig`, the parser, `ExecutionRequest`, engine validation, backends, and existing typed APIs. |
 | Avoid on the new path | `RequestSpec`, binding-only JSON, policy-builder round trips, and the Node executor process. |
 | Follow-up (separate proposals) | Redesign state-aware lifecycle APIs; define API-shape guidelines for discovery, policy helpers, telemetry, and future SDK APIs. |
@@ -140,8 +155,11 @@ spawnConfig(json: string, options?: SpawnOptions): SandboxProcess;
 ## Migration
 
 1. Add JSON-first run and spawn entry points to `mxc-sdk` and `mxc_ffi`.
-2. Bind C# and Node to the `mxc_ffi` C ABI.
-3. Keep existing paths through parity. Deprecation comes later.
+2. Validate Koffi run, streaming, cancellation, cleanup, and worker capacity on
+   Windows, Linux, and macOS.
+3. Bind C# directly and Node through a thin Koffi adapter to the `mxc_ffi` C
+   ABI.
+4. Keep existing paths through parity. Deprecation comes later.
 
 ## Success criteria
 
