@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -fsS --max-time 20 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK && echo PROXY_FETCH_OK || echo PROXY_FETCH_FAILED",
+        "timeout": 30000
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "proxy": {
+            "builtinTestServer": true
+        },
+        "allowedHosts": [
+            "mxc-test.invalid"
+        ]
+    }
+}

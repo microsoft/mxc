@@ -69,10 +69,10 @@ three `Build.*.Job.yml` workflows before calling the matrix job.
   catalog and expands a plan, so a backend may only be triggered where its
   platform declares it.
 - `scripts/ci/prepare-{windows,linux,macos}-host.{ps1,sh}` — per-backend host
-  prep, plus an inventory of the workload interpreters. Backend prerequisites
-  are installed per job; most workload interpreters come from image provisioning
-  scripts outside this repository, while Windows prep installs packaged `winapp`
-  and OpenSSL per job.
+  prep, plus an inventory of the workload interpreters. Backend prerequisites
+  are installed per job; most workload interpreters come from image provisioning
+  scripts outside this repository, while Windows prep installs packaged `winapp`
+  and OpenSSL per job.
 - `scripts/ci/run_backend_validation_tests.{ps1,sh}` — map a matrix `backend`
   id to the repository's existing backend suite. An unwired id fails loudly
   rather than reporting a false success.
@@ -127,6 +127,7 @@ tests\scripts\run_wslc_state_aware_tests.ps1  # WSLc state-aware lifecycle E2E (
 tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one-shot E2E (fresh disposable VM per test; requires the Windows Sandbox optional feature)
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
+tests\scripts\run_seatbelt_all_tests.sh       # All Seatbelt tests (macOS). No skip path: a missing prerequisite (mxc-exec-mac, unix-test-proxy, python3, curl, sandbox-exec, or a reachable external anchor) is a FAILURE, not a skip. Must NOT run as root. Individual suites are run_seatbelt_<area>_test.sh; shared setup/assertions live in tests/scripts/lib/seatbelt_common.sh.
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
 sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_backend_validation_tests.sh.
 

@@ -19,9 +19,6 @@
         ],
         "readonlyPaths": [
             "/opt/homebrew"
-        ],
-        "deniedPaths": [
-            "/opt/homebrew/Cellar"
         ]
     },
     "network": {

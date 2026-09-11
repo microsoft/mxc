@@ -510,6 +510,8 @@ Apple credentials.
 Run with `--debug` to print the generated profile — most surprises are obvious
 once you can see the rules that were emitted.
 
+`--log-file <path>` prints the generated profile to a file.
+
 ### Common symptoms
 
 | Symptom | Likely cause | Fix |
@@ -603,3 +605,10 @@ every invocation is a fresh process tree.
 **`sandbox_init` is deprecated in headers** (since 10.8) but still ships and is
 used by Apple's own apps and Chromium. It's the same framework behind the App
 Sandbox.
+
+## Tests
+
+`tests/scripts/run_seatbelt_all_tests.sh` runs the whole suite; the individual
+`run_seatbelt_<area>_test.sh` scripts can be run on their own. There is no skip
+path — a missing prerequisite fails, so a green run always means the assertions
+executed.

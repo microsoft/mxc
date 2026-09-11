@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -fsS --max-time 20 http://mxc-blocked.invalid/ > /dev/null 2>&1 && echo DENIED_HOST_REACHED || echo DENIED_HOST_BLOCKED",
+        "timeout": 30000
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "proxy": {
+            "builtinTestServer": true
+        },
+        "allowedHosts": [
+            "mxc-test.invalid"
+        ]
+    }
+}

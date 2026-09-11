@@ -1,0 +1,15 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "id -un || true",
+        "timeout": 20000
+    },
+    "seatbelt": {
+        "extraMachLookups": [
+            "com.apple.system.opendirectoryd.api",
+            "com.apple.system.opendirectoryd.libinfo"
+        ]
+    }
+}
