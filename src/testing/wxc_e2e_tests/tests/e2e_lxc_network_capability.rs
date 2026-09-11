@@ -13,6 +13,16 @@ fn ready() -> bool {
     has_platform_exec() && has_lxc_host()
 }
 
+/// Read one capability mask out of the container's `/proc/self/status`.
+fn capability_mask(status: &str, field: &str) -> u64 {
+    status
+        .lines()
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|mask| u64::from_str_radix(mask, 16).ok())
+        .unwrap_or_else(|| panic!("the container reported no readable {field} line\n{status}"))
+}
+
 #[test]
 fn workload_cannot_reconfigure_the_network() {
     if !ready() {
@@ -38,17 +48,15 @@ fn workload_cannot_reconfigure_the_network() {
         result.stderr
     );
 
-    // The kernel writes this file; the workload cannot forge the mask.
-    let holds_net_admin = status
-        .lines()
-        .find(|line| line.starts_with("CapEff:"))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|mask| u64::from_str_radix(mask, 16).ok())
-        .map(|mask| mask & CAP_NET_ADMIN != 0)
-        .unwrap_or_else(|| panic!("the container reported no readable CapEff line\n{status}"));
-
-    assert!(
-        !holds_net_admin,
-        "the workload holds CAP_NET_ADMIN and can rewrite the firewall confining it\n{status}"
-    );
+    // The kernel writes these masks; the workload cannot forge them.  Effective
+    // alone would not settle it: a process raises a permitted capability into
+    // its effective set whenever it likes, and only a bounding-set drop
+    // survives execve.
+    for field in ["CapEff:", "CapPrm:", "CapBnd:"] {
+        assert_eq!(
+            capability_mask(&status, field) & CAP_NET_ADMIN,
+            0,
+            "{field} still carries CAP_NET_ADMIN; the workload can rewrite the firewall confining it\n{status}"
+        );
+    }
 }
