@@ -628,8 +628,8 @@ fn one_shot_kill_stops_the_workload() {
         "the workload must be running before the kill, or this test cannot fail"
     );
 
-    // Bounded, because teardown has been seen to block on a platform call that
-    // never returns. The handle comes back so this test, not the worker, decides
+    // Bounded so a kill that never returns fails this test rather than hanging
+    // the suite. The handle comes back so this test, not the worker, decides
     // when it drops.
     let (killed_tx, killed_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
