@@ -191,6 +191,11 @@ describe('Linux LXC Container default-deny network posture', {
   skip: lxcSkipReason,
 }, () => {
   it('should give schema 0.8 no network interface when the policy names no network fields', async () => {
+    // `awk` takes the interface names out of /proc/net/dev and strips the
+    // trailing colon; the `ip` call reports whether loopback carries
+    // 127.0.0.1.  The container prints two lines:
+    //   ifaces=[eth0 lo ]
+    //   loopback=up
     const probe =
       "echo \"ifaces=[$(awk 'NR>2 {sub(/:.*/, \"\", $1); print $1}' /proc/net/dev | sort | tr '\\n' ' ')]\"; " +
       "ip -4 addr show lo 2>/dev/null | grep -q '127.0.0.1' && echo 'loopback=up' || echo 'loopback=down'";
