@@ -57,26 +57,16 @@ describe('StateAwareSchemaVersion', () => {
 });
 
 describe('IsolationSessionProvisionConfig', () => {
-  const legacyNetwork = {
-    defaultPolicy: 'allow',
-    allowLocalNetwork: true,
-  } as const;
   const directionalNetwork = {
     egress: { default: 'allow' },
     ingress: { default: 'allow', hostLoopback: 'allow' },
   } as const;
 
   it('requires a canonical unrestricted network posture', () => {
-    const legacy: IsolationSessionProvisionConfig = {
-      version: '0.9.0-alpha',
-      network: legacyNetwork,
-    };
     const directional: IsolationSessionProvisionConfig = {
       network: directionalNetwork,
     };
-    assert.strictEqual(legacy.network.defaultPolicy, 'allow');
-    assert.ok('egress' in directional.network);
-    assert.strictEqual(directional.network.egress?.default, 'allow');
+    assert.strictEqual(directional.network.egress.default, 'allow');
 
     const oldVersion: IsolationSessionProvisionConfig = {
       // @ts-expect-error — no state-aware contract is registered for 0.8.
@@ -136,8 +126,8 @@ describe('IsolationSessionProvisionConfig', () => {
       network: { egress: { default: 'allow' } },
     };
     const mixed: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — legacy and directional spellings are mutually exclusive.
       network: {
+        // @ts-expect-error — legacy network fields are removed from schema 0.9.
         defaultPolicy: 'allow',
         allowLocalNetwork: true,
         ...directionalNetwork,
@@ -269,7 +259,13 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
 describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
-      provision: { version: '0.9.0-alpha', network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+      provision: {
+        version: '0.9.0-alpha',
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
+      },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -415,7 +411,10 @@ describe('WslcProvisionConfig', () => {
     const cfg: WslcProvisionConfig = {
       version: '0.9.0-alpha',
       filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
-      network: { defaultPolicy: 'allow' },
+      network: {
+        egress: { default: 'allow' },
+        ingress: { default: 'allow', hostLoopback: 'allow' },
+      },
       image: 'alpine:latest',
       imageTarPath: 'C:\\images\\alpine.tar',
     };
@@ -467,12 +466,14 @@ describe('WslcExecConfig', () => {
   it('requires process and accepts an optional cooperative proxy', () => {
     const cfg: WslcExecConfig = {
       process: { commandLine: 'echo hi' },
-      network: { proxy: { url: 'http://127.0.0.1:8888' } },
+      runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
     };
     assert.strictEqual(cfg.process.commandLine, 'echo hi');
 
     // @ts-expect-error — exec config requires process.
-    const missing: WslcExecConfig = { network: { proxy: { url: 'http://127.0.0.1:8888' } } };
+    const missing: WslcExecConfig = {
+      runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
+    };
     assert.ok(missing);
   });
 });

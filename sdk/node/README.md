@@ -313,8 +313,7 @@ const config: ContainerConfig = {
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
-The legacy `defaultPolicy: 'allow'` plus `allowLocalNetwork: true` spelling
-remains accepted during the transition. Selecting the backend or passing
+Legacy network fields are rejected. Selecting the backend or passing
 `experimental: true` never supplies an unrestricted network posture
 automatically.
 
@@ -372,8 +371,8 @@ await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
-`IsolationSessionProvisionConfig.network` accepts either the canonical legacy
-pair or the preferred standard directional all-allow shape shown above. Rules,
+`IsolationSessionProvisionConfig.network` requires the standard directional
+all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The shared lifecycle
 signatures and other backends are unchanged.
 

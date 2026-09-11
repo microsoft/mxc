@@ -7,6 +7,14 @@ requiring root privileges or a container runtime.
 
 > **Status:** Experimental — requires the `--experimental` CLI flag.
 
+> **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
+> requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
+> `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy` are
+> no longer accepted in v0.9. The legacy examples and compatibility discussion
+> below apply to their declared older contracts; they do not authorize those
+> fields in v0.9. The existing private-namespace prerequisites and backend
+> capability checks still apply. See [schema migration](../schema.md).
+
 ## Prerequisites
 
 - **Linux** host with kernel 3.8+ (user namespace support)

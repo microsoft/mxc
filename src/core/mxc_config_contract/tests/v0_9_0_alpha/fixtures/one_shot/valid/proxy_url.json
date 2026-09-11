@@ -3,9 +3,5 @@
   "process": {
     "commandLine": "echo proxy"
   },
-  "network": {
-    "proxy": {
-      "url": "http://proxy.example:8080"
-    }
-  }
+  "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
 }

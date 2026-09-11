@@ -141,9 +141,7 @@ The directional shape explicitly describes the backend's actual unrestricted
 posture across egress, ingress, and host loopback. All three values are
 required; rules, proxies, mixed postures, and omission are rejected.
 
-During the additive v0.9 transition, the existing canonical legacy form
-(`defaultPolicy: "allow"` and `allowLocalNetwork: true`, with no host rules,
-proxy, or non-default enforcement) remains accepted as an alternative.
+Legacy network fields are rejected.
 
 `appId` and the nested `provision` section are state-aware-only and are
 rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
@@ -248,9 +246,8 @@ the rationale for each disposition, and the error mapping live in
 | `process.commandLine` | **honored** (required) |
 | `process.cwd` / `process.env` / `process.timeout` | **honored** |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required preferred form** |
-| `network` — canonical legacy allow (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during the transition |
-| `network` — absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
+| `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** |
+| `network` — legacy fields, absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
@@ -295,8 +292,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | Directional and retained legacy network shapes, closure, and phase-specific field rejection |
-| Policy validation | `policy.rs` | Filesystem/UI rejection; directional and legacy unrestricted forms; empty/restrictive/mixed policy rejection; unchanged post-provision rules |
+| Config parsing | `config_parser.rs` | Directional network shape, closure, legacy-field removal, and phase-specific field rejection |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; directional unrestricted form; empty/restrictive/mixed policy rejection; unchanged post-provision rules |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 

@@ -84,14 +84,15 @@ internal static class Program
         {
             var provisioned = MxcLifecycle.ProvisionSandbox(
                 StateAwareContainment.IsolationSession,
-                new ProvisionSandboxOptions
+                new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
                 {
-                    Network = new StateAwareNetworkPolicy
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                    Ingress = new NetworkIngressPolicy
                     {
-                        DefaultPolicy = StateAwareNetworkDefault.Allow,
-                        AllowLocalNetwork = true,
+                        Default = NetworkAction.Allow,
+                        HostLoopback = NetworkAction.Allow,
                     },
-                });
+                }));
             id = provisioned.SandboxId;
         }
         catch (MxcException e)

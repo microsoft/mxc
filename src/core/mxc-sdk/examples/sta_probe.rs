@@ -149,7 +149,7 @@ fn main() {
 
         checkpoint("provision — the first async join");
         let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
         let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
             Ok(r) => r,
             Err(e) => {
@@ -264,7 +264,7 @@ fn measure_handle_outliving_its_thread() {
     let (exec_tx, exec_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
         let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
             Ok(r) => r,
             Err(e) => {

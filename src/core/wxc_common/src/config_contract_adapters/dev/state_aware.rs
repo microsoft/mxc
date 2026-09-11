@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config,
+    convert_telemetry, convert_version,
 };
 use crate::error::WxcError;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
@@ -39,50 +40,30 @@ fn convert_isolation_session_provision_experimental(
 }
 
 fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
-    match value {
-        contract::IsolationSessionNetwork::Legacy(value) => {
-            let contract::IsolationSessionLegacyNetwork {
-                allow_local_network: contract::True,
-                default_policy: contract::IsolationSessionLegacyNetworkAllow,
-            } = value;
-            wire::Network {
-                allow_local_network: Some(true),
-                default_policy: Some(wire::NetworkPolicy::Allow),
-                allowed_hosts: None,
-                enforcement_mode: None,
-                blocked_hosts: None,
-                proxy: None,
-                egress: None,
-                ingress: None,
-            }
-        }
-        contract::IsolationSessionNetwork::Directional(value) => {
-            let contract::IsolationSessionDirectionalNetwork { egress, ingress } = value;
-            let contract::IsolationSessionNetworkEgress {
-                default: contract::IsolationSessionNetworkAllow,
-            } = egress;
-            let contract::IsolationSessionNetworkIngress {
-                default: contract::IsolationSessionNetworkAllow,
-                host_loopback: contract::IsolationSessionNetworkAllow,
-            } = ingress;
-            wire::Network {
-                allow_local_network: None,
-                default_policy: None,
-                allowed_hosts: None,
-                enforcement_mode: None,
-                blocked_hosts: None,
-                proxy: None,
-                egress: Some(wire::NetworkEgress {
-                    default: Some(wire::NetworkAction::Allow),
-                    allow: None,
-                    deny: None,
-                }),
-                ingress: Some(wire::NetworkIngress {
-                    default: Some(wire::NetworkAction::Allow),
-                    host_loopback: Some(wire::NetworkAction::Allow),
-                }),
-            }
-        }
+    let contract::IsolationSessionNetwork { egress, ingress } = value;
+    let contract::IsolationSessionNetworkEgress {
+        default: contract::IsolationSessionNetworkAllow,
+    } = egress;
+    let contract::IsolationSessionNetworkIngress {
+        default: contract::IsolationSessionNetworkAllow,
+        host_loopback: contract::IsolationSessionNetworkAllow,
+    } = ingress;
+    wire::Network {
+        allow_local_network: None,
+        default_policy: None,
+        allowed_hosts: None,
+        enforcement_mode: None,
+        blocked_hosts: None,
+        proxy: None,
+        egress: Some(wire::NetworkEgress {
+            default: Some(wire::NetworkAction::Allow),
+            allow: None,
+            deny: None,
+        }),
+        ingress: Some(wire::NetworkIngress {
+            default: Some(wire::NetworkAction::Allow),
+            host_loopback: Some(wire::NetworkAction::Allow),
+        }),
     }
 }
 
@@ -274,6 +255,7 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
         sandbox_id,
         process,
         network,
+        runtime_config,
         telemetry,
         experimental,
     } = request;
@@ -283,6 +265,7 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.process = Some(convert_process(process));
     common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
     StateAwareInput::new(common, StateAwareOperation::Exec { sandbox_id })
 }
 

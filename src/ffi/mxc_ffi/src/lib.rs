@@ -908,6 +908,61 @@ mod tests {
     }
 
     #[test]
+    fn v09_legacy_network_authoring_reports_migration_without_running() {
+        for field in [
+            r#""defaultPolicy":"allow""#,
+            r#""enforcementMode":"capabilities""#,
+            r#""allowOutbound":true"#,
+            r#""allowOutbound":false"#,
+            r#""allowLocalNetwork":false"#,
+            r#""allowedHosts":[]"#,
+            r#""blockedHosts":[]"#,
+            r#""proxy":null"#,
+            r#""proxy":{"url":"http://localhost:8080"}"#,
+        ] {
+            let request = format!(
+                r#"{{"policy":{{"version":"0.9.0-alpha","network":{{{field}}}}},"command":"must-not-execute"}}"#
+            );
+            let mut out = run_with(&request);
+            assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST, "{field}");
+            assert!(out.stdout_utf8.is_null());
+            assert!(out.stderr_utf8.is_null());
+            // SAFETY: the failed call owns a non-null error string until freed.
+            let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+                .to_str()
+                .unwrap();
+            assert!(
+                message.contains("schema 0.9.0-alpha no longer accepts legacy"),
+                "{message}"
+            );
+            // SAFETY: out was initialized by mxc_run_request and has not been freed.
+            unsafe { mxc_run_result_free(&mut out) };
+        }
+    }
+
+    #[test]
+    fn null_legacy_bool_and_list_values_are_not_silently_omitted() {
+        for field in [
+            "allowOutbound",
+            "allowLocalNetwork",
+            "allowedHosts",
+            "blockedHosts",
+        ] {
+            for version in ["0.8.0-alpha", "0.9.0-alpha"] {
+                let request = format!(
+                    r#"{{"policy":{{"version":"{version}","network":{{"{field}":null}}}},"command":"must-not-execute"}}"#
+                );
+                let mut out = run_with(&request);
+                assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST, "{request}");
+                assert!(out.stdout_utf8.is_null());
+                assert!(out.stderr_utf8.is_null());
+                // SAFETY: out was initialized by mxc_run_request and has not been freed.
+                unsafe { mxc_run_result_free(&mut out) };
+            }
+        }
+    }
+
+    #[test]
     fn empty_command_reports_malformed_request() {
         let mut out = run_with(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#);
         assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);

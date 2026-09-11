@@ -44,8 +44,8 @@ fn accepts_empty_optional_arrays() {
         r#""filesystem": {"readwritePaths": []}"#,
         r#""filesystem": {"readonlyPaths": []}"#,
         r#""filesystem": {"deniedPaths": []}"#,
-        r#""network": {"allowedHosts": []}"#,
-        r#""network": {"blockedHosts": []}"#,
+        r#""network": {"egress": {"allow": []}}"#,
+        r#""network": {"egress": {"deny": []}}"#,
         r#""processContainer": {"capabilities": []}"#,
         r#""seatbelt": {"extraMachLookups": []}"#,
     ] {

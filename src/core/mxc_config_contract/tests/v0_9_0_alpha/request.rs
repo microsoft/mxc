@@ -96,10 +96,7 @@ fn provision_phase_with_isolation_session_containment_selects_isolation_session_
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            }
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
     }"#;
 
     assert!(matches!(

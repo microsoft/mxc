@@ -6,7 +6,8 @@
     "commandLine": "echo 'Image pulled from Quay' && cat /etc/os-release | head -4"
   },
   "network": {
-    "defaultPolicy": "allow"
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "experimental": {
     "wslc": {

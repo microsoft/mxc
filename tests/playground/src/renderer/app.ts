@@ -510,13 +510,6 @@ var SCENARIOS: Scenario[] = [
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: "import urllib.request\nresp = urllib.request.urlopen('http://httpbin.org/get', timeout=10)\nprint('HTTP status:', resp.status)\nprint('Network works!')",
     policy: { network: { enabled: true } }, successMarker: 'Network works!' },
-  { id: 'hl-net-http-blocked', name: 'HTTP GET (network off)', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
-    containment: 'hyperlight',
-    description: 'Attempts HTTP GET with networking disabled. Should fail to connect (verdict passes when blocked).',
-    expectedOutcome: 'succeed', expectedLabel: 'Should block network request',
-    script: "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/get', timeout=5)\n    print('ERROR: request should have failed')\nexcept Exception as e:\n    print('Correctly blocked:', type(e).__name__)",
-    policy: {}, successMarker: 'Correctly blocked', failureMarker: 'ERROR: request should have failed' },
-
   // ========== Hyperlight — Filesystem ==========
   { id: 'hl-fs-write-read', name: 'Write & read file', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
     containment: 'hyperlight',
@@ -1228,13 +1221,23 @@ function buildRawBackendConfig(
       timeout: timeoutMs,
     },
   };
-  if (scenarioPolicy.network && scenarioPolicy.network.enabled) {
-    config.network = { defaultPolicy: 'allow' };
-    if (scenarioPolicy.network.allowedHosts) {
-      config.network.allowedHosts = scenarioPolicy.network.allowedHosts;
+  if (scenarioPolicy.network) {
+    if (scenarioPolicy.network.allowedHosts || scenarioPolicy.network.blockedHosts) {
+      throw new Error(
+        'Schema 0.9 raw-backend configs require CIDR-based directional rules; '
+        + 'hostname allow/block lists cannot be translated safely.',
+      );
     }
-    if (scenarioPolicy.network.blockedHosts) {
-      config.network.blockedHosts = scenarioPolicy.network.blockedHosts;
+    // Hyperlight has no valid v0.9 network section; omission keeps its
+    // unrestricted backend default.
+    if (containment === 'microvm') {
+      var action = scenarioPolicy.network.enabled ? 'allow' : 'deny';
+      config.network = {
+        egress: { default: action },
+        ingress: { default: action, hostLoopback: action },
+      };
+    } else if (containment !== 'hyperlight' && scenarioPolicy.network.enabled) {
+      config.network = { egress: { default: 'allow' } };
     }
   }
   if (scenarioPolicy.filesystem) {
@@ -1245,12 +1248,6 @@ function buildRawBackendConfig(
     if (scenarioPolicy.filesystem.readonlyPaths) {
       config.filesystem.readonlyPaths = scenarioPolicy.filesystem.readonlyPaths;
     }
-  }
-  // Hyperlight defaults to network-allowed when `network` is omitted; explicitly
-  // block unless the scenario opts in. MicroVM/NanVix rejects `defaultPolicy: block`,
-  // so leave its network field unset in that case.
-  if (containment === 'hyperlight' && !config.network) {
-    config.network = { defaultPolicy: 'block' };
   }
   if (scenarioPolicy.timeoutMs) {
     config.process.timeout = scenarioPolicy.timeoutMs;
@@ -1272,20 +1269,6 @@ async function runSandbox(): Promise<void> {
     if (!rawJson) {
       termError('No JSON config provided');
       return;
-    }
-
-    // Apply Hyperlight default-block defense-in-depth: if the user-pasted config
-    // targets Hyperlight and omits `network`, inject `{ defaultPolicy: 'block' }`
-    // so we don't silently inherit the backend's default-allow.
-    try {
-      var rawParsed = JSON.parse(rawJson);
-      if (rawParsed && rawParsed.containment === 'hyperlight' && !rawParsed.network) {
-        rawParsed.network = { defaultPolicy: 'block' };
-        rawJson = JSON.stringify(rawParsed);
-        termDim('[Playground] Hyperlight: injected network.defaultPolicy=block (no network field provided)');
-      }
-    } catch {
-      // Let the backend surface the parse error.
     }
 
     state.running = true;

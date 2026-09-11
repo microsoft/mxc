@@ -115,15 +115,6 @@ public static class MxcLifecycle
                     "appId",
                     isolation.AppId);
                 break;
-            case ProvisionSandboxOptions legacy:
-                SetCrossCuttingPolicies(envelope, legacy.Filesystem, legacy.Network);
-                SetOptionalBackendConfig(
-                    envelope,
-                    backend,
-                    "provision",
-                    "appId",
-                    legacy.AppId);
-                break;
             case WindowsSandboxProvisionOptions windowsSandbox:
                 SetCrossCuttingPolicies(envelope, windowsSandbox.Filesystem, network: null);
                 break;
@@ -294,9 +285,9 @@ public static class MxcLifecycle
             process["timeout"] = timeout;
         }
         envelope["process"] = process;
-        if (options is WslcExecOptions { Network: { } network })
+        if (options is WslcExecOptions { RuntimeConfig: { } runtime })
         {
-            envelope["network"] = SerializeToNode(network);
+            envelope["runtimeConfig"] = SerializeToNode(runtime);
         }
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
@@ -435,6 +426,13 @@ public static class MxcLifecycle
         string phase,
         StateAwarePhaseOptions? options)
     {
+        if (options is WslcExecOptions wslc
+            && (wslc.RuntimeConfig is not null || wslc.Network is not null))
+        {
+            throw new ArgumentException(
+                "Runtime proxy configuration is accepted only on WSLC exec, not start, stop or deprovision.",
+                nameof(options));
+        }
         if (options is StateAwareExecOptions)
         {
             throw new ArgumentException(
@@ -535,11 +533,32 @@ public static class MxcLifecycle
                     : $"{options.GetType().Name} cannot configure {containment}",
                 nameof(options));
         }
+        if (options is ProvisionSandboxOptions)
+        {
+            throw new ArgumentException(
+                "Schema 0.9 no longer accepts legacy IsolationSession network fields. "
+                    + "Use IsolationSessionProvisionOptions with directional egress, ingress, "
+                    + "and host-loopback defaults set to Allow.",
+                nameof(options));
+        }
         if (options is IsolationSessionProvisionOptions isolation)
         {
-            IsolationSessionProvisionOptions.ValidateNetwork(
-                isolation.Network,
-                nameof(options));
+            ValidateDirectionalNetwork(isolation.Network);
+            if (isolation.Network.Egress?.Default != NetworkAction.Allow
+                || isolation.Network.Egress.Allow is not null
+                || isolation.Network.Egress.Deny is not null
+                || isolation.Network.Ingress?.Default != NetworkAction.Allow
+                || isolation.Network.Ingress.HostLoopback != NetworkAction.Allow)
+            {
+                throw new ArgumentException(
+                    "IsolationSession requires directional egress, ingress, and host-loopback "
+                        + "defaults set to Allow, with no rules.",
+                    nameof(options));
+            }
+        }
+        if (options is WslcProvisionOptions { Network: { } network })
+        {
+            ValidateDirectionalNetwork(network);
         }
     }
 
@@ -552,6 +571,39 @@ public static class MxcLifecycle
             throw new ArgumentException(
                 $"{nameof(WslcExecOptions)} requires a wslc: sandbox id",
                 nameof(options));
+        }
+        if (options is WslcExecOptions wslc)
+        {
+            if (wslc.Network is not null)
+            {
+                throw new ArgumentException(
+                    "Schema 0.9 no longer supports exec network.proxy; use "
+                        + "WslcExecOptions.RuntimeConfig.NetworkProxy with an HTTP/S URL.",
+                    nameof(options));
+            }
+            if (wslc.RuntimeConfig?.NetworkProxy is { } proxy
+                && (string.IsNullOrWhiteSpace(proxy)
+                    || proxy.Trim() != proxy
+                    || !Uri.TryCreate(proxy, UriKind.Absolute, out var uri)
+                    || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+            {
+                throw new ArgumentException(
+                    "runtimeConfig.networkProxy must be an HTTP/S URL string.",
+                    nameof(options));
+            }
+        }
+    }
+
+    private static void ValidateDirectionalNetwork(StateAwareNetworkPolicy network)
+    {
+        if (network.LegacyFieldSpecified is { } field)
+        {
+            throw new ArgumentException(
+                $"Schema 0.9 no longer supports authored network.{field}, including null. "
+                    + "Use directional network.Egress/Ingress on WSLC provision. "
+                    + "Remove DefaultPolicy, AllowLocalNetwork, AllowedHosts, BlockedHosts and Proxy; "
+                    + "configure a proxy with RuntimeConfig.NetworkProxy on exec. Hostnames are not converted to CIDRs.",
+                nameof(network));
         }
     }
 

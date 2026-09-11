@@ -120,17 +120,15 @@ try
     {
         var provisioned = MxcLifecycle.ProvisionSandbox(
             StateAwareContainment.IsolationSession,
-            new ProvisionSandboxOptions
+            new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
             {
-                // The isolation session runs on a network MXC can neither filter
-                // nor deny; provision accepts only this posture, stated
-                // explicitly, and refuses an absent policy.
-                Network = new StateAwareNetworkPolicy
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                Ingress = new NetworkIngressPolicy
                 {
-                    DefaultPolicy = StateAwareNetworkDefault.Allow,
-                    AllowLocalNetwork = true,
+                    Default = NetworkAction.Allow,
+                    HostLoopback = NetworkAction.Allow,
                 },
-            });
+            }));
         Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
         try
         {

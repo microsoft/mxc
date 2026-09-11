@@ -7,7 +7,7 @@
         "deniedPaths": ["C:\\mxc_wslc_sa_test\\rw\\secret"]
     },
     "network": {
-        "defaultPolicy": "block"
+        "egress": { "default": "deny" }
     },
     "experimental": {
         "wslc": {

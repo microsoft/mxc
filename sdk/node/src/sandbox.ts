@@ -28,6 +28,15 @@ const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
 const REGISTERED_VERSION_ORDER = new Map(
     REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
 );
+const LEGACY_NETWORK_FIELDS = [
+    'allowOutbound',
+    'defaultPolicy',
+    'enforcementMode',
+    'allowLocalNetwork',
+    'allowedHosts',
+    'blockedHosts',
+    'proxy',
+] as const;
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -127,11 +136,9 @@ function validateTelemetryVersion(policy: SandboxPolicy): void {
 }
 
 function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return network.allowOutbound !== undefined ||
-        network.allowLocalNetwork !== undefined ||
-        network.allowedHosts !== undefined ||
-        network.blockedHosts !== undefined ||
-        network.proxy !== undefined;
+    return LEGACY_NETWORK_FIELDS.some(
+        field => (network as Record<string, unknown>)[field] !== undefined,
+    );
 }
 
 function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
@@ -147,6 +154,20 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
 
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
+    if (policy.version === '0.9.0-alpha' && network !== undefined) {
+        for (const field of LEGACY_NETWORK_FIELDS) {
+            if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
+                throw new Error(
+                    `Schema 0.9.0-alpha no longer supports network.${field}. ` +
+                    'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
+                    'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
+                );
+            }
+        }
+        if (network === null || typeof network !== 'object' || Array.isArray(network)) {
+            throw new Error('network must be an object when supplied.');
+        }
+    }
     const hasLegacy = network !== undefined && hasLegacyNetworkFields(network);
     const hasDirectional = usesDirectionalNetwork(policy);
 
@@ -190,7 +211,7 @@ function buildWslcContainerConfig(
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from
-    // the network.defaultPolicy field — no firewall enforcement needed.
+    // the directional egress posture — no firewall enforcement needed.
 
     return config;
 }
@@ -274,7 +295,7 @@ function buildProcessBaseContainerConfig(
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network && !usesDirectionalNetwork(policy)) {
+    if (config.network && policy.version !== '0.9.0-alpha' && !usesDirectionalNetwork(policy)) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -392,10 +413,11 @@ export function createConfigFromPolicy(
     };
 
     if (directionalNetwork) {
-        if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
+        if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
+            policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
             config.network = {
-                egress: policy.network.egress,
-                ingress: policy.network.ingress,
+                egress: policy.network?.egress,
+                ingress: policy.network?.ingress,
             };
         }
         if (policy.runtimeConfig?.networkProxy !== undefined) {

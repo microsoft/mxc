@@ -11,25 +11,11 @@ use crate::configs::{
 
 use super::super::{
     ClipboardPolicy, Containment, NetworkAction, NetworkEgressSection, NetworkIngressSection,
-    NetworkProtocol, NetworkRuleSection, ProxySpec, UiSection, WslcSection,
+    NetworkProtocol, NetworkRuleSection, UiSection, WslcSection,
 };
 use super::{
-    error, legacy_enforcement, non_empty_port, normalized_capabilities, selected_process_container,
-    LegacyEnforcement, NetworkFormat, PreparedInput,
+    error, non_empty_port, normalized_capabilities, selected_process_container, PreparedInput,
 };
-
-fn map_proxy(proxy: &ProxySpec) -> Result<contract::NetworkProxy, MxcError> {
-    match proxy {
-        ProxySpec::BuiltinTestServer => Err(error(
-            "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
-        )),
-        ProxySpec::Localhost(port) => Ok(contract::NetworkProxy::Localhost(non_empty_port(
-            *port,
-            "network.proxy.localhost",
-        )?)),
-        ProxySpec::Url(url) => Ok(contract::NetworkProxy::Url(url.clone())),
-    }
-}
 
 fn map_ui(ui: &UiSection) -> contract::Ui {
     contract::Ui {
@@ -65,14 +51,6 @@ fn map_process_container_ui(ui: &ProcessContainerUi) -> contract::ProcessContain
             .to_string(),
         ),
         ime: contract::OptionalField::present(ui.ime),
-    }
-}
-
-fn map_legacy_enforcement(value: LegacyEnforcement) -> contract::NetworkEnforcementMode {
-    match value {
-        LegacyEnforcement::Capabilities => contract::NetworkEnforcementMode::Capabilities,
-        LegacyEnforcement::Firewall => contract::NetworkEnforcementMode::Firewall,
-        LegacyEnforcement::Both => contract::NetworkEnforcementMode::Both,
     }
 }
 
@@ -210,63 +188,23 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
     let containment = input.containment;
     let network_format = input.network_format;
     let process_container = selected_process_container(containment);
-    let enforcement = legacy_enforcement(policy, containment, process_container.is_some());
-    let network = match network_format {
-        NetworkFormat::Legacy => contract::OptionalField::present(contract::Network {
-            default_policy: contract::OptionalField::present(
-                if policy
-                    .network
-                    .as_ref()
-                    .is_some_and(|network| network.allow_outbound)
-                {
-                    contract::DefaultNetworkPolicy::Allow
-                } else {
-                    contract::DefaultNetworkPolicy::Block
-                },
-            ),
-            enforcement_mode: optional!(contract, enforcement.map(map_legacy_enforcement)),
-            allowed_hosts: match policy.network.as_ref() {
-                Some(network) => contract::OptionalField::present(network.allowed_hosts.clone()),
-                None => Default::default(),
-            },
-            blocked_hosts: match policy.network.as_ref() {
-                Some(network) => contract::OptionalField::present(network.blocked_hosts.clone()),
-                None => Default::default(),
-            },
-            allow_local_network: match policy.network.as_ref() {
-                Some(network) => contract::OptionalField::present(network.allow_local_network),
-                None => Default::default(),
-            },
-            proxy: optional!(
-                contract,
-                policy
-                    .network
-                    .as_ref()
-                    .and_then(|network| network.proxy.as_ref())
-                    .map(map_proxy)
-                    .transpose()?
-            ),
-            egress: Default::default(),
-            ingress: Default::default(),
-        }),
-        NetworkFormat::Directional => match policy.network.as_ref() {
-            Some(network) if network.egress.is_some() || network.ingress.is_some() => {
-                contract::OptionalField::present(contract::Network {
-                    default_policy: Default::default(),
-                    enforcement_mode: Default::default(),
-                    allowed_hosts: Default::default(),
-                    blocked_hosts: Default::default(),
-                    allow_local_network: Default::default(),
-                    proxy: Default::default(),
-                    egress: optional!(
-                        contract,
-                        network.egress.as_ref().map(map_egress).transpose()?
-                    ),
-                    ingress: optional!(contract, network.ingress.as_ref().map(map_ingress)),
-                })
-            }
-            _ => Default::default(),
-        },
+    let network = match policy.network.as_ref() {
+        // A runtime-only section does not author a sandbox posture. In
+        // particular, it must not turn a proxy-only exec into a mode change.
+        Some(network)
+            if network.runtime_config.is_none()
+                || network.egress.is_some()
+                || network.ingress.is_some() =>
+        {
+            contract::OptionalField::present(contract::Network {
+                egress: optional!(
+                    contract,
+                    network.egress.as_ref().map(map_egress).transpose()?
+                ),
+                ingress: optional!(contract, network.ingress.as_ref().map(map_ingress)),
+            })
+        }
+        _ => Default::default(),
     };
     let seatbelt = if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
         contract::OptionalField::present(contract::Seatbelt {
