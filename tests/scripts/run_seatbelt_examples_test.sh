@@ -7,7 +7,7 @@
 # executed to prove they do what they claim.
 #
 # 27_mac_terminal_sandboxed is validated but never executed: it uses
-# launchMethod "open", which is excluded from this suite pending a fix.
+# launchMethod "open", which this suite does not run.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

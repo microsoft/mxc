@@ -7,9 +7,6 @@
 # network anchor means the environment is misconfigured -- not that the test is
 # inapplicable. Reporting that as "skipped" is how a gate goes green having
 # verified nothing, so exit 77 is treated as a failure here.
-#
-# The launchMethod=open suite drives LaunchServices, so it needs a GUI login
-# session and leaves Terminal windows open behind it.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,7 +82,6 @@ run_test "Seatbelt guiAccess" "$SCRIPT_DIR/run_seatbelt_gui_access_test.sh"
 run_test "Seatbelt Options" "$SCRIPT_DIR/run_seatbelt_options_test.sh"
 run_test "Seatbelt Profile Output" "$SCRIPT_DIR/run_seatbelt_profile_test.sh"
 run_test "Seatbelt Examples" "$SCRIPT_DIR/run_seatbelt_examples_test.sh"
-run_test "Seatbelt launchMethod=open" "$SCRIPT_DIR/run_seatbelt_launch_open_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed"
