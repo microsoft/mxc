@@ -95,7 +95,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release -p lxc --bin lxc-exec
 
-      - name: Run LXC network capability E2E test
+      # The other network tests assert that MXC's rules block traffic.  That
+      # proves nothing if the workload can delete the rules.
+      - name: Check the container cannot delete the rules confining it
         working-directory: src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
