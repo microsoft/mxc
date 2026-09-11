@@ -164,18 +164,20 @@ depends on the entry and on `defaultPolicy`:
 | `blockedHosts` | `block` | Reported as unresolved and skipped. The closing DROP already denies the destination, so the unwritten rule was redundant |
 | `blockedHosts` | `allow` | **Fails firewall setup.** The chain ends in ACCEPT, so the unwritten DROP was the only thing that would have denied that destination, and skipping it silently converts a deny into an allow |
 
-An allow that covers every address is detected: under `defaultPolicy: "block"`,
-an `allowedHosts` entry whose prefix length is zero, alongside a `blockedHosts`
-entry that resolved to nothing, fails firewall setup. The allow is evaluated
-before the closing DROP, so it would accept whatever the blocked host resolves
-to for the container, and deny precedence could not hold.
+All of this needs an entry that failed to resolve. A policy whose entries all
+resolve has no gap here.
 
-One gap remains open and is not detected: an `allowedHosts` entry with a
-bounded prefix may still happen to cover the destination whose `blockedHosts`
-rule went unwritten. Deciding that would require the address the failed entry
-was *meant* to resolve to, which is by definition unavailable, so no check over
-the policy text can be complete — and a partial check would imply a guarantee
-this code cannot make.
+When a `blockedHosts` entry does fail under `defaultPolicy: "block"`, one case
+is caught and one is not. An `allowedHosts` entry covering every address — a
+zero-length prefix — fails firewall setup: it sits ahead of the closing DROP
+and would accept whatever the blocked host resolved to. An entry with a
+*bounded* prefix is not caught, and it may happen to cover that destination.
+Deciding that needs the address the failed entry was meant to resolve to,
+which is by definition unavailable — no check over the policy text can be
+complete, and a partial one would imply a guarantee this code cannot make.
+
+None of this reaches schema 0.8, whose `network.egress` peers are CIDRs with
+no hostname form. Nothing there can fail to resolve.
 
 ### Schema 0.8 egress rules
 
