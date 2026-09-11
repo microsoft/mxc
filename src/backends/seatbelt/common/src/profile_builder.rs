@@ -26,6 +26,8 @@
 //! rules — the behavior callers expect from MXC's `denied_paths`.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::seatbelt_policy;
 use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
@@ -65,6 +67,7 @@ pub fn build_profile_with_proxy(
 
     // Filesystem — read-only system paths every process needs.
     out.push_str(SYSTEM_READ_ALLOW);
+    write_developer_dir_rule(&mut out);
 
     // Pseudo-terminal access — when the executor binary runs under a pty
     // the sandboxed shell inherits that TTY, so it sees a real terminal
@@ -135,6 +138,113 @@ const SYSTEM_READ_ALLOW: &str = "\
     (literal \"/dev/random\")
     (literal \"/dev/urandom\"))
 ";
+
+/// Where `xcode-select` records the active developer directory. The second
+/// entry is the older path some releases still populate.
+const DEVELOPER_DIR_LINKS: [&str; 2] = [
+    "/private/var/db/xcode_select_link",
+    "/private/var/select/developer_dir",
+];
+
+/// Resolve the active Xcode / Command Line Tools developer directory.
+///
+/// The `/usr/bin` stubs (`python3`, `git`) are `xcrun` shims that `dlopen`
+/// `libxcrun.dylib` from here, so they cannot start unless it is readable.
+/// `SYSTEM_READ_ALLOW` reaches a Command Line Tools install through its
+/// `/Library` grant, but an Xcode-selected host puts it under `/Applications`.
+///
+/// `DEVELOPER_DIR` is ignored because any caller can set it. An untrusted link
+/// is skipped, so resolution continues to the legacy one.
+fn active_developer_dir() -> Option<PathBuf> {
+    DEVELOPER_DIR_LINKS
+        .iter()
+        .map(Path::new)
+        .filter(|link| link_is_root_controlled(link))
+        .filter_map(|link| fs::read_link(link).ok())
+        .find(|target| target.is_absolute() && target.is_dir())
+}
+
+/// Whether root alone decides what `link` resolves to.
+///
+/// Requires both a root-owned symlink and root-owned, non-group/world-writable
+/// directories above it: replacing a symlink is a directory operation, so the
+/// link's own ownership settles nothing by itself.
+#[cfg(unix)]
+fn link_is_root_controlled(link: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let Ok(link_meta) = fs::symlink_metadata(link) else {
+        return false;
+    };
+    if !link_meta.file_type().is_symlink() || link_meta.uid() != 0 {
+        return false;
+    }
+    // `ancestors()` starts at the link itself; the directories follow.
+    link.ancestors().skip(1).all(|dir| {
+        fs::metadata(dir)
+            .is_ok_and(|meta| dir_is_root_controlled(meta.uid(), meta.permissions().mode()))
+    })
+}
+
+/// Windows only: this module compiles everywhere but `std::os::unix` does not.
+/// There is no `xcode-select` there, so nothing to trust.
+#[cfg(not(unix))]
+fn link_is_root_controlled(_link: &Path) -> bool {
+    false
+}
+
+/// Pure so the rule is testable without a root-owned fixture. Sticky
+/// world-writable directories are rejected too — none of the real
+/// `xcode-select` locations are sticky, so refusing costs nothing.
+#[cfg(unix)]
+fn dir_is_root_controlled(uid: u32, mode: u32) -> bool {
+    const NON_OWNER_WRITE: u32 = 0o022;
+
+    uid == 0 && mode & NON_OWNER_WRITE == 0
+}
+
+/// Emit the read-only grant for the active developer directory.
+fn write_developer_dir_rule(out: &mut String) {
+    if let Some(dir) = active_developer_dir() {
+        push_developer_dir_rule(out, &developer_dir_grant_root(&dir));
+    }
+}
+
+/// Widen a developer directory to the `.app` bundle containing it, if any.
+///
+/// The tools `xcrun` dispatches load frameworks from
+/// `<Xcode.app>/Contents/SharedFrameworks`, outside `Contents/Developer`, so
+/// the bundle root is the smallest subtree that lets them run. A Command Line
+/// Tools install has no `.app` ancestor and is returned as-is.
+fn developer_dir_grant_root(dir: &Path) -> PathBuf {
+    enclosing_app_bundle(dir).map_or_else(|| dir.to_path_buf(), Path::to_path_buf)
+}
+
+/// The bundle for which `dir` is exactly `<bundle>.app/Contents/Developer`.
+fn enclosing_app_bundle(dir: &Path) -> Option<&Path> {
+    if dir.file_name()? != "Developer" {
+        return None;
+    }
+    let contents = dir.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    bundle
+        .extension()?
+        .eq_ignore_ascii_case("app")
+        .then_some(bundle)
+}
+
+/// Emit the grant for an already-resolved path. Split out so it can be tested
+/// independently of what is installed on the test host.
+fn push_developer_dir_rule(out: &mut String, dir: &Path) {
+    let Some(path) = dir.to_str() else {
+        return;
+    };
+    out.push_str(";; --- active developer directory (xcrun shims in /usr/bin) ---\n");
+    let _ = writeln!(out, "(allow file-read* (subpath {}))", quote_scheme(path));
+}
 
 /// Pseudo-terminal device access required by the inner shell when the
 /// runner attaches it to a pty. The secondary fd we hand the child as
@@ -1825,5 +1935,175 @@ mod tests {
         });
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(global-name \"weird\\\"name\")"));
+    }
+
+    #[test]
+    fn developer_dir_rule_grants_read_only_subpath() {
+        let mut out = String::new();
+        push_developer_dir_rule(
+            &mut out,
+            Path::new("/Applications/Xcode.app/Contents/Developer"),
+        );
+        assert!(out.contains(
+            "(allow file-read* (subpath \"/Applications/Xcode.app/Contents/Developer\"))"
+        ));
+        // The xcrun shims only need to read it; a write grant would widen the
+        // sandbox for no benefit.
+        assert!(!out.contains("file-write"));
+    }
+
+    #[test]
+    fn developer_dir_rule_escapes_embedded_quotes() {
+        let mut out = String::new();
+        push_developer_dir_rule(&mut out, Path::new("/tmp/we\"ird/Developer"));
+        assert!(out.contains("(subpath \"/tmp/we\\\"ird/Developer\")"));
+    }
+
+    #[test]
+    fn xcode_developer_dir_widens_to_the_app_bundle() {
+        let root =
+            developer_dir_grant_root(Path::new("/Applications/Xcode_26.6.app/Contents/Developer"));
+        assert_eq!(root, Path::new("/Applications/Xcode_26.6.app"));
+    }
+
+    #[test]
+    fn command_line_tools_dir_is_not_widened() {
+        let dir = Path::new("/Library/Developer/CommandLineTools");
+        assert_eq!(developer_dir_grant_root(dir), dir);
+    }
+
+    #[test]
+    fn developer_dir_widening_is_case_insensitive_on_the_extension() {
+        let root =
+            developer_dir_grant_root(Path::new("/Applications/Xcode.APP/Contents/Developer"));
+        assert_eq!(root, Path::new("/Applications/Xcode.APP"));
+    }
+
+    #[test]
+    fn widening_accepts_any_bundle_name_and_install_location() {
+        // xcode-select fixes the Contents/Developer suffix, never the prefix.
+        for (dir, want) in [
+            (
+                "/Applications/Xcode-beta.app/Contents/Developer",
+                "/Applications/Xcode-beta.app",
+            ),
+            (
+                "/Applications/Xcode_26.6.app/Contents/Developer",
+                "/Applications/Xcode_26.6.app",
+            ),
+            (
+                "/Volumes/Build/Xcode.app/Contents/Developer",
+                "/Volumes/Build/Xcode.app",
+            ),
+        ] {
+            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(want));
+        }
+    }
+
+    #[test]
+    fn a_dir_deeper_inside_a_bundle_is_not_widened_to_it() {
+        // Only the exact Contents/Developer layout widens.
+        for dir in [
+            "/Applications/Evil.app/Contents/Developer/usr/bin",
+            "/Applications/Evil.app/a/b/Developer",
+            "/Applications/Evil.app/Contents/Developer2",
+        ] {
+            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(dir));
+        }
+    }
+
+    #[test]
+    fn widening_handles_non_normalized_paths_without_overreaching() {
+        // These all normalize to the same directory, so they still widen.
+        for dir in [
+            "/Applications/Xcode.app/Contents/Developer/",
+            "/Applications/Xcode.app/Contents//Developer",
+            "/Applications/Xcode.app/Contents/./Developer",
+        ] {
+            assert_eq!(
+                developer_dir_grant_root(Path::new(dir)),
+                Path::new("/Applications/Xcode.app")
+            );
+        }
+        // `..` is not normalized away, so it fails the layout match.
+        let parent_ref = "/Applications/Xcode.app/Contents/Developer/..";
+        assert_eq!(
+            developer_dir_grant_root(Path::new(parent_ref)),
+            Path::new(parent_ref)
+        );
+    }
+
+    #[test]
+    fn developer_dir_absent_emits_nothing() {
+        let mut out = String::new();
+        if active_developer_dir().is_none() {
+            write_developer_dir_rule(&mut out);
+            assert!(out.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_root_owned_unwritable_dir_is_trusted() {
+        assert!(dir_is_root_controlled(0, 0o755));
+        assert!(dir_is_root_controlled(0, 0o700));
+        for mode in [0o775, 0o757, 0o777, 0o1777] {
+            assert!(!dir_is_root_controlled(0, mode), "mode {mode:o}");
+        }
+        for uid in [1, 501, 1000] {
+            assert!(!dir_is_root_controlled(uid, 0o755), "uid {uid}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_caller_controls_is_not_trusted() {
+        use std::os::unix::fs::{symlink, MetadataExt as _};
+
+        let dir = std::env::temp_dir().join(format!("mxc-devdir-trust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("target")).expect("fixture dir");
+
+        let link = dir.join("link");
+        symlink(dir.join("target"), &link).expect("fixture symlink");
+        // Only decisive when the test user is not root.
+        if fs::metadata(&dir).expect("fixture metadata").uid() != 0 {
+            assert!(!link_is_root_controlled(&link));
+        }
+
+        // True for any user: `xcode-select` writes a symlink, nothing else.
+        let plain = dir.join("plain");
+        fs::write(&plain, "").expect("fixture file");
+        assert!(!link_is_root_controlled(&plain));
+        assert!(!link_is_root_controlled(&dir.join("missing")));
+
+        fs::remove_dir_all(&dir).expect("fixture cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_real_xcode_select_links_are_trusted_when_present() {
+        // The check must accept a stock host, or the grant silently vanishes.
+        for link in DEVELOPER_DIR_LINKS.iter().map(Path::new) {
+            if fs::symlink_metadata(link).is_ok() {
+                assert!(
+                    link_is_root_controlled(link),
+                    "rejected a stock link: {}",
+                    link.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn baseline_profile_grants_the_active_developer_dir() {
+        // The documented baseline promise is that standard tools work, and
+        // the /usr/bin xcrun shims cannot start without this directory.
+        let Some(dir) = active_developer_dir() else {
+            return;
+        };
+        let granted = developer_dir_grant_root(&dir);
+        let p = build_profile(&req()).unwrap();
+        assert!(p.contains(&format!("(subpath \"{}\")", granted.display())));
     }
 }
