@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "isolation-session-one-shot-network-rejected",
   "containment": "isolation_session",
   "network": {

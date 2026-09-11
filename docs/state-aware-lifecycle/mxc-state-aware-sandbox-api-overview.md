@@ -304,7 +304,7 @@ const { sandboxId } = await provisionSandbox(
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
@@ -348,7 +348,7 @@ const r = await execInSandboxAsync(
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "exec",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello" }

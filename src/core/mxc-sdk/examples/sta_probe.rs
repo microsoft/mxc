@@ -50,12 +50,13 @@ fn teardown(id: &str, who: &str) {
     let worker = std::thread::spawn(move || {
         println!("    [{who}] tearing down {id}");
         let _ = std::io::stdout().flush();
-        let stop = format!(r#"{{"phase":"stop","sandboxId":"{id}"}}"#);
+        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
         match mxc_sdk::run_state_aware_json(&stop, false, true) {
             Ok(_) => println!("    [{who}] stopped"),
             Err(e) => println!("    [{who}] stop failed: {e:?}"),
         }
-        let deprovision = format!(r#"{{"phase":"deprovision","sandboxId":"{id}"}}"#);
+        let deprovision =
+            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
         match mxc_sdk::run_state_aware_json(&deprovision, false, true) {
             Ok(_) => println!("    [{who}] deprovisioned"),
             Err(e) => println!("    [{who}] WARNING: deprovision failed, account may leak: {e:?}"),
@@ -147,7 +148,7 @@ fn main() {
         }
 
         checkpoint("provision — the first async join");
-        let provision = r#"{"phase":"provision","containment":"isolation_session",
+        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
             "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
         let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
             Ok(r) => r,
@@ -175,7 +176,7 @@ fn main() {
 
         checkpoint("start — a second async join, on a live session");
         if let Err(e) = mxc_sdk::run_state_aware_json(
-            &format!(r#"{{"phase":"start","sandboxId":"{sandbox_id}"}}"#),
+            &format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#),
             false,
             true,
         ) {
@@ -189,7 +190,7 @@ fn main() {
         // initialising COM themselves.
         checkpoint("exec — worker threads call WinRT with no apartment of their own");
         let exec = format!(
-            r#"{{"phase":"exec","sandboxId":"{sandbox_id}",
+            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
                 "process":{{"commandLine":"cmd.exe /c echo sta-probe-marker","timeout":30000}}}}"#
         );
         let mut exec_ok = false;
@@ -262,7 +263,7 @@ fn measure_handle_outliving_its_thread() {
     let (tx, rx) = std::sync::mpsc::channel();
     let (exec_tx, exec_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let provision = r#"{"phase":"provision","containment":"isolation_session",
+        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
             "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
         let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
             Ok(r) => r,
@@ -285,7 +286,8 @@ fn measure_handle_outliving_its_thread() {
         // Sent before anything else can fail, so main owns cleanup from here.
         let _ = tx.send(Ok(sandbox_id.clone()));
 
-        let start = format!(r#"{{"phase":"start","sandboxId":"{sandbox_id}"}}"#);
+        let start =
+            format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
         if let Err(e) = mxc_sdk::run_state_aware_json(&start, false, true) {
             let _ = exec_tx.send(Err(format!("start failed: {e:?}")));
             return;
@@ -295,7 +297,7 @@ fn measure_handle_outliving_its_thread() {
         // thread exits, so the handle under test is live, but short enough to
         // end on its own so no kill races the read path.
         let exec = format!(
-            r#"{{"phase":"exec","sandboxId":"{sandbox_id}",
+            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
                 "process":{{"commandLine":"cmd.exe /c echo marker-before && ping -n 4 127.0.0.1","timeout":120000}}}}"#
         );
         match mxc_sdk::exec_sandbox(&exec, true) {
