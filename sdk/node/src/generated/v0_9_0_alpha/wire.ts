@@ -230,8 +230,6 @@ export interface IsolationSessionProvisionRequest {
   version: Version;
 }
 
-export type LaunchMethod = "exec" | "open";
-
 /**
  * Container lifecycle settings.
  */
@@ -687,10 +685,6 @@ export interface Seatbelt {
    * Whether macOS Keychain access is allowed.
    */
   keychainAccess?: boolean;
-  /**
-   * Optional method used to launch the contained process.
-   */
-  launchMethod?: LaunchMethod;
   /**
    * Whether the contained process may allocate nested pseudo-terminals.
    */

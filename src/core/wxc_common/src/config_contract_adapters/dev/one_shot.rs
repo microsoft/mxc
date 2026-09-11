@@ -164,18 +164,10 @@ fn convert_lxc(value: contract::Lxc) -> wire::Lxc {
     }
 }
 
-fn convert_launch_method(value: contract::LaunchMethod) -> wire::LaunchMethod {
-    match value {
-        contract::LaunchMethod::Exec => wire::LaunchMethod::Exec,
-        contract::LaunchMethod::Open => wire::LaunchMethod::Open,
-    }
-}
-
 fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     let contract::Seatbelt {
         profile_override,
         gui_access,
-        launch_method,
         nested_pty,
         keychain_access,
         extra_mach_lookups,
@@ -183,7 +175,8 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
         gui_access: gui_access.into_option(),
-        launch_method: launch_method.into_option().map(convert_launch_method),
+        // Removed from the 0.9 contract: the inner process is always exec'd.
+        launch_method: None,
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),

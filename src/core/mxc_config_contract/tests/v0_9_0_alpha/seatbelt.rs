@@ -9,7 +9,6 @@ fn accepts_complete_seatbelt_object() {
         "seatbelt": {
             "profileOverride": "none",
             "guiAccess": false,
-            "launchMethod": "exec",
             "nestedPty": false,
             "keychainAccess": false,
             "extraMachLookups": ["com.apple.securityd", "com.apple.coreservices.launchservicesd"]
@@ -21,8 +20,9 @@ fn accepts_complete_seatbelt_object() {
 }
 
 #[test]
-fn accepts_every_seatbelt_launch_method() {
-    for launch_method in ["exec", "open"] {
+fn rejects_seatbelt_launch_method() {
+    // Removed in 0.9: the contained process is always launched with exec.
+    for launch_method in ["exec", "open", "invalid"] {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
@@ -33,21 +33,8 @@ fn accepts_every_seatbelt_launch_method() {
             }}"#
         );
 
-        assert_valid(&json);
+        assert_invalid(&json);
     }
-}
-
-#[test]
-fn rejects_invalid_seatbelt_launch_method() {
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "seatbelt": {
-                "launchMethod": "invalid"
-            },
-            "process": {"commandLine": "echo"}
-        }"#;
-
-    assert_invalid(json);
 }
 
 #[test]

@@ -144,7 +144,6 @@ const SEATBELT_REQUEST_JSON: &str = r#"{
     "seatbelt": {
         "profileOverride": "custom-profile.sb",
         "guiAccess": true,
-        "launchMethod": "open",
         "nestedPty": true,
         "keychainAccess": true,
         "extraMachLookups": ["com.example.service"]
@@ -213,7 +212,6 @@ const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
     "macos_sandbox": {
         "profileOverride": "custom-profile.sb",
         "guiAccess": true,
-        "launchMethod": "open",
         "nestedPty": true,
         "keychainAccess": true,
         "extraMachLookups": ["com.example.service"]
@@ -287,8 +285,6 @@ const UI_CLIPBOARD_CASES: &[&str] = &["none", "read", "write", "all"];
 
 const PROCESS_CONTAINER_UI_ISOLATION_CASES: &[&str] = &["container", "desktop", "handles", "atoms"];
 
-const SEATBELT_LAUNCH_METHOD_CASES: &[&str] = &["exec", "open"];
-
 const CAPTURE_DENIALS_MODE_CASES: &[&str] = &["block", "allow"];
 
 fn request_with_comment(comment: &str) -> String {
@@ -361,16 +357,6 @@ fn request_with_capture_denials_mode(mode: &str) -> String {
             "captureDenials": {{"mode": "{mode}"}}
         }}
     }}"#
-    )
-}
-
-fn request_with_seatbelt_launch_method(launch_method: &str) -> String {
-    format!(
-        r#"{{
-            "version": "0.9.0-alpha",
-            "process": {{"commandLine": "echo hello"}},
-            "seatbelt": {{"launchMethod": "{launch_method}"}}
-        }}"#
     )
 }
 
@@ -638,10 +624,7 @@ fn seatbelt_request_maps_expected_wire_fields() {
         Some("custom-profile.sb")
     );
     assert_eq!(seatbelt.gui_access, Some(true));
-    assert!(matches!(
-        seatbelt.launch_method,
-        Some(super::wire::LaunchMethod::Open)
-    ));
+    assert!(seatbelt.launch_method.is_none());
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
     assert_eq!(
@@ -921,22 +904,6 @@ fn enum_variants_map_expected_wire_values() {
             serde_json::json!(capture_denials_mode)
         );
     }
-
-    for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
-        let json = request_with_seatbelt_launch_method(launch_method);
-        let wire = adapt(&json);
-
-        assert_eq!(
-            serde_json::to_value(
-                wire.seatbelt
-                    .unwrap()
-                    .launch_method
-                    .expect("launchMethod should be populated")
-            )
-            .unwrap(),
-            serde_json::json!(launch_method)
-        );
-    }
 }
 
 #[test]
@@ -966,10 +933,7 @@ fn macos_sandbox_section_alias_maps_expected_wire_fields() {
         Some("custom-profile.sb")
     );
     assert_eq!(seatbelt.gui_access, Some(true));
-    assert!(matches!(
-        seatbelt.launch_method,
-        Some(super::wire::LaunchMethod::Open)
-    ));
+    assert!(seatbelt.launch_method.is_none());
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
     assert_eq!(
@@ -1097,11 +1061,6 @@ fn enum_variants_match_current_wire_deserialization() {
 
     for isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
         let json = request_with_process_container_ui_isolation(isolation);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
-        let json = request_with_seatbelt_launch_method(launch_method);
         assert_matches_current_wire_deserialization(&json);
     }
 }

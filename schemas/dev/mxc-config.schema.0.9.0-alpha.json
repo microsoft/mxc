@@ -436,24 +436,6 @@
       ],
       "type": "object"
     },
-    "LaunchMethod": {
-      "oneOf": [
-        {
-          "description": "Exec",
-          "enum": [
-            "exec"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Open",
-          "enum": [
-            "open"
-          ],
-          "type": "string"
-        }
-      ]
-    },
     "Lifecycle": {
       "additionalProperties": false,
       "description": "Container lifecycle settings.",
@@ -1253,10 +1235,6 @@
         "keychainAccess": {
           "description": "Whether macOS Keychain access is allowed.",
           "type": "boolean"
-        },
-        "launchMethod": {
-          "$ref": "#/definitions/LaunchMethod",
-          "description": "Optional method used to launch the contained process."
         },
         "nestedPty": {
           "description": "Whether the contained process may allocate nested pseudo-terminals.",
