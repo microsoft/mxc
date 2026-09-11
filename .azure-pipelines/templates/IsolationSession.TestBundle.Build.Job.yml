@@ -190,18 +190,23 @@ jobs:
           'run_isolation_session_resize_smoke.ps1'
       )
       foreach ($s in $scripts) {
-          $srcRoot = if ($s -eq 'run_isolation_session_tests.ps1') {
-              "$(Pipeline.Workspace)/pipeline"
-          } else {
-              "$(Build.SourcesDirectory)"
-          }
-          $src = "$srcRoot/tests/scripts/$s"
+          $src = "$(Build.SourcesDirectory)/tests/scripts/$s"
           if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
                throw "Required test script not found: $src"
            }
           Copy-Item $src "$out/test_scripts/"
           Write-Host "  -> test_scripts/$s"
       }
+
+      # The in-process runner is pipeline collateral rather than product-
+      # branch collateral. Keep it separate from the branch-specific
+      # wxc-exec runners above.
+      $inProcRunner = "$(Pipeline.Workspace)/pipeline/tests/scripts/run_isolation_session_inproc_tests.ps1"
+      if (-not (Test-Path -LiteralPath $inProcRunner -PathType Leaf)) {
+          throw "Required in-process test runner not found: $inProcRunner"
+      }
+      Copy-Item $inProcRunner "$out/test_scripts/"
+      Write-Host "  -> test_scripts/run_isolation_session_inproc_tests.ps1"
 
       # SDK integration tests (Node E2E suite)
       $sdkInteg = "$out/sdk-integration"
@@ -335,6 +340,15 @@ jobs:
       $testExe = "$(outputDirectory)/inproc/mxc-sdk-isolation-session-tests.exe"
       if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
           throw "Packaged in-process test executable not found: $testExe"
+      }
+
+      $runner = "$(outputDirectory)/test_scripts/run_isolation_session_inproc_tests.ps1"
+      $tokens = $null
+      $parseErrors = $null
+      [System.Management.Automation.Language.Parser]::ParseFile(
+          $runner, [ref]$tokens, [ref]$parseErrors) | Out-Null
+      if ($parseErrors.Count -gt 0) {
+          throw "Packaged in-process runner has PowerShell parse errors: $($parseErrors -join '; ')"
       }
 
       $testList = @(& $testExe --list)
