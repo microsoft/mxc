@@ -124,11 +124,19 @@ assert_no_new_mxc_chains() {
 
 PROTOCOLS="icmp tcp udp"
 
+# Both the delete and the count below match on this tag rather than on the
+# rule specification alone.  A host can already carry a rule with the same
+# destination, protocol, and target, put there by an operator or another test;
+# matching the specification would delete that rule and read its packet count
+# as this run's traffic.  The tag is fixed rather than per-process because the
+# pre-run cleanup below has to recognize what an aborted earlier run left.
+COUNTER_TAG="mxc-raw-egress-counter"
+
 remove_counters() {
     local protocol
     for protocol in $PROTOCOLS; do
         while iptables -t mangle -D POSTROUTING -d "$DEST"/32 -p "$protocol" \
-            -j ACCEPT 2>/dev/null; do :; done
+            -m comment --comment "$COUNTER_TAG" -j ACCEPT 2>/dev/null; do :; done
     done
 }
 
@@ -153,8 +161,9 @@ COMPILER="$(command -v cc || command -v gcc)"
 # stable.  POSTROUTING is the last hook a forwarded packet crosses before the
 # device, so a count here means the packet went out.
 for protocol in $PROTOCOLS; do
-    iptables -t mangle -A POSTROUTING -d "$DEST"/32 -p "$protocol" -j ACCEPT \
-        || fail "could not install the $protocol counter on the host."
+    iptables -t mangle -A POSTROUTING -d "$DEST"/32 -p "$protocol" \
+        -m comment --comment "$COUNTER_TAG" -j ACCEPT \
+        || fail "could not install the $protocol counter on the host; the comment match may be unavailable here."
 done
 
 protocol_number() {
@@ -174,8 +183,8 @@ counter_for() {
     local name="$1" number
     number="$(protocol_number "$name")"
     iptables -t mangle -L POSTROUTING -v -n -x 2>/dev/null \
-        | awk -v n="$name" -v num="$number" -v d="$DEST" \
-            '$3 == "ACCEPT" && ($4 == n || $4 == num) && $9 == d { print $1; exit }'
+        | awk -v n="$name" -v num="$number" -v d="$DEST" -v tag="$COUNTER_TAG" \
+            '$3 == "ACCEPT" && ($4 == n || $4 == num) && $9 == d && index($0, tag) { print $1; exit }'
 }
 
 # A missing counter and a counter reading zero are the same number to a naive
