@@ -212,29 +212,25 @@ address. That is the GA decision:
 first-class policy surface and that queries fail when the rules do not allow the
 resolver's IP.
 
-Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
-
-| Classification | Condition | Behavior |
-|----------------|-----------|----------|
-| `Available` | The `ip6tables` probe succeeds | Programs the parallel `ip6tables` chain alongside the IPv4 chain |
-| `KernelIpv6Disabled` | The probe fails **and** the namespace has no active IPv6 | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
-| `UnusableButIpv6Active` | The probe fails **and** the namespace has active IPv6 | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
-
-Both the probe and the IPv6 reading are scoped to the namespace the rules land in, because a host with IPv6 switched off says nothing about the container being filtered — reading the host there would skip the v6 chain while the rules went into a container that had IPv6, leaving it unfiltered. Activity is read from that namespace's `if_inet6`, and its *existence* is the signal rather than its contents: a container whose IPv6 address has not arrived yet presents the same address-less file as one with IPv6 switched off, and the kernel never creates the file at all when IPv6 is disabled at boot. If the file cannot be read for any other reason the state is *unknown* rather than a confirmed "IPv6 is off", so an unreadable state fails closed.
+IPv6 is filtered by a parallel `ip6tables` chain. MXC probes for it first, and
+the outcome that matters is the unsafe one: when `ip6tables` cannot be
+programmed while the container has IPv6 active, the run fails rather than
+installing an IPv4-only policy that would leave IPv6 egress open. A container
+with no IPv6 at all is given no v6 chain. Both the probe and the IPv6 reading
+are taken inside the container's namespace, because a host with IPv6 switched
+off says nothing about the container, and a reading that is merely
+indeterminate counts as active — the failure direction is deliberate and
+one-way.
 
 The chain is hooked into the `OUTPUT` chain of the container's **own network
-namespace**, not the host's `FORWARD` chain. Every command is issued through
-`nsenter -t <init-pid> -n`, so the container's init PID is mandatory; when a
-policy needs a firewall and MXC cannot discover that PID, the run is aborted
-rather than started with egress silently unenforced.
-
-Host `FORWARD` cannot serve here. A container on the default bridge reaches the
-outside world through the bridge's own IP, so the host routes the packet and it
-arrives in `FORWARD` with the bridge as its input interface, never the
-container's veth. Rules scoped to that veth match nothing. Filtering at the
-source — inside the namespace the traffic originates in — removes the question
-of how the veth is attached, and needs no `br_netfilter`, no topology change,
-and no address management.
+namespace**, not the host's `FORWARD` chain. A container on the default bridge
+reaches the outside world through the bridge's own IP, so its packets arrive in
+`FORWARD` with the bridge as the input interface and never the container's
+veth, and rules scoped to that veth would match nothing. Filtering at the
+source also needs no `br_netfilter`, no topology change, and no address
+management. Reaching that namespace takes the container's init PID, and a
+policy that needs a firewall aborts the run rather than starting unenforced
+when MXC cannot discover it.
 
 Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` suppresses that teardown on both the explicit path and the drop path. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
 
@@ -251,9 +247,9 @@ filter, and it arrives at the same place the chains would have left it.
 
 ### Inbound (ingress) policy
 
-Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
+Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host, reached the same way and with the same init-PID requirement. Bubblewrap installs no inbound chain at all: it either gives the sandbox its own network namespace, where nothing outside can reach in, or shares the host's, where an inbound chain would be host-wide.
 
-Every inbound `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Inbound teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install. The egress path pins no locale and needs none, because nothing there reads iptables' diagnostic text.
+Every inbound `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`, because inbound teardown reads iptables' own diagnostic text to tell "already absent" from a real failure, and that text is localized.
 
 Under 0.7.0, inbound filtering is installed only when the configuration
 requests a firewall enforcement mode. Under 0.8.0 it is installed whenever the
@@ -267,9 +263,7 @@ none, and so needs no chain.
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 
-IPv6 is classified with the same three-way probe as egress, against the *container* namespace and from the same signal. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
-
-The signal is the file's *existence* rather than its contents, because a container is not a long-running host. `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off. Existence is stable — the kernel never creates `/proc/<pid>/net/if_inet6` when IPv6 is disabled at boot — so a present but address-less file counts as active, and an unusable `ip6tables` fails the run closed instead of installing IPv4-only enforcement that an IPv6 address arriving moments later would slip past. The trade is deliberate and one-directional: this can abort a run that a contents-based reading would have let proceed, never the reverse.
+IPv6 is probed and classified exactly as egress is, and fails the same way: an `ip6tables` that cannot be programmed while the container has IPv6 active aborts the run rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
