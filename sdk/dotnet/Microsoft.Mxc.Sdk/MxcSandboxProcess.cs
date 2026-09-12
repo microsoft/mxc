@@ -41,7 +41,7 @@ public interface ISandboxProcess : IDisposable
     /// <summary>A handle that can interrupt standard-error reads.</summary>
     ISandboxStreamCloser? StandardErrorCloser { get; }
 
-    /// <summary>Security warnings emitted while applying the policy.</summary>
+    /// <summary>Security warnings from this sandbox.</summary>
     IReadOnlyList<string> Warnings { get; }
 
     /// <summary>Structured feature output available after terminal completion.</summary>
@@ -72,11 +72,11 @@ public interface ISandboxProcess : IDisposable
 /// Stream the child's stdio with <see cref="StandardInput"/> /
 /// <see cref="StandardOutput"/> / <see cref="StandardError"/>, wait for it with
 /// <see cref="Wait"/> / <see cref="WaitAsync"/>, or kill it (and its whole tree)
-/// with <see cref="Kill"/>. <see cref="Warnings"/> reports policy relaxations
-/// immediately. Each standard stream is a separate object; different streams
-/// may be used concurrently on different threads, but a single stream must be
-/// driven from one thread at a time (its native reads/writes are serialized
-/// internally, since the underlying handle is not concurrency-safe).
+/// with <see cref="Kill"/>. Each standard stream is a separate object;
+/// different streams may be used concurrently on different threads, but a
+/// single stream must be driven from one thread at a time (its native
+/// reads/writes are serialized internally, since the underlying handle is not
+/// concurrency-safe).
 /// </para>
 /// <para>
 /// <b>Draining.</b> Like the underlying Rust <c>Sandbox</c>, <see cref="Wait"/>
@@ -114,7 +114,6 @@ public sealed class MxcSandboxProcess : ISandboxProcess
 
     private readonly object _controlLock = new();
     private readonly MxcSandboxHandle _handle;
-    private IReadOnlyList<string>? _warnings;
     private bool _disposed;
 
     // Tracks whether each readable standard stream is still available, has been
@@ -248,7 +247,8 @@ public sealed class MxcSandboxProcess : ISandboxProcess
         StandardErrorCloser;
 
     /// <summary>
-    /// Security warnings emitted while applying the sandbox policy.
+    /// Security warnings emitted while applying the sandbox policy, and
+    /// cleanup steps that failed after the workload exited.
     /// </summary>
     public IReadOnlyList<string> Warnings
     {
@@ -257,10 +257,6 @@ public sealed class MxcSandboxProcess : ISandboxProcess
             lock (_controlLock)
             {
                 ThrowIfDisposed();
-                if (_warnings is not null)
-                {
-                    return _warnings;
-                }
                 unsafe
                 {
                     byte* json = null;
@@ -273,15 +269,14 @@ public sealed class MxcSandboxProcess : ISandboxProcess
                     }
                     if (json is null)
                     {
-                        return _warnings = Array.Empty<string>();
+                        return Array.Empty<string>();
                     }
                     try
                     {
                         var text = Marshal.PtrToStringUTF8((IntPtr)json);
-                        _warnings = string.IsNullOrEmpty(text)
+                        return string.IsNullOrEmpty(text)
                             ? Array.Empty<string>()
                             : JsonSerializer.Deserialize<string[]>(text) ?? Array.Empty<string>();
-                        return _warnings;
                     }
                     finally
                     {

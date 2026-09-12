@@ -72,11 +72,11 @@ or the configured output directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
-to the host's stderr, so inspecting `Warnings` is the only way to learn that
-containment was relaxed.
+to the host's stderr, so inspecting `Warnings` is the only way to see them.
 
-Streaming callers receive the same warnings immediately from
-`MxcSandboxProcess.Warnings`. They do not need to wait for the process to exit.
+Streaming callers read warnings from `MxcSandboxProcess.Warnings` without
+waiting for the process to exit. Cleanup failures are added during teardown,
+so read it again after `Wait`, `WaitAsync` or `Kill` to see them.
 
 ### Dependency injection and testing
 
