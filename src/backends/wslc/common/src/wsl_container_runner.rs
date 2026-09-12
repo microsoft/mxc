@@ -681,6 +681,7 @@ impl ScriptRunner for WSLContainerRunner {
             .into_response());
         }
         policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
+        reject_untranslatable_working_directory(request)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
@@ -697,6 +698,30 @@ impl ScriptRunner for WSLContainerRunner {
 /// `policy_validation` with the same message the state-aware surface emits.
 fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
+}
+
+/// One-shot reads `process.cwd` as a Windows host path and maps it to its
+/// in-container mount point, so a value without a drive letter (a UNC path,
+/// say) has no equivalent inside the container.
+///
+/// Checked here so dry-run reports it and no SDK, session, or image work
+/// happens first; [`WSLContainerRunner::start_container`] repeats it because it
+/// owns the translated value.
+fn reject_untranslatable_working_directory(
+    request: &ExecutionRequest,
+) -> Result<(), ScriptResponse> {
+    if request.working_directory.is_empty()
+        || policy_mapping::windows_path_to_container_path(&request.working_directory).is_some()
+    {
+        return Ok(());
+    }
+
+    Err(WslcError::Rejected(format!(
+        "WSLc: process.cwd must be a Windows drive path that maps into the container \
+         (e.g. C:\\workspace -> /mnt/c/workspace), got {:?}",
+        request.working_directory
+    ))
+    .into_response())
 }
 
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
@@ -1509,9 +1534,8 @@ impl WSLContainerRunner {
 
         let _cwd_cstr;
         if !request.working_directory.is_empty() {
-            // One-shot takes a Windows host path and translates it to its
-            // in-container mount point. An untranslatable value fails the
-            // launch rather than being dropped.
+            // Backstop for `reject_untranslatable_working_directory`, which
+            // already ran in `validate_runner`.
             let Some(container_cwd) =
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
             else {
@@ -2554,6 +2578,41 @@ mod tests {
             err.failure_phase,
             wxc_common::models::FailurePhase::Rejected
         );
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_cwd_that_does_not_map_into_the_container() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        for cwd in ["\\\\server\\share", "/mnt/c/workspace", "relative"] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                working_directory: cwd.to_string(),
+                ..Default::default()
+            };
+            let err = runner
+                .validate_runner(&request)
+                .expect_err(&format!("accepted '{cwd}'"));
+            assert!(
+                err.error_message.contains("maps into the container"),
+                "got: {}",
+                err.error_message
+            );
+            assert_eq!(
+                err.failure_phase,
+                wxc_common::models::FailurePhase::Rejected
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_accepts_a_drive_rooted_cwd() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            working_directory: "C:\\workspace".to_string(),
+            ..Default::default()
+        };
+        assert!(runner.validate_runner(&request).is_ok());
     }
 
     #[test]

@@ -101,10 +101,11 @@ impl ContainmentBackend {
             // a Windows host resolves that intent to `WindowsSandbox`.
             ContainmentBackend::Lxc
             | ContainmentBackend::Bubblewrap
-            | ContainmentBackend::Seatbelt
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight
             | ContainmentBackend::Vm => WorkingDirectoryStyle::Unix,
+            // Seatbelt is the only backend that expands `~` itself.
+            ContainmentBackend::Seatbelt => WorkingDirectoryStyle::MacOs,
             // One-shot WSLc takes a Windows *host* path and translates it into
             // the container; state-aware exec takes the in-container path.
             ContainmentBackend::Wslc => match scope {
@@ -130,9 +131,12 @@ pub enum WorkingDirectoryScope {
 pub enum WorkingDirectoryStyle {
     /// Windows paths: `C:\dir`, `C:/dir`, or a UNC/device path.
     Windows,
-    /// POSIX paths: `/dir`, plus the home-anchored `~` forms the Seatbelt
-    /// profile expands.
+    /// POSIX paths: `/dir` only. LXC and Bubblewrap hand the value to
+    /// `cd -- "$1"` and `--chdir` respectively, neither of which expands `~`.
     Unix,
+    /// POSIX paths plus the home-anchored `~` forms, which the Seatbelt
+    /// profile expands before use.
+    MacOs,
 }
 
 impl WorkingDirectoryStyle {
@@ -142,6 +146,9 @@ impl WorkingDirectoryStyle {
         match self {
             WorkingDirectoryStyle::Windows => is_windows_absolute(path),
             WorkingDirectoryStyle::Unix => is_unix_absolute(path),
+            WorkingDirectoryStyle::MacOs => {
+                is_unix_absolute(path) || path == "~" || path.starts_with("~/")
+            }
         }
     }
 
@@ -149,7 +156,7 @@ impl WorkingDirectoryStyle {
     pub fn example(self) -> &'static str {
         match self {
             WorkingDirectoryStyle::Windows => "C:\\workspace",
-            WorkingDirectoryStyle::Unix => "/workspace",
+            WorkingDirectoryStyle::Unix | WorkingDirectoryStyle::MacOs => "/workspace",
         }
     }
 }
@@ -170,7 +177,7 @@ fn is_windows_absolute(path: &str) -> bool {
 }
 
 fn is_unix_absolute(path: &str) -> bool {
-    path.starts_with('/') || path == "~" || path.starts_with("~/")
+    path.starts_with('/')
 }
 
 impl From<crate::wire::Containment> for ContainmentBackend {

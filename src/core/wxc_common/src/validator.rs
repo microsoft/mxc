@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::models::{
-    ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse, WorkingDirectoryScope,
+    ExecutionRequest, FailurePhase, NetworkAction, NetworkPolicy, ScriptResponse,
+    WorkingDirectoryScope,
 };
 use crate::mxc_error::MxcError;
 
@@ -199,7 +200,9 @@ pub fn validate_working_directory(
     request: &ExecutionRequest,
     scope: WorkingDirectoryScope,
 ) -> Result<(), String> {
-    let cwd = request.working_directory.trim();
+    // Validate the exact string the backends receive: only a genuinely empty
+    // value means "omitted", and " /tmp" is relative everywhere.
+    let cwd = request.working_directory.as_str();
     if cwd.is_empty() || !schema_requires_absolute_cwd(&request.schema_version) {
         return Ok(());
     }
@@ -230,8 +233,14 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
 
-    validate_working_directory(request, WorkingDirectoryScope::OneShot)
-        .map_err(|message| ScriptResponse::error(&message))?;
+    // `Rejected` so the SDK surfaces this as `policy_validation`, matching what
+    // state-aware `exec` returns for the same cwd.
+    validate_working_directory(request, WorkingDirectoryScope::OneShot).map_err(|message| {
+        ScriptResponse {
+            failure_phase: FailurePhase::Rejected,
+            ..ScriptResponse::error(&message)
+        }
+    })?;
 
     // Enforce the testing-only-features gate centrally so it applies uniformly
     // to all backends — every backend runs `validate_common` before executing.
@@ -389,15 +398,40 @@ mod tests {
         for backend in backends {
             for cwd in ["sub", ".", "..\\sibling", "./sub", "C:relative"] {
                 let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
-                let error = validate_common(&req)
-                    .expect_err(&format!("{} accepted '{cwd}'", backend.wire_name()))
-                    .error_message;
+                let resp = validate_common(&req)
+                    .expect_err(&format!("{} accepted '{cwd}'", backend.wire_name()));
                 assert!(
-                    error.contains("process.cwd must be an absolute path"),
-                    "unexpected message: {error}"
+                    resp.error_message
+                        .contains("process.cwd must be an absolute path"),
+                    "unexpected message: {}",
+                    resp.error_message
+                );
+                // Caller-fixable, so the SDK reports `policy_validation`.
+                assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+            }
+        }
+    }
+
+    #[test]
+    fn only_seatbelt_accepts_a_tilde_cwd() {
+        // Everything else hands the path to `cd -- "$1"` or `--chdir`, which
+        // treat `~` as an ordinary relative name.
+        for backend in [ContainmentBackend::Lxc, ContainmentBackend::Bubblewrap] {
+            for cwd in ["~", "~/workspace"] {
+                let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
+                assert!(
+                    validate_common(&req).is_err(),
+                    "{} accepted '{cwd}'",
+                    backend.wire_name()
                 );
             }
         }
+
+        let exec = request_with_cwd("0.9.0-alpha", ContainmentBackend::Wslc, "~/workspace");
+        assert!(validate_exec_common(&exec).is_err());
+
+        let seatbelt = request_with_cwd("0.9.0-alpha", ContainmentBackend::Seatbelt, "~/workspace");
+        assert!(validate_common(&seatbelt).is_ok());
     }
 
     #[test]
