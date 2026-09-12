@@ -17,34 +17,9 @@ namespace Microsoft.Mxc.Sdk.Tests;
 /// rather than only through the engine: the identity and workspace that
 /// provision reports, and the output and exit code an exec returns.
 /// </remarks>
+[Collection("MxcLiveHost")]
 public class MxcLifecycleE2ETests
 {
-    // Evaluated once: this answer decides failure versus skip, so it has to be
-    // the same for every test in the class.
-    private static readonly Lazy<bool> HostRunsIsolationSession = new(() =>
-        MxcSandbox.GetAvailableBackends()
-            .Any(b => b.Backend == ContainmentBackend.IsolationSession));
-
-    // Without this, a run in which everything skipped is indistinguishable from
-    // one that passed. The same variable the Rust isolation-session suite honours.
-    private static bool SkipsAreFailures =>
-        Environment.GetEnvironmentVariable("MXC_ISO_TESTS_REQUIRED") is "1" or "true";
-
-    /// <summary>Skips the calling test when the backend is unavailable, or fails
-    /// it when skips have been declared failures.</summary>
-    private static void RequireIsolationSessionHost()
-    {
-        Assert.False(
-            SkipsAreFailures && !HostRunsIsolationSession.Value,
-            "MXC_ISO_TESTS_REQUIRED is set, but GetAvailableBackends() does not "
-                + "report the isolation-session backend. That needs both a build "
-                + "with MxcWithIsolationSession and a host running the OS-side "
-                + "service.");
-        Assert.SkipUnless(
-            HostRunsIsolationSession.Value,
-            "GetAvailableBackends() does not report the isolation-session backend");
-    }
-
     private const string Cmd = @"C:\Windows\System32\cmd.exe";
 
     /// <summary>
@@ -157,7 +132,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Exec_RunsAsTheAgentUserFromTheProvisionMetadata()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -177,7 +152,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Exec_PropagatesANonZeroExitCode()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -195,7 +170,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Exec_ReportsConfiguredTimeout()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -217,7 +192,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Deprovision_RetiresTheSandboxId()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -236,7 +211,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Lifecycle_RunsEndToEnd()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -253,7 +228,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Workspace_IsSharedWithTheAgent_AndRemovedOnDeprovision()
     {
-        RequireIsolationSessionHost();
+        IsolationSessionHost.Require();
 
         var started = ProvisionAndStart();
         using (started.Teardown)
