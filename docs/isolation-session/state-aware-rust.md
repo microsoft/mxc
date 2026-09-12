@@ -160,9 +160,8 @@ the executable.
 
 **Config (none).** Start takes only the `sandboxId`; it accepts no per-phase
 payload. The one-shot surface likewise takes **no backend configuration at
-all**, so anything under `experimental.isolation_session` there is simply an
-unrecognised key in the deliberately permissive `experimental` block and is
-ignored.
+all**, so anything under `experimental.isolation_session` is rejected by the
+exact one-shot contract as `malformed_request`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -273,12 +272,12 @@ meaning for this backend.
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
 | `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
-| `process.commandLine` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
-| `process.{cwd,env,timeout}` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
-| `experimental.isolation_session.provision.appId` | accepted, ignored | **honored** | n/a | n/a | n/a | n/a |
-| `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
+| `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `experimental.isolation_session.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
+| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
-| another backend's `experimental.<backend>` section | rejected | rejected | accepted, ignored if it is the only one | accepted, ignored if the only one | accepted, ignored if the only one | accepted, ignored if the only one |
+| another backend's `experimental.<backend>` section | rejected | rejected | rejected | rejected | rejected | rejected |
 
 Notes on the rows that are not a simple accept/reject:
 
@@ -296,53 +295,38 @@ Notes on the rows that are not a simple accept/reject:
   is vacuously satisfied and neither asserts anything untrue. Bringing it under
   the single-backend-section check uniformly across backends is tracked
   separately.
-- **A lone foreign `experimental.<backend>` section on a non-provision phase** is
-  accepted and ignored, not rejected. Those requests carry no `containment`, so
-  `validate_experimental_backend_keys` has no resolved backend to compare
-  against; it rejects two or more foreign keys as unambiguously wrong but
-  tolerates exactly one. The *stable* sections (`processContainer`, `lxc`,
-  `seatbelt`) are rejected on every phase by the separate stray-section check.
-  Closing the lone-foreign-key case requires resolving the backend from the
-  `sandboxId` prefix, which is cross-backend work tracked separately.
+- **Foreign backend sections** are rejected structurally. Provision roots admit
+  only the selected backend's experimental object, while start, exec, stop, and
+  deprovision use closed experimental objects with no backend keys.
 - **`containerId`** is a caller-supplied label, not a restriction. This backend
   addresses sandboxes by the OS-assigned agent user name, so the field has no
   effect and ignoring it asserts nothing.
-- **`process` on non-exec state-aware phases** is accepted and ignored. The
-  dispatcher reads `process` only on `exec`, so a `commandLine`, `cwd`, `env` or
-  `timeout` supplied at provision / start / stop / deprovision has no effect and
-  no error. Nothing runs at those phases, so nothing is lost — but the request is
-  not what the caller believes it is. Supply `process` only on `exec`.
-- **Mis-slotted `experimental.isolation_session` payloads are accepted and
-  ignored, not rejected.** `deserialize_config` navigates exactly
-  `experimental.<backend>.<the request's own phase>`; anything else in that block
-  is read by nothing. Two shapes reach that state:
-  - a nested `provision` block on a *one-shot* request;
-  - a block under a phase that is not this request's phase, e.g.
-    `{"phase": "start", …, "isolation_session": {"provision": {…}}}`.
+- **`process` is valid only on one-shot and state-aware exec.** The exact
+  provision, start, stop, and deprovision roots omit it, so a supplied process
+  block is rejected as `malformed_request`.
+- **Mis-slotted `experimental.isolation_session` payloads are rejected
+  structurally.** A nested provision block on a one-shot request is unknown to
+  `OneShotExperimental`; a backend block on start, exec, stop, or deprovision is
+  unknown to that phase's closed experimental object.
 
-  Each is a caller supplying a documented field in an undocumented position, so
-  the value is silently not applied. Detecting mis-slotted
-  payloads generically is a cross-backend concern and is deliberately not solved
-  here. Nest the config under the request's own phase; the SDK already does.
+The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
+fields before backend validation. For example, supplied `ui`, noncanonical
+provision `network` shapes, and policy on phases that do not define it surface
+as `malformed_request`. Requests that pass the exact structural contract but
+violate a backend semantic invariant surface as `policy_validation`; a
+structurally valid but oversized `appId` is one such case.
 
-Rejection of `policy.*` fields surfaces on the **state-aware** surface as
-`error.code = "policy_validation"`. The **one-shot** surface answers by consumer:
-the Rust SDK classifies it the same way, while `wxc-exec` discards the typed
-variant (`ScriptResponse::error`) and its envelope carries
-`error.code = "backend_error"` with the reason in the message. A structurally
-invalid `appId` likewise surfaces as `policy_validation`.
-
-One exception: a supplied `network.proxy` is refused during config parsing,
-before any backend validation runs, so it surfaces as `malformed_request` on
-both surfaces.
+On the **one-shot** surface the backend's typed policy variant is discarded
+(`ScriptResponse::error`) and the envelope carries `error.code =
+"backend_error"` with the reason in the message. A supplied `network.proxy` is
+also structurally refused as `malformed_request`.
 
 ## Mode-specific fields
 
 ### Fields valid in both modes
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
-  accepted and ignored at non-exec state-aware phases (the dispatcher reads
-  `process` only on `exec`, and nothing runs at the other phases).
+  rejected structurally at non-exec state-aware phases.
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
   honoured per-process (each exec receives its own block).
 
@@ -370,9 +354,8 @@ whole section for every backend. See the matrix notes above.
   `deprovision` use `()`).
 - `experimental.isolation_session.provision.appId` — the calling application's
   identifier. Honoured here. The one-shot surface takes no backend
-  configuration at all, so the same field on a one-shot
-  `experimental.isolation_session` is an unrecognised key in the permissive
-  `experimental` block and is accepted and ignored.
+  configuration at all, so a one-shot `experimental.isolation_session` block is
+  rejected as `malformed_request`.
 
 ## Idempotence per phase
 
@@ -417,7 +400,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
+| `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
 | `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |

@@ -161,7 +161,7 @@ fn one_shot_requires_the_experimental_optin() {
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
     let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
+        version: "0.9.0-alpha".to_string(),
         filesystem: None,
         // The backend cannot filter the container's network, so it accepts only
         // an explicit acknowledgment; an absent policy reads as a deny it has no
@@ -769,6 +769,7 @@ fn provision_and_start() -> Started {
 
 fn exec_capture_stdout(sandbox_id: &str, command: &str) -> String {
     let request = serde_json::json!({
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": sandbox_id,
         "process": { "commandLine": command, "timeout": 30000 }

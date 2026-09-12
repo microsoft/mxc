@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// State-aware wire-type conformance oracle (Phase 2.5).
+// State-aware wire-type conformance oracle.
 //
 // The one-shot oracle (`wire-conformance.test.ts`) asserts that
 // `sdk/src/types.ts` conforms to the generated wire types. This companion does
