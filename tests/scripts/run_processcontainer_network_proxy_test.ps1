@@ -103,10 +103,11 @@ function Phase-NetworkProxy {
         }
 
         # Direct egress must be blocked while the proxy is configured. The
-        # proxy is not actually listening, so a REACHED verdict here means the
-        # workload went straight out — the exact bypass the model forbids.
+        # fetch bypasses the proxy env vars, so a REACHED verdict means the
+        # workload really went straight out rather than just failing to reach
+        # a proxy that is not listening.
         $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
-            -CommandLine (Get-AnchorFetchCommand) `
+            -CommandLine (Get-AnchorFetchCommand -IgnoreProxyEnv) `
             -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
             -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
             -NetworkProxy $proxyUrl -TimeoutMs 25000

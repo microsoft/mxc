@@ -45,7 +45,7 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 function Phase-T3Forced {
     Section 'Phase 4: debug build, natural detection -> T3'
-    Clear-StateFiles
+    Reset-StateFileBaseline
 
     $rw = Join-Path $ScratchRoot 'rw'
     $ro = Join-Path $ScratchRoot 'ro'
@@ -72,7 +72,7 @@ function Phase-T3Forced {
     $aclRwAfter     = Get-Acl-Snapshot $rw
     $aclRoAfter     = Get-Acl-Snapshot $ro
     $aclDeniedAfter = Get-Acl-Snapshot $denied
-    $stateAfter     = @(Get-StateFiles)
+    $stateAfter     = @(Get-NewStateFiles)
 
     Record-Result -Phase 'P4' -Name 'child exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P4' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
@@ -103,7 +103,7 @@ function Phase-T3Forced {
     # Even though child crashed, ACEs must still be cleaned up.
     $aclRwAfterUi = Get-Acl-Snapshot $rw
     Record-Result -Phase 'P4' -Name 'ui.disable=true rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterUi)
-    Record-Result -Phase 'P4' -Name 'ui.disable=true no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
+    Record-Result -Phase 'P4' -Name 'ui.disable=true no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 
     # ---------------------------------------------------------------------
     # Sandbox property test: ping requires raw ICMP sockets, which
@@ -113,7 +113,7 @@ function Phase-T3Forced {
     # If ping ever succeeds here we have a sandbox escape.
     # ---------------------------------------------------------------------
     $cfgPing = New-Config -Name 't3-ping-blocked' `
-        -CommandLine 'ping.exe -n 1 -w 1000 127.0.0.1' `
+        -CommandLine (New-ProbeCommand -Body 'ping.exe -n 1 -w 1000 127.0.0.1') `
         -ReadWrite @($rw) -TimeoutMs 10000
     $logPing = Join-Path $ScratchRoot 'logs\t3-ping-blocked.log'
 
@@ -125,22 +125,22 @@ function Phase-T3Forced {
 
     $combinedPing = "$($rPing.Stdout)`n$($rPing.Stderr)"
     $aclRwAfterPing = Get-Acl-Snapshot $rw
+    # A launch failure would otherwise satisfy the exit code, the timing and
+    # the error regex without ping.exe ever being invoked.
+    $pingRan = Test-WorkloadRan $rPing
 
-    Record-Result -Phase 'P4' -Name 'sandbox blocks ping (child exit != 0)' -Pass ($rPing.ExitCode -ne 0) -Detail "exit=$($rPing.ExitCode)"
-    # ping with one attempt and 1s timeout would take ~1.5s if successful;
-    # raw-socket creation failure exits in milliseconds. Use 5s as a
-    # generous upper bound that still detects "ping actually ran".
-    Record-Result -Phase 'P4' -Name 'sandbox blocks ping (failed fast, < 5s)' -Pass ($stopwatch.Elapsed.TotalSeconds -lt 5) -Detail ("elapsed={0:N2}s" -f $stopwatch.Elapsed.TotalSeconds)
-    # Best-effort confirmation that the failure mode was access/socket
-    # related, not e.g. ENOENT for ping.exe. Localized OS messages may
-    # vary; we accept several known signatures plus a network-error
-    # pattern. This is informational — the exit code + timing are the
-    # load-bearing assertions.
+    Record-Result -Phase 'P4' -Name 'sandbox blocks ping: workload actually started' -Pass $pingRan -Detail "marker seen=$pingRan"
+    Record-Result -Phase 'P4' -Name 'sandbox blocks ping (child exit != 0)' -Pass ($pingRan -and $rPing.ExitCode -ne 0) -Detail "ran=$pingRan; exit=$($rPing.ExitCode)"
+    # A successful ping takes ~1.5s; raw-socket creation failure exits in
+    # milliseconds. 5s is a generous bound that still detects "ping ran".
+    Record-Result -Phase 'P4' -Name 'sandbox blocks ping (failed fast, < 5s)' -Pass ($pingRan -and $stopwatch.Elapsed.TotalSeconds -lt 5) -Detail ("ran=$pingRan; elapsed={0:N2}s" -f $stopwatch.Elapsed.TotalSeconds)
+    # Best-effort: confirm the failure was access/socket related rather than
+    # ENOENT. Localized messages vary, so this is informational.
     $accessSignal = $combinedPing -match '(?im)access\s*is\s*denied|access\s*denied|socket|10013|ICMP|general\s*failure|unable\s*to\s*contact'
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping (failure looks socket-related)' -Pass ([bool]$accessSignal) -Detail 'best-effort string match'
     Record-Result -Phase 'P4' -Name "sandbox blocks ping: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentPing) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping: rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterPing)
-    Record-Result -Phase 'P4' -Name 'sandbox blocks ping: no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
+    Record-Result -Phase 'P4' -Name 'sandbox blocks ping: no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 
     # ---------------------------------------------------------------------
     # Access matrix: the existing sub-tests verify ACL apply/restore and
@@ -239,7 +239,7 @@ function Phase-T3Forced {
     Record-Result -Phase 'P4' -Name 'matrix: ro ACL restored' -Pass ($aclRoBefore -eq (Get-Acl-Snapshot $ro))
     Record-Result -Phase 'P4' -Name 'matrix: denied ACL restored' -Pass ($aclDeniedBefore -eq (Get-Acl-Snapshot $denied))
     Record-Result -Phase 'P4' -Name 'matrix: control ACL untouched' -Pass ($aclControlBefore -eq (Get-Acl-Snapshot $control))
-    Record-Result -Phase 'P4' -Name 'matrix: no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
+    Record-Result -Phase 'P4' -Name 'matrix: no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 }
 
 Invoke-WpcPhase -Key 'T3Forced' -Body { Phase-T3Forced }

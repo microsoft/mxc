@@ -54,7 +54,7 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 function Phase-T1DenyForced {
     Section 'Phase 4d: T1 deny-ACE empirical test (skipped if BC not usable)'
-    Clear-StateFiles
+    Reset-StateFileBaseline
 
     # Use the release-build probe to discover BC usability (same JSON
     # surface as Phase 1). T1 is usable only when the empty-policy probe
@@ -91,18 +91,23 @@ function Phase-T1DenyForced {
     # The child invocation: try to read the marker. cmd.exe's `type`
     # writes "Access is denied." (or an OS-localized variant) to stderr
     # and exits with a non-zero code when the file can't be opened.
-    $cmd = "cmd /c type `"$marker`""
+    # Wrapped so the marker proves the workload actually started. Without it a
+    # launch failure satisfies every assertion below: no sentinel, non-zero
+    # exit, untouched ACLs, no state files.
+    $cmd = New-ProbeCommand -Body "type `"$marker`""
     $cfg = New-Config -Name 't1-deny-forced' -CommandLine $cmd -Denied @($denied)
     $log = Join-Path $ScratchRoot 'logs\t1-deny-forced.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
+    $ran = Test-WorkloadRan $r
 
     $aclAfter = Get-Acl-Snapshot $denied
-    $stateAfter = @(Get-StateFiles)
+    $stateAfter = @(Get-NewStateFiles)
 
     Record-Result -Phase 'P4d' -Name 'selected isolation tier: base-container' -Pass ([bool]($logContent -match '(?im)selected isolation tier:.*?base-container')) -Detail "log saw tier=base-container"
-    Record-Result -Phase 'P4d' -Name 'child did not echo denied-file contents (deny ACE worked)' -Pass (-not ($r.Stdout -match $sentinel)) -Detail "stdout-saw-sentinel=$([bool]($r.Stdout -match $sentinel))"
-    Record-Result -Phase 'P4d' -Name 'child exited non-zero (access denied)' -Pass ($r.ExitCode -ne 0) -Detail "exit=$($r.ExitCode)"
+    Record-Result -Phase 'P4d' -Name 'workload actually started' -Pass $ran -Detail "marker seen=$ran; the deny assertions below are only meaningful if it did"
+    Record-Result -Phase 'P4d' -Name 'child did not echo denied-file contents (deny ACE worked)' -Pass ($ran -and -not ($r.Stdout -match $sentinel)) -Detail "ran=$ran; stdout-saw-sentinel=$([bool]($r.Stdout -match $sentinel))"
+    Record-Result -Phase 'P4d' -Name 'child exited non-zero (access denied)' -Pass ($ran -and $r.ExitCode -ne 0) -Detail "ran=$ran; exit=$($r.ExitCode)"
     Record-Result -Phase 'P4d' -Name 'denied ACL restored after run' -Pass ($aclBefore -eq $aclAfter)
     Record-Result -Phase 'P4d' -Name 'no orphan state files' -Pass ($stateAfter.Count -eq 0) -Detail "files=$($stateAfter.Count)"
 }

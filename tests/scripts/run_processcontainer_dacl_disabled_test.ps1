@@ -45,7 +45,7 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 function Phase-DaclDisabled {
     Section 'Phase 5: debug build, allowDaclMutation=false (DACL-augmentation refusal)'
-    Clear-StateFiles
+    Reset-StateFileBaseline
 
     # This phase exercises the DACL-augmentation refusal path, which only
     # engages when the host's expected tier augments DACLs for an rw policy
@@ -67,7 +67,7 @@ function Phase-DaclDisabled {
     Assert-NoBfscfg -LogContent $logContent -Phase 'P5' -Name 't3-refuse'
 
     $aclAfter = Get-Acl-Snapshot $rw
-    $stateAfter = @(Get-StateFiles)
+    $stateAfter = @(Get-NewStateFiles)
 
     Record-Result -Phase 'P5' -Name 'dispatch refused (exit != 0)' -Pass ($r.ExitCode -ne 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P5' -Name 'rw ACL untouched' -Pass ($aclBefore -eq $aclAfter)

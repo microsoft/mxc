@@ -45,7 +45,7 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 function Phase-CrashRecovery {
     Section 'Phase 6: debug build, taskkill mid-run (DACL state crash recovery)'
-    Clear-StateFiles
+    Reset-StateFileBaseline
 
     # Crash recovery is about reaping orphaned DACL-augmentation state, so it
     # only applies when an rw policy actually augments DACLs (appcontainer-dacl
@@ -102,7 +102,7 @@ function Phase-CrashRecovery {
     $recoveryStdout = & $WxcRelease --probe 2>&1
     Start-Sleep -Milliseconds 300
     $aclAfterRecovery = Get-Acl-Snapshot $rw
-    $stateAfterRecovery = @(Get-StateFiles)
+    $stateAfterRecovery = @(Get-NewStateFiles)
 
     Record-Result -Phase 'P6' -Name 'orphan reaped on next launch'   -Pass ($stateAfterRecovery.Count -eq 0) -Detail "remaining=$($stateAfterRecovery.Count)"
     Record-Result -Phase 'P6' -Name 'ACL restored after recovery'    -Pass ($aclBefore -eq $aclAfterRecovery)

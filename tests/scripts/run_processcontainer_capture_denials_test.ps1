@@ -117,9 +117,12 @@ function Phase-CaptureDenialsOutputPath {
     $logText = Read-Log $log
     $all = "$logText`n$($r.Stderr)"
     $pathComplaint = [bool]($all -match 'captureDenials\.outputPath')
+    # Requires the run not to have been refused at all, not merely the absence
+    # of one message: an unrelated rejection would otherwise score green.
+    $wasRejected = Test-WasRejected -Run $r -Log $logText
     Record-Result -Phase 'P14a' -Name 'control: a valid absolute outputPath passes validation' `
-        -Pass (-not $pathComplaint) `
-        -Detail ("exit=$($r.ExitCode); outputPath complaint in log=$pathComplaint; " +
+        -Pass ((-not $pathComplaint) -and (-not $wasRejected)) `
+        -Detail ("exit=$($r.ExitCode); rejected=$wasRejected; outputPath complaint in log=$pathComplaint; " +
                  'asserts validation only -- whether capture itself can run is P14b')
 }
 

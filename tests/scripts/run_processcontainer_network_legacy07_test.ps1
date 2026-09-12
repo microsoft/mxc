@@ -114,6 +114,10 @@ function Phase-NetworkLegacy07 {
             continue
         }
         $before = Get-MxcFirewallRuleNames
+        # Rule names are WXC_<principal>_<unix-millis>[...]. Correlating on
+        # that timestamp keeps a concurrent MXC run on the same host from
+        # being mistaken for this one.
+        $runStartMs = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
         $cfgMode = New-Config -Name "net07-mode-$mode" -CommandLine $cmd `
             -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
             -LegacyDefaultPolicy 'block' -LegacyEnforcementMode $mode `
@@ -149,7 +153,11 @@ function Phase-NetworkLegacy07 {
         $duringRaw = @()
         try { $duringRaw = @($sampler.EndInvoke($samplerHandle)) } catch {}
         try { $sampler.Dispose() } catch {}
-        $during = @($duringRaw | Where-Object { $_ -notin $before })
+        $during = @($duringRaw | Where-Object {
+            $_ -notin $before -and
+            $_ -match '^WXC_.*_(\d{13})' -and
+            [long]$matches[1] -ge $runStartMs
+        })
 
         Record-Result -Phase 'P9' -Name "enforcementMode=${mode}: allowedHosts entry is reachable" `
             -Pass ($run.Verdict -eq 'REACHED') `

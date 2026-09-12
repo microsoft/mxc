@@ -65,7 +65,10 @@ function Phase-Probes {
         Write-Host ("BaseContainer state on this host: {0} (apiPresent={1}); expected tier={2}" -f $bcState, $probeEmpty.probes.baseContainerApiPresent, $Script:ExpectedTier)
 
         Record-Result -Phase 'P1' -Name 'expected tier is a recognized value' -Pass ($Script:ExpectedTier -in @('base-container', 'appcontainer-dacl')) -Detail "expectedTier=$($Script:ExpectedTier)"
-        Record-Result -Phase 'P1' -Name "empty policy probe -> tier=$($Script:ExpectedTier)" -Pass ($probeEmpty.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeEmpty.tier)"
+        # $Script:ExpectedTier is itself derived from an empty-policy probe, so
+        # this shows repeatability, not that the tier was selected correctly.
+        # -RequireTier is what pins the tier for a CI job.
+        Record-Result -Phase 'P1' -Name "empty policy probe is repeatable -> tier=$($Script:ExpectedTier)" -Pass ($probeEmpty.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeEmpty.tier); consistency check, not tier validation -- use -RequireTier for that"
         $expAugEmpty = Get-ExpectedDaclAug -HasDenied:$false
         Record-Result -Phase 'P1' -Name "empty policy probe -> needsDaclAugmentation=$expAugEmpty" -Pass ($probeEmpty.needsDaclAugmentation -eq $expAugEmpty) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
     }

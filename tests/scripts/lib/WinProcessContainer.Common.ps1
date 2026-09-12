@@ -247,14 +247,18 @@ function Get-StateFiles {
     Get-ChildItem -LiteralPath $dir -Filter '*.json' -ErrorAction SilentlyContinue
 }
 
-function Clear-StateFiles {
-    # Wipe the dacl-restore directory so a phase can assert
-    # "no NEW state files appeared during this phase".
-    $dir = Get-DaclRestoreDir
-    if (Test-Path $dir) {
-        Get-ChildItem -LiteralPath $dir -Filter '*.json' -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
+$Script:StateFileBaseline = @()
+
+function Reset-StateFileBaseline {
+    # Records what is already in the shared dacl-restore directory so a phase
+    # can assert "no NEW state file appeared". Deleting instead would destroy
+    # the recovery records of unrelated MXC processes on the same host.
+    $Script:StateFileBaseline = @(Get-StateFiles | ForEach-Object { $_.Name })
+}
+
+function Get-NewStateFiles {
+    $baseline = @($Script:StateFileBaseline)
+    Get-StateFiles | Where-Object { $baseline -notcontains $_.Name }
 }
 
 function Get-Acl-Snapshot {
@@ -907,9 +911,14 @@ function Test-HostCanReachAnchor {
 # distinguishable from a policy verdict — a silent child means the run itself
 # failed and the phase must not read that as "blocked".
 function Get-AnchorFetchCommand {
-    param([string]$Url = $ExternalAnchorUrl, [int]$TimeoutSec = 10)
+    param([string]$Url = $ExternalAnchorUrl, [int]$TimeoutSec = 10, [switch]$IgnoreProxyEnv)
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    return "$env:SystemRoot\System32\cmd.exe /c `"$curl --silent --show-error --max-time $TimeoutSec --output NUL $Url && echo NET=REACHED || echo NET=BLOCKED`""
+    # curl honors HTTP_PROXY/HTTPS_PROXY. When a phase has deliberately pointed
+    # those at a dead endpoint, an unqualified fetch reports BLOCKED whether or
+    # not direct egress is actually restricted, so -IgnoreProxyEnv is required
+    # for any assertion about the direct path.
+    $noproxy = $(if ($IgnoreProxyEnv) { '--noproxy * ' } else { '' })
+    return "$env:SystemRoot\System32\cmd.exe /c `"$curl --silent --show-error $noproxy--max-time $TimeoutSec --output NUL $Url && echo NET=REACHED || echo NET=BLOCKED`""
 }
 
 # Classify a completed run into REACHED / BLOCKED / NORUN. NORUN covers "the
@@ -988,8 +997,8 @@ function Test-VerdictsRan {
 # Exit code alone cannot tell them apart: Invoke-Wxc synthesizes -1 on timeout,
 # and wxc-exec exits -1 when the launch API fails on an unprepared host. Either
 # would score every "must be rejected" assertion green on a host where nothing
-# runs. An unsupported policy is a typed error raised BEFORE the container
-# starts, so anything that got further accepted the policy and died elsewhere.
+# runs. So this requires positive evidence of a refusal and treats an
+# unexplained failure as "not a rejection".
 function Test-WasRejected {
     param(
         [Parameter(Mandatory)] [object]$Run,
@@ -999,25 +1008,32 @@ function Test-WasRejected {
     $result = $(if ($Run.PSObject.Properties['Result']) { $Run.Result } else { $Run })
     if ($result.TimedOut) { return $false }
     if ($result.ExitCode -eq 0) { return $false }
+    # wxc-exec exits 1 when it refuses a request and -1 when a launch API
+    # fails, so a -1 is never a rejection no matter what else the log says.
+    if ($result.ExitCode -eq -1) { return $false }
     if ($Run.PSObject.Properties['Verdict'] -and $Run.Verdict -ne 'NORUN') { return $false }
 
     $text = $Log
     if (-not $text -and $Run.PSObject.Properties['Log']) { $text = $Run.Log }
+    $err = "$(if ($result.PSObject.Properties['Stderr']) { $result.Stderr })"
+    $both = "$text`n$err"
+
     # Reached the launch API, so validation had already accepted the policy.
-    if ($text -and ($text -match '(?i)create_process_failed|CreateProcessInSandbox failed|CreateProcessSecurityEnvironment failed')) {
+    if ($both -match '(?i)create_process_failed|CreateProcessInSandbox failed|CreateProcessSecurityEnvironment failed') {
         return $false
     }
-    # Tier selected means validation passed; every later failure is a backend
-    # or host problem wearing a non-zero exit code.
-    if ($text -and ($text -match '(?i)selected isolation tier')) { return $false }
     # Validation failures surface as config_parse or policy_validation.
-    if ($text -and ($text -match '"code"\s*:\s*"backend_error"')) { return $false }
-    if ($Run.PSObject.Properties['Stderr'] -and
-        ("$($Run.Stderr)" -match '"code"\s*:\s*"backend_error"')) { return $false }
+    if ($both -match '"code"\s*:\s*"backend_error"') { return $false }
     # No tier could be built on this host, so the policy was never judged.
     # Emitted as a ConfigRejected event, which the typed checks above miss.
-    if ($text -and ($text -match '"reason"\s*:\s*"runner_unavailable"')) { return $false }
-    return $true
+    if ($both -match '"reason"\s*:\s*"runner_unavailable"') { return $false }
+
+    # Positive evidence. wxc-exec prints this banner for every request it
+    # refuses, at parse stage and at backend validate. Requiring it means an
+    # unexplained non-zero exit is NOT counted as a rejection.
+    return [bool]($both -match '(?im)^\s*Request error\s*$' -or
+                  $both -match '(?i)Configuration parse error' -or
+                  $both -match '"code"\s*:\s*"(config_parse|policy_validation)"')
 }
 
 # The non-network counterpart of Get-NetVerdict's NORUN state.

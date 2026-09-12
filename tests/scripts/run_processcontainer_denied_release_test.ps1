@@ -53,7 +53,7 @@ function Phase-DeniedRelease {
         return
     }
     Section 'Phase 3: release build, deniedPaths only (safe lane)'
-    Clear-StateFiles
+    Reset-StateFileBaseline
 
     # deniedPaths is enforced on T3 (DENY ACEs) and on BaseContainer only once
     # the SANDBOX_CAP_DENY_PATHS bit lights up. Where unsupported, the runner
@@ -80,7 +80,7 @@ function Phase-DeniedRelease {
     Record-Result -Phase 'P3' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P3' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
     Record-Result -Phase 'P3' -Name 'denied-path ACL restored after run' -Pass ($aclBefore -eq $aclAfter)
-    Record-Result -Phase 'P3' -Name 'no orphan state files' -Pass (@(Get-StateFiles).Count -eq 0)
+    Record-Result -Phase 'P3' -Name 'no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 }
 
 Invoke-WpcPhase -Key 'DeniedRelease' -Body { Phase-DeniedRelease }

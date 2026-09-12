@@ -172,7 +172,7 @@ function Phase-UiMitigationMatrix {
     # the probe prints WIN32K=FAIL. WIN32K is destructive-gated, so the
     # MXC_PROBE_DESTRUCTIVE_OK override must reach the child (via the full env
     # block) for the GetMessageW path to be attempted.
-    $cmdB = "`"$UiProbeDebug`" WIN32K"
+    $cmdB = New-ProbeCommand -Body "`"$UiProbeDebug`" WIN32K"
     $cfgB = New-Config -Name 'ui-matrix-B-win32k' `
         -CommandLine $cmdB `
         -ReadWrite @($rw) `
@@ -185,14 +185,16 @@ function Phase-UiMitigationMatrix {
 
     $printedFail = ($rB.Stdout -match '(?m)^WIN32K=FAIL\s*$')
     $printedPass = ($rB.Stdout -match '(?m)^WIN32K=PASS\s*$')
+    # Both assertions below are satisfied by empty stdout, so a launch failure
+    # would be indistinguishable from the kernel killing the child. The marker
+    # is printed before the probe is reached and makes the difference visible.
+    $ranB = Test-WorkloadRan $rB
 
     Record-UiTelemetryResult -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -LogContent $logContentB -Check 'win32k'
     Record-Result -Phase 'P4b' -Name "scenarioB: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentB) -Detail "expected=$($Script:ExpectedTier)"
-    # Mitigation worked iff the child never reported WIN32K=FAIL. Child
-    # exit code is incidental — under the mitigation the process is killed
-    # by the kernel; without it the probe completes and exits 0.
-    Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=allowed (mitigation honored)' -Pass (-not $printedFail) -Detail "exit=$($rB.ExitCode); stdout=$(Format-VerdictSummary ($rB.Stdout.Trim()) 'blocked' 'allowed')"
-    Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=blocked' -Pass (-not $printedPass) -Detail 'probe never reports WIN32K=blocked (process is killed before printing)'
+    Record-Result -Phase 'P4b' -Name 'scenarioB: workload actually started' -Pass $ranB -Detail "marker seen=$ranB; without it, silence is not evidence of the mitigation"
+    Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=allowed (mitigation honored)' -Pass ($ranB -and -not $printedFail) -Detail "ran=$ranB; exit=$($rB.ExitCode); stdout=$(Format-VerdictSummary ($rB.Stdout.Trim()) 'blocked' 'allowed')"
+    Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=blocked' -Pass ($ranB -and -not $printedPass) -Detail 'probe never reports WIN32K=blocked (process is killed before printing)'
 }
 
 Invoke-WpcPhase -Key 'UiMitigationMatrix' -Body { Phase-UiMitigationMatrix }
