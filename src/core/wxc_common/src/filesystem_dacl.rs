@@ -2671,8 +2671,8 @@ mod tests {
     /// order at every observable step. Guards against:
     ///   (1) `SetEntriesInAclW(REVOKE_ACCESS)` quirk on Windows 25H2
     ///       where DENY ACEs survive a REVOKE; observed in the field
-    ///       via WinProcessContainer-Tests Phase 3 / Phase 4 "denied ACL
-    ///       restored" failures.
+    ///       via run_processcontainer_{denied_release,filesystem_matrix}_test.ps1
+    ///       "denied ACL restored" failures.
     ///   (2) `replace_explicit_aces_for_sid_inner` emitting ACEs in
     ///       non-canonical order, which Windows accepts but resolves
     ///       per first-match — making a DENY-after-ALLOW silently

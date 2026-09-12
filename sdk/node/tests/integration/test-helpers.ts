@@ -82,7 +82,7 @@ const OPTIONAL_BINARIES = [
   // up here. They are not required: no SDK consumer needs them, and the ADO
   // package producer filters its artifact through signPattern, which
   // deliberately ships only product binaries.
-  'wxc-ui-probe.exe',     // WinProcessContainer-Tests.ps1
+  'wxc-ui-probe.exe',     // run_processcontainer_ui_mitigations_test.ps1
   'wxc-test-driver.exe',  // run_test_configs.ps1
 ];
 

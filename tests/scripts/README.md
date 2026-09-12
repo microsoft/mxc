@@ -41,9 +41,27 @@ Linux / macOS (`.sh`):
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
-| `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
+| `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery, schema 0.8 networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
+
+Each `run_processcontainer_<area>_test.ps1` also runs standalone against a
+built tree, which is the fastest way to iterate on one area:
+
+```powershell
+tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
+```
+
+Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
+must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
+publishes the suite context into the calling script's scope, which only works
+because dot-sourcing merges scopes.
+
+T2 (`appcontainer-bfs`) is out of scope: it is off by default behind the
+`tier2_bfs` Cargo feature and is not in use, so the suite records no assertions
+about it. The remaining `bfscfg` checks are guards, not coverage — invoking
+`bfscfg.exe` hard-locks the `bfs.sys` minifilter on 25H2, so a run that detects
+one raises MXC-FATAL and stops the whole suite (child exit code 78).
 
 ### Linux suites
 
@@ -76,10 +94,12 @@ these dispatchers, which map a matrix backend id to the suites above:
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
 handler name. Ids that share a suite have their own case in the dispatcher:
-`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
-determines the tier it expects from the host's own `wxc-exec --probe`.
-`process-t3` additionally runs `T3-Workloads.ps1`; both suites run even if the
-first one fails, and the job reports their exit codes together.
+`process-t1` and `process-t3` both run `run_processcontainer_all_tests.ps1`,
+which determines the tier it expects from the host's own `wxc-exec --probe` and
+is passed `-RequireTier` so a mis-provisioned runner aborts rather than quietly
+testing the other tier. `process-t3` additionally runs `T3-Workloads.ps1`; both
+suites run even if the first one fails, and the job reports their exit codes
+together.
 
 ```powershell
 scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `

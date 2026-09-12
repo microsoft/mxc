@@ -129,7 +129,7 @@ A backend id is passed straight through: the matrix job hands it to the host-pre
 script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
 share a suite each keep their own case so they can diverge later without a
 mapping table — `process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
+`run_processcontainer_all_tests.ps1`, and `process-t3` additionally runs
 `T3-Workloads.ps1`.
 
 The two ids no longer run an identical command. The suite derives every
