@@ -34,7 +34,13 @@ pub struct Telemetry {
 pub struct Process {
     /// The non-empty command line to execute.
     pub command_line: NonEmptyString,
-    /// Optional working directory.
+    /// Optional working directory. A supplied value must be absolute for the
+    /// target the path reaches — `C:\workspace` or a UNC path for the Windows
+    /// backends, `/workspace` (or a `~` path on Seatbelt) for the Unix ones.
+    /// WSL Container reads it as a Windows host path one-shot and as an
+    /// in-container path on a state-aware `exec`. A relative path is rejected
+    /// because it would resolve against the launching process's working
+    /// directory.
     #[serde(default)]
     pub cwd: OptionalField<String>,
     /// Optional environment entries encoded as `KEY=VALUE` strings.
