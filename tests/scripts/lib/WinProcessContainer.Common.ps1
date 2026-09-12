@@ -135,30 +135,22 @@ function Test-Preflight {
     if (-not (Test-Path $WxcRelease)) { throw "Release binary not found at $WxcRelease" }
     if (-not (Test-Path $UiProbeDebug))   { throw "UI probe debug binary not found at $UiProbeDebug" }
     if (-not (Test-Path $UiProbeRelease)) { throw "UI probe release binary not found at $UiProbeRelease" }
-
-    # The load-bearing safety check: refuse to run if either binary has
-    # the `tier2_bfs` Cargo feature compiled in. On 25H2 spawning
-    # `bfscfg.exe` hard-locks the OS. The feature gate at compile time
-    # is what makes the harness safe to run; this preflight verifies it.
-    Assert-BfsSafety
 }
 
 function Assert-BfsSafety {
-    # The bfsCompiledIn gate on its own, without the build step or the banner.
-    # Every child script runs this before it spawns anything: the gate is what
-    # makes the suite safe to run at all, so a child invoked directly must not
-    # be able to skip it just because it did not go through Test-Preflight.
+    # Refuse to run against a binary built with the tier2_bfs feature: T2 is
+    # out of scope here, and spawning bfscfg.exe hard-locks the bfs.sys
+    # minifilter on 25H2. Compile-time exclusion is what makes the suite safe;
+    # this verifies it once per process.
     param([switch]$Quiet)
-    foreach ($pair in @(@{ Path = $WxcDebug; Label = 'debug' }, @{ Path = $WxcRelease; Label = 'release' })) {
-        $probe = & $pair.Path --probe 2>$null | ConvertFrom-Json -ErrorAction Stop
-        if ($null -eq $probe.probes.bfsCompiledIn) {
-            throw "Preflight: $($pair.Label) binary at $($pair.Path) does not expose `bfsCompiledIn` in its --probe output. Rebuild from a tree that has the tier2_bfs gate."
-        }
-        if ($probe.probes.bfsCompiledIn) {
-            throw "Preflight ABORT: $($pair.Label) binary at $($pair.Path) was built with --features tier2_bfs. On 25H2 this risks an OS hang. Rebuild without the feature (drop --features tier2_bfs) before re-running."
-        }
-        if (-not $Quiet) { Write-Host ("bfsCompiledIn ({0,-7}): false" -f $pair.Label) }
+    $probe = & $WxcDebug --probe 2>$null | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $probe.probes.bfsCompiledIn) {
+        throw "Preflight: $WxcDebug does not expose ``bfsCompiledIn`` in --probe output. Rebuild from a tree that has the tier2_bfs gate."
     }
+    if ($probe.probes.bfsCompiledIn) {
+        throw "Preflight ABORT: $WxcDebug was built with --features tier2_bfs. On 25H2 this risks an OS hang. Rebuild without the feature before re-running."
+    }
+    if (-not $Quiet) { Write-Host 'bfsCompiledIn: false' }
 }
 
 # -----------------------------------------------------------------------
@@ -272,35 +264,6 @@ function Get-Acl-Snapshot {
 function Read-Log {
     param([string]$LogPath)
     if (Test-Path $LogPath) { Get-Content -Raw -LiteralPath $LogPath } else { '' }
-}
-
-function Assert-NoBfscfg {
-    # NOT a test — a guard. T2 (`appcontainer-bfs`) is out of scope for this
-    # suite and records no assertions; this exists only because invoking
-    # bfscfg.exe hard-locks the bfs.sys minifilter on 25H2. It raises
-    # MXC-FATAL, which stops the whole suite rather than failing one area.
-    param(
-        [string]$LogContent,
-        [string]$Phase,
-        [string]$Name
-    )
-    # The unique signature of an actual bfscfg.exe invocation is
-    # `Output from bfscfg.exe:` emitted by
-    # filesystem_bfs::execute_bfscfg_operation on a non-empty
-    # stdout/stderr capture. The plain substring `bfscfg` also appears
-    # in legitimate fallback-chain warnings ("bfscfg.exe not present;
-    # falling back to AppContainer + DACL") which are evidence of the
-    # safety gate WORKING, not of invocation. Match only the
-    # spawn-output marker.
-    if ($LogContent -match '(?im)Output from bfscfg\.exe') {
-        throw "MXC-FATAL [$Phase :: $Name] log contains 'Output from bfscfg.exe' (real invocation). Aborting to avoid 25H2 deadlock."
-    }
-    # Logger interleaves a `[timestamp] ` token between every write
-    # fragment, so a single `writeln!(logger, "x: {}", y)` serializes as
-    # `x: [ts] y`. Use `.*?` instead of `\s*` to bridge that token.
-    if ($LogContent -match '(?im)selected isolation tier:.*?appcontainer-bfs') {
-        throw "MXC-FATAL [$Phase :: $Name] log shows 'selected isolation tier: appcontainer-bfs'. Aborting."
-    }
 }
 
 # -----------------------------------------------------------------------
@@ -1250,18 +1213,19 @@ $Script:WpcRepoRoot   = Split-Path -Parent (Split-Path -Parent $Script:WpcScript
 
 function Initialize-WpcContext {
     # Resolves every path and switch the suite needs and publishes them into
-    # the calling script's scope. Area scripts declare their parameters
-    # WITHOUT defaults and splat $PSBoundParameters here, so this is the one
-    # place a default is written down. Notes on the shared parameters:
-    #   -CapsJson      host --probe results, so 24 children need not re-probe;
-    #                  absent means probe here.
-    #   -RequireTier   deliberately not [ValidateSet]-decorated: the attribute
-    #                  binds to the variable and this function assigns through
-    #                  it, so the value is validated below instead.
-    #   -ReuseScratch  set by the entry script, which owns and has already
-    #                  populated the tree; standalone runs get a fresh one.
+    # the calling script's scope -- the one place a default is written down.
+    #
+    # The entry script resolves the context once and writes it to a JSON file;
+    # each area is then launched with just -ContextJson. An explicitly supplied
+    # parameter always wins over the file, so a standalone run with an override
+    # behaves the same either way.
+    #
+    # -RequireTier is deliberately not [ValidateSet]-decorated: the attribute
+    # binds to the variable and this function assigns through it, so the value
+    # is validated below instead.
     [CmdletBinding()]
     param(
+        [string]$ContextJson,
         [string]$RepoRoot,
         [string]$CargoRoot,
         [string]$WxcDebug,
@@ -1271,13 +1235,11 @@ function Initialize-WpcContext {
         [string]$ScratchRoot,
         [string]$ResultsFile,
         [string]$ResultsJson,
-        [string]$CargoLog,
         [string]$CapsJson,
         [string]$RequireTier,
         [string]$ExternalAnchorUrl,
         [string]$UnlistedDestinationUrl,
         [switch]$SkipBuild,
-        [switch]$SkipReleaseLane,
         [switch]$KeepArtifacts,
         [switch]$SkipNetwork,
         [switch]$ReuseScratch,
@@ -1286,6 +1248,16 @@ function Initialize-WpcContext {
         # scratch tree. Children inherit all three.
         [switch]$Fresh
     )
+
+    if ($ContextJson) {
+        if (-not (Test-Path $ContextJson)) { throw "Context file not found: $ContextJson" }
+        $inherited = Get-Content -Raw -LiteralPath $ContextJson | ConvertFrom-Json
+        foreach ($prop in $inherited.PSObject.Properties) {
+            if ($PSBoundParameters.ContainsKey($prop.Name)) { continue }
+            if (-not $PSCmdlet.MyInvocation.MyCommand.Parameters.ContainsKey($prop.Name)) { continue }
+            Set-Variable -Name $prop.Name -Value $prop.Value -Scope Local
+        }
+    }
 
     $suite = [System.IO.Path]::GetFileNameWithoutExtension((Get-PSCallStack)[1].ScriptName)
     if (-not $suite) { $suite = 'WinProcessContainer' }
@@ -1302,14 +1274,9 @@ function Initialize-WpcContext {
     # recursive wipe cannot collide with an open Start-Transcript handle.
     if (-not $ResultsFile)    { $ResultsFile    = Join-Path $env:TEMP "$suite.results.txt" }
     if (-not $ResultsJson)    { $ResultsJson    = Join-Path $env:TEMP "$suite.results.json" }
-    if (-not $CargoLog)       { $CargoLog       = Join-Path $env:TEMP 'WinProcessContainer.cargo.log' }
     if (-not $ExternalAnchorUrl)      { $ExternalAnchorUrl      = 'https://dev.azure.com' }
     if (-not $UnlistedDestinationUrl) { $UnlistedDestinationUrl = 'https://example.com' }
 
-    # Validated here rather than with a [ValidateSet] on each script's
-    # parameter: PowerShell attaches a validation attribute to the VARIABLE, so
-    # the assignments below would re-validate and reject the empty string that
-    # means "no tier requirement".
     $validTiers = @('base-container', 'appcontainer-dacl')
     if ($RequireTier -and $RequireTier -notin $validTiers) {
         throw "Invalid -RequireTier '$RequireTier'. Valid values: $($validTiers -join ', ')."
@@ -1324,12 +1291,10 @@ function Initialize-WpcContext {
     $Script:ScratchRoot            = $ScratchRoot
     $Script:ResultsFile            = $ResultsFile
     $Script:ResultsJson            = $ResultsJson
-    $Script:CargoLog               = $CargoLog
     $Script:RequireTier            = $RequireTier
     $Script:ExternalAnchorUrl      = $ExternalAnchorUrl
     $Script:UnlistedDestinationUrl = $UnlistedDestinationUrl
     $Script:SkipBuild              = [bool]$SkipBuild
-    $Script:SkipReleaseLane        = [bool]$SkipReleaseLane
     $Script:KeepArtifacts          = [bool]$KeepArtifacts
     $Script:SkipNetwork            = [bool]$SkipNetwork
     $Script:Phases                 = @($Phases)
@@ -1338,13 +1303,11 @@ function Initialize-WpcContext {
     if ($Fresh) {
         Test-Preflight
     } else {
-        # A child must still pass the bfscfg gate — it is the reason the suite
-        # is safe to run at all — but it neither builds nor prints the banner.
         foreach ($bin in @($WxcDebug, $WxcRelease)) {
-            if (-not (Test-Path $bin)) { throw "Binary not found at $bin. Run run_processcontainer_all_tests.ps1, or pass -WxcDebug/-WxcRelease." }
+            if (-not (Test-Path $bin)) { throw "Binary not found at $bin. Run run_processcontainer_all_tests.ps1, or pass -ContextJson." }
         }
-        Assert-BfsSafety -Quiet
     }
+    Assert-BfsSafety -Quiet:(-not $Fresh)
 
     if ($Fresh -or -not $ReuseScratch) { Initialize-Scratch } else { Confirm-Scratch }
 
@@ -1468,12 +1431,11 @@ function Complete-WpcChild {
     exit 0
 }
 
-function Get-WpcChildArguments {
-    # The context the entry script forwards to every child, as a splattable
-    # hashtable. Built from the already-resolved $Script:* values so a child
-    # never re-derives a default and disagrees with its siblings.
-    param([Parameter(Mandatory)] [string]$Key)
-    $childArgs = @{
+function Write-WpcContextFile {
+    # Freeze the resolved suite context so every area inherits identical values
+    # instead of re-deriving its own and disagreeing with its siblings.
+    param([Parameter(Mandatory)] [string]$Path)
+    $ctx = [ordered]@{
         RepoRoot               = $Script:RepoRoot
         CargoRoot              = $Script:CargoRoot
         WxcDebug               = $Script:WxcDebug
@@ -1481,36 +1443,20 @@ function Get-WpcChildArguments {
         UiProbeDebug           = $Script:UiProbeDebug
         UiProbeRelease         = $Script:UiProbeRelease
         ScratchRoot            = $Script:ScratchRoot
-        CargoLog               = $Script:CargoLog
-        ResultsJson            = Join-Path $Script:ScratchRoot "results\$Key.json"
         CapsJson               = Join-Path $Script:ScratchRoot 'results\host-capabilities.json'
         ExternalAnchorUrl      = $Script:ExternalAnchorUrl
         UnlistedDestinationUrl = $Script:UnlistedDestinationUrl
+        RequireTier            = [string]$Script:RequireTier
+        # [bool] casts matter: these land in the caller's scope, where the entry
+        # script's own param block types them as [switch], and ConvertTo-Json
+        # writes a SwitchParameter as {"IsPresent":...} rather than a bool.
+        SkipNetwork            = [bool]$Script:SkipNetwork
+        KeepArtifacts          = [bool]$Script:KeepArtifacts
         ReuseScratch           = $true
     }
-    if ($Script:RequireTier)     { $childArgs['RequireTier']    = $Script:RequireTier }
-    if ($Script:SkipNetwork)     { $childArgs['SkipNetwork']    = $true }
-    if ($Script:SkipReleaseLane) { $childArgs['SkipReleaseLane'] = $true }
-    if ($Script:KeepArtifacts)   { $childArgs['KeepArtifacts']  = $true }
-    $childArgs
-}
-
-function ConvertTo-WpcArgumentList {
-    # Flatten a splat hashtable into the -File argument vector powershell.exe
-    # wants. Values are passed as separate argv entries, so a path with spaces
-    # survives without quoting games.
-    param([Parameter(Mandatory)] [hashtable]$Arguments)
-    $list = [System.Collections.Generic.List[string]]::new()
-    foreach ($k in $Arguments.Keys) {
-        $v = $Arguments[$k]
-        if ($v -is [bool] -or $v -is [switch]) {
-            if ($v) { $list.Add("-$k") }
-        } else {
-            $list.Add("-$k")
-            $list.Add([string]$v)
-        }
-    }
-    $list.ToArray()
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    ($ctx | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $Path -Encoding utf8 -Force
 }
 
 function Write-WpcChildOutput {

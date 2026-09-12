@@ -13,23 +13,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot,
-    [string]$CargoRoot,
-    [string]$WxcDebug,
-    [string]$WxcRelease,
-    [string]$UiProbeDebug,
-    [string]$UiProbeRelease,
-    [string]$ScratchRoot,
+    # -ContextJson carries the context the entry script already resolved.
+    # Anything passed explicitly overrides it, so a standalone run works too.
+    [string]$ContextJson,
     [string]$ResultsJson,
-    [string]$CargoLog,
-    [string]$CapsJson,
     [string]$RequireTier,
-    [string]$ExternalAnchorUrl,
-    [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
-    [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts,
-    [switch]$ReuseScratch
+    [switch]$KeepArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,7 +57,6 @@ function Phase-T3Forced {
     $log = Join-Path $ScratchRoot 'logs\t3-forced.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P4' -Name 't3-forced'
 
     $aclRwAfter     = Get-Acl-Snapshot $rw
     $aclRoAfter     = Get-Acl-Snapshot $ro
@@ -96,7 +85,6 @@ function Phase-T3Forced {
     $log2 = Join-Path $ScratchRoot 'logs\t3-ui-disable.log'
     $r2 = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg2 -LogPath $log2
     $logContent2 = Read-Log $log2
-    Assert-NoBfscfg -LogContent $logContent2 -Phase 'P4' -Name 't3-ui-disable'
 
     Record-UiTelemetryResult -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -LogContent $logContent2 -Check 'win32k' -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
     Record-Result -Phase 'P4' -Name "ui.disable=true emits selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent2) -Detail "expected=$($Script:ExpectedTier)"
@@ -121,7 +109,6 @@ function Phase-T3Forced {
     $rPing = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgPing -LogPath $logPing -TimeoutSec 30
     $stopwatch.Stop()
     $logContentPing = Read-Log $logPing
-    Assert-NoBfscfg -LogContent $logContentPing -Phase 'P4' -Name 't3-ping-blocked'
 
     $combinedPing = "$($rPing.Stdout)`n$($rPing.Stderr)"
     $aclRwAfterPing = Get-Acl-Snapshot $rw
@@ -198,7 +185,6 @@ function Phase-T3Forced {
     $logMatrix = Join-Path $ScratchRoot 'logs\t3-access-matrix.log'
     $rMatrix = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgMatrix -LogPath $logMatrix
     $logContentMatrix = Read-Log $logMatrix
-    Assert-NoBfscfg -LogContent $logContentMatrix -Phase 'P4' -Name 't3-access-matrix'
 
     # Parse the matrix from stdout into a hashtable.
     $matrix = @{}

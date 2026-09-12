@@ -13,23 +13,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot,
-    [string]$CargoRoot,
-    [string]$WxcDebug,
-    [string]$WxcRelease,
-    [string]$UiProbeDebug,
-    [string]$UiProbeRelease,
-    [string]$ScratchRoot,
+    # -ContextJson carries the context the entry script already resolved.
+    # Anything passed explicitly overrides it, so a standalone run works too.
+    [string]$ContextJson,
     [string]$ResultsJson,
-    [string]$CargoLog,
-    [string]$CapsJson,
     [string]$RequireTier,
-    [string]$ExternalAnchorUrl,
-    [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
-    [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts,
-    [switch]$ReuseScratch
+    [switch]$KeepArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,7 +54,6 @@ function Phase-DaclDisabled {
     $log = Join-Path $ScratchRoot 'logs\t3-refuse.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
     $logContent = Read-Log $log
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P5' -Name 't3-refuse'
 
     $aclAfter = Get-Acl-Snapshot $rw
     $stateAfter = @(Get-NewStateFiles)

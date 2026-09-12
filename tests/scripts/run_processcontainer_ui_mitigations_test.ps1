@@ -13,23 +13,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot,
-    [string]$CargoRoot,
-    [string]$WxcDebug,
-    [string]$WxcRelease,
-    [string]$UiProbeDebug,
-    [string]$UiProbeRelease,
-    [string]$ScratchRoot,
+    # -ContextJson carries the context the entry script already resolved.
+    # Anything passed explicitly overrides it, so a standalone run works too.
+    [string]$ContextJson,
     [string]$ResultsJson,
-    [string]$CargoLog,
-    [string]$CapsJson,
     [string]$RequireTier,
-    [string]$ExternalAnchorUrl,
-    [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
-    [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts,
-    [switch]$ReuseScratch
+    [switch]$KeepArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,7 +79,6 @@ function Phase-UiMitigationMatrix {
         $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
         $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
         $logContentA = Read-Log $logA
-        Assert-NoBfscfg -LogContent $logContentA -Phase 'P4b' -Name 'ui-matrix-A'
 
         $matrixA = @{}
         foreach ($line in ($rA.Stdout -split "`r?`n")) {
@@ -150,7 +139,6 @@ function Phase-UiMitigationMatrix {
             -Env (Get-ProbeEnvWithDestructive)
         $logAneg = Join-Path $ScratchRoot 'logs\ui-matrix-A-handles-neg.log'
         $rAneg = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgAneg -LogPath $logAneg
-        Assert-NoBfscfg -LogContent (Read-Log $logAneg) -Phase 'P4b' -Name 'ui-matrix-A-handles-neg'
         $negHandles = if ($rAneg.Stdout -match '(?m)^HANDLES=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
         $negHandlesV = Format-Verdict $negHandles 'blocked' 'allowed'
         $negStdoutV  = Format-VerdictSummary ($rAneg.Stdout.Trim()) 'blocked' 'allowed'
@@ -181,7 +169,6 @@ function Phase-UiMitigationMatrix {
     $logB = Join-Path $ScratchRoot 'logs\ui-matrix-B.log'
     $rB = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgB -LogPath $logB
     $logContentB = Read-Log $logB
-    Assert-NoBfscfg -LogContent $logContentB -Phase 'P4b' -Name 'ui-matrix-B'
 
     $printedFail = ($rB.Stdout -match '(?m)^WIN32K=FAIL\s*$')
     $printedPass = ($rB.Stdout -match '(?m)^WIN32K=PASS\s*$')

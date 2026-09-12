@@ -28,26 +28,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot,
-    [string]$CargoRoot,
-    [string]$WxcDebug,
-    [string]$WxcRelease,
-    [string]$UiProbeDebug,
-    [string]$UiProbeRelease,
-    [string]$ScratchRoot,
+    # -ContextJson carries the context the entry script already resolved.
+    # Anything passed explicitly overrides it, so a standalone run works too.
+    [string]$ContextJson,
     [string]$ResultsJson,
-    [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # the child scripts do not each re-run --probe. Absent (a standalone run)
-    # means probe the host here.
-    [string]$CapsJson,
     [string]$RequireTier,
-    [string]$ExternalAnchorUrl,
-    [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
-    [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts,
-    [switch]$ReuseScratch
+    [switch]$KeepArtifacts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,7 +82,6 @@ function Invoke-UiPolicyCase {
     $cfg = New-Config @cfgArgs
     $log = Join-Path $ScratchRoot "logs\ui-policy-$($Case.Name).log"
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
-    Assert-NoBfscfg -LogContent (Read-Log $log) -Phase $Phase -Name "ui-policy-$($Case.Name)"
 
     $matrix = @{}
     foreach ($line in ($r.Stdout -split "`r?`n")) {

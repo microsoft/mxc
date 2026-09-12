@@ -116,11 +116,9 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
     $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
-    # -KeepArtifacts stops the suite deleting its scratch tree on a clean
-    # run, so a passing job still uploads its per-area logs, configs, and
-    # result documents. Skip build and Cargo areas because this job consumes a
-    # previously built artifact; retain the host and containment behavior
-    # areas. These keys must stay in sync with $AreaScripts in the entry
+    # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
+    # so a passing job still uploads its per-area logs, configs, and result
+    # documents. These keys must stay in sync with $AreaScripts in the entry
     # script, which validates them and fails fast on an unknown name.
     $areas = @(
         'Probes',
@@ -150,7 +148,6 @@ function Invoke-ProcessContainerTests {
     $global:LASTEXITCODE = 0
     & $script `
         -SkipBuild `
-        -SkipReleaseLane `
         -RequireTier $RequireTier `
         -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
         -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `

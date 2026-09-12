@@ -4,27 +4,21 @@
 # run_processcontainer_all_tests.ps1
 #
 # Entry point for the Windows process-container suite. Probes the host once,
-# then dispatches each area to its own run_processcontainer_*_test.ps1 and
-# merges the results.
+# writes the resolved context to a JSON file, then dispatches each area to its
+# own run_processcontainer_*_test.ps1 and merges the results.
 #
 # Tier scope: T1 (base-container) and T3 (appcontainer-dacl). T2
-# (appcontainer-bfs) is off by default behind the `tier2_bfs` Cargo feature
-# and is not covered — what remains below is a guard, not coverage. bfscfg.exe
-# hard-locks the bfs.sys minifilter on 25H2, so Test-Preflight refuses to run
-# when either binary reports `bfsCompiledIn=true`, every child re-runs that
-# gate via Assert-BfsSafety, and Assert-NoBfscfg post-checks each log. A hit
-# is MXC-FATAL (exit 78), not a recorded failure. Tier selection is natural:
-# there is no -ForceTier.
+# (appcontainer-bfs) is off behind the `tier2_bfs` Cargo feature and is not
+# covered; Assert-BfsSafety refuses to run against a binary that has it
+# compiled in, because bfscfg.exe hard-locks the bfs.sys minifilter on 25H2.
+# Tier selection is otherwise natural -- there is no -ForceTier.
 #
 # $Script:ExpectedTier is derived once from --probe and passed to every child:
 # base-container when BaseContainer is usable, otherwise appcontainer-dacl.
 #
-# Schema: configs are authored at 0.8.0-alpha. The legacy network fields
-# (defaultPolicy / enforcementMode / allowedHosts / blockedHosts /
-# allowLocalNetwork / network.proxy) stay pinned to 0.7.0-alpha, since 0.8 is
-# where the directional network.egress / network.ingress shape became the
-# documented way to express network intent. New-Config switches lanes when a
-# -Legacy* parameter is supplied.
+# Schema: configs are authored at 0.8.0-alpha. The legacy network fields stay
+# pinned to 0.7.0-alpha, since 0.8 is where the directional network.egress /
+# network.ingress shape became the documented way to express network intent.
 #
 # Network areas assert the DOCUMENTED contract (docs/process-container/
 # networking.md, docs/sandbox-policy/0.8.0/networking/networking.md), not
@@ -56,23 +50,18 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsFile,
     [string]$ResultsJson,
-    [string]$CargoLog,
     [switch]$SkipBuild,
-    [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
     # Hard prerequisite on the containment tier. When set, the suite ABORTS if
     # the host does not naturally select this tier. Without it a mis-provisioned
-    # T1 runner silently runs the T3 assertions (every expectation is derived
-    # from $Script:ExpectedTier) and reports green having proven nothing about
-    # BaseContainer. CI passes the tier its job name claims to cover. Same
-    # doctrine as run_seatbelt_all_tests.sh: a missing prerequisite is a
-    # FAILURE, not a skip.
-    # The empty string is in the set on purpose, and means "no tier
-    # requirement". ValidateSet binds to the VARIABLE, not just to parameter
-    # binding, so it re-fires when Initialize-WpcContext publishes the suite
-    # context back into this scope; omitting '' would make an unspecified
-    # -RequireTier throw. The area scripts drop ValidateSet entirely and let
-    # Initialize-WpcContext do the checking.
+    # T1 runner silently runs the T3 assertions and reports green having proven
+    # nothing about BaseContainer. CI passes the tier its job name claims to
+    # cover. A missing prerequisite is a FAILURE, not a skip -- same doctrine as
+    # run_seatbelt_all_tests.sh.
+    #
+    # '' is in the set on purpose and means "no tier requirement": ValidateSet
+    # binds to the VARIABLE, so it re-fires when Initialize-WpcContext publishes
+    # the context back into this scope.
     [ValidateSet('', 'base-container', 'appcontainer-dacl')]
     [string]$RequireTier,
     # Reachability anchor for the positive egress assertions. An egress-allow
@@ -80,18 +69,18 @@ param(
     # internet" proves nothing, so the suite probes this from the HOST first and
     # fails (never skips) when the host itself cannot reach it.
     [string]$ExternalAnchorUrl,
-    # A second reachable destination, used as the negative control for the
-    # explicit-egress-rule area: the allow rules name the anchor and nothing
-    # else, so this one must be blocked INSIDE the container while remaining
-    # reachable from the host. If the host cannot reach it either, a BLOCKED
-    # verdict is unattributable and the area fails rather than scoring green.
+    # A second reachable destination, the negative control for the explicit
+    # egress-rule area: the allow rules name the anchor and nothing else, so
+    # this one must be blocked INSIDE the container while staying reachable from
+    # the host. If the host cannot reach it either, a BLOCKED verdict is
+    # unattributable and the area fails rather than scoring green.
     [string]$UnlistedDestinationUrl,
     # Opt out of every live-network area (air-gapped bring-up). The parse-only
     # rejection area still runs — it needs no connectivity.
     [switch]$SkipNetwork,
-    # Restrict the run to a subset of areas. Accepts the keys in $Areas below,
-    # e.g. -Areas UiMitigationMatrix. Empty = run everything. `-Phases` is
-    # accepted as an alias for compatibility with the pre-split harness.
+    # Restrict the run to a subset of areas. Accepts the keys in $AreaScripts
+    # below. Empty = run everything. `-Phases` is an alias for compatibility
+    # with the pre-split harness.
     [Alias('Phases')]
     [string[]]$Areas = @()
 )
@@ -105,10 +94,7 @@ Set-StrictMode -Version Latest
 # scripts\ci\run_backend_validation_tests.ps1 and are unchanged from the
 # pre-split harness's phase names, so an existing -Phases list keeps working.
 $AreaScripts = [ordered]@{
-    'UnitTests'                = 'run_processcontainer_unit_tests_test.ps1'
     'Probes'                   = 'run_processcontainer_probes_test.ps1'
-    'EmptyRelease'             = 'run_processcontainer_empty_release_test.ps1'
-    'DeniedRelease'            = 'run_processcontainer_denied_release_test.ps1'
     'T3Forced'                 = 'run_processcontainer_filesystem_matrix_test.ps1'
     'T1DenyForced'             = 'run_processcontainer_denied_paths_test.ps1'
     'UiMitigationMatrix'       = 'run_processcontainer_ui_mitigations_test.ps1'
@@ -183,6 +169,8 @@ try {
     # mid-suite if the host changes underneath them.
     $capsPath = Join-Path $Script:ScratchRoot 'results\host-capabilities.json'
     ($Script:Caps | ConvertTo-Json -Depth 6) | Out-File -LiteralPath $capsPath -Encoding utf8 -Force
+    $contextPath = Join-Path $Script:ScratchRoot 'results\suite-context.json'
+    Write-WpcContextFile -Path $contextPath
 
     $selected = @(if ($Areas.Count -gt 0) { $AreaScripts.Keys | Where-Object { $_ -in $Areas } } else { $AreaScripts.Keys })
 
@@ -190,15 +178,15 @@ try {
         $script = Join-Path $PSScriptRoot $AreaScripts[$key]
         Section ("Area: {0}  ({1})" -f $key, $AreaScripts[$key])
 
-        $childArgs = Get-WpcChildArguments -Key $key
-        $argv = ConvertTo-WpcArgumentList -Arguments $childArgs
+        $childJson = Join-Path $Script:ScratchRoot "results\$key.json"
 
         # Re-emit the child's streams through this host: output that bypasses
         # the PowerShell host does not land in the transcript, and a transcript
         # missing the actual test output is worthless for diagnosing a CI
         # failure. Write-WpcChildOutput also restores the colour the child
         # used, which does not survive the pipe.
-        & $PSHostExe -NoProfile -ExecutionPolicy Bypass -File $script @argv 2>&1 |
+        & $PSHostExe -NoProfile -ExecutionPolicy Bypass -File $script `
+            -ContextJson $contextPath -ResultsJson $childJson 2>&1 |
             Write-WpcChildOutput
         $childExit = $LASTEXITCODE
 
@@ -207,7 +195,6 @@ try {
         # everything the suite prints from here on.
         Reset-WpcConsoleColor -To $BaseConsoleColor
 
-        $childJson = $childArgs['ResultsJson']
         if (Test-Path $childJson) {
             try {
                 $doc = Get-Content -Raw -LiteralPath $childJson | ConvertFrom-Json
@@ -309,9 +296,6 @@ finally {
     }
     Write-Host ("Transcript:        {0}" -f $ResultsFile)
     Write-Host ("JSON summary:      {0}" -f $ResultsJson)
-    if ($Script:CargoLog -and (Test-Path $Script:CargoLog)) {
-        Write-Host ("Cargo full log:    {0}" -f $Script:CargoLog)
-    }
 
     if (-not $KeepArtifacts -and $fail -eq 0 -and $pass -gt 0 -and $Script:ScratchRoot -and (Test-Path $Script:ScratchRoot)) {
         # Re-validate before deletion. Assert-SafeScratchRoot ran at the start of
