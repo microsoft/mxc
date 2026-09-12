@@ -551,9 +551,27 @@ function New-Config {
         [Nullable[bool]]$Injection          = $null,
         [string[]]$Env                      = @(),
         [string]$Cwd                        = $null,
+        [Nullable[bool]]$InheritDefaultEnv  = $null,
+        # lifecycle.* — never exercised by any area before the lifecycle phase.
+        [Nullable[bool]]$DestroyOnExit      = $null,
+        [Nullable[bool]]$PreservePolicy     = $null,
+        # telemetry.enabled — the config kill-switch (one of three independent
+        # terms; it can only ever subtract from consent, never grant).
+        [Nullable[bool]]$TelemetryEnabled   = $null,
+        # Override the emitted schema version. Only for version-gating cases:
+        # the default follows the legacy/directional split below.
+        [string]$SchemaVersion              = $null,
+        # `process` is the intent alias that must resolve to the concrete
+        # Windows backend; `processcontainer` is the concrete name.
+        [string]$Containment                = 'processcontainer',
         # processContainer.capabilities — the AppContainer capability list.
         [string[]]$Capabilities             = @(),
         [Nullable[bool]]$LeastPrivilege     = $null,
+        [Nullable[bool]]$LearningMode       = $null,
+        # processContainer.captureDenials.*
+        [ValidateSet('block', 'allow')] [string]$CaptureDenialsMode = $null,
+        [string]$CaptureDenialsOutputPath   = $null,
+        [Nullable[bool]]$CaptureDenialsRetainEtl = $null,
 
         # --- schema 0.8 directional network (network.egress / network.ingress)
         # Supplying ANY of these emits a `network` block. Leave them all unset
@@ -607,11 +625,13 @@ function New-Config {
     }
 
     $obj = [ordered]@{
-        version     = $(if ($usesLegacyNetwork) { $Script:LegacySchemaVersion } else { $Script:SchemaVersion })
+        version     = $(if ($SchemaVersion) { $SchemaVersion }
+                        elseif ($usesLegacyNetwork) { $Script:LegacySchemaVersion }
+                        else { $Script:SchemaVersion })
         containerId = "MxcWinPC-$Name"
         # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
         # `processcontainer` is the concrete Windows backend on both.
-        containment = 'processcontainer'
+        containment = $Containment
         process     = [ordered]@{
             commandLine = $CommandLine
             timeout     = $TimeoutMs
@@ -619,6 +639,16 @@ function New-Config {
     }
     if ($Cwd) { $obj['process']['cwd'] = $Cwd }
     if ($null -ne $Env -and $Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
+    if ($null -ne $InheritDefaultEnv) { $obj['process']['inheritDefaultEnv'] = [bool]$InheritDefaultEnv }
+    if ($null -ne $DestroyOnExit -or $null -ne $PreservePolicy) {
+        $lc = [ordered]@{}
+        if ($null -ne $DestroyOnExit)  { $lc['destroyOnExit']  = [bool]$DestroyOnExit }
+        if ($null -ne $PreservePolicy) { $lc['preservePolicy'] = [bool]$PreservePolicy }
+        $obj['lifecycle'] = $lc
+    }
+    if ($null -ne $TelemetryEnabled) {
+        $obj['telemetry'] = [ordered]@{ enabled = [bool]$TelemetryEnabled }
+    }
     $hasRw     = ($null -ne $ReadWrite -and $ReadWrite.Count -gt 0)
     $hasRo     = ($null -ne $ReadOnly  -and $ReadOnly.Count  -gt 0)
     $hasDenied = ($null -ne $Denied    -and $Denied.Count    -gt 0)
@@ -683,6 +713,14 @@ function New-Config {
     $pc = [ordered]@{}
     if ($Capabilities.Count -gt 0)  { $pc['capabilities']  = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
+    if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
+    if ($CaptureDenialsMode -or $CaptureDenialsOutputPath -or $null -ne $CaptureDenialsRetainEtl) {
+        $cd = [ordered]@{}
+        if ($CaptureDenialsMode)       { $cd['mode']       = $CaptureDenialsMode }
+        if ($CaptureDenialsOutputPath) { $cd['outputPath'] = $CaptureDenialsOutputPath }
+        if ($null -ne $CaptureDenialsRetainEtl) { $cd['retainEtl'] = [bool]$CaptureDenialsRetainEtl }
+        $pc['captureDenials'] = $cd
+    }
     if ($AllowedProxyPeer) { $pc['network'] = [ordered]@{ allowedProxyPeer = $AllowedProxyPeer } }
     $needBp = ($BpUiIsolation -or $BpUiSystemSettings -or $null -ne $BpUiDesktopControl -or $null -ne $BpUiIme)
     if ($needBp) {
@@ -978,6 +1016,27 @@ function Test-WasRejected {
         # policy. This is a host-provisioning failure, not a rejection.
         return $false
     }
+    # Same reasoning, one step earlier and much broader. Once a tier has been
+    # selected the config is through validation, so everything after it --
+    # a failed loopback exemption, an unavailable proxy, a DACL refusal --
+    # is a backend or host failure wearing a non-zero exit code.
+    #
+    # Without this, any policy that parses fine but cannot be APPLIED on an
+    # under-provisioned host scores as "correctly rejected", which is the
+    # precise false green this helper exists to prevent.
+    if ($text -and ($text -match '(?i)selected isolation tier')) { return $false }
+    # The typed error code says it directly: validation failures surface as
+    # config_parse or policy_validation, never backend_error.
+    if ($text -and ($text -match '"code"\s*:\s*"backend_error"')) { return $false }
+    if ($Run.PSObject.Properties['Stderr'] -and
+        ("$($Run.Stderr)" -match '"code"\s*:\s*"backend_error"')) { return $false }
+    # `runner_unavailable` on `containment` means no tier could be constructed
+    # for the requested backend on THIS host -- BaseContainer absent, BFS not
+    # compiled in, DACL augmentation refused. The config was never judged on
+    # its merits, so counting it as a rejection would credit the policy under
+    # test for a host limitation. It is emitted as a ConfigRejected event,
+    # which is why the typed-code checks above do not catch it.
+    if ($text -and ($text -match '"reason"\s*:\s*"runner_unavailable"')) { return $false }
     return $true
 }
 
