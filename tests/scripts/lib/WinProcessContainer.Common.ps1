@@ -434,6 +434,51 @@ function Test-Win32kMitigationApplied {
     return [bool]($LogContent -match '(?im)win32k_system_calls:.*?blocked')
 }
 
+# The two helpers above read BaseContainer's "[ui subsystem]" telemetry, which
+# is produced by log_sandbox_spec() decoding the legacy SBOX FlatBuffer. That
+# call sits behind `if !use_process_security_environment`, so a run that took
+# the PSEC / CreateProcessSecurityEnvironment path emits NO UI telemetry at all
+# -- regardless of how faithfully the limits were applied. Asserting on those
+# tokens there is unsound in BOTH directions: a positive assertion fails even
+# though the restriction holds, and a NEGATED one ("mitigation not applied")
+# passes vacuously, which is the more dangerous of the two.
+#
+# Detection is positive-proof and fail-closed: skip only when the log actually
+# shows the PSEC spec being built. A run that died before building any spec
+# matches neither marker and is asserted as before, so a broken run still fails.
+function Test-UiTelemetryAvailable {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
+    if ($Script:ExpectedTier -eq 'appcontainer-dacl') { return $true }
+    return -not ($LogContent -match '(?im)process security environment spec built \(PSEC')
+}
+
+# Record a BaseContainer UI-telemetry assertion, skipping it when the run took
+# the PSEC path. $Expected is the value the token grep should return, so a
+# caller asserting "mitigation NOT applied" passes -Expected $false rather than
+# negating the result itself (which would defeat the skip).
+function Record-UiTelemetryResult {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$LogContent,
+        [Parameter(Mandatory)][ValidateSet('ui-restrictions', 'win32k')][string]$Check,
+        [bool]$Expected = $true,
+        [string]$Detail = ''
+    )
+    if (-not (Test-UiTelemetryAvailable -LogContent $LogContent)) {
+        $skipDetail = 'PSEC path selected; BaseContainer emits UI telemetry only on the legacy SBOX path'
+        if ($Detail) { $skipDetail = "$Detail; $skipDetail" }
+        Record-Result -Phase $Phase -Name $Name -Status 'skip' -Detail $skipDetail
+        return
+    }
+    $actual = if ($Check -eq 'win32k') {
+        Test-Win32kMitigationApplied -LogContent $LogContent
+    } else {
+        Test-UiRestrictionsApplied -LogContent $LogContent
+    }
+    Record-Result -Phase $Phase -Name $Name -Pass ($actual -eq $Expected) -Detail $Detail
+}
+
 # Default schema version for generated configs. Everything the 0.8 stable
 # schema can express is authored at 0.8; the LEGACY network fields
 # (defaultPolicy / enforcementMode / allowedHosts / blockedHosts /
@@ -1355,6 +1400,9 @@ function Complete-WpcChild {
     Write-Host ("{0}: total={1} passed={2} failed={3} skipped={4} warnings={5}" -f `
         $Script:WpcSuiteName, $total, $t.Passed.Count, $t.Failed.Count, $t.Skipped.Count, $t.Warned.Count)
 
+    # Standalone runs end here too, so leave the console as it was found.
+    Reset-WpcConsoleColor
+
     if ($Script:WpcFatal) { exit 78 }
     if ($t.Failed.Count -gt 0 -or $total -eq 0) { exit 1 }
     exit 0
@@ -1403,6 +1451,63 @@ function ConvertTo-WpcArgumentList {
         }
     }
     $list.ToArray()
+}
+
+function Write-WpcChildOutput {
+    # Re-emit an area script's output through this host so it reaches the
+    # transcript, restoring the colour the child itself used.
+    #
+    # Console colour is an attribute of the writing process's console, not
+    # bytes in the stream, so it does not survive the pipe. Without this a
+    # full-suite run is monochrome while running the same area script on its
+    # own is coloured — the same results, formatted two different ways.
+    # Re-derive the colour from the line shape that Record-Result and Section
+    # emit, so both paths look identical.
+    param([Parameter(ValueFromPipeline)] [object]$Line)
+    begin { $inBanner = $false }
+    process {
+        $text = if ($null -eq $Line) { '' } else { [string]$Line }
+        $color = $null
+        if ($text -match '^={10,}\s*$') {
+            # Section draws a bar, the title, then another bar. Toggling on the
+            # bars colours the title without having to recognize the title text.
+            $color = 'Cyan'
+            $inBanner = -not $inBanner
+        } elseif ($inBanner) {
+            $color = 'Cyan'
+        } else {
+            switch -Regex ($text) {
+                '^\s*\[PASS\]'          { $color = 'Green' }
+                '^\s*\[FAIL\]'          { $color = 'Red' }
+                '^\s*\[(SKIP|WARN)\]'   { $color = 'Yellow' }
+                'MXC-FATAL'             { $color = 'Red' }
+                '^PHASE .+ THREW:'      { $color = 'Red' }
+                '^\s*warning:'          { $color = 'Yellow' }
+            }
+        }
+        if ($color) { Write-Host $text -ForegroundColor $color } else { Write-Host $text }
+    }
+}
+
+function Reset-WpcConsoleColor {
+    # PowerShell sets the console foreground, writes, then restores it. A
+    # process killed between those steps — or a native binary that changes the
+    # attribute itself — leaves the console tinted, and every later line the
+    # suite prints inherits that colour. Re-assert a known state between areas
+    # so one area cannot recolour the rest of the run.
+    #
+    # The Console colour APIs throw when stdout is redirected, which is the
+    # normal case under CI, so every call is guarded.
+    param([object]$To = $null)
+    try {
+        if ($null -ne $To) { [Console]::ForegroundColor = $To } else { [Console]::ResetColor() }
+    } catch {}
+}
+
+function Get-WpcConsoleColor {
+    # Snapshot the host's foreground colour, or $null when there is no console
+    # to read (redirected output, CI). Paired with Reset-WpcConsoleColor.
+    try { return [Console]::ForegroundColor } catch { return $null }
 }
 
 function Write-WpcSummary {

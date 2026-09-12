@@ -87,8 +87,8 @@ function Phase-T3Forced {
 
     Record-Result -Phase 'P4' -Name 'child exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode)"
     Record-Result -Phase 'P4' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
-    Record-Result -Phase 'P4' -Name 'UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContent)
-    Record-Result -Phase 'P4' -Name 'Win32k mitigation NOT applied (ui.disable=false)' -Pass (-not (Test-Win32kMitigationApplied -LogContent $logContent)) -Detail 'this config has ui.disable=false'
+    Record-UiTelemetryResult -Phase 'P4' -Name 'UI restrictions applied telemetry' -LogContent $logContent -Check 'ui-restrictions'
+    Record-UiTelemetryResult -Phase 'P4' -Name 'Win32k mitigation NOT applied (ui.disable=false)' -LogContent $logContent -Check 'win32k' -Expected $false -Detail 'this config has ui.disable=false'
     Record-Result -Phase 'P4' -Name 'rw ACL restored after run'     -Pass ($aclRwBefore -eq $aclRwAfter)
     Record-Result -Phase 'P4' -Name 'ro ACL restored after run'     -Pass ($aclRoBefore -eq $aclRoAfter)
     Record-Result -Phase 'P4' -Name 'denied ACL restored after run' -Pass ($aclDeniedBefore -eq $aclDeniedAfter)
@@ -109,7 +109,7 @@ function Phase-T3Forced {
     $logContent2 = Read-Log $log2
     Assert-NoBfscfg -LogContent $logContent2 -Phase 'P4' -Name 't3-ui-disable'
 
-    Record-Result -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -Pass (Test-Win32kMitigationApplied -LogContent $logContent2) -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
+    Record-UiTelemetryResult -Phase 'P4' -Name 'ui.disable=true emits Win32k mitigation applied' -LogContent $logContent2 -Check 'win32k' -Detail "child exit=$($r2.ExitCode) (expected to fail; cmd.exe needs Win32k)"
     Record-Result -Phase 'P4' -Name "ui.disable=true emits selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent2) -Detail "expected=$($Script:ExpectedTier)"
     # Even though child crashed, ACEs must still be cleaned up.
     $aclRwAfterUi = Get-Acl-Snapshot $rw

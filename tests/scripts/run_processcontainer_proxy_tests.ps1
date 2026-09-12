@@ -34,7 +34,7 @@ if (-not $BinDir) {
 }
 
 $ProxyConfigs = @(
-    "proxy_builtin_test.json"
+    "processcontainer_proxy_builtin_test.json"
 )
 
 $TestDriverExe = Join-Path $BinDir "wxc-test-driver.exe"

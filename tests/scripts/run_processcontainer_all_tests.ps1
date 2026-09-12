@@ -187,6 +187,9 @@ foreach ($key in $AreaScripts.Keys) {
 try { Stop-Transcript | Out-Null } catch {}
 $Merged = [System.Collections.Generic.List[object]]::new()
 $FatalAbort = $null
+# Snapshot the operator's foreground colour so it can be re-asserted between
+# areas and restored on the way out. $null when output is redirected.
+$BaseConsoleColor = Get-WpcConsoleColor
 
 try {
     # Initialize-WpcContext needs the transcript path resolved, but the default
@@ -221,13 +224,19 @@ try {
         $childArgs = Get-WpcChildArguments -Key $key
         $argv = ConvertTo-WpcArgumentList -Arguments $childArgs
 
-        # Pipe the child's streams through Write-Host rather than letting it
-        # write straight to the console: output that bypasses the PowerShell
-        # host does not land in the transcript, and a transcript missing the
-        # actual test output is worthless for diagnosing a CI failure.
+        # Re-emit the child's streams through this host: output that bypasses
+        # the PowerShell host does not land in the transcript, and a transcript
+        # missing the actual test output is worthless for diagnosing a CI
+        # failure. Write-WpcChildOutput also restores the colour the child
+        # used, which does not survive the pipe.
         & $PSHostExe -NoProfile -ExecutionPolicy Bypass -File $script @argv 2>&1 |
-            ForEach-Object { Write-Host $_ }
+            Write-WpcChildOutput
         $childExit = $LASTEXITCODE
+
+        # Re-assert the console colour between areas so a child that died mid
+        # write, or a native binary that changed the attribute, cannot tint
+        # everything the suite prints from here on.
+        Reset-WpcConsoleColor -To $BaseConsoleColor
 
         $childJson = $childArgs['ResultsJson']
         if (Test-Path $childJson) {
@@ -279,6 +288,9 @@ catch {
     }) | Out-Null
 }
 finally {
+    # A child may have left the console tinted; restore before printing the
+    # summary so it is not rendered in some other area's colour.
+    Reset-WpcConsoleColor -To $BaseConsoleColor
     Section 'Summary'
     if ($FatalAbort) {
         Write-Host $FatalAbort -ForegroundColor Red
@@ -341,5 +353,7 @@ finally {
         Remove-Item -Recurse -Force -LiteralPath $Script:ScratchRoot -ErrorAction SilentlyContinue
     }
     try { Stop-Transcript | Out-Null } catch {}
+    # Never hand the operator's shell back in a colour the suite chose.
+    Reset-WpcConsoleColor -To $BaseConsoleColor
     if ($fail -gt 0 -or $pass -eq 0) { exit 1 } else { exit 0 }
 }

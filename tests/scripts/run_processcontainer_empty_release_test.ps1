@@ -80,7 +80,7 @@ function Phase-EmptyRelease {
     Record-Result -Phase 'P2' -Name 'release exit=0' -Pass ($r.ExitCode -eq 0) -Detail "exit=$($r.ExitCode); stdout=$($r.Stdout.Trim())"
     Record-Result -Phase 'P2' -Name 'AppContainer ran the child (stdout round-trip)' -Pass ($r.Stdout -match 'P2-empty-release-ok')
     Record-Result -Phase 'P2' -Name "selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContent) -Detail "expected=$($Script:ExpectedTier)"
-    Record-Result -Phase 'P2' -Name 'UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContent)
+    Record-UiTelemetryResult -Phase 'P2' -Name 'UI restrictions applied telemetry' -LogContent $logContent -Check 'ui-restrictions'
 }
 
 Invoke-WpcPhase -Key 'EmptyRelease' -Body { Phase-EmptyRelease }

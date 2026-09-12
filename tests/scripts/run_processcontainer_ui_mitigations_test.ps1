@@ -123,10 +123,10 @@ function Phase-UiMitigationMatrix {
         }
         $summaryA = ($matrixA.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
 
-        Record-Result -Phase 'P4b' -Name 'scenarioA: UI restrictions applied telemetry' -Pass (Test-UiRestrictionsApplied -LogContent $logContentA)
+        Record-UiTelemetryResult -Phase 'P4b' -Name 'scenarioA: UI restrictions applied telemetry' -LogContent $logContentA -Check 'ui-restrictions'
         Record-Result -Phase 'P4b' -Name "scenarioA: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentA) -Detail "expected=$($Script:ExpectedTier)"
         # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
-        Record-Result -Phase 'P4b' -Name 'scenarioA: Win32k mitigation NOT applied (ui.disable=false)' -Pass (-not (Test-Win32kMitigationApplied -LogContent $logContentA))
+        Record-UiTelemetryResult -Phase 'P4b' -Name 'scenarioA: Win32k mitigation NOT applied (ui.disable=false)' -LogContent $logContentA -Check 'win32k' -Expected $false
 
         foreach ($tag in @('READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
             $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
@@ -219,7 +219,7 @@ function Phase-UiMitigationMatrix {
     $printedFail = ($rB.Stdout -match '(?m)^WIN32K=FAIL\s*$')
     $printedPass = ($rB.Stdout -match '(?m)^WIN32K=PASS\s*$')
 
-    Record-Result -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -Pass (Test-Win32kMitigationApplied -LogContent $logContentB)
+    Record-UiTelemetryResult -Phase 'P4b' -Name 'scenarioB: Win32k mitigation applied telemetry' -LogContent $logContentB -Check 'win32k'
     Record-Result -Phase 'P4b' -Name "scenarioB: selected isolation tier: $($Script:ExpectedTier)" -Pass (Test-SelectedTier -LogContent $logContentB) -Detail "expected=$($Script:ExpectedTier)"
     # Mitigation worked iff the child never reported WIN32K=FAIL. Child
     # exit code is incidental — under the mitigation the process is killed

@@ -322,11 +322,11 @@ pub fn assert_python() {
     }
 }
 
-/// The hardcoded path used by `pwsh_setlocation.json`.
+/// The hardcoded path used by `processcontainer_pwsh_setlocation.json`.
 const PWSH_PATH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
 
 /// Check whether PowerShell 7 is available at the expected path.
-/// The test config `pwsh_setlocation.json` uses a hardcoded fully-qualified
+/// The test config `processcontainer_pwsh_setlocation.json` uses a hardcoded fully-qualified
 /// path, so we validate that specific path exists rather than relying on
 /// PATH resolution.
 ///

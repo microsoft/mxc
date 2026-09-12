@@ -24,7 +24,7 @@ if (-not $BinDir) {
 }
 
 $WxcExec = Join-Path $BinDir "wxc-exec.exe"
-$TestConfig = Join-Path $RepoRoot "tests\configs\pwsh_setlocation.json"
+$TestConfig = Join-Path $RepoRoot "tests\configs\processcontainer_pwsh_setlocation.json"
 
 if (-not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found at $WxcExec" -ForegroundColor Red

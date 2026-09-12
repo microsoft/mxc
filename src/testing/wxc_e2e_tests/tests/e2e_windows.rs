@@ -68,7 +68,7 @@ fn processcontainer_basic() {
 }
 
 fn processcontainer_lpac() {
-    assert_wxc_success("basic_lpac.json", &["--debug"]);
+    assert_wxc_success("processcontainer_basic_lpac.json", &["--debug"]);
 }
 
 fn filesystem_bfs() {
@@ -91,7 +91,7 @@ fn filesystem_bfs_spaces() {
 }
 
 fn pwsh_setlocation() {
-    assert_wxc_success("pwsh_setlocation.json", &["--debug"]);
+    assert_wxc_success("processcontainer_pwsh_setlocation.json", &["--debug"]);
 }
 
 fn test_configs() {
@@ -264,7 +264,7 @@ fn microvm_network_blocked() {
 }
 
 fn processcontainer_proxy() {
-    let config = test_configs_dir().join("proxy_builtin_test.json");
+    let config = test_configs_dir().join("processcontainer_proxy_builtin_test.json");
     if !config.exists() {
         println!("SKIPPED: proxy config not found: {}", config.display());
         return;
