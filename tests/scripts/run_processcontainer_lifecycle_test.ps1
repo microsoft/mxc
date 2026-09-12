@@ -210,8 +210,7 @@ function Phase-IntentTelemetryVersion {
         $rejected = Test-WasRejected -Run $r -Log $logText
         Record-Result -Phase 'P13d' -Name "containment '$name' is accepted on Windows" `
             -Pass (-not $rejected) -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected"
-        $m = [regex]::Match($logText, '(?im)selected\s+(?:isolation\s+)?tier\s*[:=]?\s*([A-Za-z0-9_\-]+)')
-        $tiers[$name] = $(if ($m.Success) { $m.Groups[1].Value.Trim() } else { '' })
+        $tiers[$name] = Get-SelectedTier -LogContent $logText
     }
     $bothReported = ($tiers['process'] -and $tiers['processcontainer'])
     Record-Result -Phase 'P13d' -Name "containment 'process' resolves to the same tier as 'processcontainer'" `

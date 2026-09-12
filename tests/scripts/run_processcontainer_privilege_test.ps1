@@ -143,27 +143,21 @@ function Phase-LegacyProxyShapes {
 
     $cases = @(
         @{ Name = 'legacy network.proxy.url is accepted on 0.7'
-           Args = @{ LegacyProxyUrl = 'http://127.0.0.1:8888' } }
+           Net  = [ordered]@{ proxy = [ordered]@{ url = 'http://127.0.0.1:8888' } } }
         @{ Name = 'legacy network.proxy.localhost (port form) is accepted on 0.7'
-           Args = @{ LegacyProxyLocalhost = 8888 } }
+           Net  = [ordered]@{ proxy = [ordered]@{ localhost = 8888 } } }
         @{ Name = 'legacy network.proxy.builtinTestServer is accepted on 0.7'
-           Args = @{ LegacyProxyBuiltinTestServer = $true } }
+           Net  = [ordered]@{ proxy = [ordered]@{ builtinTestServer = $true } } }
         @{ Name = 'legacy allowLocalNetwork=true is accepted on 0.7'
-           Args = @{ LegacyAllowLocalNetwork = $true; LegacyDefaultPolicy = 'allow' } }
+           Net  = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true } }
         @{ Name = 'legacy allowLocalNetwork=false is accepted on 0.7'
-           Args = @{ LegacyAllowLocalNetwork = $false; LegacyDefaultPolicy = 'allow' } }
+           Net  = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $false } }
     )
 
     foreach ($case in $cases) {
         $slug = ($case.Name -replace '[^a-zA-Z0-9]+', '-').Trim('-').ToLowerInvariant()
-        $cfgArgs = @{
-            Name        = "priv-legacy-$slug"
-            CommandLine = $Script:PrivCmd
-            ReadWrite   = @($rw)
-        }
-        foreach ($k in $case.Args.Keys) { $cfgArgs[$k] = $case.Args[$k] }
-
-        $cfg = New-Config @cfgArgs
+        $cfg = New-Config -Name "priv-legacy-$slug" -CommandLine $Script:PrivCmd `
+            -ReadWrite @($rw) -SchemaVersion $Script:LegacySchemaVersion -RawNetwork $case.Net
         $log = Join-Path $ScratchRoot "logs\priv-legacy-$slug.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
         $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)

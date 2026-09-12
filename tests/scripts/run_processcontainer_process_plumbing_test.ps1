@@ -100,13 +100,17 @@ function Phase-ProcessPlumbing {
     # unique token. MainWindowTitle is always empty for a sandboxed child, so
     # that check would be tautologically green; Win32_Process.CommandLine is
     # CIM-backed and unavailable on locked-down hosts.
+    # The blocker must outlast the deadline using nothing but cmd.exe: `ping -n`
+    # dies instantly inside the container ("Unable to contact IP driver"), which
+    # made this whole block pass on a child that never blocked at all.
     $unique = "MXCLEAK$((Get-Random -Maximum 99999))"
     $survivorExe = Join-Path $rw "$unique.exe"
     Copy-Item -LiteralPath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
         -Destination $survivorExe -Force
+    $spin = 'for /l %i in (1,1,2000000000) do @ver > nul'
     $timeoutCfg = New-Config -Name 'plumb-timeout' `
         -CommandLine (New-ProbeCommand -Body (
-            "start /b `"`" `"$survivorExe`" -NoProfile -Command `"Start-Sleep -Seconds 120`" & ping -n 120 127.0.0.1")) `
+            "start /b `"`" `"$survivorExe`" -NoProfile -Command `"Start-Sleep -Seconds 120`" & $spin")) `
         -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -TimeoutMs 4000
     $timeoutLog = Join-Path $ScratchRoot 'logs\plumb-timeout.log'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -120,16 +124,18 @@ function Phase-ProcessPlumbing {
     Record-Result -Phase 'P11' -Name 'process.timeout kills a runaway child' `
         -Pass ($timeoutRan -and ($rTimeout.ExitCode -ne 0)) `
         -Detail "ran=$timeoutRan; exit=$($rTimeout.ExitCode)"
-    # 4s deadline; allow generous teardown headroom but still catch "ran to
-    # completion" (the workload would take 120s).
-    Record-Result -Phase 'P11' -Name 'process.timeout fires near the deadline (not after the workload finishes)' `
-        -Pass ($timeoutRan -and ($sw.Elapsed.TotalSeconds -lt 45)) `
+    # Bounded on BOTH sides. Without the lower bound a child that dies on its own
+    # scores green here, which is exactly what the ping-based workload used to do.
+    Record-Result -Phase 'P11' -Name 'process.timeout fires near the deadline (not before, not after the workload finishes)' `
+        -Pass ($timeoutRan -and ($sw.Elapsed.TotalSeconds -ge 3) -and ($sw.Elapsed.TotalSeconds -lt 45)) `
         -Detail ("ran={0}; elapsed={1:N1}s; timeout=4s; workload=120s" -f $timeoutRan, $sw.Elapsed.TotalSeconds)
     # Match the runner's own message, not the bare word: the config carries
     # `"timeout": 4000` and the request dump prints `Script timeout: 4000`,
     # which a loose /timed?\s*out/ would match without anything being killed.
-    # Streams are cleaned individually; joining first would truncate at the
-    # first echo boundary.
+    # Both spellings count -- the ScriptRunner bridge says "script timed out
+    # after Nms", the engine's streaming completion says "sandbox execution
+    # timed out". Streams are cleaned individually; joining first would
+    # truncate at the first echo boundary.
     $timeoutSignal = @(
         (Remove-ConfigEcho "$($rTimeout.Stdout)"),
         (Remove-ConfigEcho "$($rTimeout.Stderr)"),
@@ -137,7 +143,7 @@ function Phase-ProcessPlumbing {
     ) -join "`n"
 
     Record-Result -Phase 'P11' -Name 'timeout is reported, not silent' `
-        -Pass ($timeoutRan -and ($timeoutSignal -match '(?i)(script )?timed out after \d+\s*ms')) `
+        -Pass ($timeoutRan -and ($timeoutSignal -match '(?i)(script timed out after \d+\s*ms|sandbox execution timed out)')) `
         -Detail "ran=$timeoutRan; exit=$($rTimeout.ExitCode); tail=$(Format-Snippet $timeoutSignal)"
 
     Start-Sleep -Seconds 2

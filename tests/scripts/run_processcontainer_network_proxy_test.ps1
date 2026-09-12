@@ -57,8 +57,15 @@ function Phase-NetworkProxy {
     if ($psec) {
         $out = $envRun.Result.Stdout
         $ran = [bool]($out -match '(?im)^SystemRoot=')
-        Record-Result -Phase 'P8e' -Name 'identity-less proxy config runs (ingress=allow + hostLoopback=allow)' `
-            -Pass $ran -Detail "exit=$($envRun.Result.ExitCode); stderr=$(Format-Snippet $envRun.Result.Stderr)"
+        # networking.md: hostLoopback=allow needs the PSEC 1.1 ingress contract
+        # and "is rejected when the PSEC 1.1 ingress contract is unavailable".
+        # Only two outcomes are documented, so a bare OS error is a failure even
+        # on a 1.0-only host -- the caller cannot act on E_INVALIDARG.
+        $rejectedCleanly = Test-WasRejected $envRun
+        Record-Result -Phase 'P8e' -Name 'identity-less proxy config either runs or is rejected cleanly (never a bare OS error)' `
+            -Pass ($ran -or $rejectedCleanly) `
+            -Detail ("ran=$ran; rejectedAtValidation=$rejectedCleanly; exit=$($envRun.Result.ExitCode); " +
+                     "stderr=$(Format-Snippet $envRun.Result.Stderr)")
         if ($ran) {
             foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
                 # cmd.exe `set` upper-cases nothing, but Windows env lookup is
@@ -79,16 +86,22 @@ function Phase-NetworkProxy {
         # Direct egress must be blocked while the proxy is configured. The
         # fetch bypasses the proxy env vars, so a REACHED verdict means the
         # workload really went straight out rather than just failing to reach
-        # a proxy that is not listening.
-        $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
-            -CommandLine (Get-AnchorFetchCommand -IgnoreProxyEnv) `
-            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-            -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
-            -NetworkProxy $proxyUrl -TimeoutMs 25000
-        $direct = Invoke-NetRun -Name 'net-proxy-direct-blocked' -ConfigPath $cfgDirect
-        Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' `
-            -Pass ($direct.Verdict -eq 'BLOCKED') `
-            -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
+        # a proxy that is not listening. Skipped when the identity-less shape
+        # is not startable here -- NORUN would otherwise read as BLOCKED.
+        if (-not $ran) {
+            Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' -Status 'skip' `
+                -Detail 'the identity-less proxy shape does not start on this host; a NORUN cannot prove egress was blocked'
+        } else {
+            $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
+                -CommandLine (Get-AnchorFetchCommand -IgnoreProxyEnv) `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+                -NetworkProxy $proxyUrl -TimeoutMs 25000
+            $direct = Invoke-NetRun -Name 'net-proxy-direct-blocked' -ConfigPath $cfgDirect
+            Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' `
+                -Pass ($direct.Verdict -eq 'BLOCKED') `
+                -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
+        }
     } else {
         # "schema 0.8 runtime proxy requests do not fall back because neither
         # SBOX nor AppContainer can preserve their peer or host-loopback

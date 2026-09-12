@@ -266,10 +266,14 @@ function Read-Log {
 # Smallest environment a cmd.exe workload can still launch under, plus the
 # caller's own variables. `process.env` replaces the environment outright, so
 # a block with only the variable under test fails at CreateProcess.
+# A caller-supplied process.env replaces the block wholesale, and Windows
+# refuses to create a contained process whose env lacks SYSTEMROOT or
+# LOCALAPPDATA (REQUIRED_CHILD_ENV_VARS in launch_diagnostics.rs). Both are
+# included here so a fixture testing something else does not fail on that.
 function Get-MinimalEnv {
     param([string[]]$Extra = @())
     $base = @()
-    foreach ($name in 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATH', 'PATHEXT', 'TEMP', 'TMP') {
+    foreach ($name in 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATH', 'PATHEXT', 'LOCALAPPDATA', 'TEMP', 'TMP') {
         $value = [System.Environment]::GetEnvironmentVariable($name)
         if ($value) { $base += "$name=$value" }
     }
@@ -387,6 +391,14 @@ function Test-SelectedTier {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
     $pattern = '(?im)selected isolation tier:.*?' + [regex]::Escape($Script:ExpectedTier)
     return [bool]($LogContent -match $pattern)
+}
+
+# Read the tier name back out of a run log. The logger stamps a timestamp
+# before every write, so `[1789195588] ` sits between the label and the name.
+function Get-SelectedTier {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
+    $m = [regex]::Match($LogContent, '(?im)selected isolation tier:(?:\s|\[[^\]]*\])*([A-Za-z][A-Za-z0-9_-]*)')
+    return $(if ($m.Success) { $m.Groups[1].Value.Trim() } else { '' })
 }
 
 # Pass when the log shows that UI restrictions were applied, using the tier's
