@@ -266,27 +266,22 @@ function Phase-IntentTelemetryVersion {
                      'acceptance only -- the kill-switch can subtract from consent but never grant it')
     }
 
-    # docs/schema.md documents `telemetry` with no version annotation, while
-    # annotating the neighbouring `process.inheritDefaultEnv` as
-    # "0.9.0-alpha+". Read literally, that means telemetry is available across
-    # the whole supported range, so that is what this asserts.
+    # docs/schema.md marks telemetry as 0.9.0-alpha+, so emitting it on an
+    # earlier version must be refused outright. Silently ignoring it would be
+    # the damaging outcome: a caller asking for telemetry on 0.8 would believe
+    # the request took effect.
     #
-    # The parser disagrees: it gates telemetry at 0.9.0-alpha too. This
-    # assertion therefore encodes the documented contract rather than the
-    # implemented one, and a failure here is a signal about the doc, not the
-    # fixture. Resolve it by annotating the field in docs/schema.md (making
-    # this a rejection assertion) or by lowering the gate.
+    # The error must name the field. A run that failed for an unrelated reason
+    # would otherwise satisfy a bare "was rejected" check and prove nothing.
     $cfg = New-Config -Name 'lc-telemetry-0800' -CommandLine $Script:LifecycleCmd -ReadWrite @($rw) `
         -TelemetryEnabled $true -SchemaVersion '0.8.0-alpha'
     $log = Join-Path $ScratchRoot 'logs\lc-telemetry-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
-    $rejected = Test-WasRejected -Run $r -Log $logText
-    $gated = [bool]("$logText`n$($r.Stderr)" -match "(?i)telemetry.{0,60}schema version")
-    Record-Result -Phase 'P13d' -Name 'telemetry is accepted on 0.8.0-alpha (docs list no version gate)' `
-        -Pass (-not $rejected) `
-        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; versionGateMessage=$gated; " +
-                 'docs/schema.md annotates inheritDefaultEnv as 0.9.0-alpha+ but leaves telemetry unannotated')
+    $gated = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match "(?i)telemetry.{0,60}schema version")
+    Record-Result -Phase 'P13d' -Name 'telemetry is rejected on schema 0.8.0-alpha (0.9.0-alpha+ only)' `
+        -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
+        -Detail "exit=$($r.ExitCode); errorNamesTheVersionGate=$gated"
 
     # The supported range is 0.6.0-alpha through 0.9.0-alpha inclusive
     # (schemas/schema-version.json). Both ends must be accepted and both
