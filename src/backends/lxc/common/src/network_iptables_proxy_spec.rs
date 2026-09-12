@@ -1,23 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Black-box specification for cooperative-proxy egress enforcement: when the
-//! policy routes traffic through a proxy, the container must be able to reach
-//! that proxy and nothing else.
-//!
-//! Written against the documented contract, not against the bodies of the
-//! builders. Every test that reaches `apply_firewall_rules` names an IP
-//! literal or `localhost` as the proxy host, so the assertions do not depend
-//! on the DNS the machine running them happens to have.
-
 use super::*;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{
     ContainerPolicy, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ProxyConfig,
 };
 
-/// Build a firewall-mode policy routed through the given proxy endpoint,
-/// leaving every other field at its default.
 fn policy_with_proxy(host: &str, port: u16) -> ContainerPolicy {
     ContainerPolicy {
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
@@ -29,8 +18,6 @@ fn policy_with_proxy(host: &str, port: u16) -> ContainerPolicy {
     }
 }
 
-/// Apply `policy` through the fake firewall and hand back the manager and
-/// every command the apply issued.
 fn apply_and_collect(
     container: &str,
     policy: &ContainerPolicy,
@@ -49,8 +36,6 @@ fn apply_and_collect(
     (manager, issued, result)
 }
 
-/// The commands from `issued` that appended a rule to the container's chain
-/// with the given binary, in the order they were issued.
 fn appended_rules<'a>(
     issued: &'a [Vec<String>],
     binary: &str,
@@ -66,26 +51,16 @@ fn appended_rules<'a>(
         .collect()
 }
 
-/// The jump target (`-j <value>`) of a rule, or `None` when it has none.
 fn action_of(rule: &[String]) -> Option<&str> {
     let index = rule.iter().position(|arg| arg == "-j")?;
     rule.get(index + 1).map(String::as_str)
 }
 
-/// Whether `rule` carries `flag` immediately followed by `value`.
 fn has_pair(rule: &[String], flag: &str, value: &str) -> bool {
     rule.windows(2)
         .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
-// ---------------------------------------------------------------------------
-// The catch-all action.
-// ---------------------------------------------------------------------------
-
-// Proxy mode is "deny all except the proxy". A configured default policy of
-// Allow would end the chain in ACCEPT, which lets every destination through
-// and makes the proxy ACCEPT above it meaningless -- the container would
-// reach the whole internet directly.
 #[test]
 fn proxy_mode_forces_a_drop_default_even_when_the_policy_says_allow() {
     assert_eq!(
@@ -98,9 +73,6 @@ fn proxy_mode_forces_a_drop_default_even_when_the_policy_says_allow() {
     );
 }
 
-// Negative control for the rule above: with no proxy the configured default
-// policy must still decide the catch-all, or the proxy change would have
-// silently turned every Allow policy into a deny-all.
 #[test]
 fn without_a_proxy_the_configured_default_policy_still_decides_the_catch_all() {
     assert_eq!(
@@ -113,8 +85,6 @@ fn without_a_proxy_the_configured_default_policy_still_decides_the_catch_all() {
     );
 }
 
-// The same forcing must survive through the rule builder the install path
-// actually calls, not just the pure helper underneath it.
 #[test]
 fn the_terminal_rule_built_in_proxy_mode_drops() {
     let rule = NetworkIptablesManager::build_default_policy_rule_arg(
@@ -126,8 +96,6 @@ fn the_terminal_rule_built_in_proxy_mode_drops() {
     assert_eq!(action_of(&rule), Some("DROP"), "actual rule: {rule:?}");
 }
 
-// End-to-end through apply: an Allow default plus a proxy must still close
-// the chain with DROP.
 #[test]
 fn an_applied_proxy_chain_ends_in_drop_under_an_allow_default() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
@@ -145,13 +113,6 @@ fn an_applied_proxy_chain_ends_in_drop_under_an_allow_default() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The proxy ACCEPT.
-// ---------------------------------------------------------------------------
-
-// The one destination a proxied container may reach is the proxy's address on
-// the proxy's port over TCP. A rule missing any of those three narrows or
-// widens the hole in ways the policy did not ask for.
 #[test]
 fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -186,8 +147,6 @@ fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
     );
 }
 
-// Ordering is the whole security property: a DROP appended before the proxy
-// ACCEPT would match first and the container would reach nothing at all.
 #[test]
 fn the_proxy_accept_is_appended_before_the_closing_drop() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -214,9 +173,6 @@ fn the_proxy_accept_is_appended_before_the_closing_drop() {
     );
 }
 
-// Every address the proxy host resolves to belongs to that same proxy, so all
-// of them are opened. Opening only the first would drop a client that picked
-// a different one.
 #[test]
 fn every_resolved_proxy_address_is_opened() {
     let mut logger = Logger::new(Mode::Buffer);
@@ -235,14 +191,6 @@ fn every_resolved_proxy_address_is_opened() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// What proxy mode must NOT emit.
-// ---------------------------------------------------------------------------
-
-// An unscoped port 53 ACCEPT is a standing DNS-tunnel exfil path straight
-// through a posture whose entire point is that the proxy is the only
-// reachable destination. The container resolves the proxy through its
-// hosts-file pin instead, so it needs no resolver.
 #[test]
 fn proxy_mode_opens_no_dns_port() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -251,8 +199,6 @@ fn proxy_mode_opens_no_dns_port() {
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
     let rules = appended_rules(&issued, "iptables", manager.chain_name());
-    // Without this the test passes vacuously: a chain name that matches
-    // nothing yields an empty list, and the loop below asserts nothing.
     assert!(
         !rules.is_empty(),
         "the proxied chain must have been programmed at all; issued: {issued:?}"
@@ -266,10 +212,6 @@ fn proxy_mode_opens_no_dns_port() {
     }
 }
 
-// Intra-container loopback is allowed on every backend with a private
-// loopback, proxy or not. The conntrack exemption is a different matter: in a
-// deny-all proxy chain it would let flows the proxy never brokered keep
-// running.
 #[test]
 fn proxy_mode_keeps_loopback_and_drops_the_conntrack_exemption() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -300,8 +242,6 @@ fn proxy_mode_keeps_loopback_and_drops_the_conntrack_exemption() {
     }
 }
 
-// Under "the proxy and nothing else" an allowed host contradicts the model,
-// so programming it would widen the posture the proxy defines.
 #[test]
 fn proxy_mode_does_not_program_the_allow_list() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
@@ -324,10 +264,6 @@ fn proxy_mode_does_not_program_the_allow_list() {
     }
 }
 
-// A blocked destination is still reachable by asking the permitted proxy to
-// fetch it, and MXC never forwards the list to that proxy. Accepting the
-// combination reports success for a control that is not in effect, which is
-// the same failure the bridge-netfilter gate already refuses.
 #[test]
 fn a_proxy_combined_with_a_block_list_is_refused() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
@@ -342,9 +278,6 @@ fn a_proxy_combined_with_a_block_list_is_refused() {
     );
 }
 
-// The proxy endpoint is IPv4, so nothing authorizes IPv6 egress off-box. The
-// v6 chain must therefore reach its closing DROP with only loopback allowed --
-// leaving it empty would fail open the moment the chain is hooked.
 #[test]
 fn the_ipv6_chain_allows_only_loopback_before_its_closing_drop_in_proxy_mode() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -367,9 +300,6 @@ fn the_ipv6_chain_allows_only_loopback_before_its_closing_drop_in_proxy_mode() {
     );
 }
 
-// Negative control for every "proxy mode omits X" test above: without a proxy
-// the base exemptions and the host lists must still be programmed, or those
-// tests would pass against a manager that had stopped emitting rules at all.
 #[test]
 fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
     let policy = ContainerPolicy {
@@ -396,10 +326,6 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
     );
 }
 
-// The egress chain is installed after the container already holds its address,
-// so no rule in it is what obtains one.  An ACCEPT on the DHCP port pair would
-// only widen the policy: container root can bind port 68 and reach any host on
-// port 67 through a chain written to deny exactly that.
 #[test]
 fn no_chain_opens_a_dhcp_port() {
     let filtered = ContainerPolicy {
@@ -434,14 +360,6 @@ fn no_chain_opens_a_dhcp_port() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IPv6 proxy endpoints.
-// ---------------------------------------------------------------------------
-
-// The proxy rule is emitted with IPv4 iptables only. An IPv6 proxy that fell
-// through IPv4 endpoint selection would be silently discarded, leaving a
-// deny-all container whose proxy was never authorized -- so it must be
-// refused loudly instead.
 #[test]
 fn an_ipv6_proxy_literal_is_refused_rather_than_silently_dropped() {
     let mut logger = Logger::new(Mode::Buffer);
@@ -458,26 +376,30 @@ fn an_ipv6_proxy_literal_is_refused_rather_than_silently_dropped() {
     }
 }
 
-// Both spellings of an IPv6 literal reach the same code path, and a bare one
-// is what a `{ host, port }` proxy carries.
 #[test]
 fn ipv6_literals_are_recognized_bracketed_or_bare() {
-    assert!(NetworkIptablesManager::host_is_ipv6_literal("::1"));
-    assert!(NetworkIptablesManager::host_is_ipv6_literal("[::1]"));
-    assert!(NetworkIptablesManager::host_is_ipv6_literal("2001:db8::1"));
-    assert!(!NetworkIptablesManager::host_is_ipv6_literal("10.9.8.7"));
-    assert!(!NetworkIptablesManager::host_is_ipv6_literal(
-        "proxy.example.com"
-    ));
+    assert!(
+        NetworkIptablesManager::host_is_ipv6_literal("::1"),
+        "a bare IPv6 literal must be recognized"
+    );
+    assert!(
+        NetworkIptablesManager::host_is_ipv6_literal("[::1]"),
+        "a bracketed IPv6 literal must be recognized"
+    );
+    assert!(
+        NetworkIptablesManager::host_is_ipv6_literal("2001:db8::1"),
+        "a full IPv6 literal must be recognized"
+    );
+    assert!(
+        !NetworkIptablesManager::host_is_ipv6_literal("10.9.8.7"),
+        "an IPv4 literal must not be classified as IPv6"
+    );
+    assert!(
+        !NetworkIptablesManager::host_is_ipv6_literal("proxy.example.com"),
+        "a hostname must not be classified as IPv6"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// The hosts-file pin.
-// ---------------------------------------------------------------------------
-
-// With DNS closed, a container handed a proxy URL naming a hostname cannot
-// resolve it. The pin is what makes the proxy reachable, and it must name the
-// address this apply authorized rather than one a later lookup returned.
 #[test]
 fn a_hostname_proxy_records_a_pin_naming_an_authorized_address() {
     let policy = policy_with_proxy("localhost", 8888);
@@ -492,9 +414,6 @@ fn a_hostname_proxy_records_a_pin_naming_an_authorized_address() {
     assert_eq!(pin.ip().to_string(), "127.0.0.1");
 }
 
-// An IP literal is already the address the chain allows, so there is nothing
-// to resolve and nothing to pin. Recording a pin here would write a hosts
-// entry whose name column is an IP literal.
 #[test]
 fn an_ip_literal_proxy_records_no_pin() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
@@ -508,8 +427,6 @@ fn an_ip_literal_proxy_records_no_pin() {
     );
 }
 
-// A policy with no proxy must not leave a pin behind, or the runner would
-// write an unrelated hosts entry into every container.
 #[test]
 fn a_policy_without_a_proxy_records_no_pin() {
     let policy = ContainerPolicy {
@@ -520,16 +437,12 @@ fn a_policy_without_a_proxy_records_no_pin() {
     let (manager, _issued, result) = apply_and_collect("proxy-absent", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    assert!(manager.proxy_host_pin().is_none());
+    assert!(
+        manager.proxy_host_pin().is_none(),
+        "a policy without a proxy must not record a hosts-file pin"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// Malformed proxy configuration.
-// ---------------------------------------------------------------------------
-
-// Port 0 is not a listening port. Programming `--dport 0` would build a rule
-// that can never match, leaving a container that looks proxied and reaches
-// nothing.
 #[test]
 fn a_zero_proxy_port_is_refused() {
     let mut logger = Logger::new(Mode::Buffer);
@@ -544,8 +457,6 @@ fn a_zero_proxy_port_is_refused() {
     );
 }
 
-// A proxy host that resolves to nothing cannot be authorized, and continuing
-// would install a deny-all chain the caller believes is proxied.
 #[test]
 fn an_unresolvable_proxy_host_is_refused() {
     let mut logger = Logger::new(Mode::Buffer);
@@ -560,8 +471,6 @@ fn an_unresolvable_proxy_host_is_refused() {
     );
 }
 
-// A policy carrying no proxy must produce no endpoints, which is what puts
-// the chain back on the ordinary allow/block path.
 #[test]
 fn a_policy_without_a_proxy_resolves_to_no_endpoints() {
     let mut logger = Logger::new(Mode::Buffer);
@@ -590,8 +499,6 @@ fn a_proxy_answer_larger_than_the_cap_contributes_no_more_than_the_cap() {
         accepted.len()
     );
 
-    // The hosts-file pin is built from the first address, so trimming must
-    // never drop the one address the container is pinned to.
     assert_eq!(
         accepted.first().map(String::as_str),
         Some("203.0.113.0"),

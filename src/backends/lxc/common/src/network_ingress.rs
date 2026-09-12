@@ -1,23 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Inbound network policy for the LXC backend, enforced inside the
-//! container's own network namespace.
-//!
-//! A packet destined to a container socket traverses the container's `INPUT`
-//! chain, never the host's; the host sees such packets only in `FORWARD`.
-//! The rules run under `nsenter -t <pid> -n`.
-//!
-//! IPv6 gets its own rule set rather than a replay of the IPv4 one.  IPv6
-//! resolves addresses with ICMPv6 Neighbor Discovery (RFC 4861) where IPv4
-//! uses layer-2 ARP, and `ip6tables` filters ND.  The chain accepts the
-//! ICMPv6 control-plane types to keep address resolution working under a
-//! default deny.
-//!
-//! Asking to accept inbound returns a not-yet-implemented error.  The policy
-//! carries no way to narrow an accept to particular ports, sources, or
-//! interfaces, and the only rule available is an unscoped
-//! `--state NEW -j ACCEPT` opening the container to LAN and WAN alike.
+//! Packets destined to container sockets traverse the container namespace's
+//! `INPUT` chain.  IPv6 Neighbor Discovery uses ICMPv6, and `ip6tables`
+//! filters those packets.
 
 use std::process::Command;
 
@@ -29,7 +15,6 @@ use crate::network_iptables::{
     NetworkIptablesManager,
 };
 
-/// IP family an inbound chain is being built for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum IpFamily {
     V4,
@@ -37,7 +22,6 @@ enum IpFamily {
 }
 
 impl IpFamily {
-    /// The packet-filter binary for this family.
     fn binary(self) -> &'static str {
         match self {
             IpFamily::V4 => "iptables",
@@ -45,7 +29,6 @@ impl IpFamily {
         }
     }
 
-    /// Index into a per-family `[T; 2]`.
     fn index(self) -> usize {
         match self {
             IpFamily::V4 => 0,
@@ -54,65 +37,53 @@ impl IpFamily {
     }
 }
 
-/// ICMPv6 message types the IPv6 inbound chain accepts, selected per RFC 4890
-/// "Recommendations for Filtering ICMPv6 Messages in Firewalls".
-///
-/// Echo request/reply (128/129) and Redirect (137) are omitted; RFC 4890
-/// permits dropping those at a firewall, and every type listed here is needed
-/// for basic IPv6 operation.
+const ICMPV6_DESTINATION_UNREACHABLE: &str = "1";
+const ICMPV6_PACKET_TOO_BIG: &str = "2";
+const ICMPV6_TIME_EXCEEDED: &str = "3";
+const ICMPV6_PARAMETER_PROBLEM: &str = "4";
+const ICMPV6_MULTICAST_LISTENER_QUERY: &str = "130";
+const ICMPV6_MULTICAST_LISTENER_REPORT: &str = "131";
+const ICMPV6_MULTICAST_LISTENER_DONE: &str = "132";
+const ICMPV6_ROUTER_SOLICITATION: &str = "133";
+const ICMPV6_ROUTER_ADVERTISEMENT: &str = "134";
+const ICMPV6_NEIGHBOR_SOLICITATION: &str = "135";
+const ICMPV6_NEIGHBOR_ADVERTISEMENT: &str = "136";
+const ICMPV6_MULTICAST_LISTENER_REPORT_V2: &str = "143";
+
+/// RFC 4890 permits dropping echo request, echo reply, and redirect at a firewall.
 const ICMPV6_ALLOW_TYPES: [&str; 12] = [
-    // Neighbor Discovery (RFC 4861), RFC 4890 §4.4.1.
-    "133", // router-solicitation
-    "134", // router-advertisement
-    "135", // neighbor-solicitation
-    "136", // neighbor-advertisement
-    // Multicast Listener Discovery (RFC 2710 / RFC 3810), RFC 4890 §4.3.1.
-    "130", // multicast-listener-query
-    "131", // multicast-listener-report
-    "132", // multicast-listener-done
-    "143", // multicast-listener-report-v2
-    // Essential error messages, RFC 4890 §4.4.1.
-    "1", // destination-unreachable
-    "2", // packet-too-big (Path MTU Discovery)
-    "3", // time-exceeded
-    "4", // parameter-problem
+    ICMPV6_ROUTER_SOLICITATION,
+    ICMPV6_ROUTER_ADVERTISEMENT,
+    ICMPV6_NEIGHBOR_SOLICITATION,
+    ICMPV6_NEIGHBOR_ADVERTISEMENT,
+    ICMPV6_MULTICAST_LISTENER_QUERY,
+    ICMPV6_MULTICAST_LISTENER_REPORT,
+    ICMPV6_MULTICAST_LISTENER_DONE,
+    ICMPV6_MULTICAST_LISTENER_REPORT_V2,
+    ICMPV6_DESTINATION_UNREACHABLE,
+    ICMPV6_PACKET_TOO_BIG,
+    ICMPV6_TIME_EXCEEDED,
+    ICMPV6_PARAMETER_PROBLEM,
 ];
 
-/// Manages the container's inbound iptables `INPUT` chain.
 pub struct IngressManager {
-    /// Deterministic chain name for this container.
     chain_name: String,
 
-    /// PID of a process in the container, naming the network namespace the
-    /// rules are installed into.
     netns_pid: u32,
 
-    /// What this run created or hooked, per family; teardown attempts only
-    /// what is recorded here.
     v4_chain_created: bool,
     v6_chain_created: bool,
     v4_hooked: bool,
     v6_hooked: bool,
-    /// Whether the caller asked for a successfully installed policy to outlive
-    /// this run (the lifecycle's `preservePolicy`). Consulted by [`Drop`] and
-    /// not only by the runner's explicit teardown call, because `Drop` fires on
-    /// every path out of the run and would otherwise silently undo the request.
     preserve_policy: bool,
 }
 
-/// The outcome of a single `iptables`/`ip6tables` invocation, split so cleanup
-/// can tell "the object is gone" from "the command could not run".
 enum RunError {
-    /// The command could not be spawned at all.  Never treated as absence: it
-    /// is the strongest evidence that the state is unknown.
     Spawn(String),
-    /// The command ran and exited non-zero. `stderr` is iptables' own message —
-    /// the only thing that may indicate an object was already absent.
     Exit { stderr: String, msg: String },
 }
 
 impl RunError {
-    /// The human-readable message for logging or returning.
     fn into_message(self) -> String {
         match self {
             RunError::Spawn(msg) => msg,
@@ -120,8 +91,6 @@ impl RunError {
         }
     }
 
-    /// The human-readable message, borrowed — for logging without consuming the
-    /// error (the caller still needs to classify it).
     fn message(&self) -> &str {
         match self {
             RunError::Spawn(msg) => msg,
@@ -130,17 +99,12 @@ impl RunError {
     }
 }
 
-/// A single teardown command against one family's chain.
 struct TeardownStep {
     family: IpFamily,
     kind: StepKind,
-    /// iptables args (not `nsenter`-prefixed); the executor wraps them.
     args: Vec<String>,
 }
 
-/// Which teardown operation a [`TeardownStep`] performs. Determines both the
-/// order (unhook before flush before delete) and which "already absent" message
-/// is acceptable for that step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StepKind {
     Unhook,
@@ -149,24 +113,15 @@ enum StepKind {
 }
 
 impl StepKind {
-    /// Whether this step's non-zero exit means the target was *already gone*
-    /// (so removal is a no-op), matched only against iptables' actual messages.
-    /// A spawn failure never reaches here — it is a real error by construction.
     fn stderr_means_absent(self, stderr: &str) -> bool {
         let s = stderr.to_ascii_lowercase();
-        // An absent chain is reported without the "no chain/target/match"
-        // phrasing.  iptables 1.8.10, nf_tables: "Chain 'X' does not exist";
-        // legacy: "Couldn't load target `X':No such file or directory".
         let absent_chain = s.contains("does not exist") || s.contains("couldn't load target");
         match self {
-            // The jump rule is absent because its target chain is gone, or
-            // because the chain remains with no INPUT reference left.
             StepKind::Unhook => {
                 s.contains("no chain/target/match by that name")
                     || s.contains("does a matching rule exist")
                     || absent_chain
             }
-            // Flushing or deleting a chain that does not exist.
             StepKind::Flush | StepKind::Delete => {
                 s.contains("no chain/target/match by that name") || absent_chain
             }
@@ -175,7 +130,6 @@ impl StepKind {
 }
 
 impl TeardownStep {
-    /// `-D INPUT -j <chain>`: remove one INPUT jump to the chain.
     fn unhook(family: IpFamily, chain: &str) -> Self {
         Self {
             family,
@@ -189,7 +143,6 @@ impl TeardownStep {
         }
     }
 
-    /// `-F <chain>`: empty the chain.
     fn flush(family: IpFamily, chain: &str) -> Self {
         Self {
             family,
@@ -198,7 +151,6 @@ impl TeardownStep {
         }
     }
 
-    /// `-X <chain>`: delete the (now empty, unreferenced) chain.
     fn delete(family: IpFamily, chain: &str) -> Self {
         Self {
             family,
@@ -208,26 +160,18 @@ impl TeardownStep {
     }
 }
 
-/// Upper bound on `-D INPUT -j <chain>` repetitions when unhooking during a
-/// reset or teardown. One `-D` removes one reference and a crashed run may have
-/// left several, but a count this high can only mean the delete is not making
-/// progress; we treat exhausting the bound as a real error rather than spin
-/// forever.
+/// Bound `-D INPUT -j <chain>` retries high enough for repeated crashed
+/// installs and low enough to detect a delete that is not making progress.
 const MAX_UNHOOK_ATTEMPTS: usize = 128;
 
-/// Executes one already-`nsenter`-wrapped `iptables`/`ip6tables` command and
-/// classifies its outcome.
 trait CommandRunner {
     fn run(&mut self, argv: &[String]) -> Result<(), RunError>;
 }
 
-/// Build the `iptables`/`ip6tables` invocation with the message locale pinned.
+/// Pin iptables diagnostics to the C locale before matching stderr.
 ///
-/// Teardown decides that a target was already gone by matching iptables' own
-/// diagnostic text, and that text is localized.  On a host running a
-/// non-English locale the benign "no chain by that name" arrives translated
-/// and reads as a real failure.  Exit codes cannot substitute: iptables
-/// returns 1 both for "no such chain" and for genuine errors.
+/// iptables returns 1 for both missing objects and genuine errors, and its
+/// diagnostic text is localized.
 fn nsenter_command(argv: &[String]) -> Command {
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -236,9 +180,6 @@ fn nsenter_command(argv: &[String]) -> Command {
     command
 }
 
-/// The production [`CommandRunner`]: spawns the argv and distinguishes a spawn
-/// failure (state unknown, always a real error) from a non-zero exit (whose
-/// stderr may mean "already absent").
 struct NsenterRunner;
 
 impl CommandRunner for NsenterRunner {
@@ -264,11 +205,6 @@ impl CommandRunner for NsenterRunner {
     }
 }
 
-/// Build the full argv for running `binary args...` inside the network
-/// namespace of process `netns_pid`: `["nsenter", "-t", <pid>, "-n", binary,
-/// args...]`. Pure — no process execution — so the `nsenter` wrapping (the
-/// guarantee that every mutating command targets the container netns and never
-/// the host) is unit-testable.
 fn build_nsenter_argv(netns_pid: u32, binary: &str, args: &[&str]) -> Vec<String> {
     let mut argv = vec![
         "nsenter".to_string(),
@@ -281,25 +217,12 @@ fn build_nsenter_argv(netns_pid: u32, binary: &str, args: &[&str]) -> Vec<String
     argv
 }
 
-/// One family's inbound rules, split so install cannot confuse the chain body
-/// with the `INPUT` hook. The `-N` creation appears in neither field: the
-/// caller issues it explicitly so its success gates ownership. Keeping the hook
-/// separate lets install append the body first and hook *last*, so a hooked
-/// chain is never momentarily empty.
 struct IngressRules {
-    /// The `-A` rules that populate the chain, in order: loopback, established,
-    /// ICMPv6 (IPv6 only), the NEW-state decision, and the terminal drop.
     body: Vec<Vec<String>>,
-    /// The `-I INPUT -j <chain>` jump, installed last after the body is in
-    /// place.
     hook: Vec<String>,
 }
 
 impl IngressManager {
-    /// Create a new manager for the given container name and init PID.
-    ///
-    /// The PID is required.  The chain is enforced inside the container's own
-    /// netns, which nothing can install into or probe without one.
     pub fn new(container_name: &str, netns_pid: u32) -> Self {
         Self {
             chain_name: ingress_chain_name_for(container_name),
@@ -312,31 +235,22 @@ impl IngressManager {
         }
     }
 
-    /// Ask for the installed chain to outlive this manager.
-    ///
-    /// Call this only after [`Self::apply_firewall_rules`] has reported success.
-    /// The flag suppresses [`Drop`]'s teardown, and setting it beforehand would
-    /// strand whatever partial chain a failed install left behind.
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
     }
 
-    /// Whether [`Drop`] should tear the chain down.
     fn should_cleanup_on_drop(&self) -> bool {
         self.rules_applied() && !self.preserve_policy
     }
 
-    /// The iptables chain name this manager owns.
     pub fn chain_name(&self) -> &str {
         &self.chain_name
     }
 
-    /// Whether this run installed anything that still needs cleanup.
     pub fn rules_applied(&self) -> bool {
         self.v4_chain_created || self.v6_chain_created || self.v4_hooked || self.v6_hooked
     }
 
-    /// Record that this run created `family`'s chain.
     fn set_created(&mut self, family: IpFamily) {
         match family {
             IpFamily::V4 => self.v4_chain_created = true,
@@ -344,7 +258,6 @@ impl IngressManager {
         }
     }
 
-    /// Record that this run hooked `family`'s chain into INPUT.
     fn set_hooked(&mut self, family: IpFamily) {
         match family {
             IpFamily::V4 => self.v4_hooked = true,
@@ -380,8 +293,6 @@ impl IngressManager {
         }
     }
 
-    /// The 0.8 `network.ingress` section, or `None` when this run was given the
-    /// legacy schema.
     fn stated_ingress(
         policy: &ContainerPolicy,
         uses_directional_keys: bool,
@@ -393,8 +304,6 @@ impl IngressManager {
         }
     }
 
-    /// The policy field asking for permissive inbound, if any, named as the
-    /// operator wrote it.
     fn permissive_inbound_field(
         policy: &ContainerPolicy,
         uses_directional_keys: bool,
@@ -412,11 +321,6 @@ impl IngressManager {
         policy.allow_local_network.then_some("allowLocalNetwork")
     }
 
-    /// Apply the inbound firewall rules for `policy`.
-    ///
-    /// Delegates argv construction to the pure [`Self::build_ingress_rules`]
-    /// (unit-testable without root or `iptables`), then executes each resulting
-    /// vector inside the container netns via `nsenter -t <pid> -n`.
     fn apply_rules_in_dialect(
         &mut self,
         policy: &ContainerPolicy,
@@ -428,11 +332,6 @@ impl IngressManager {
             return Ok(true);
         }
 
-        // Refusing also keeps the support declaration honest: LXC claims the
-        // 0.8 ingress bits because it enforces their `deny` values, and a bit
-        // claimed is a promise to either enforce the field or reject it.
-        // Unconditional: we always have a real container netns to hook (the PID
-        // is mandatory), so there is no inert path that could safely emit it.
         if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_keys) {
             return Err(format!(
                 "{field} asks for permissive inbound, which is not yet implemented for \
@@ -463,15 +362,8 @@ impl IngressManager {
             }
         ));
 
-        // Every command lands in the container netns via `nsenter -t <pid> -n`.
         let mut runner = NsenterRunner;
 
-        // Decide IPv6 enforcement against the *container's* namespace, not the
-        // host's: a host that reports IPv6 disabled says nothing about the
-        // namespace we are actually filtering. Fail-closed semantics are
-        // preserved — IPv6 live in the container but ip6tables unusable there
-        // => abort; ip6tables unusable AND IPv6 positively disabled *in that
-        // namespace* => the IPv4 chain alone is acceptable.
         let ipv6_enabled = match self.container_ip6tables_status(&mut runner, logger) {
             Ip6tablesStatus::Available => true,
             Ip6tablesStatus::KernelIpv6Disabled => {
@@ -513,7 +405,6 @@ impl IngressManager {
         Ok(true)
     }
 
-    /// Program the inbound chain from a 0.7 host-list policy.
     pub fn apply_legacy_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -522,7 +413,6 @@ impl IngressManager {
         self.apply_rules_in_dialect(policy, false, logger)
     }
 
-    /// Program the inbound chain from a 0.8 directional policy.
     pub fn apply_directional_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -531,11 +421,6 @@ impl IngressManager {
         self.apply_rules_in_dialect(policy, true, logger)
     }
 
-    /// Test-only shim that reads the dialect back off the policy.
-    ///
-    /// Production enters through [`Self::apply_legacy_rules`] or
-    /// [`Self::apply_directional_rules`], which are chosen by the one
-    /// dialect decision the runner makes.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -545,12 +430,6 @@ impl IngressManager {
         self.apply_rules_in_dialect(policy, dialect, logger)
     }
 
-    /// Install one family's chain and hook it into `INPUT` last.
-    ///
-    /// Resetting a leftover hooked chain from a crashed run unhooks it before
-    /// the replacement is built, and whatever it was enforcing lapses until
-    /// the new hook lands.  Closing that needs an atomic swap this call cannot
-    /// express.
     fn install_family(
         &mut self,
         family: IpFamily,
@@ -581,13 +460,6 @@ impl IngressManager {
         Ok(())
     }
 
-    /// Reset `family`'s chain to a known-empty baseline before (re)creating it.
-    ///
-    /// The chain name is deterministic per container and the chain lives in
-    /// that container's own network namespace, so anything found under it is
-    /// this container's leftover from a crashed run.  Removal is unconditional
-    /// rather than inferred from an error message, which cannot distinguish
-    /// one stale `INPUT` reference from several.
     fn reset_family(
         &mut self,
         family: IpFamily,
@@ -598,10 +470,6 @@ impl IngressManager {
         self.execute_teardown(&steps, runner, logger)
     }
 
-    /// The over-approximating teardown steps for `family`: assume the chain may
-    /// exist and be hooked (possibly several times) and plan to remove all of
-    /// it. Same shape and order as [`Self::owned_teardown_steps`] — unhook, then
-    /// flush, then delete — so reset and ownership teardown share one plan.
     fn reset_steps(family: IpFamily, chain: &str) -> Vec<TeardownStep> {
         vec![
             TeardownStep::unhook(family, chain),
@@ -610,11 +478,6 @@ impl IngressManager {
         ]
     }
 
-    /// Run one command through `runner`, logging any failure. Returns the
-    /// structured [`RunError`] so callers can classify it (spawn failure vs a
-    /// non-zero exit whose stderr may mean "already absent"). Builds the
-    /// `nsenter -t <pid> -n` prefix here, so every command the runner sees is
-    /// already scoped to the container netns.
     fn run(
         &self,
         runner: &mut dyn CommandRunner,
@@ -632,11 +495,6 @@ impl IngressManager {
         }
     }
 
-    /// Build the ordered list of `iptables` argument vectors for `policy`.
-    ///
-    /// The `-I INPUT` jump comes back separately from the chain body so the
-    /// caller can append the body first and hook last, and the `-N` creation
-    /// is left to the caller so its success can gate ownership.
     fn build_ingress_rules(
         chain: &str,
         policy: &ContainerPolicy,
@@ -651,14 +509,8 @@ impl IngressManager {
         let drop = "DROP";
         let mut body: Vec<Vec<String>> = Vec::new();
 
-        // Intra-container loopback (127.0.0.1 / ::1 inside the sandbox) must
-        // always pass — it is unaffected by the host-to-container inbound
-        // policy.
         body.push(argv(&["-A", chain, "-i", "lo", "-j", accept]));
 
-        // Accept return traffic for connections the container itself opened.
-        // MUST precede the NEW-inbound decision below so container-initiated
-        // flows survive an inbound DROP.
         body.push(argv(&[
             "-A",
             chain,
@@ -670,13 +522,6 @@ impl IngressManager {
             accept,
         ]));
 
-        // IPv6 only: permit the ICMPv6 control-plane types a functioning IPv6
-        // stack needs (Neighbor Discovery, Multicast Listener Discovery, and
-        // essential errors). These arrive as `NEW`, so they MUST precede the
-        // `--state NEW` decision and the terminal `DROP` below or address
-        // resolution and autoconfiguration break. IPv4 emits nothing here —
-        // ARP is layer 2 and never reaches iptables. See `ICMPV6_ALLOW_TYPES`
-        // for the type list and RFC 4890 citation.
         if family == IpFamily::V6 {
             for icmpv6_type in ICMPV6_ALLOW_TYPES {
                 body.push(argv(&[
@@ -692,8 +537,6 @@ impl IngressManager {
             }
         }
 
-        // Accept or drop NEW inbound connections to the container's listening
-        // sockets. A permissive request is refused before any rule is built.
         let inbound_verb =
             if Self::permissive_inbound_field(policy, uses_directional_keys).is_some() {
                 accept
@@ -711,24 +554,13 @@ impl IngressManager {
             inbound_verb,
         ]));
 
-        // Inbound default-deny: host/external inbound is blocked by default.
-        // Deliberately independent of the egress `default_network_policy` — an
-        // "allow" egress posture must not open the container to inbound.
         body.push(argv(&["-A", chain, "-j", drop]));
 
-        // The hook into the container's INPUT chain, returned separately so
-        // install can emit it last, after the body is fully in place.
         let hook = argv(&["-I", "INPUT", "-j", chain]);
 
         IngressRules { body, hook }
     }
 
-    /// Remove the resources this run installed.
-    ///
-    /// Unhooking removes every matching `INPUT` reference, not only the one this
-    /// run added, because a crashed run can leave extras.  A family whose unhook
-    /// fails keeps the rest of its teardown: flushing a chain still reachable
-    /// from `INPUT` would empty it while packets traverse it.
     pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<(), String> {
         let mut runner = NsenterRunner;
         self.remove_firewall_rules_with(&mut runner, logger)
@@ -752,14 +584,6 @@ impl IngressManager {
         self.execute_teardown(&steps, runner, logger)
     }
 
-    /// Execute an ordered list of teardown [`TeardownStep`]s, clearing each
-    /// resource's ownership flag as it is removed.
-    ///
-    /// An unhook step loops `-D INPUT` until iptables reports no matching
-    /// rule, bounded by [`MAX_UNHOOK_ATTEMPTS`].  A step that exits non-zero
-    /// with iptables' own "already absent" text is a no-op; any other failure
-    /// keeps that resource's ownership and blocks the rest of that family's
-    /// steps.
     fn execute_teardown(
         &mut self,
         steps: &[TeardownStep],
@@ -767,13 +591,11 @@ impl IngressManager {
         logger: &mut Logger,
     ) -> Result<(), String> {
         let mut failures: Vec<String> = Vec::new();
-        // Once a family's teardown hits a real error we stop that family.
         let mut blocked = [false, false];
 
         for step in steps {
             let fi = step.family.index();
             if blocked[fi] {
-                // Leave this resource's flag set so `Drop` retries it.
                 continue;
             }
             let binary = step.family.binary();
@@ -781,14 +603,9 @@ impl IngressManager {
 
             match step.kind {
                 StepKind::Unhook => {
-                    // Remove every INPUT reference: one `-D` deletes one, and a
-                    // crashed run may have left several. Loop until iptables
-                    // reports no matching rule, bounded so a persistently
-                    // failing delete cannot spin forever.
                     let mut cleared = false;
                     for _ in 0..MAX_UNHOOK_ATTEMPTS {
                         match self.run(runner, binary, &arg_refs, logger) {
-                            // One reference gone; try again in case there are more.
                             Ok(()) => continue,
                             Err(RunError::Exit { ref stderr, .. })
                                 if step.kind.stderr_means_absent(stderr) =>
@@ -807,8 +624,6 @@ impl IngressManager {
                         continue;
                     }
                     if !cleared {
-                        // Still deleting references after the bound: abnormal,
-                        // treat as a real error rather than assume success.
                         let msg = format!(
                             "still removing INPUT references to chain '{}' after {} attempts",
                             self.chain_name, MAX_UNHOOK_ATTEMPTS
@@ -826,7 +641,6 @@ impl IngressManager {
                         Err(RunError::Exit { ref stderr, .. })
                             if step.kind.stderr_means_absent(stderr) =>
                         {
-                            // The object is genuinely gone; removal is a no-op.
                             self.clear_step_flag(step);
                         }
                         Err(e) => {
@@ -849,11 +663,6 @@ impl IngressManager {
         }
     }
 
-    /// The ordered teardown commands for the resources this run currently owns.
-    ///
-    /// Pure — no execution — so both the executor and the tests share one source
-    /// of truth for what teardown will run. Per family, in reverse of install:
-    /// unhook (if hooked), then flush and delete (if created).
     fn owned_teardown_steps(&self) -> Vec<TeardownStep> {
         let chain = &self.chain_name;
         let mut steps: Vec<TeardownStep> = Vec::new();
@@ -869,9 +678,6 @@ impl IngressManager {
         steps
     }
 
-    /// Clear the ownership flag a successfully-removed (or already-absent) step
-    /// corresponds to. Flushing does not clear `created` — the chain still
-    /// exists until it is deleted.
     fn clear_step_flag(&mut self, step: &TeardownStep) {
         match step.kind {
             StepKind::Unhook => self.clear_hooked(step.family),
@@ -880,11 +686,6 @@ impl IngressManager {
         }
     }
 
-    /// Best-effort cleanup when the owning [`IngressManager`] is not reachable,
-    /// such as signal-time cleanup from the watchdog thread.
-    ///
-    /// Nothing here knows what a dead run installed, so teardown assumes every
-    /// resource exists and treats an absent one as already removed.
     pub fn force_cleanup(container_name: &str, netns_pid: u32, logger: &mut Logger) {
         let mut runner = NsenterRunner;
         Self::force_cleanup_with(container_name, netns_pid, &mut runner, logger);
@@ -900,7 +701,6 @@ impl IngressManager {
         let _ = mgr.remove_firewall_rules_with(runner, logger);
     }
 
-    /// A manager that assumes every resource might exist.
     fn for_full_reset(container_name: &str, netns_pid: u32) -> Self {
         let mut mgr = Self::new(container_name, netns_pid);
         mgr.v4_chain_created = true;
@@ -910,17 +710,10 @@ impl IngressManager {
         mgr
     }
 
-    /// Build the full argv for running `binary args...` inside this container's
-    /// network namespace.
     fn nsenter_argv(&self, binary: &str, args: &[&str]) -> Vec<String> {
         build_nsenter_argv(self.netns_pid, binary, args)
     }
 
-    /// Classify `ip6tables` usability for the container's network namespace.
-    ///
-    /// A host with IPv6 disabled says nothing about the namespace being
-    /// filtered, and probing the host would leave a container's IPv6 inbound
-    /// unfiltered under the deny.
     fn container_ip6tables_status(
         &self,
         runner: &mut dyn CommandRunner,
@@ -940,11 +733,6 @@ impl IngressManager {
         )
     }
 
-    /// Whether the container namespace has a live IPv6 stack.
-    /// Reads `/proc/<pid>/net/if_inet6` (the netns view of process `<pid>`) and
-    /// defers to [`Self::classify_container_ipv6_state`] so the mapping stays
-    /// unit-tested. `/proc/<pid>/net` presence separates "IPv6 is off in
-    /// this namespace" from "we could not read it" (fail-closed).
     fn container_ipv6_state(&self) -> HostIpv6State {
         let if_inet6 = format!("/proc/{}/net/if_inet6", self.netns_pid);
         let proc_net = format!("/proc/{}/net", self.netns_pid);
@@ -954,9 +742,6 @@ impl IngressManager {
         )
     }
 
-    /// Run a read-only `ip6tables -S` inside the container namespace, reporting
-    /// whether the tool is usable there. Probed via `nsenter` so it reflects
-    /// the namespace we will actually program, not the host's `ip6tables`.
     fn container_ip6tables_probe_succeeded(
         &self,
         runner: &mut dyn CommandRunner,
@@ -977,10 +762,6 @@ impl IngressManager {
 
 impl Drop for IngressManager {
     fn drop(&mut self) {
-        // `preserve_policy` is checked here and not only at the runner's
-        // explicit teardown call. `Drop` runs on every path out of the run, so
-        // gating the explicit call alone would still remove the rules the
-        // caller asked to keep.
         if self.should_cleanup_on_drop() {
             let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
             let _ = self.remove_firewall_rules(&mut logger);
@@ -1000,7 +781,6 @@ mod tests {
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
 
-    /// The 0.8 ingress posture as the parser delivers it.
     fn directional_ingress(
         default: NetworkAction,
         host_loopback: NetworkAction,
@@ -1051,9 +831,6 @@ mod tests {
         );
     }
 
-    // A 0.8 config never writes the legacy toggle, and a 0.7 config never
-    // carries an ingress section. Neither schema can be reported under the
-    // other's field name.
     #[test]
     fn a_legacy_permissive_request_is_still_named_allow_local_network() {
         let policy = ContainerPolicy {
@@ -1068,8 +845,6 @@ mod tests {
         );
     }
 
-    // A bare 0.8 config gets the parser's fill-in, which denies on both
-    // fields. Nothing permissive is being asked for, and nothing is refused.
     #[test]
     fn a_bare_directional_config_asks_for_nothing_permissive() {
         let policy = ContainerPolicy {
@@ -1084,8 +859,6 @@ mod tests {
         );
     }
 
-    // A 0.8 operator never writes allowLocalNetwork.  Naming it in the log
-    // would point at a field their schema does not have.
     #[test]
     fn the_inbound_log_line_names_the_schema_that_asked_for_the_posture() {
         for (directional, expected, absent) in [
@@ -1099,8 +872,6 @@ mod tests {
                 ..Default::default()
             };
             if directional {
-                // A policy admitting no peer at all is given no interface to
-                // hook.
                 policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
                     default: NetworkAction::Allow,
                     ..Default::default()
@@ -1124,8 +895,6 @@ mod tests {
         }
     }
 
-    /// A `ContainerPolicy` with the two fields these tests vary; everything
-    /// else defaults.
     fn policy_with(allow_local: bool, default: NetworkPolicy) -> ContainerPolicy {
         ContainerPolicy {
             allow_local_network: allow_local,
@@ -1134,7 +903,6 @@ mod tests {
         }
     }
 
-    /// Exact-match a single rule against an expected argv.
     fn is(rule: &[String], want: &[&str]) -> bool {
         rule.len() == want.len() && rule.iter().zip(want).all(|(a, b)| a == b)
     }
@@ -1147,18 +915,12 @@ mod tests {
         rules.iter().position(|r| is(r, want))
     }
 
-    /// The chain name these builder tests pin against.
     const TEST_CHAIN: &str = "MXC-t";
 
-    // ── Container-namespace IPv6 classification ──────────────────────────────
-
-    /// A real `/proc/net/if_inet6` loopback line: address, if_index, prefix_len,
-    /// scope, flags, device.
+    /// A `/proc/net/if_inet6` loopback line contains address, if_index,
+    /// prefix_len, scope, flags, and device.
     const LOOPBACK_ONLY_IF_INET6: &str = "00000000000000000000000000000001 01 80 10 80       lo\n";
 
-    /// The race this classifier exists to close. A container that has not been
-    /// assigned an IPv6 address yet shows the same address-less `if_inet6` as
-    /// one with IPv6 switched off, so contents cannot be read as "IPv6 is off".
     #[test]
     fn container_if_inet6_with_only_loopback_is_still_active() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(
@@ -1173,8 +935,6 @@ mod tests {
         );
     }
 
-    /// An empty file is the same situation as loopback-only: the kernel created
-    /// it, so the stack is there; it simply has no addresses yet.
     #[test]
     fn container_empty_if_inet6_is_still_active() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(Ok(String::new()), true);
@@ -1185,9 +945,6 @@ mod tests {
         );
     }
 
-    /// The consequence stated as an outcome rather than an intermediate state:
-    /// an unusable `ip6tables` plus an address-less container must abort, not
-    /// quietly install IPv4-only enforcement.
     #[test]
     fn address_less_container_with_unusable_ip6tables_fails_closed() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(
@@ -1205,10 +962,7 @@ mod tests {
         );
     }
 
-    /// The genuine IPv4-only case must still work. A kernel with IPv6 disabled
-    /// at boot never creates `if_inet6`, and that absence -- with
-    /// `/proc/<pid>/net` present to prove the read was real -- is the one signal
-    /// that still means "off".
+    /// A kernel booted with IPv6 disabled does not create `if_inet6`.
     #[test]
     fn container_missing_if_inet6_with_proc_net_is_inactive() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(
@@ -1223,8 +977,6 @@ mod tests {
         );
     }
 
-    /// A missing file with no `/proc/<pid>/net` behind it is "we could not read
-    /// it", not "IPv6 is off" -- the process may simply be gone.
     #[test]
     fn container_missing_if_inet6_without_proc_net_is_unknown() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(
@@ -1239,7 +991,6 @@ mod tests {
         );
     }
 
-    /// Any other read error is uncertainty, which must not be downgraded.
     #[test]
     fn container_unreadable_if_inet6_is_unknown() {
         let state = NetworkIptablesManager::classify_container_ipv6_state(
@@ -1253,8 +1004,6 @@ mod tests {
         );
     }
 
-    /// The full install sequence for one policy/family: `-N`, then the chain
-    /// body, then the `-I INPUT` hook.
     fn full_sequence(
         policy: &ContainerPolicy,
         uses_directional_keys: bool,
@@ -1276,10 +1025,6 @@ mod tests {
         )
     }
 
-    /// A [`CommandRunner`] that records every fully-formed (nsenter-wrapped)
-    /// argv it is asked to run and returns a scripted outcome, so the apply,
-    /// reset, teardown, and force-cleanup paths can be exercised — and their
-    /// exact commands asserted — on a host with no `iptables`.
     struct FakeRunner<F: FnMut(&[String]) -> Result<(), RunError>> {
         calls: Vec<Vec<String>>,
         respond: F,
@@ -1292,14 +1037,10 @@ mod tests {
         }
     }
 
-    /// The iptables verb (first arg after `nsenter -t <pid> -n <binary>`) of a
-    /// recorded argv, e.g. `-N`, `-A`, `-I`, `-D`, `-F`, `-X`, `-S`.
     fn verb(argv: &[String]) -> &str {
         argv.get(5).map(String::as_str).unwrap_or("")
     }
 
-    /// An [`RunError::Exit`] carrying iptables' own "no matching rule" message,
-    /// so an unhook step reads it as already-absent.
     fn absent_rule() -> RunError {
         RunError::Exit {
             stderr: "iptables: Bad rule (does a matching rule exist in that chain?).".to_string(),
@@ -1307,8 +1048,6 @@ mod tests {
         }
     }
 
-    /// An [`RunError::Exit`] carrying iptables' own "no such chain" message, so
-    /// a flush/delete step reads it as already-absent.
     fn absent_chain() -> RunError {
         RunError::Exit {
             stderr: "iptables: No chain/target/match by that name.".to_string(),
@@ -1316,10 +1055,7 @@ mod tests {
         }
     }
 
-    /// The C-locale messages iptables emits when the target is already gone,
-    /// paired with the step whose non-zero exit they are allowed to excuse.
-    /// These are the exact strings [`StepKind::stderr_means_absent`] is written
-    /// against, so they are the contract the locale pin exists to guarantee.
+    /// C-locale iptables messages for missing rules and chains.
     const C_LOCALE_ABSENT: &[(StepKind, &str)] = &[
         (
             StepKind::Unhook,
@@ -1401,13 +1137,8 @@ mod tests {
         }
     }
 
-    /// The regression the locale pin exists to prevent: a localized `iptables`
-    /// emits the same two conditions as [`C_LOCALE_ABSENT`] in translation, and
-    /// none of them matches.
     #[test]
     fn localized_absent_messages_are_not_recognized_without_the_locale_pin() {
-        // German and French renderings of "No chain/target/match by that name"
-        // and "Bad rule (does a matching rule exist in that chain?)".
         let localized = [
             "iptables: Kein Chain/Target/Match mit diesem Namen.",
             "iptables: Pas de chaîne/cible/correspondance de ce nom.",
@@ -1515,8 +1246,6 @@ mod tests {
 
     #[test]
     fn terminal_default_is_always_drop_regardless_of_egress_policy() {
-        // Inbound is default-deny; the egress `default_network_policy` must not
-        // turn it into a default-accept.
         for default in [NetworkPolicy::Block, NetworkPolicy::Allow] {
             let rules = full_sequence(&policy_with(false, default.clone()), false, IpFamily::V4);
             assert!(
@@ -1538,9 +1267,6 @@ mod tests {
 
     #[test]
     fn no_egress_dest_or_dns_rules_in_ingress_chain() {
-        // The inbound chain is loopback + established + a single NEW-state
-        // decision with no CIDR peers, so it must not carry egress-intent
-        // destination or DNS accepts.
         let rules = build(false);
         assert!(
             !rules.iter().any(|r| r.iter().any(|a| a == "-d")),
@@ -1561,8 +1287,6 @@ mod tests {
         );
     }
 
-    // ---- family-awareness: IPv4 pinned, IPv6 gains ICMPv6 ND ------------
-
     fn build_family(allow_local: bool, family: IpFamily) -> Vec<Vec<String>> {
         full_sequence(
             &policy_with(allow_local, NetworkPolicy::Block),
@@ -1571,9 +1295,6 @@ mod tests {
         )
     }
 
-    /// The IPv4 rule set must be exactly this sequence, in order — the
-    /// regression pin proving IPv4 behavior is what the contract specifies and
-    /// stays fixed as the IPv6 path evolves.
     #[test]
     fn ipv4_full_sequence_is_pinned_exactly() {
         let rules = build_family(false, IpFamily::V4);
@@ -1609,8 +1330,6 @@ mod tests {
         }
     }
 
-    /// IPv4 must add no ICMP/ICMPv6 rules at all — ARP is layer 2, so the IPv4
-    /// chain never needs a control-plane allowance.
     #[test]
     fn ipv4_emits_no_icmpv6_rules() {
         for allow in [true, false] {
@@ -1624,8 +1343,6 @@ mod tests {
         }
     }
 
-    /// IPv6 must accept each Neighbor Discovery type (RS/RA/NS/NA), or inbound
-    /// ND is dropped by the NEW rule and IPv6 address resolution breaks.
     #[test]
     fn ipv6_permits_neighbor_discovery_types() {
         let rules = build_family(false, IpFamily::V6);
@@ -1654,8 +1371,6 @@ mod tests {
         }
     }
 
-    /// IPv6 must accept the Multicast Listener Discovery and essential-error
-    /// types (packet-too-big is required for Path MTU Discovery).
     #[test]
     fn ipv6_permits_mld_and_essential_error_types() {
         let rules = build_family(false, IpFamily::V6);
@@ -1688,8 +1403,6 @@ mod tests {
         }
     }
 
-    /// Every ICMPv6 accept must come before the `--state NEW` decision and the
-    /// terminal DROP, or ND (which is NEW) would be dropped before it matches.
     #[test]
     fn ipv6_icmpv6_accepts_precede_new_and_terminal_drop() {
         let rules = build_family(false, IpFamily::V6);
@@ -1728,18 +1441,13 @@ mod tests {
         }
     }
 
-    /// The IPv6 chain must not become a blanket ICMPv6 accept: only the
-    /// specific control-plane types are opened, and ordinary new inbound (and
-    /// inbound ping / redirects) stay dropped.
     #[test]
     fn ipv6_does_not_blanket_accept_icmpv6_or_new_inbound() {
         let rules = build_family(false, IpFamily::V6);
-        // No untyped `-p icmpv6 -j ACCEPT` (would accept every ICMPv6 message).
         assert!(
             !has(&rules, &["-A", "MXC-t", "-p", "icmpv6", "-j", "ACCEPT"]),
             "IPv6 chain must not blanket-accept all ICMPv6"
         );
-        // Echo request (128) and Redirect (137) are deliberately not opened.
         for num in ["128", "137"] {
             assert!(
                 !has(
@@ -1758,7 +1466,6 @@ mod tests {
                 "IPv6 chain must not accept ICMPv6 type {num}"
             );
         }
-        // Default-deny still holds: NEW inbound dropped, terminal DROP present.
         assert!(
             has(
                 &rules,
@@ -1772,8 +1479,6 @@ mod tests {
         );
     }
 
-    /// With `allowLocalNetwork: true` the IPv6 NEW decision flips to ACCEPT
-    /// just like IPv4 — the ICMPv6 allowances are independent of the toggle.
     #[test]
     fn ipv6_new_decision_follows_allow_local_toggle() {
         let allow = build_family(true, IpFamily::V6);
@@ -1788,9 +1493,6 @@ mod tests {
         ));
     }
 
-    /// The ingress chain name must be distinct from the egress chain name for
-    /// the same container, so the two chains can never collide or be torn down
-    /// for each other.
     #[test]
     fn ingress_chain_name_is_distinct_from_egress() {
         let name = "my-container";
@@ -1801,7 +1503,6 @@ mod tests {
             egress,
             "ingress and egress chains must not share a name"
         );
-        // iptables rejects chain names of 29+ characters.
         assert!(
             ingress.chain_name().len() <= crate::network_iptables::CHAIN_NAME_MAX_LEN,
             "ingress chain name '{}' exceeds the {}-char ceiling",
@@ -1810,7 +1511,6 @@ mod tests {
         );
     }
 
-    /// A firewall-mode policy with `allowLocalNetwork: true`.
     fn permissive_firewall_policy() -> ContainerPolicy {
         ContainerPolicy {
             allow_local_network: true,
@@ -1820,13 +1520,10 @@ mod tests {
         }
     }
 
-    /// The permissive path (`allowLocalNetwork: true`) must be refused by the
-    /// public apply entry point before any command is issued.
     #[test]
     fn permissive_apply_is_refused_unconditionally() {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
-        // The PID value is irrelevant: the refusal precedes every use of it.
         for pid in [1u32, 42u32, 999_999u32] {
             let mut mgr = IngressManager::new("permissive-container", pid);
             let result = mgr.apply_firewall_rules(&permissive_firewall_policy(), &mut logger);
@@ -1839,7 +1536,6 @@ mod tests {
                 msg.contains("not yet implemented"),
                 "refusal must explain it is not yet implemented, got: {msg}"
             );
-            // The refusal must never have claimed ownership of any resource.
             assert!(
                 !mgr.rules_applied(),
                 "a refused permissive apply must install nothing (pid={pid})"
@@ -1851,10 +1547,6 @@ mod tests {
         }
     }
 
-    /// `network.ingress.default` and `allowLocalNetwork` govern LAN/private-network
-    /// inbound; `network.ingress.hostLoopback` is the separate host-loopback control
-    /// (`docs/sandbox-policy/0.8.0/policy.md`). A refusal that blames host loopback
-    /// sends the operator to a field they did not write.
     #[test]
     fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
@@ -1880,10 +1572,6 @@ mod tests {
         }
     }
 
-    /// Every command this manager issues must be scoped to the container netns
-    /// with an `nsenter -t <pid> -n` prefix — the invariant that keeps the
-    /// rules off the host. Assert the argv shape the pure builder produces, for
-    /// a representative iptables rule and for the read-only ip6tables probe.
     #[test]
     fn every_emitted_command_is_nsenter_prefixed() {
         let pid = 31337u32;
@@ -1902,7 +1590,6 @@ mod tests {
         }
     }
 
-    /// Assert an argv is `["nsenter", "-t", <pid>, "-n", <binary>, <args...>]`.
     fn assert_nsenter_prefixed(argv: &[String], pid: u32, binary: &str, args: &[&str]) {
         assert_eq!(
             &argv[..5],
@@ -1920,14 +1607,11 @@ mod tests {
         assert_eq!(tail, want, "the wrapped command args must be preserved");
     }
 
-    /// Teardown must also route every command through `nsenter`: one that skips
-    /// it would execute against the host's tables.
     #[test]
     fn teardown_commands_are_nsenter_prefixed_and_chain_scoped() {
         let pid = 4242u32;
         let mut mgr = IngressManager::new("teardown-container", pid);
 
-        // Simulate a full dual-stack install: both families created and hooked.
         mgr.v4_chain_created = true;
         mgr.v6_chain_created = true;
         mgr.v4_hooked = true;
@@ -1935,7 +1619,6 @@ mod tests {
         let chain = mgr.chain_name().to_string();
 
         let steps = mgr.owned_teardown_steps();
-        // Unhook + flush + delete, per family.
         assert_eq!(
             steps.len(),
             6,
@@ -1945,7 +1628,6 @@ mod tests {
             let arg_refs: Vec<&str> = step.args.iter().map(String::as_str).collect();
             let argv = mgr.nsenter_argv(step.family.binary(), &arg_refs);
             assert_nsenter_prefixed(&argv, pid, step.family.binary(), &arg_refs);
-            // Every teardown command names our own chain and no other.
             assert!(
                 step.args.iter().any(|a| a == &chain),
                 "teardown step {:?} must target our chain '{}', got {:?}",
@@ -1954,8 +1636,6 @@ mod tests {
                 step.args
             );
         }
-        // Within each family, unhook must be planned before flush/delete so we
-        // never flush a chain still referenced from INPUT.
         for family in [IpFamily::V4, IpFamily::V6] {
             let idx = |k: StepKind| {
                 steps
@@ -1968,8 +1648,6 @@ mod tests {
         }
     }
 
-    /// `preservePolicy` must survive `Drop`, not just the runner's explicit
-    /// teardown call.
     #[test]
     fn drop_honors_preserve_policy() {
         let mut mgr = IngressManager::new("preserve-container", 4242);
@@ -1998,14 +1676,10 @@ mod tests {
             "without preservePolicy an installed chain must still be torn down"
         );
 
-        // Dropping a manager that still owns state would reach the real
-        // nsenter; disown it first.
         mgr.v4_chain_created = false;
         mgr.v4_hooked = false;
     }
 
-    /// `force_cleanup` cannot know what a dead run installed, and must plan to
-    /// remove every resource for both families.
     #[test]
     fn force_cleanup_removes_all_resources_via_nsenter() {
         let pid = 9001u32;
@@ -2023,7 +1697,6 @@ mod tests {
 
         IngressManager::force_cleanup_with(container, pid, &mut runner, &mut logger);
 
-        // Six commands: unhook + flush + delete, per family.
         assert_eq!(
             runner.calls.len(),
             6,
@@ -2031,7 +1704,6 @@ mod tests {
             runner.calls
         );
 
-        // Every command is nsenter-scoped and names only our chain.
         for argv in &runner.calls {
             assert_eq!(
                 &argv[..4],
@@ -2053,7 +1725,6 @@ mod tests {
             );
         }
 
-        // Both families are covered.
         for binary in ["iptables", "ip6tables"] {
             assert!(
                 runner.calls.iter().any(|a| a[4] == binary),
@@ -2061,7 +1732,6 @@ mod tests {
             );
         }
 
-        // Per family: unhook (-D) before flush (-F) before delete (-X).
         for binary in ["iptables", "ip6tables"] {
             let idx = |v: &str| {
                 runner
@@ -2075,10 +1745,6 @@ mod tests {
         }
     }
 
-    /// The pure builder must return the chain *body* and the `INPUT` *hook* as
-    /// separate values, so install cannot confuse one for the other and needs no
-    /// `-I`-filtering. The body carries neither the `-N` creation nor the `-I`
-    /// hook; the hook is exactly the `-I INPUT` jump.
     #[test]
     fn builder_returns_body_and_hook_separately() {
         for family in [IpFamily::V4, IpFamily::V6] {
@@ -2122,8 +1788,6 @@ mod tests {
         }
     }
 
-    /// Install must reset before it creates, and hook only after the body is in
-    /// place — a chain hooked while still empty accepts everything.
     #[test]
     fn install_resets_then_creates_then_hooks_last() {
         let pid = 4242u32;
@@ -2139,8 +1803,6 @@ mod tests {
 
         let mut runner = FakeRunner {
             calls: Vec::new(),
-            // No leftover: reset's -D/-F/-X all report already-absent; the
-            // create/body/hook commands succeed.
             respond: |argv: &[String]| match verb(argv) {
                 "-D" => Err(absent_rule()),
                 "-F" | "-X" => Err(absent_chain()),
@@ -2155,7 +1817,6 @@ mod tests {
         let first = |v: &str| verbs.iter().position(|x| *x == v).unwrap_or(usize::MAX);
         let last = |v: &str| verbs.iter().rposition(|x| *x == v).unwrap_or(usize::MAX);
 
-        // Reset (unhook, flush, delete) all precede the fresh create.
         assert!(
             last("-D") < first("-N"),
             "reset unhook must precede create: {verbs:?}"
@@ -2172,12 +1833,10 @@ mod tests {
             last("-X") < first("-N"),
             "reset delete must precede create: {verbs:?}"
         );
-        // Create precedes every body append.
         assert!(
             first("-N") < first("-A"),
             "create must precede the body: {verbs:?}"
         );
-        // The hook is the single last command.
         assert_eq!(
             verbs.last().copied(),
             Some("-I"),
@@ -2190,8 +1849,6 @@ mod tests {
         );
     }
 
-    /// The reset must remove *every* leftover `INPUT` reference, not just one:
-    /// a crashed run can leave several.
     #[test]
     fn reset_repeats_unhook_until_absent_then_deletes() {
         let pid = 55u32;
@@ -2205,7 +1862,6 @@ mod tests {
             respond: move |argv: &[String]| match verb(argv) {
                 "-D" => {
                     d_seen += 1;
-                    // Two references present, then no matching rule.
                     if d_seen <= 2 {
                         Ok(())
                     } else {
@@ -2225,7 +1881,6 @@ mod tests {
             3,
             "unhook must repeat until absent (2 removals + 1 absent probe): {verbs:?}"
         );
-        // Unhook-before-delete: every -D precedes the first -F and -X.
         let first_flush = verbs
             .iter()
             .position(|v| *v == "-F")
@@ -2248,9 +1903,6 @@ mod tests {
         );
     }
 
-    /// A partial install — the chain is created but a body rule fails before the
-    /// hook lands — must record the chain as owned and the hook as not, leaving
-    /// teardown no jump rule to remove.
     #[test]
     fn partial_body_failure_plans_flush_delete_no_unhook() {
         let pid = 7u32;
@@ -2265,8 +1917,6 @@ mod tests {
 
         let mut runner = FakeRunner {
             calls: Vec::new(),
-            // Reset finds no leftover; the fresh `-N` succeeds; the first body
-            // `-A` fails for a real reason (not an absence).
             respond: |argv: &[String]| match verb(argv) {
                 "-D" => Err(absent_rule()),
                 "-F" | "-X" => Err(absent_chain()),
@@ -2279,21 +1929,18 @@ mod tests {
         mgr.install_family(IpFamily::V4, &rules, &mut runner, &mut logger)
             .expect_err("install must fail when a body rule fails");
 
-        // Ownership records the chain but not the hook.
         assert!(mgr.v4_chain_created, "the successful -N must set created");
         assert!(
             !mgr.v4_hooked,
             "the hook never landed, so hooked must stay false"
         );
 
-        // The hook was never issued — the body failed before install reached it.
         assert!(
             !runner.calls.iter().any(|a| verb(a) == "-I"),
             "no -I INPUT hook may be issued when a body rule failed: {:?}",
             runner.calls
         );
 
-        // Teardown plans flush + delete for the created chain, but no unhook.
         let steps = mgr.owned_teardown_steps();
         assert_eq!(
             steps.len(),
@@ -2312,11 +1959,6 @@ mod tests {
         assert!(steps.iter().any(|s| s.kind == StepKind::Delete));
     }
 
-    /// Reset fail-closed, spawn case: if the reset's very first `-D` cannot even
-    /// be spawned (e.g. `nsenter` or `iptables` missing), install must abort
-    /// before creating anything — no `-N`, and no ownership flag set. A reset
-    /// that cannot run must never let install proceed to a half-built, unowned
-    /// chain, which would enforce nothing while looking installed.
     #[test]
     fn reset_spawn_failure_aborts_before_create_with_no_ownership() {
         let pid = 7u32;
@@ -2331,7 +1973,6 @@ mod tests {
 
         let mut runner = FakeRunner {
             calls: Vec::new(),
-            // The reset's first unhook cannot be spawned at all.
             respond: |argv: &[String]| match verb(argv) {
                 "-D" => Err(RunError::Spawn(
                     "nsenter: executable file not found".to_string(),
@@ -2358,9 +1999,6 @@ mod tests {
         );
     }
 
-    /// A `-D` that keeps succeeding and never reports the rule absent must
-    /// abort install after [`MAX_UNHOOK_ATTEMPTS`].  Reading a persistently
-    /// successful delete as "drained" would spin the loop forever.
     #[test]
     fn reset_unhook_exhaustion_aborts_before_create() {
         let pid = 7u32;
@@ -2375,8 +2013,6 @@ mod tests {
 
         let mut runner = FakeRunner {
             calls: Vec::new(),
-            // Every unhook "succeeds" — there is always another reference — so
-            // the loop never sees absence and must hit the bound.
             respond: |argv: &[String]| match verb(argv) {
                 "-D" => Ok(()),
                 _ => Ok(()),
@@ -2412,11 +2048,6 @@ mod tests {
         );
     }
 
-    /// Pin the entire IPv6 chain body as a literal, in order.  The sequence is
-    /// written out rather than built from [`ICMPV6_ALLOW_TYPES`] on purpose:
-    /// deriving it would re-derive the thing under test.  The 12 ICMPv6 accepts
-    /// arrive as NEW and must precede the NEW drop, or Neighbor Discovery and
-    /// SLAAC break.
     #[test]
     fn ipv6_full_body_sequence_is_pinned_exactly() {
         let rules = IngressManager::build_ingress_rules(
@@ -2572,12 +2203,8 @@ mod tests {
         );
     }
 
-    /// The "already absent" classification must accept only iptables' own
-    /// missing-object messages, never a spawn failure — treating "cannot run
-    /// the tool" as "nothing to remove" would be a fail-open.
     #[test]
     fn absent_classification_rejects_spawn_style_messages() {
-        // iptables' actual missing-chain / missing-rule messages: absent.
         assert!(
             StepKind::Flush.stderr_means_absent("iptables: No chain/target/match by that name.")
         );
@@ -2585,7 +2212,6 @@ mod tests {
         assert!(StepKind::Unhook.stderr_means_absent(
             "iptables: Bad rule (does a matching rule exist in that chain?)."
         ));
-        // Spawn-style / unknown-state messages: never absent.
         for msg in [
             "executable file not found",
             "No such file or directory",
@@ -2602,17 +2228,13 @@ mod tests {
                 "must not treat '{msg}' as proof the rule is absent"
             );
         }
-        // A missing-*rule* message must not satisfy a chain step, and vice versa.
         assert!(
             !StepKind::Flush.stderr_means_absent("does a matching rule exist in that chain?"),
             "a missing-rule message must not clear a chain flush/delete step"
         );
     }
 
-    /// A fresh container has no MXCI chain, so the reset that precedes every
-    /// install must read an absent chain as benign.  Until it did, inbound
-    /// default-deny could not install on any `iptables-nft` host.  Strings
-    /// captured verbatim from iptables 1.8.10 under `LC_ALL=C`.
+    /// Strings captured from iptables 1.8.10 under `LC_ALL=C`.
     #[test]
     fn absent_chain_messages_from_both_backends_are_recognized() {
         let observed = [
@@ -2641,9 +2263,6 @@ mod tests {
         }
     }
 
-    // A 0.7 config naming a firewall mode is owed the inbound deny even with
-    // nothing to restrict outbound; skipping it would accept new inbound
-    // connections on every interface, the fail-open direction.
     #[test]
     fn a_firewall_mode_config_with_nothing_to_restrict_outbound_still_installs_the_inbound_chain() {
         for mode in [
@@ -2661,8 +2280,6 @@ mod tests {
         }
     }
 
-    // 0.8 states its posture with no enforcementMode to name.  The inbound
-    // chain has to follow from the schema itself.
     #[test]
     fn a_stated_directional_posture_installs_the_inbound_chain() {
         let mut policy = directional_ingress(NetworkAction::Allow, NetworkAction::Deny);

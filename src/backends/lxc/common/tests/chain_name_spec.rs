@@ -1,11 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Black-box specification tests for LXC firewall chain-name construction.
-//!
-//! Written against the published contract only. Nothing here may depend on how
-//! `chain_name_for` computes its result.
-
 use lxc_common::network_iptables::{
     chain_name_for, EgressHookPoint, NetworkIptablesManager, CHAIN_NAME_MAX_LEN,
 };
@@ -15,8 +10,6 @@ fn multibyte_inputs() -> Vec<String> {
     vec![
         "日本語のコンテナ名前が非常に長い".to_string(),
         "😀😀😀😀😀😀😀😀😀😀".to_string(),
-        // 'e' plus a combining acute accent: the base char is kept, the mark is
-        // dropped, and the whole input is multi-byte (defect 3).
         "e\u{0301}e\u{0301}e\u{0301}e\u{0301}e\u{0301}".to_string(),
         "café-münchen-ñoño".to_string(),
         "中文名字".to_string(),
@@ -66,12 +59,6 @@ fn assert_invariants(input: &str, chain: &str) {
     }
 }
 
-// Hand-rolled recognizer for the exact shape the four bash integration scripts
-// assert against: `^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$`.  Written without a
-// regex dependency so the black-box suite stays dependency-free.  The 16-char
-// base32 hash is a fixed-width suffix, so the separator (when a slug is present)
-// is always the byte immediately before it, which makes the parse unambiguous
-// even though `-` is legal inside the slug.
 fn matches_documented_shape(chain: &str) -> bool {
     if !chain.is_ascii() {
         return false;
@@ -88,11 +75,8 @@ fn matches_documented_shape(chain: &str) -> bool {
         return false;
     }
     if head.is_empty() {
-        // Slug-less form: `MXC-<hash>`.
         return true;
     }
-    // Slug form: `MXC-<slug>-<hash>`; strip the mandatory separator, then check
-    // the slug is 1..=7 characters drawn from the documented slug alphabet.
     let Some(slug) = head.strip_suffix('-') else {
         return false;
     };
@@ -234,8 +218,6 @@ fn names_sharing_first_seven_slug_chars_differ() {
 
 #[test]
 fn names_differing_only_in_dropped_chars_differ() {
-    // '.' and '/' are both dropped, so the slug is "ab" for both; only the hash
-    // over the original name can distinguish them.
     let a = chain_name_for("a.b");
     let b = chain_name_for("a/b");
     assert!(
@@ -305,8 +287,6 @@ fn empty_and_slugless_names_stay_valid_and_distinct() {
 
 #[test]
 fn slugless_output_is_prefix_plus_sixteen_char_base32_hash() {
-    // Names with no sluggable chars take the documented `MXC-<hash>` shape: the
-    // hash is 16 lowercase RFC 4648 base32 chars, so the whole name is 20 bytes.
     for input in ["", "....", "中文名字", "          ", "😀😀😀"] {
         let chain = chain_name_for(input);
         assert_eq!(
@@ -352,7 +332,6 @@ fn short_ascii_name_is_recognizable_in_slug() {
 
 #[test]
 fn slug_is_capped_at_seven_characters() {
-    // Brief: MXC-(4) + slug(<=7) + -(1) + hash(16) = 28 for a 7-char slug.
     let chain = chain_name_for("abcdefghijklmnop");
     assert!(
         chain.starts_with("MXC-abcdefg-"),
@@ -376,18 +355,9 @@ fn names_sharing_a_slug_still_differ() {
 
 #[test]
 fn hash_region_spans_the_whole_base32_alphabet() {
-    // The hash is a deterministic 80-bit value rendered as 16 base32 characters,
-    // so a fixed corpus makes this a reproducible assertion rather than a random
-    // one.  A few thousand names yield tens of thousands of hash characters, and
-    // a full-alphabet encoder is expected to emit each of the 32 symbols well
-    // over a thousand times, so every symbol appearing at least once is a
-    // near-certainty; a mask that can reach only 16 symbols fails on this same
-    // corpus every run.
     const BASE32_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz234567";
     let alphabet: HashSet<char> = BASE32_ALPHABET.chars().collect();
 
-    // The corpus spans both documented shapes: ASCII names keep a slug
-    // (MXC-<slug>-<hash>), while CJK and emoji names drop it (MXC-<hash>).
     let mut names: Vec<String> = Vec::new();
     for i in 0..2000 {
         names.push(format!("web-{i}"));
@@ -427,8 +397,6 @@ fn hash_region_spans_the_whole_base32_alphabet() {
             slugless += 1;
         } else {
             slugged += 1;
-            // The existing suite width-checked only the slug-less form; pin the
-            // same 16-char hash width for the slug form here.
             let after_sep = chain.rsplit('-').next().unwrap();
             assert_eq!(
                 after_sep.len(),
@@ -470,9 +438,6 @@ fn every_hash_position_independently_spans_the_full_base32_alphabet() {
     const BASE32_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz234567";
     let alphabet: HashSet<char> = BASE32_ALPHABET.chars().collect();
 
-    // Both documented shapes are exercised: short and long ASCII names keep a
-    // slug (MXC-<slug>-<hash>), while single CJK ideographs and emoji drop it
-    // (MXC-<hash>).
     let mut names: Vec<String> = Vec::new();
     for i in 0..16000 {
         names.push(format!("web-{i}"));
@@ -494,11 +459,6 @@ fn every_hash_position_independently_spans_the_full_base32_alphabet() {
         distinct.len()
     );
 
-    // With 20000+ names, each of the 16 positions draws ~20000/32 ≈ 625 samples
-    // per symbol, so every symbol is expected hundreds of times at every
-    // position; a symbol never appearing at some position is a real entropy
-    // defect, not sampling noise.  A pooled, whole-region alphabet check cannot
-    // see a single position that has silently collapsed toward a constant.
     let mut per_position: Vec<HashSet<char>> = vec![HashSet::new(); 16];
     let mut slugged = 0usize;
     let mut slugless = 0usize;
@@ -529,8 +489,6 @@ fn every_hash_position_independently_spans_the_full_base32_alphabet() {
         "corpus must exercise both output forms; saw {slugged} slugged and {slugless} slug-less"
     );
 
-    // Report the worst (fewest distinct symbols) position first so a red test
-    // names the most severe case immediately.
     let mut failures: Vec<(usize, Vec<char>, Vec<char>)> = Vec::new();
     for (pos, seen) in per_position.iter().enumerate() {
         if seen.len() != 32 {
@@ -564,10 +522,6 @@ fn every_hash_position_independently_spans_the_full_base32_alphabet() {
     assert!(failures.is_empty(), "{report}");
 }
 
-// The hash is taken over the *original* container name and SHA-256 is
-// byte-exact, so two names that differ only in letter case are distinct inputs
-// and must not share a chain -- even when the differing letter lies past the
-// 7-char slug, where the slug alone can no longer tell them apart.
 #[test]
 fn names_differing_only_in_case_receive_distinct_chains() {
     let assert_case_distinct = |a: &str, b: &str| {
@@ -576,31 +530,18 @@ fn names_differing_only_in_case_receive_distinct_chains() {
         assert_ne!(ca, cb, "{a:?} and {b:?} both map to {ca}");
     };
 
-    // Differs only past the 7-char slug ("contain"): the decisive case, since
-    // the slug is identical for both and only the hash can separate them.
     assert_case_distinct("container-A", "container-a");
 
-    // Differs inside the slug.
     assert_case_distinct("Web", "web");
 
-    // Three capitalizations of one name, all mutually distinct.
     assert_case_distinct("MyContainer", "mycontainer");
     assert_case_distinct("MyContainer", "MYCONTAINER");
     assert_case_distinct("mycontainer", "MYCONTAINER");
 
-    // Case difference at the very last character, far past the slug.
     assert_case_distinct("abcdefghijklmnopqrstuvwxyZ", "abcdefghijklmnopqrstuvwxyz");
 
-    // A pair whose only slug characters are the case-varying letters -- the
-    // emoji carry nothing sluggable, so the slug is built entirely from what
-    // differs by case.
     assert_case_distinct("😀Web😀", "😀web😀");
 
-    // A corpus of 512 names that are pairwise case-variants of one another: a
-    // fixed lowercase prefix (slug "contain") followed by nine letters whose
-    // case is toggled per bit pattern, so every difference falls past the slug
-    // boundary.  Hashing the original name yields 512 distinct chains; hashing a
-    // lowercased copy collapses every one of them onto a single chain.
     let mut seen: HashMap<String, String> = HashMap::new();
     for pattern in 0u32..512 {
         let mut name = String::from("container");
@@ -624,20 +565,6 @@ fn names_differing_only_in_case_receive_distinct_chains() {
     );
 }
 
-/// Cross-version stability anchors: known-answer vectors computed independently
-/// from the written specification with CPython's `hashlib` and `base64`, never
-/// from the crate under test.  They pin the exact `container name -> chain name`
-/// mapping so that a future refactor cannot silently change it.
-///
-/// The operational stakes are concrete.  A container's firewall rules live in a
-/// chain whose name is derived here.  If a newer build computed a different name
-/// for the same container, teardown would look for a chain that does not exist,
-/// the old chain would be orphaned, and its rules would leak -- accumulating
-/// stale firewall state that no code path can ever remove.  These anchors exist
-/// so that mapping stays byte-for-byte stable across builds and Rust versions.
-///
-/// Every expected value below was copied verbatim from the Python oracle's
-/// output; none was produced by running the implementation.
 #[test]
 fn known_answer_vectors_pin_the_exact_chain_mapping() {
     let cases = [
@@ -668,43 +595,34 @@ fn known_answer_vectors_pin_the_exact_chain_mapping() {
     }
 }
 
-/// Pins the reversal pair to literal digests.  `abcdefg` and `gfedcba` share no
-/// property the rest of the suite asserts -- both are 7-char slugs, both are
-/// distinct from each other, both are the right length -- because string
-/// reversal is a bijection that preserves distinctness, injectivity, length,
-/// and alphabet coverage.  A mutant that reverses the container name before
-/// hashing therefore survives every property test; only pinning the literal
-/// hash over the *original* byte order can distinguish the correct function
-/// from the name-reversing mutant.
 #[test]
 fn reversal_pair_is_pinned_to_literal_digests_to_kill_a_name_reversing_mutation() {
-    assert_eq!(chain_name_for("abcdefg"), "MXC-abcdefg-punfiet3eisqf5nx");
-    assert_eq!(chain_name_for("gfedcba"), "MXC-gfedcba-3gb4yrzhxoudzuga");
+    assert_eq!(
+        chain_name_for("abcdefg"),
+        "MXC-abcdefg-punfiet3eisqf5nx",
+        "the digest for abcdefg must be taken over its original byte order"
+    );
+    assert_eq!(
+        chain_name_for("gfedcba"),
+        "MXC-gfedcba-3gb4yrzhxoudzuga",
+        "the digest for gfedcba must be taken over its original byte order"
+    );
 }
 
-/// Pins the case pair to literal digests.  `container-A` and `container-a`
-/// share the 7-char slug `contain`, so if the digest were taken over a
-/// lowercased name the two would collapse onto one chain -- a real collision
-/// between distinct containers.  Pinning both literals proves the hash is taken
-/// over the original, case-preserving bytes.
 #[test]
 fn case_pair_is_pinned_to_literal_digests_to_prove_case_preserving_hashing() {
     assert_eq!(
         chain_name_for("container-A"),
-        "MXC-contain-yxnu4zopsc3bor72"
+        "MXC-contain-yxnu4zopsc3bor72",
+        "the digest for container-A must keep the original letter case"
     );
     assert_eq!(
         chain_name_for("container-a"),
-        "MXC-contain-tygguspady7fdgsp"
+        "MXC-contain-tygguspady7fdgsp",
+        "the digest for container-a must keep the original letter case"
     );
 }
 
-// Gap: the contract lists `_` alongside alphanumerics and `-` as a character
-// the slug keeps, but no existing test drives an underscore into the slug --
-// every known-answer vector and slug assertion uses only letters, digits, and
-// `-`.  A mutant that dropped `_` from the slug alphabet would pass the whole
-// prior suite.  `a_b_c_d_e` has sluggable characters a, _, b, _, c, _, d in
-// order, so the first CHAIN_SLUG_LEN=7 of them are the slug "a_b_c_d".
 #[test]
 fn slug_keeps_underscores() {
     let input = "a_b_c_d_e";
@@ -716,13 +634,6 @@ fn slug_keeps_underscores() {
     assert_invariants(input, &chain);
 }
 
-// Gap: the contract says the slug "keeps" the ASCII characters "in order,
-// discarding everything else", and only the hash is documented as lowercased
-// (BASE32_LOWER); the shape the integration scripts assert allows `[A-Za-z]` in
-// the slug.  So an uppercase ASCII letter must survive verbatim into the slug.
-// No prior test pins this -- the case-variance tests are all driven by the hash
-// over original bytes, so a mutant that lowercased the slug would pass them.
-// `ABCdef` keeps its first six sluggable characters verbatim.
 #[test]
 fn slug_preserves_ascii_letter_case() {
     let input = "ABCdef";
@@ -734,20 +645,14 @@ fn slug_preserves_ascii_letter_case() {
     assert_invariants(input, &chain);
 }
 
-// Gap: the documented slug group is `{1,7}` characters, and the slug-less form
-// (`MXC-<hash>`) and the 7-char maximum are both pinned, but the lower boundary
-// -- a single sluggable character producing a one-character slug plus separator
-// -- is not.  This distinguishes "one sluggable char" from the slug-less path.
 #[test]
 fn single_sluggable_char_yields_a_one_char_slug() {
-    // '.' is dropped, leaving exactly one sluggable character.
     let input = "a...";
     let chain = chain_name_for(input);
     assert!(
         chain.starts_with("MXC-a-"),
         "a single sluggable char must yield a 1-char slug for {input:?}: {chain:?}"
     );
-    // MXC-(4) + slug(1) + -(1) + hash(16) = 22 bytes.
     assert_eq!(
         chain.len(),
         22,
@@ -756,15 +661,6 @@ fn single_sluggable_char_yields_a_one_char_slug() {
     assert_invariants(input, &chain);
 }
 
-// Gap: four bash integration scripts read the chain name back out of debug logs
-// and assert it against the literal shape `^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$`,
-// so that regex is itself a client-visible contract (unit-testing-what-to-test
-// §3: observable behavior is relative to a named client and its goals -- here
-// client (c), the scripts).  The prior suite checks fragments of the shape
-// separately (prefix, ASCII, safe charset, hash alphabet, length) but never the
-// exact composed shape those scripts depend on.  This pins it end to end across
-// both documented forms and every character class, including the underscore,
-// uppercase, one-char-slug, and slug-less cases the fragment tests miss.
 #[test]
 fn every_output_matches_the_documented_integration_script_shape() {
     let mut inputs = representative_inputs();
