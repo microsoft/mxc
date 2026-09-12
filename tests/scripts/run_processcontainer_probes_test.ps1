@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_probes_test.ps1
-#
 # Read-only --probe assertions: tier selection and capability reporting.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_probes_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 1 — probes (read-only)
 #
 # Only T1 and T3 are in scope. The selected tier is the same for every policy
@@ -40,7 +32,6 @@ Initialize-WpcContext @PSBoundParameters
 # unchanged on both T1-capable and T3-only hosts. needsDaclAugmentation is
 # asserted via Get-ExpectedDaclAug (DACL tier always augments; BaseContainer
 # augments only for denied paths).
-# -----------------------------------------------------------------------
 function Phase-Probes {
     Section 'Phase 1: --probe (read-only)'
 

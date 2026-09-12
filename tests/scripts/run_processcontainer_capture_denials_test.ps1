@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_capture_denials_test.ps1
-#
 # processContainer.captureDenials -- Windows denial capture (Learning Mode).
 #
 # `outputPath` is validated by validate_capture_denials_output_path during
@@ -20,18 +18,12 @@
 #     is printed on stderr
 #   * retainEtl defaults to false
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1. Runs standalone too:
-#
-#   .\run_processcontainer_capture_denials_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -47,14 +39,12 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 14a -- outputPath validation
 #
 # Decided before launch, so these assertions hold on any host. Each one
 # matches the documented error text as well as the rejection itself: a config
 # that was rejected for an unrelated reason (a schema-shape mistake in the
 # fixture, say) would otherwise score green and hide a broken test.
-# -----------------------------------------------------------------------
 function Phase-CaptureDenialsOutputPath {
     Section 'Phase 14a: captureDenials.outputPath validation'
 
@@ -115,13 +105,11 @@ function Phase-CaptureDenialsOutputPath {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 14b -- mode and retainEtl are accepted
 #
 # Both spellings of `mode` plus both `retainEtl` values. These are acceptance
 # assertions: they prove the section parses and the run proceeds, which is the
 # part that does not depend on Learning Mode being available on the host.
-# -----------------------------------------------------------------------
 function Phase-CaptureDenialsModes {
     Section 'Phase 14b: captureDenials mode / retainEtl acceptance'
 
@@ -179,7 +167,6 @@ function Phase-CaptureDenialsModes {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 14c -- the per-run stamped output path
 #
 # Documented: "a unique per-run id is stamped into the stem and the actual
@@ -188,7 +175,6 @@ function Phase-CaptureDenialsModes {
 #
 # Two runs that both fail to start produce no path at all, which fails here
 # rather than passing vacuously on two equal empty strings.
-# -----------------------------------------------------------------------
 function Phase-CaptureDenialsStampedPath {
     Section 'Phase 14c: captureDenials per-run output path'
 

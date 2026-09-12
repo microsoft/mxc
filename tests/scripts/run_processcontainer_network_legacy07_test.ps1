@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_legacy07_test.ps1
-#
 # Legacy 0.7 network fields (defaultPolicy / allowedHosts / firewall rules).
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_legacy07_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 9 — LEGACY network fields, pinned at schema 0.7.
 #
 # The 0.6/0.7 shape (defaultPolicy / enforcementMode / allowedHosts /
@@ -42,10 +34,32 @@ Initialize-WpcContext @PSBoundParameters
 # apply -> restore -> orphan reap in three phases, while nothing ever checked
 # that `netsh advfirewall` rules created for a container are removed when it
 # exits. A leaked allow rule outlives the sandbox it was scoped to.
-# -----------------------------------------------------------------------
+function New-LegacyConfig {
+    # The pre-directional 0.7 network shape. It lives here rather than in
+    # New-Config because this is its only consumer, and because none of the
+    # 0.8 keys (egress / ingress / runtimeConfig / allowedProxyPeer) exist at
+    # 0.7 -- mixing the two would fail on schema shape instead of on the thing
+    # under test. Phase 8f authors that deliberate mixture as raw JSON.
+    param(
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$CommandLine,
+        [ValidateSet('allow', 'block')] [string]$DefaultPolicy,
+        [ValidateSet('capabilities', 'firewall', 'both')] [string]$EnforcementMode,
+        [string[]]$AllowedHosts = @(),
+        [string[]]$BlockedHosts = @(),
+        [hashtable]$Rest = @{}
+    )
+    $net = [ordered]@{}
+    if ($DefaultPolicy)         { $net['defaultPolicy']   = $DefaultPolicy }
+    if ($EnforcementMode)       { $net['enforcementMode'] = $EnforcementMode }
+    if ($AllowedHosts.Count)    { $net['allowedHosts']    = @($AllowedHosts) }
+    if ($BlockedHosts.Count)    { $net['blockedHosts']    = @($BlockedHosts) }
+    New-Config -Name $Name -CommandLine $CommandLine `
+        -SchemaVersion $Script:LegacySchemaVersion -RawNetwork $net @Rest
+}
+
 function Phase-NetworkLegacy07 {
     Section 'Phase 9: legacy network fields (schema 0.7)'
-
     if ($SkipNetwork) {
         Record-Result -Phase 'P9' -Name 'legacy network' -Status 'skip' -Detail '-SkipNetwork'
         return
@@ -56,12 +70,12 @@ function Phase-NetworkLegacy07 {
 
     # defaultPolicy allow vs block, capability enforcement. The pair is the
     # assertion: either verdict alone is unattributable.
-    $cfgAllow = New-Config -Name 'net07-cap-allow' -CommandLine $cmd `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'capabilities' -TimeoutMs 30000
-    $cfgBlock = New-Config -Name 'net07-cap-block' -CommandLine $cmd `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -LegacyDefaultPolicy 'block' -LegacyEnforcementMode 'capabilities' -TimeoutMs 30000
+    $cfgAllow = New-LegacyConfig -Name 'net07-cap-allow' -CommandLine $cmd `
+        -DefaultPolicy 'allow' -EnforcementMode 'capabilities' `
+        -Rest @{ ReadWrite = $fs.ReadWrite; ReadOnly = $fs.ReadOnly; TimeoutMs = 30000 }
+    $cfgBlock = New-LegacyConfig -Name 'net07-cap-block' -CommandLine $cmd `
+        -DefaultPolicy 'block' -EnforcementMode 'capabilities' `
+        -Rest @{ ReadWrite = $fs.ReadWrite; ReadOnly = $fs.ReadOnly; TimeoutMs = 30000 }
 
     $allow = Invoke-NetRun -Name 'net07-cap-allow' -ConfigPath $cfgAllow
     $block = Invoke-NetRun -Name 'net07-cap-block' -ConfigPath $cfgBlock
@@ -79,10 +93,10 @@ function Phase-NetworkLegacy07 {
 
     # Explicit internetClient capability, and the negative control that makes
     # the grant meaningful: same policy, capability withheld.
-    $cfgCap = New-Config -Name 'net07-explicit-capability' -CommandLine $cmd `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'capabilities' `
-        -Capabilities @('internetClient') -TimeoutMs 30000
+    $cfgCap = New-LegacyConfig -Name 'net07-explicit-capability' -CommandLine $cmd `
+        -DefaultPolicy 'allow' -EnforcementMode 'capabilities' `
+        -Rest @{ ReadWrite = $fs.ReadWrite; ReadOnly = $fs.ReadOnly
+                 Capabilities = @('internetClient'); TimeoutMs = 30000 }
     $cap = Invoke-NetRun -Name 'net07-explicit-capability' -ConfigPath $cfgCap
     Record-Result -Phase 'P9' -Name 'explicit processContainer.capabilities=[internetClient] reaches the anchor' `
         -Pass ($cap.Verdict -eq 'REACHED') -Detail "verdict=$($cap.Verdict)"
@@ -108,11 +122,11 @@ function Phase-NetworkLegacy07 {
         # that timestamp keeps a concurrent MXC run on the same host from
         # being mistaken for this one.
         $runStartMs = [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-        $cfgMode = New-Config -Name "net07-mode-$mode" -CommandLine $cmd `
-            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-            -LegacyDefaultPolicy 'block' -LegacyEnforcementMode $mode `
-            -LegacyAllowedHosts @(([Uri]$ExternalAnchorUrl).Host) `
-            -Capabilities @('internetClient') -TimeoutMs 40000
+        $cfgMode = New-LegacyConfig -Name "net07-mode-$mode" -CommandLine $cmd `
+            -DefaultPolicy 'block' -EnforcementMode $mode `
+            -AllowedHosts @(([Uri]$ExternalAnchorUrl).Host) `
+            -Rest @{ ReadWrite = $fs.ReadWrite; ReadOnly = $fs.ReadOnly
+                     Capabilities = @('internetClient'); TimeoutMs = 40000 }
 
         # Sample the rule set WHILE the container is alive. Comparing only
         # before/after cannot tell "rules were applied and cleaned up" from
@@ -167,11 +181,11 @@ function Phase-NetworkLegacy07 {
     # blockedHosts under an allow default: the destination named is the one
     # that must fail while the default still permits everything else.
     if ($fwCapable) {
-        $cfgBlocked = New-Config -Name 'net07-blockedhosts' -CommandLine $cmd `
-            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-            -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'firewall' `
-            -LegacyBlockedHosts @(([Uri]$ExternalAnchorUrl).Host) `
-            -Capabilities @('internetClient') -TimeoutMs 40000
+        $cfgBlocked = New-LegacyConfig -Name 'net07-blockedhosts' -CommandLine $cmd `
+            -DefaultPolicy 'allow' -EnforcementMode 'firewall' `
+            -BlockedHosts @(([Uri]$ExternalAnchorUrl).Host) `
+            -Rest @{ ReadWrite = $fs.ReadWrite; ReadOnly = $fs.ReadOnly
+                     Capabilities = @('internetClient'); TimeoutMs = 40000 }
         $blocked = Invoke-NetRun -Name 'net07-blockedhosts' -ConfigPath $cfgBlocked -TimeoutSec 60
         Record-Result -Phase 'P9' -Name 'blockedHosts entry is unreachable under an allow default' `
             -Pass ($blocked.Verdict -eq 'BLOCKED') -Detail "verdict=$($blocked.Verdict)"

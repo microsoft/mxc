@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_proxy_test.ps1
-#
 # runtimeConfig.networkProxy and proxy peer identity.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,24 +23,15 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8e — schema 0.8 runtime proxy (model 2).
 #
-# docs/process-container/networking.md is explicit and testable here:
-#   * MXC sets HTTP_PROXY / HTTPS_PROXY and their lowercase variants to the
-#     loopback endpoint;
-#   * NO_PROXY is a bypass list and must NOT carry the proxy endpoint;
-#   * direct egress is blocked while the proxy is configured;
-#   * "Direct egress allow and deny rules do not apply when
-#     runtimeConfig.networkProxy is present";
-#   * identity-scoped (allowedProxyPeer present) keeps hostLoopback deny;
-#     identity-less REQUIRES hostLoopback allow;
-#   * schema 0.8 proxy requests never fall back to SBOX or AppContainer.
+# Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
+# at the loopback endpoint, NO_PROXY must not carry it, direct egress is
+# blocked, egress rules do not apply, identity-less proxy requires
+# hostLoopback allow, and no fallback to SBOX/AppContainer.
 #
-# The env-var contract is asserted by having the workload print its own
-# environment — a log line saying MXC configured a proxy does not prove the
-# child received it.
-# -----------------------------------------------------------------------
+# The workload prints its own environment: an MXC log line saying a proxy was
+# configured does not prove the child received it.
 function Phase-NetworkProxy {
     Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'
 

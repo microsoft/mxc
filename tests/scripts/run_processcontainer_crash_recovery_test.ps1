@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_crash_recovery_test.ps1
-#
 # DACL restore-state recovery after an abnormal exit.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_crash_recovery_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,9 +23,7 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 6 — crash-recovery
-# -----------------------------------------------------------------------
 function Phase-CrashRecovery {
     Section 'Phase 6: debug build, taskkill mid-run (DACL state crash recovery)'
     Reset-StateFileBaseline

@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_lifecycle_test.ps1
-#
 # lifecycle.* and the process.* knobs no other area sets.
 #
 # Covers `lifecycle.destroyOnExit`, `lifecycle.preservePolicy`,
@@ -15,18 +13,12 @@
 # field is the worst outcome for a caller: the config looks accepted and the
 # environment is wrong. Phase 13b pins both sides.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1. Runs standalone too:
-#
-#   .\run_processcontainer_lifecycle_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -45,7 +37,6 @@ $Script:LifecycleMarker = 'MXC-LC-RAN'
 $Script:LifecycleCmd    = "cmd /c echo $Script:LifecycleMarker"
 
 
-# -----------------------------------------------------------------------
 # Phase 13a -- lifecycle.* acceptance
 #
 # All four combinations. The one-shot process container tears down when the
@@ -53,7 +44,6 @@ $Script:LifecycleCmd    = "cmd /c echo $Script:LifecycleMarker"
 # documented wording is permissive ("Retain container policies after exit if
 # applicable"), so these are acceptance assertions rather than behavioral
 # ones. Asserting a behavioral difference here would be inventing a contract.
-# -----------------------------------------------------------------------
 function Phase-Lifecycle {
     Section 'Phase 13a: lifecycle.destroyOnExit / preservePolicy'
 
@@ -88,7 +78,6 @@ function Phase-Lifecycle {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 13b -- process.inheritDefaultEnv and the 0.9 version gate
 #
 # Documented as 0.9.0-alpha+. The stable surface is closed, so on 0.8 the
@@ -96,7 +85,6 @@ function Phase-Lifecycle {
 # either alone: "rejected at 0.8" is only meaningful next to "accepted at
 # 0.9", which proves the rejection is the version gate and not a typo in the
 # fixture.
-# -----------------------------------------------------------------------
 function Phase-InheritDefaultEnv {
     Section 'Phase 13b: process.inheritDefaultEnv (0.9.0-alpha+)'
 
@@ -151,13 +139,11 @@ function Phase-InheritDefaultEnv {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 13c -- process.env without inheritDefaultEnv
 #
 # Documented: "Omitted: backend default; supplied: used verbatim". Verbatim is
 # the claim under test -- a supplied env that still carried the launcher's
 # variables would be a containment leak, not a convenience.
-# -----------------------------------------------------------------------
 function Phase-ProcessEnv {
     Section 'Phase 13c: process.env supplied vs omitted'
 
@@ -201,7 +187,6 @@ function Phase-ProcessEnv {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 13d -- containment intent, telemetry kill-switch, version range
 #
 # `containment: "process"` is the intent alias; on Windows it must resolve to
@@ -210,7 +195,6 @@ function Phase-ProcessEnv {
 #
 # `telemetry.enabled` can only ever subtract from consent, so the only safe
 # assertion is that both values are accepted. true is not consent.
-# -----------------------------------------------------------------------
 function Phase-IntentTelemetryVersion {
     Section 'Phase 13d: containment intent, telemetry kill-switch, version range'
 

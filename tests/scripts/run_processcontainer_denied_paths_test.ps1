@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_denied_paths_test.ps1
-#
 # Denied-path enforcement on the natively selected tier.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_denied_paths_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 4d — Tier 1 (BaseContainer) deny-ACE empirical test
 #
 # Asserts that the deny ACE the dispatcher applies on the T1 path actually
@@ -41,7 +33,6 @@ Initialize-WpcContext @PSBoundParameters
 # Skipped unless BaseContainer is usable, read from the selected tier rather
 # than symbol presence: a present-but-disabled API still resolves to T3,
 # where forcing T1 cannot exercise the deny.
-# -----------------------------------------------------------------------
 function Phase-T1DenyForced {
     Section 'Phase 4d: T1 deny-ACE empirical test (skipped if BC not usable)'
     Reset-StateFileBaseline

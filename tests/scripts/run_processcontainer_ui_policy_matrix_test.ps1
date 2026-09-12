@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_ui_policy_matrix_test.ps1
-#
 # Full UI policy resolution matrix.
 #
 # Phase 4b proves maximal lockdown — one point in the space. This area walks
@@ -20,17 +18,12 @@
 # that would be a real logoff of the operator's session. Those cases record an
 # explicit skip so the gap stays visible.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_ui_policy_matrix_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -125,12 +118,10 @@ function Invoke-UiPolicyCase {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 4e -- UI policy resolution matrix
 #
 # One case per documented value of each knob. Cases assert only the tags the
 # knob actually governs, so a failure names the exact mapping that broke.
-# -----------------------------------------------------------------------
 function Phase-UiPolicyMatrix {
     Section 'Phase 4e: UI policy resolution matrix (every documented value)'
 
@@ -228,7 +219,6 @@ function Phase-UiPolicyMatrix {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 4f -- ui.disable=true overrides every individual allow
 #
 # Documented: ui.disable=true sets every restriction flag regardless of the
@@ -239,7 +229,6 @@ function Phase-UiPolicyMatrix {
 # WIN32K is not probed: ui.disable also engages the Win32k mitigation, which
 # kills the process at the first Win32k syscall — and every tag here is one.
 # Phase 4b scenario B asserts the mitigation itself.
-# -----------------------------------------------------------------------
 function Phase-UiDisableOverrides {
     Section 'Phase 4f: ui.disable=true overrides permissive knobs'
 

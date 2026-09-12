@@ -1,40 +1,26 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_all_tests.ps1
+# Entry point for the Windows process-container suite: probes the host once,
+# writes the resolved context to JSON, dispatches each area to its own
+# run_processcontainer_*_test.ps1, and merges the results. Areas also run
+# standalone.
 #
-# Entry point for the Windows process-container suite. Probes the host once,
-# writes the resolved context to a JSON file, then dispatches each area to its
-# own run_processcontainer_*_test.ps1 and merges the results.
+# Tiers covered are T1 (base-container) and T3 (appcontainer-dacl); selection is
+# natural, there is no -ForceTier. T2 (appcontainer-bfs) is off behind the
+# `tier2_bfs` Cargo feature and Assert-BfsSafety refuses a binary built with it,
+# because bfscfg.exe hard-locks the bfs.sys minifilter on 25H2.
 #
-# Tier scope: T1 (base-container) and T3 (appcontainer-dacl). T2
-# (appcontainer-bfs) is off behind the `tier2_bfs` Cargo feature and is not
-# covered; Assert-BfsSafety refuses to run against a binary that has it
-# compiled in, because bfscfg.exe hard-locks the bfs.sys minifilter on 25H2.
-# Tier selection is otherwise natural -- there is no -ForceTier.
+# Configs are authored at 0.8.0-alpha; only the legacy network fields stay at
+# 0.7.0-alpha. Network areas assert the DOCUMENTED contract (docs/process-
+# container/networking.md, docs/sandbox-policy/0.8.0/networking/networking.md),
+# so an assertion that outruns the backend fails by design.
 #
-# $Script:ExpectedTier is derived once from --probe and passed to every child:
-# base-container when BaseContainer is usable, otherwise appcontainer-dacl.
+# Prerequisites fail, they do not skip: a -RequireTier mismatch, an unreachable
+# egress anchor (-SkipNetwork opts out), or a child recording zero assertions.
 #
-# Schema: configs are authored at 0.8.0-alpha. The legacy network fields stay
-# pinned to 0.7.0-alpha, since 0.8 is where the directional network.egress /
-# network.ingress shape became the documented way to express network intent.
-#
-# Network areas assert the DOCUMENTED contract (docs/process-container/
-# networking.md, docs/sandbox-policy/0.8.0/networking/networking.md), not
-# current behavior. Where the backend has not caught up the assertion fails,
-# which is the intended signal.
-#
-# Prerequisites are failures, not skips: -RequireTier aborts on a tier
-# mismatch, an unreachable egress anchor aborts (-SkipNetwork opts out), and a
-# child that records zero assertions fails.
-#
-# Usage:
-#   .\run_processcontainer_all_tests.ps1
 #   .\run_processcontainer_all_tests.ps1 -SkipBuild -RequireTier base-container
 #   .\run_processcontainer_all_tests.ps1 -Areas NetworkProxy,NetworkEgressRules
-#
-# Each area also runs standalone — see run_processcontainer_<area>_test.ps1.
 
 [CmdletBinding()]
 param(
@@ -52,28 +38,20 @@ param(
     [string]$ResultsJson,
     [switch]$SkipBuild,
     [switch]$KeepArtifacts,
-    # Hard prerequisite on the containment tier. When set, the suite ABORTS if
-    # the host does not naturally select this tier. Without it a mis-provisioned
-    # T1 runner silently runs the T3 assertions and reports green having proven
-    # nothing about BaseContainer. CI passes the tier its job name claims to
-    # cover. A missing prerequisite is a FAILURE, not a skip -- same doctrine as
-    # run_seatbelt_all_tests.sh.
-    #
-    # '' is in the set on purpose and means "no tier requirement": ValidateSet
-    # binds to the VARIABLE, so it re-fires when Initialize-WpcContext publishes
+    # Aborts when the host does not naturally select this tier: without it a
+    # mis-provisioned T1 runner would run the T3 assertions and report green.
+    # '' means "no requirement" and must stay in the set, because ValidateSet
+    # binds to the VARIABLE and re-fires when Initialize-WpcContext publishes
     # the context back into this scope.
     [ValidateSet('', 'base-container', 'appcontainer-dacl')]
     [string]$RequireTier,
-    # Reachability anchor for the positive egress assertions. An egress-allow
-    # test that cannot distinguish "policy blocked it" from "this host has no
-    # internet" proves nothing, so the suite probes this from the HOST first and
-    # fails (never skips) when the host itself cannot reach it.
+    # Reachability anchor for the positive egress assertions, probed from the
+    # host first: an allow test that cannot tell "policy blocked it" from "no
+    # internet here" proves nothing, so an unreachable anchor fails the run.
     [string]$ExternalAnchorUrl,
-    # A second reachable destination, the negative control for the explicit
-    # egress-rule area: the allow rules name the anchor and nothing else, so
-    # this one must be blocked INSIDE the container while staying reachable from
-    # the host. If the host cannot reach it either, a BLOCKED verdict is
-    # unattributable and the area fails rather than scoring green.
+    # Negative control for the explicit egress-rule area: the allow rules name
+    # the anchor and not this, so it must be blocked inside the container while
+    # staying reachable from the host — otherwise BLOCKED is unattributable.
     [string]$UnlistedDestinationUrl,
     # Opt out of every live-network area (air-gapped bring-up). The parse-only
     # rejection area still runs — it needs no connectivity.

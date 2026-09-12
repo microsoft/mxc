@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_ui_mitigations_test.ps1
-#
 # JOB_OBJECT_UILIMIT_* mitigation matrix (docs/process-container/UIPolicy_Schema.md).
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_ui_mitigations_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -31,7 +24,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 4b — UI mitigation behavior matrix (host baseline tier, debug build)
 #
 # Phase 4 asserts only that the parent reached the corresponding API. This
@@ -42,7 +34,6 @@ Initialize-WpcContext @PSBoundParameters
 #   JOB_OBJECT_UILIMIT_* bit set. Every probe except WIN32K must report PASS.
 # Scenario B: ui.disable=true -> Win32k mitigation. WIN32K alone; the child
 #   must never print WIN32K=FAIL.
-# -----------------------------------------------------------------------
 function Phase-UiMitigationMatrix {
     Section 'Phase 4b: UI mitigation behavior matrix (host baseline tier)'
 

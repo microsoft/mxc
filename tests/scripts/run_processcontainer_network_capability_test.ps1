@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_capability_test.ps1
-#
 # egress/ingress default -> AppContainer capability mapping.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_capability_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,24 +23,11 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8a — the documented egress x ingress capability matrix.
-#
-# docs/process-container/networking.md §1 states the mapping exactly:
-#
-#   egress | ingress | capabilities                 | result
-#   deny   | deny    | none                         | internet + private denied
-#   allow  | deny    | internetClient               | internet out allowed
-#   deny   | allow   | privateNetworkClientServer   | PSEC blocks out via WFP,
-#                                                     permits private inbound;
-#                                                     AppContainer fallback
-#                                                     REJECTS (bidirectional)
-#   allow  | allow   | both                         | both allowed
-#
-# The deny/allow row is the one combination the doc says a non-PSEC tier must
-# REFUSE rather than approximate. A tier that quietly accepts it has granted
-# bidirectional private-network access the caller did not ask for.
-# -----------------------------------------------------------------------
+# docs/process-container/networking.md §1 gives the mapping. The deny/allow
+# row is the one combination the doc says a non-PSEC tier must REFUSE rather
+# than approximate: privateNetworkClientServer is bidirectional, so accepting
+# it there would grant inbound access the caller never asked for.
 function Phase-NetworkCapabilityMatrix {
     Section 'Phase 8a: schema 0.8 egress/ingress capability matrix'
 
@@ -59,69 +39,52 @@ function Phase-NetworkCapabilityMatrix {
     $fs = Get-NetFsGrants
     $psec = Test-PsecEligible
 
-    # --- deny/deny: no capabilities, everything denied.
-    $cfgDD = New-Config -Name 'net-matrix-deny-deny' `
-        -CommandLine (Get-AnchorFetchCommand) `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 30000
-    $dd = Invoke-NetRun -Name 'net-matrix-deny-deny' -ConfigPath $cfgDD
-    Record-Result -Phase 'P8a' -Name 'egress=deny ingress=deny -> internet denied' `
-        -Pass ($dd.Verdict -eq 'BLOCKED') `
-        -Detail "verdict=$($dd.Verdict); exit=$($dd.Result.ExitCode)"
+    $cases = @(
+        @{ Egress = 'deny';  Ingress = 'deny'
+           Verdict = 'BLOCKED'; Caps = @()
+           Name = 'egress=deny ingress=deny -> internet denied' }
+        @{ Egress = 'allow'; Ingress = 'deny'
+           Verdict = 'REACHED'; Caps = @('internetClient')
+           Name = 'egress=allow ingress=deny -> internet REACHED (internetClient granted)' }
+        # Accepted only on PSEC, where WFP still blocks egress; every other
+        # tier must reject the config outright.
+        @{ Egress = 'deny';  Ingress = 'allow'
+           Verdict = 'BLOCKED'; Caps = @('privateNetworkClientServer')
+           RejectUnlessPsec = $true
+           Name = 'egress=deny ingress=allow -> accepted on PSEC, egress still blocked by WFP' }
+        @{ Egress = 'allow'; Ingress = 'allow'
+           Verdict = 'REACHED'; Caps = @('internetClient', 'privateNetworkClientServer')
+           Name = 'egress=allow ingress=allow -> internet REACHED (both capabilities)' }
+    )
 
-    # --- allow/deny: internetClient granted, internet reachable.
-    $cfgAD = New-Config -Name 'net-matrix-allow-deny' `
-        -CommandLine (Get-AnchorFetchCommand) `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -EgressDefault 'allow' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 30000
-    $ad = Invoke-NetRun -Name 'net-matrix-allow-deny' -ConfigPath $cfgAD
-    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=deny -> internet REACHED (internetClient granted)' `
-        -Pass ($ad.Verdict -eq 'REACHED') `
-        -Detail "verdict=$($ad.Verdict); exit=$($ad.Result.ExitCode)"
-    # The capability is what makes the grant real: a run that reached the anchor
-    # by some other route must not score as a working grant.
-    Record-CapabilityLogged -Phase 'P8a' -Name 'egress=allow logs internetClient capability' `
-        -LogContent (Remove-ConfigEcho $ad.Log) -Capability @('internetClient') `
-        -Detail 'documented capability mapping for egress.default=allow'
+    foreach ($case in $cases) {
+        $name = "net-matrix-$($case.Egress)-$($case.Ingress)"
+        $cfg = New-Config -Name $name -CommandLine (Get-AnchorFetchCommand) `
+            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+            -EgressDefault $case.Egress -IngressDefault $case.Ingress `
+            -HostLoopback 'deny' -TimeoutMs 30000
+        $run = Invoke-NetRun -Name $name -ConfigPath $cfg
+        $detail = "verdict=$($run.Verdict); exit=$($run.Result.ExitCode)"
 
-    # --- deny/allow: the tier-dependent row.
-    $cfgDA = New-Config -Name 'net-matrix-deny-allow' `
-        -CommandLine (Get-AnchorFetchCommand) `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' -TimeoutMs 30000
-    $da = Invoke-NetRun -Name 'net-matrix-deny-allow' -ConfigPath $cfgDA
-    if ($psec) {
-        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow -> accepted on PSEC, egress still blocked by WFP' `
-            -Pass ($da.Verdict -eq 'BLOCKED') `
-            -Detail "verdict=$($da.Verdict); exit=$($da.Result.ExitCode)"
-        Record-CapabilityLogged -Phase 'P8a' -Name 'egress=deny ingress=allow logs privateNetworkClientServer' `
-            -LogContent (Remove-ConfigEcho $da.Log) -Capability @('privateNetworkClientServer') `
-            -Detail 'documented capability mapping for ingress.default=allow'
-    } else {
-        # "The AppContainer fallback rejects this combination because the
-        # capability is bidirectional." A run that merely fails late is not a
-        # rejection: the container must never start.
-        $rejected = Test-WasRejected $da
-        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow -> REJECTED on non-PSEC tier (bidirectional capability)' `
-            -Pass $rejected `
-            -Detail "verdict=$($da.Verdict); exit=$($da.Result.ExitCode); timedOut=$($da.Result.TimedOut); tier=$($Script:ExpectedTier)"
+        if ($case.ContainsKey('RejectUnlessPsec') -and -not $psec) {
+            Record-Result -Phase 'P8a' `
+                -Name "egress=$($case.Egress) ingress=$($case.Ingress) -> REJECTED on non-PSEC tier (bidirectional capability)" `
+                -Pass (Test-WasRejected $run) `
+                -Detail "$detail; timedOut=$($run.Result.TimedOut); tier=$($Script:ExpectedTier)"
+            continue
+        }
+
+        Record-Result -Phase 'P8a' -Name $case.Name -Pass ($run.Verdict -eq $case.Verdict) -Detail $detail
+        # The capability is what makes the grant real: a run that reached the
+        # anchor by some other route must not score as a working grant.
+        if ($case.Caps.Count -gt 0) {
+            Record-CapabilityLogged -Phase 'P8a' `
+                -Name "egress=$($case.Egress) ingress=$($case.Ingress) logs $($case.Caps -join ' + ')" `
+                -LogContent (Remove-ConfigEcho $run.Log) -Capability $case.Caps `
+                -Detail 'documented capability mapping'
+        }
     }
-
-    # --- allow/allow: both capabilities.
-    $cfgAA = New-Config -Name 'net-matrix-allow-allow' `
-        -CommandLine (Get-AnchorFetchCommand) `
-        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-        -EgressDefault 'allow' -IngressDefault 'allow' -HostLoopback 'deny' -TimeoutMs 30000
-    $aa = Invoke-NetRun -Name 'net-matrix-allow-allow' -ConfigPath $cfgAA
-    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=allow -> internet REACHED (both capabilities)' `
-        -Pass ($aa.Verdict -eq 'REACHED') `
-        -Detail "verdict=$($aa.Verdict); exit=$($aa.Result.ExitCode)"
-    Record-CapabilityLogged -Phase 'P8a' -Name 'egress=allow ingress=allow logs both capabilities' `
-        -LogContent (Remove-ConfigEcho $aa.Log) `
-        -Capability @('internetClient', 'privateNetworkClientServer') `
-        -Detail 'documented capability mapping for allow/allow'
 }
 
 Invoke-WpcPhase -Key 'NetworkCapabilityMatrix' -Body { Phase-NetworkCapabilityMatrix }
 Complete-WpcChild
-

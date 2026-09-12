@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_global_atom_test.ps1
-#
 # Bidirectional global atom table isolation.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_global_atom_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -31,19 +24,13 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 4c — GLOBALATOMS bidirectional isolation (host baseline tier)
 #
-# GLOBALATOMS does not make the atom APIs fail — each job gets its own
-# private atom table, so GlobalAddAtomW still succeeds inside the container.
-# The restriction is verified as isolation, in both directions:
-#
-#   * host -> guest: the host plants a global atom; the probe must not find
-#     it (GLOBALATOMS_HOST_TO_GUEST=PASS|FAIL).
-#   * guest -> host: the probe adds an atom and blocks on a release file
-#     while the host checks its own table. The handshake is required — the
-#     job-private table is torn down when the container exits.
-# -----------------------------------------------------------------------
+# GLOBALATOMS does not fail the atom APIs; each job gets a private atom table,
+# so it is verified as isolation in both directions. Host -> guest: the host
+# plants an atom the probe must not find. Guest -> host: the probe adds one
+# and blocks on a release file while the host checks its own table — the
+# handshake is required because the private table dies with the container.
 function Invoke-GlobalAtomProbe {
     # Runs the GLOBALATOMS bidirectional handshake once with the given
     # isolation mode and returns the observed results so the caller can assert

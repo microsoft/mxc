@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_privilege_test.ps1
-#
 # processContainer.leastPrivilege (LPAC), processContainer.learningMode, and
 # the legacy 0.7 network.proxy shapes.
 #
@@ -15,18 +13,12 @@
 # PSEC-ineligible. Phase 15a asserts the documented incompatibility rather
 # than the tier, which depends on the host.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1. Runs standalone too:
-#
-#   .\run_processcontainer_privilege_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -45,12 +37,10 @@ $Script:PrivMarker = 'MXC-PRIV-RAN'
 $Script:PrivCmd    = "cmd /c echo $Script:PrivMarker"
 
 
-# -----------------------------------------------------------------------
 # Phase 15a -- leastPrivilege (LPAC)
 #
 # Both values, plus the documented interaction with captureDenials. The
 # tier that results is host-dependent and deliberately not asserted.
-# -----------------------------------------------------------------------
 function Phase-LeastPrivilege {
     Section 'Phase 15a: processContainer.leastPrivilege (LPAC)'
 
@@ -98,14 +88,12 @@ function Phase-LeastPrivilege {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 15b -- learningMode
 #
 # The supported entry point for the learning-mode capability that Phase 12a
 # proves cannot be requested through `capabilities`. Both spellings of that
 # relationship are worth holding: the reserved capability name is refused,
 # and this field is the thing that replaces it.
-# -----------------------------------------------------------------------
 function Phase-LearningMode {
     Section 'Phase 15b: processContainer.learningMode'
 
@@ -132,7 +120,6 @@ function Phase-LearningMode {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 15c -- the legacy 0.7 network.proxy shapes
 #
 # Three mutually exclusive spellings of network.proxy, none previously
@@ -143,7 +130,6 @@ function Phase-LearningMode {
 # proxy area's job; what is asserted here is that each legacy spelling still
 # parses on the schema version that defines it, and that the 0.8 replacement
 # has not quietly broken the older shape.
-# -----------------------------------------------------------------------
 function Phase-LegacyProxyShapes {
     Section 'Phase 15c: legacy 0.7 network.proxy shapes'
 

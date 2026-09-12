@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_process_plumbing_test.ps1
-#
 # Exit codes, stdio, cwd, timeouts, and orphan reaping.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_process_plumbing_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,13 +23,11 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 11 — process plumbing.
 #
 # Cheap properties that nothing asserted. Each is a silent-drop failure mode:
 # a config field that never reaches the child looks identical to one that was
 # honored, from outside.
-# -----------------------------------------------------------------------
 function Phase-ProcessPlumbing {
     Section 'Phase 11: process plumbing (env / cwd / exit code / timeout / teardown)'
 

@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_model3_test.ps1
-#
 # The three documented spellings of a fully denied network.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_model3_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8b — model 3 has three spellings and they must be identical.
 #
 # docs/process-container/networking.md §Model 3 states that an explicit
@@ -39,7 +31,6 @@ Initialize-WpcContext @PSBoundParameters
 # parser change that makes an absent section mean "inherit" rather than
 # "deny" opens a default-allow hole that no single-config test would catch,
 # because each config in isolation still behaves plausibly.
-# -----------------------------------------------------------------------
 function Phase-NetworkModel3Equivalence {
     Section 'Phase 8b: model 3 — explicit deny == omitted network == empty network'
 

@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_rejections_test.ps1
-#
 # Policies a non-PSEC tier must refuse rather than silently drop.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_rejections_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8f — the documented reject surface.
 #
 # Every case here must be refused during validation, before any container
@@ -39,7 +31,6 @@ Initialize-WpcContext @PSBoundParameters
 # the tree. A policy that is "enforced" by the workload failing afterwards is
 # not enforcement, so each case asserts the run failed AND the workload never
 # produced its marker.
-# -----------------------------------------------------------------------
 function Phase-NetworkRejections {
     Section 'Phase 8f: documented network reject surface'
 

@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_egress_test.ps1
-#
 # Explicit egress allow/deny rules (PSEC-only per the 0.8 spec).
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_egress_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,20 +23,13 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8c — explicit WFP egress rules (PSEC only).
 #
-# Two properties, from docs/process-container/networking.md §3 and the shared
-# spec's D4:
-#   * an allow rule scoped to a CIDR/port actually permits THAT destination
-#     and still blocks everything else — a rule set that installs cleanly but
-#     filters nothing passes any log-only assertion;
-#   * an explicit deny beats an overlapping explicit allow (D4).
-# On a non-PSEC tier the documented behavior is a typed unsupported-policy
-# rejection, never a silent drop. A silently dropped rule set is the worst
-# outcome available here: the caller believes egress is filtered and it is
-# wide open.
-# -----------------------------------------------------------------------
+# From docs/process-container/networking.md §3 and the shared spec's D4: a
+# CIDR/port allow permits that destination and still blocks everything else,
+# and an explicit deny beats an overlapping allow. Off PSEC the documented
+# behavior is a typed rejection — a silently dropped rule set would leave the
+# caller believing egress is filtered while it is wide open.
 function Phase-NetworkEgressRules {
     Section 'Phase 8c: explicit egress rules (WFP / PSEC-only)'
 

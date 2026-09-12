@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_filesystem_matrix_test.ps1
-#
 # Read-write / read-only / denied / unlisted filesystem access matrix.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_filesystem_matrix_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,9 +23,7 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 4 — debug build, T3 forced, rw + ro + denied (the real test)
-# -----------------------------------------------------------------------
 function Phase-T3Forced {
     Section 'Phase 4: debug build, natural detection -> T3'
     Reset-StateFileBaseline
@@ -93,13 +84,11 @@ function Phase-T3Forced {
     Record-Result -Phase 'P4' -Name 'ui.disable=true rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterUi)
     Record-Result -Phase 'P4' -Name 'ui.disable=true no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 
-    # ---------------------------------------------------------------------
     # Sandbox property test: ping requires raw ICMP sockets, which
     # AppContainer denies by default (no `internetClient` capability is
     # not the issue — even with it, raw sockets need elevated
     # privileges). The child should exit non-zero almost immediately.
     # If ping ever succeeds here we have a sandbox escape.
-    # ---------------------------------------------------------------------
     $cfgPing = New-Config -Name 't3-ping-blocked' `
         -CommandLine (New-ProbeCommand -Body 'ping.exe -n 1 -w 1000 127.0.0.1') `
         -ReadWrite @($rw) -TimeoutMs 10000
@@ -129,7 +118,6 @@ function Phase-T3Forced {
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping: rw ACL still cleaned up' -Pass ($aclRwBefore -eq $aclRwAfterPing)
     Record-Result -Phase 'P4' -Name 'sandbox blocks ping: no orphan state files' -Pass (@(Get-NewStateFiles).Count -eq 0)
 
-    # ---------------------------------------------------------------------
     # Access matrix: the existing sub-tests verify ACL apply/restore and
     # that the rw grant *functionally* works (write+read inside rw). They
     # do NOT verify that:
@@ -140,7 +128,6 @@ function Phase-T3Forced {
     #     ACEs work)
     # We pre-stage a `readme.txt` in each path, run a child that
     # attempts read+write on each, and parse the resulting matrix.
-    # ---------------------------------------------------------------------
     $control = Join-Path $ScratchRoot 'control'
     # Pre-stage host-created files for the negative-side rows. We deliberately
     # do NOT pre-create one in $rw — the rw row uses a child-created marker

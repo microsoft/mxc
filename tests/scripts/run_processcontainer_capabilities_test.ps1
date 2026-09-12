@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_capabilities_test.ps1
-#
 # processContainer.capabilities -- the AppContainer capability list.
 #
 # The list is NOT a closed enum: the schema types it as `items: {type:
@@ -11,17 +9,12 @@
 # passed to the sandbox verbatim, so a misspelled capability is accepted and
 # silently grants nothing. Phase 12b pins that down.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_capabilities_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -37,19 +30,15 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 12a -- the documented rejections
 #
-# Two rules, both enforced in config_parser.rs before anything launches:
-#   * no entry may contain a comma (BaseContainer joins the list with commas
-#     on the wire, so an embedded comma would forge extra capabilities)
-#   * no entry may name a reserved learning-mode capability, matched
-#     case-insensitively because Windows derives capability SIDs that way
+# config_parser.rs rejects two shapes before launch: an entry containing a
+# comma (BaseContainer comma-joins the list, so one would forge extra
+# capabilities) and a reserved learning-mode capability, matched
+# case-insensitively as Windows derives capability SIDs that way.
 #
-# Every assertion here goes through Test-WasRejected, which refuses to count a
-# launch-API failure as a rejection. Without that, a host where nothing runs
-# would score this entire phase green having proven nothing.
-# -----------------------------------------------------------------------
+# Test-WasRejected refuses to count a launch-API failure as a rejection, so a
+# host where nothing runs cannot score this phase green.
 function Phase-CapabilityRejections {
     Section 'Phase 12a: processContainer.capabilities documented rejections'
 
@@ -106,7 +95,6 @@ function Phase-CapabilityRejections {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 12b -- the open contract
 #
 # `capabilities` is an open string list, so a misspelled capability is
@@ -114,7 +102,6 @@ function Phase-CapabilityRejections {
 # is asserted because that is what `items: {type: string}` and the parser's
 # comma/reserved-only validation describe. If MXC ever tightens this to a
 # closed enum, this is the assertion that should flip.
-# -----------------------------------------------------------------------
 function Phase-CapabilityContract {
     Section 'Phase 12b: processContainer.capabilities open contract'
 
@@ -161,7 +148,6 @@ function Phase-CapabilityContract {
 }
 
 
-# -----------------------------------------------------------------------
 # Phase 12c -- registryRead does what its name says
 #
 # No doc gives a behavioral contract for individual capability names, so this
@@ -170,7 +156,6 @@ function Phase-CapabilityContract {
 # The reverse is deliberately not asserted as a failure — AppContainers get
 # read access to much of HKLM through ALL APPLICATION PACKAGES regardless of
 # the capability. The no-capability run is recorded as information only.
-# -----------------------------------------------------------------------
 function Phase-RegistryReadCapability {
     Section 'Phase 12c: registryRead behavior'
 

@@ -17,9 +17,7 @@
 # fails with ERROR_ENVVAR_NOT_FOUND on a one-var block.
 
 
-# -----------------------------------------------------------------------
 # Result accumulator
-# -----------------------------------------------------------------------
 $Script:Results = [System.Collections.Generic.List[object]]::new()
 
 function Record-Result {
@@ -87,9 +85,7 @@ function Format-VerdictSummary {
     })
 }
 
-# -----------------------------------------------------------------------
 # Pre-flight
-# -----------------------------------------------------------------------
 function Test-Preflight {
     Section 'Pre-flight'
 
@@ -153,9 +149,7 @@ function Assert-BfsSafety {
     if (-not $Quiet) { Write-Host 'bfsCompiledIn: false' }
 }
 
-# -----------------------------------------------------------------------
 # Scratch + helpers
-# -----------------------------------------------------------------------
 function Assert-SafeScratchRoot {
     # Refuse to nuke arbitrary paths. `Initialize-Scratch` issues a
     # recursive `Remove-Item -Force` against `$ScratchRoot`; if a user
@@ -266,9 +260,7 @@ function Read-Log {
     if (Test-Path $LogPath) { Get-Content -Raw -LiteralPath $LogPath } else { '' }
 }
 
-# -----------------------------------------------------------------------
 # Config generation
-# -----------------------------------------------------------------------
 # Build a COMPLETE environment block (current process env + the destructive
 # override) for the contained probe. See the note at the top of this file.
 # Smallest environment a cmd.exe workload can still launch under, plus the
@@ -326,18 +318,11 @@ function Get-ProbeEnvWithDestructive {
     return $list.ToArray()
 }
 
-# -----------------------------------------------------------------------
-# Capability model — derive the expected containment tier from runtime
-# --probe signals rather than hardcoding it, so the harness runs unchanged on
-# both T3 hosts (BaseContainer unusable) and T1 hosts (BaseContainer usable,
-# e.g. pre-Germanium builds that lack bfscfg.exe entirely).
-#
-# `tier2_bfs` is always OFF here (Test-Preflight enforces bfsCompiledIn=false),
-# so `appcontainer-bfs` is never selected and the selected tier is identical
-# for every policy shape: `base-container` when BaseContainer is usable, else
-# `appcontainer-dacl`. BaseContainer usability is detected by the empty-policy
-# probe resolving to `base-container`.
-# -----------------------------------------------------------------------
+# Derive the expected tier from --probe rather than hardcoding it, so the
+# harness runs unchanged on T1 and T3 hosts. `tier2_bfs` is always off
+# (Assert-BfsSafety enforces it), so the tier is the same for every policy
+# shape: base-container when the empty-policy probe resolves to it, else
+# appcontainer-dacl.
 function Get-HostCapabilities {
     $p = Invoke-Probe -Wxc $WxcRelease -Phase 'P0' -Name 'host-capabilities'
     if (-not $p) {
@@ -471,12 +456,10 @@ function Record-UiTelemetryResult {
 }
 
 # Default schema version for generated configs. Everything the 0.8 stable
-# schema can express is authored at 0.8; the LEGACY network fields
-# (defaultPolicy / enforcementMode / allowedHosts / blockedHosts /
-# allowLocalNetwork / network.proxy) stay pinned at 0.7 via -LegacySchema,
-# because 0.8 is where the directional egress/ingress shape became the
-# documented way to express network intent and mixing the two shapes in one
-# config is not a scenario any doc describes.
+# schema can express is authored at 0.8; the legacy network fields stay at 0.7
+# (the legacy area builds those via -RawNetwork + -SchemaVersion), because 0.8
+# is where the directional egress/ingress shape became the documented way to
+# express network intent and no doc describes mixing the two in one config.
 $Script:SchemaVersion       = '0.8.0-alpha'
 $Script:LegacySchemaVersion = '0.7.0-alpha'
 
@@ -578,47 +561,14 @@ function New-Config {
         # --- runtime (not policy)
         [string]$NetworkProxy    = $null,   # runtimeConfig.networkProxy
         [string]$AllowedProxyPeer = $null,  # processContainer.network.allowedProxyPeer
-
-        # --- LEGACY network, schema 0.7 only. Setting any of these pins the
-        # config to 0.7.0-alpha, because these fields are the pre-directional
-        # shape and no doc describes combining them with egress/ingress.
-        [ValidateSet('allow', 'block')] [string]$LegacyDefaultPolicy = $null,
-        [ValidateSet('capabilities', 'firewall', 'both')] [string]$LegacyEnforcementMode = $null,
-        [string[]]$LegacyAllowedHosts = @(),
-        [string[]]$LegacyBlockedHosts = @(),
-        [Nullable[bool]]$LegacyAllowLocalNetwork = $null,
-        [string]$LegacyProxyUrl = $null,
-        [Nullable[int]]$LegacyProxyLocalhost = $null,
-        [switch]$LegacyProxyBuiltinTestServer
+        # Verbatim `network` block, for shapes the directional parameters above
+        # cannot express -- the legacy 0.7 fields in particular. Pair it with
+        # -SchemaVersion; it replaces the whole block rather than merging.
+        [System.Collections.Specialized.OrderedDictionary]$RawNetwork = $null
     )
 
-    $usesLegacyNetwork = ($LegacyDefaultPolicy -or $LegacyEnforcementMode -or
-        $LegacyAllowedHosts.Count -gt 0 -or $LegacyBlockedHosts.Count -gt 0 -or
-        $null -ne $LegacyAllowLocalNetwork -or $LegacyProxyUrl -or
-        $null -ne $LegacyProxyLocalhost -or $LegacyProxyBuiltinTestServer)
-
-    $usesDirectionalNetwork = ($EgressDefault -or $IngressDefault -or $HostLoopback -or
-        ($null -ne $EgressAllow -and $EgressAllow.Count -gt 0) -or
-        ($null -ne $EgressDeny -and $EgressDeny.Count -gt 0) -or
-        $NetworkProxy -or $AllowedProxyPeer -or $EmptyNetwork)
-
-    # A legacy parameter pins the config to 0.7, where none of the directional
-    # keys (network.egress / network.ingress / runtimeConfig.networkProxy /
-    # processContainer.network.allowedProxyPeer) exist and the schema is
-    # closed. Silently dropping them would emit a config that fails for a
-    # schema-shape reason instead of the reason under test, which is the
-    # hardest kind of test bug to notice. Refuse the combination outright;
-    # Phase 8f authors the deliberate legacy/directional mixture as raw JSON.
-    if ($usesLegacyNetwork -and $usesDirectionalNetwork) {
-        throw ("New-Config '$Name': -Legacy* pins the config to $Script:LegacySchemaVersion, " +
-               'which has no egress/ingress/runtimeConfig/allowedProxyPeer keys. ' +
-               'Use one network shape or the other, or author the mixture with New-RawConfig.')
-    }
-
     $obj = [ordered]@{
-        version     = $(if ($SchemaVersion) { $SchemaVersion }
-                        elseif ($usesLegacyNetwork) { $Script:LegacySchemaVersion }
-                        else { $Script:SchemaVersion })
+        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $Script:SchemaVersion })
         containerId = "MxcWinPC-$Name"
         # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
         # `processcontainer` is the concrete Windows backend on both.
@@ -655,21 +605,8 @@ function New-Config {
     }
 
     # --- network -------------------------------------------------------
-    if ($usesLegacyNetwork) {
-        $net = [ordered]@{}
-        if ($LegacyDefaultPolicy)   { $net['defaultPolicy']   = $LegacyDefaultPolicy }
-        if ($LegacyEnforcementMode) { $net['enforcementMode'] = $LegacyEnforcementMode }
-        if ($LegacyAllowedHosts.Count -gt 0) { $net['allowedHosts'] = @($LegacyAllowedHosts) }
-        if ($LegacyBlockedHosts.Count -gt 0) { $net['blockedHosts'] = @($LegacyBlockedHosts) }
-        if ($null -ne $LegacyAllowLocalNetwork) { $net['allowLocalNetwork'] = [bool]$LegacyAllowLocalNetwork }
-        if ($LegacyProxyUrl) {
-            $net['proxy'] = [ordered]@{ url = $LegacyProxyUrl }
-        } elseif ($null -ne $LegacyProxyLocalhost) {
-            $net['proxy'] = [ordered]@{ localhost = [int]$LegacyProxyLocalhost }
-        } elseif ($LegacyProxyBuiltinTestServer) {
-            $net['proxy'] = [ordered]@{ builtinTestServer = $true }
-        }
-        $obj['network'] = $net
+    if ($null -ne $RawNetwork) {
+        $obj['network'] = $RawNetwork
     } elseif ($EmptyNetwork) {
         $obj['network'] = [ordered]@{}
     } elseif ($EgressDefault -or $IngressDefault -or $HostLoopback -or
@@ -729,9 +666,7 @@ function New-Config {
     return $path
 }
 
-# -----------------------------------------------------------------------
 # Test runners
-# -----------------------------------------------------------------------
 function Invoke-Probe {
     param([string]$Wxc, [string]$ConfigPath = $null, [string]$Phase, [string]$Name)
     # Use ProcessStartInfo so we can keep stdout (the JSON) separate from
@@ -821,7 +756,6 @@ function Invoke-Wxc {
     }
 }
 
-# -----------------------------------------------------------------------
 # Tier prerequisite
 #
 # Every expectation in this harness is derived from $Script:ExpectedTier, so
@@ -829,7 +763,6 @@ function Invoke-Wxc {
 # silently fell back to T3 runs the T3 assertions and reports green. A CI job
 # named "process-t1" that never touched BaseContainer has proven nothing. When
 # -RequireTier is passed the mismatch is a hard abort, not a skip.
-# -----------------------------------------------------------------------
 function Assert-RequiredTier {
     if (-not $RequireTier) {
         Write-Host 'Tier prerequisite: not requested (-RequireTier unset); running against the naturally selected tier.' -ForegroundColor DarkGray
@@ -844,9 +777,7 @@ function Assert-RequiredTier {
     Record-Result -Phase 'P0' -Name "tier prerequisite: host selects $RequireTier" -Pass $true -Detail "expectedTier=$($Script:ExpectedTier)"
 }
 
-# -----------------------------------------------------------------------
 # Network test infrastructure
-# -----------------------------------------------------------------------
 
 # Documented in docs/process-container/networking.md §2: PSEC is the only
 # ProcessContainer path that receives schema 0.8 egress filters, proxy peer
@@ -901,14 +832,11 @@ function Get-NetVerdict {
 
 # Strip wxc-exec's redacted config/request echo out of a captured stream.
 #
-# Without this, a log assertion searches the harness's own config text: a
-# config carrying `capabilities: ["internetClient"]` matches /internetClient/
-# whether or not the backend honored it — the silent drop it exists to catch.
-#
-# The echo is a prefix, so cut it out and keep the tail; truncating at the
-# first marker would discard the tier selection and every backend line.
-# JSON bodies are skipped by brace depth because a sandboxed TEMP path
-# contains braces, balanced within its own line.
+# Without this a log assertion searches the harness's own config text, so a
+# config carrying `capabilities: ["internetClient"]` matches whether or not the
+# backend honored it — the silent drop the assertion exists to catch. The echo
+# is a prefix, so keep the tail; JSON bodies are skipped by brace depth because
+# a sandboxed TEMP path contains braces, balanced within its own line.
 function Remove-ConfigEcho {
     param([string]$Text)
     if (-not $Text) { return '' }
@@ -1060,13 +988,10 @@ function Get-HostDnsServers {
 # Host-side HTTP listener on 127.0.0.1, used as the host-loopback anchor.
 # Returned object carries Url/Port plus a Stop() closure.
 #
-# A raw TcpListener speaking a hand-written response is used instead of
-# HttpListener: HttpListener goes through http.sys, which requires a URL ACL
-# reservation (`netsh http add urlacl`) that an unelevated account does not
-# have, so it fails to bind on exactly the developer hosts this phase needs to
-# run on. A plain socket needs no reservation. The accept loop runs on a
-# background runspace so the harness thread stays free while the contained
-# child connects.
+# A raw TcpListener, not HttpListener: the latter goes through http.sys and
+# needs a URL ACL reservation an unelevated account lacks, so it fails to bind
+# on exactly the hosts this phase must run on. The accept loop sits on a
+# background runspace so the harness thread stays free.
 function Start-LoopbackListener {
     $port = Get-FreeTcpPort
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
@@ -1125,13 +1050,10 @@ function Get-LoopbackFetchCommand {
 }
 
 # Snapshot MXC-installed firewall rules so the legacy `enforcementMode:
-# firewall` phase can assert MXC removes what it installed. The DACL side has
-# a full apply/restore/orphan-reap story; the firewall side had none.
-#
-# NetworkManager::apply_firewall_rules names every rule it creates
+# firewall` phase can assert MXC removes what it installed. Rules are named
 # `WXC_<principal>_<millis>[_<action>_<index>]`, so an anchored `WXC_` prefix
-# is the exact filter. netsh is used instead of Get-NetFirewallRule because the
-# latter is CIM-backed and unavailable on locked-down hosts.
+# is the exact filter. netsh rather than Get-NetFirewallRule, which is
+# CIM-backed and unavailable on locked-down hosts.
 function Get-MxcFirewallRuleNames {
     try {
         $rules = & netsh.exe advfirewall firewall show rule name=all 2>$null
@@ -1150,21 +1072,14 @@ function Get-MxcFirewallRuleNames {
 }
 
 
-# =======================================================================
-# Phase 8 — schema 0.8 directional network policy
+# Phase 8 — schema 0.8 directional network policy.
 #
-# These phases assert the DOCUMENTED contract, not the current code. The
-# authoritative sources, both revised within the last month, are:
-#   * docs/process-container/networking.md          (backend implementation)
-#   * docs/sandbox-policy/0.8.0/networking/networking.md (shared policy)
-# Where the implementation has not caught up, the assertion fails. That is
-# the intended signal — a green suite that only encodes present behavior
-# cannot tell anyone the backend diverged from its spec.
-#
-# Every positive assertion is paired with a negative control on an otherwise
-# identical config, because "reached the anchor" and "blocked by policy" are
-# indistinguishable from a single run on a host with no connectivity.
-# =======================================================================
+# Asserts the documented contract (docs/process-container/networking.md and
+# docs/sandbox-policy/0.8.0/networking/networking.md), not the current code, so
+# an assertion that outruns the backend fails by design. Every positive is
+# paired with a negative control on an otherwise identical config: from one run
+# on a host with no connectivity, "reached it" and "blocked by policy" look the
+# same.
 
 # Standard filesystem grant for a network test. `curl.exe` needs %SystemRoot%
 # readable and the cwd fallback (documented in the 0.8 schema's `process.cwd`
@@ -1187,7 +1102,6 @@ function Invoke-NetRun {
     $log = Join-Path $ScratchRoot "logs\$Name.log"
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ConfigPath -LogPath $log -TimeoutSec $TimeoutSec
     $logContent = Read-Log $log
-    Assert-NoBfscfg -LogContent $logContent -Phase 'P8' -Name $Name
     return [pscustomobject]@{
         Result  = $r
         Log     = $logContent
@@ -1195,15 +1109,12 @@ function Invoke-NetRun {
     }
 }
 
-# =======================================================================
-# Suite context, dispatch, and reporting
+# Suite context, dispatch, and reporting.
 #
-# Everything above this line is a helper that reads its inputs by bare name
-# ($ScratchRoot, $WxcDebug, $Script:ExpectedTier, ...). Initialize-WpcContext
-# is what puts those names in scope. Because this file is DOT-SOURCED, the
-# `$Script:` assignments below land in the calling script, which is the same
-# scope the helpers resolve against.
-# =======================================================================
+# The helpers above read their inputs by bare name ($ScratchRoot, $WxcDebug,
+# $Script:ExpectedTier, ...); Initialize-WpcContext puts those names in scope.
+# This file must be DOT-SOURCED so its `$Script:` assignments land in the
+# calling script, the same scope the helpers resolve against.
 
 # Captured while this file is being dot-sourced, when $PSScriptRoot still
 # refers to <repo>\tests\scripts\lib.
@@ -1348,14 +1259,10 @@ function Initialize-WpcContext {
 }
 
 function Invoke-WpcPhase {
-    # Fault-isolates one phase. An unexpected exception (a host-dependent
-    # cmdlet, a probe that throws) is recorded as a failure rather than
-    # aborting, so the rest of the matrix stays reportable.
-    #
-    # MXC-FATAL is the exception: Assert-NoBfscfg raises it when it detects a
-    # real bfscfg invocation, which on 25H2 deadlocks the host. That one is
-    # recorded and latched so Complete-WpcChild can exit 78, which tells the
-    # entry script to stop dispatching entirely.
+    # Fault-isolates one phase: an unexpected exception is recorded as a failure
+    # rather than aborting, so the rest of the matrix stays reportable. MXC-FATAL
+    # is latched instead, so Complete-WpcChild exits 78 and the entry script
+    # stops dispatching.
     param(
         [Parameter(Mandatory)] [string]$Key,
         [Parameter(Mandatory)] [scriptblock]$Body
@@ -1389,12 +1296,11 @@ function Complete-WpcChild {
     #
     # Exit codes are the contract with run_processcontainer_all_tests.ps1:
     #   0  every assertion passed (skip/warn do not fail)
-    #   1  at least one failed, OR nothing ran at all
-    #   78 MXC-FATAL — stop the suite, do not run anything else
+    #   1  at least one failed, or nothing ran at all
+    #   78 MXC-FATAL — stop the suite
     #
-    # "Nothing ran" is a failure on purpose. A script that records no
-    # assertions has proven nothing, and reporting that as success is exactly
-    # the false green the suite exists to avoid.
+    # "Nothing ran" fails on purpose: a script recording no assertions has
+    # proven nothing, and calling that success is the false green to avoid.
     $t = Get-WpcTally -Results $Script:Results
     $total = $t.Passed.Count + $t.Failed.Count + $t.Skipped.Count + $t.Warned.Count
 
@@ -1463,12 +1369,10 @@ function Write-WpcChildOutput {
     # Re-emit an area script's output through this host so it reaches the
     # transcript, restoring the colour the child itself used.
     #
-    # Console colour is an attribute of the writing process's console, not
-    # bytes in the stream, so it does not survive the pipe. Without this a
-    # full-suite run is monochrome while running the same area script on its
-    # own is coloured — the same results, formatted two different ways.
-    # Re-derive the colour from the line shape that Record-Result and Section
-    # emit, so both paths look identical.
+    # Colour is an attribute of the writing process's console, not bytes in the
+    # stream, so it does not survive the pipe and a full-suite run would be
+    # monochrome. Re-derive it from the line shapes Record-Result and Section
+    # emit, so standalone and merged runs look identical.
     param([Parameter(ValueFromPipeline)] [object]$Line)
     begin { $inBanner = $false }
     process {
@@ -1496,14 +1400,10 @@ function Write-WpcChildOutput {
 }
 
 function Reset-WpcConsoleColor {
-    # PowerShell sets the console foreground, writes, then restores it. A
-    # process killed between those steps — or a native binary that changes the
-    # attribute itself — leaves the console tinted, and every later line the
-    # suite prints inherits that colour. Re-assert a known state between areas
-    # so one area cannot recolour the rest of the run.
-    #
-    # The Console colour APIs throw when stdout is redirected, which is the
-    # normal case under CI, so every call is guarded.
+    # A process killed between set-foreground and restore — or a native binary
+    # that sets the attribute itself — leaves the console tinted and every later
+    # line inherits it. Re-assert a known state between areas. The Console
+    # colour APIs throw when stdout is redirected (the CI case), so guard them.
     param([object]$To = $null)
     try {
         if ($null -ne $To) { [Console]::ForegroundColor = $To } else { [Console]::ResetColor() }

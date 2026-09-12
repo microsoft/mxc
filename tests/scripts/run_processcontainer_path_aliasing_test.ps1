@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_path_aliasing_test.ps1
-#
 # Denied paths reached via .., 8.3 short names, and the \\?\ prefix.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_path_aliasing_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 10 — path aliasing and most-specific-wins.
 #
 # Three Linux/macOS backends have dedicated suites for this because a grant
@@ -39,7 +31,6 @@ Initialize-WpcContext @PSBoundParameters
 # has MORE ways to alias a path than any of them — `..` traversal, 8.3 short
 # names, the `\\?\` prefix, and junctions all reach the same object that the
 # DACL ACEs are applied to.
-# -----------------------------------------------------------------------
 function Phase-PathAliasing {
     Section 'Phase 10: path aliasing and most-specific-wins'
 

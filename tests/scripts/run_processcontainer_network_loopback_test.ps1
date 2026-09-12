@@ -1,21 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# run_processcontainer_network_loopback_test.ps1
-#
 # network.ingress.hostLoopback enforcement.
 #
-# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
-#
-#   .\run_processcontainer_network_loopback_test.ps1 -RequireTier base-container
-#
-# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
 
 [CmdletBinding()]
 param(
-    # -ContextJson carries the context the entry script already resolved.
-    # Anything passed explicitly overrides it, so a standalone run works too.
     [string]$ContextJson,
+
     [string]$ResultsJson,
     [string]$RequireTier,
     [switch]$SkipNetwork,
@@ -30,7 +23,6 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# -----------------------------------------------------------------------
 # Phase 8d — host loopback.
 #
 # The shared spec (D2) blocks host loopback by default and states that an
@@ -42,7 +34,6 @@ Initialize-WpcContext @PSBoundParameters
 #
 # `hostLoopback: "allow"` is PSEC-1.1-only; every other path must reject it
 # rather than accept it with partial enforcement.
-# -----------------------------------------------------------------------
 function Phase-NetworkHostLoopback {
     Section 'Phase 8d: host-loopback policy'
 
