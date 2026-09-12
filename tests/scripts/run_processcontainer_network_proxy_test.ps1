@@ -96,7 +96,7 @@ function Phase-NetworkProxy {
         $out = $envRun.Result.Stdout
         $ran = [bool]($out -match '(?im)^SystemRoot=')
         Record-Result -Phase 'P8e' -Name 'identity-less proxy config runs (ingress=allow + hostLoopback=allow)' `
-            -Pass $ran -Detail "exit=$($envRun.Result.ExitCode)"
+            -Pass $ran -Detail "exit=$($envRun.Result.ExitCode); stderr=$(Format-Snippet $envRun.Result.Stderr)"
         if ($ran) {
             foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
                 # cmd.exe `set` upper-cases nothing, but Windows env lookup is

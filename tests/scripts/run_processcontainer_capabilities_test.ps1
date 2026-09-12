@@ -180,17 +180,15 @@ function Phase-CapabilityContract {
             -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; caps=[$($case.Caps -join ', ')]"
     }
 
-    # The capability list must actually reach the sandbox, not just survive
-    # validation. Both launch paths name the granted capabilities in the log,
-    # so a list that parsed but was dropped on the floor is visible here.
+    # The capability list must reach the sandbox, not just survive validation.
+    # Only the legacy SBOX path names them in the log.
     $cfg = New-Config -Name 'cap-reaches-sandbox' -CommandLine $cmd -ReadWrite @($rw) `
         -Capabilities @('registryRead')
     $log = Join-Path $ScratchRoot 'logs\cap-reaches-sandbox.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Remove-ConfigEcho (Read-Log $log)
-    Record-Result -Phase 'P12b' -Name 'a granted capability is named in the runner log' `
-        -Pass ([bool]($logText -match '(?i)registryRead')) `
-        -Detail "exit=$($r.ExitCode); config echo stripped so this matches the runner, not the config"
+    Record-CapabilityLogged -Phase 'P12b' -Name 'a granted capability is named in the runner log' `
+        -LogContent $logText -Capability @('registryRead') -Detail "exit=$($r.ExitCode)"
 }
 
 

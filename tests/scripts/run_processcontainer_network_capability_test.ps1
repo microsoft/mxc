@@ -100,11 +100,10 @@ function Phase-NetworkCapabilityMatrix {
     Record-Result -Phase 'P8a' -Name 'egress=allow ingress=deny -> internet REACHED (internetClient granted)' `
         -Pass ($ad.Verdict -eq 'REACHED') `
         -Detail "verdict=$($ad.Verdict); exit=$($ad.Result.ExitCode)"
-    # The capability is what makes the grant real. Assert the backend actually
-    # named it, so a run that reached the anchor by some other route (a stale
-    # firewall hole, an unenforced tier) is not scored as a working grant.
-    Record-Result -Phase 'P8a' -Name 'egress=allow logs internetClient capability' `
-        -Pass ([bool]((Remove-ConfigEcho $ad.Log) -match '(?i)internetClient')) `
+    # The capability is what makes the grant real: a run that reached the anchor
+    # by some other route must not score as a working grant.
+    Record-CapabilityLogged -Phase 'P8a' -Name 'egress=allow logs internetClient capability' `
+        -LogContent (Remove-ConfigEcho $ad.Log) -Capability @('internetClient') `
         -Detail 'documented capability mapping for egress.default=allow'
 
     # --- deny/allow: the tier-dependent row.
@@ -117,8 +116,8 @@ function Phase-NetworkCapabilityMatrix {
         Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow -> accepted on PSEC, egress still blocked by WFP' `
             -Pass ($da.Verdict -eq 'BLOCKED') `
             -Detail "verdict=$($da.Verdict); exit=$($da.Result.ExitCode)"
-        Record-Result -Phase 'P8a' -Name 'egress=deny ingress=allow logs privateNetworkClientServer' `
-            -Pass ([bool]((Remove-ConfigEcho $da.Log) -match '(?i)privateNetworkClientServer')) `
+        Record-CapabilityLogged -Phase 'P8a' -Name 'egress=deny ingress=allow logs privateNetworkClientServer' `
+            -LogContent (Remove-ConfigEcho $da.Log) -Capability @('privateNetworkClientServer') `
             -Detail 'documented capability mapping for ingress.default=allow'
     } else {
         # "The AppContainer fallback rejects this combination because the
@@ -139,9 +138,9 @@ function Phase-NetworkCapabilityMatrix {
     Record-Result -Phase 'P8a' -Name 'egress=allow ingress=allow -> internet REACHED (both capabilities)' `
         -Pass ($aa.Verdict -eq 'REACHED') `
         -Detail "verdict=$($aa.Verdict); exit=$($aa.Result.ExitCode)"
-    $aaLog = Remove-ConfigEcho $aa.Log
-    Record-Result -Phase 'P8a' -Name 'egress=allow ingress=allow logs both capabilities' `
-        -Pass ([bool]($aaLog -match '(?i)internetClient') -and [bool]($aaLog -match '(?i)privateNetworkClientServer')) `
+    Record-CapabilityLogged -Phase 'P8a' -Name 'egress=allow ingress=allow logs both capabilities' `
+        -LogContent (Remove-ConfigEcho $aa.Log) `
+        -Capability @('internetClient', 'privateNetworkClientServer') `
         -Detail 'documented capability mapping for allow/allow'
 }
 

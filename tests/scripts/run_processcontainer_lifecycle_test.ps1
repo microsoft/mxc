@@ -184,7 +184,7 @@ function Phase-ProcessEnv {
     $env:MXC_LC_LEAK = 'leaked'
     try {
         $cfg = New-Config -Name 'lc-env-verbatim' -CommandLine $cmd -ReadWrite @($rw) `
-            -Env @('MXC_LC_MINE=yes', "SystemRoot=$env:SystemRoot")
+            -Env (Get-MinimalEnv -Extra @('MXC_LC_MINE=yes'))
         $log = Join-Path $ScratchRoot 'logs\lc-env-verbatim.log'
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $out = "$($r.Stdout)"
@@ -203,7 +203,7 @@ function Phase-ProcessEnv {
             -Pass (-not $rejected) -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected"
 
         $cfg = New-Config -Name 'lc-env-empty' -CommandLine $Script:LifecycleCmd -ReadWrite @($rw) `
-            -Env @('MXC_LC_EMPTY=')
+            -Env (Get-MinimalEnv -Extra @('MXC_LC_EMPTY='))
         $log = Join-Path $ScratchRoot 'logs\lc-env-empty.log'
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)
@@ -244,7 +244,7 @@ function Phase-IntentTelemetryVersion {
         $rejected = Test-WasRejected -Run $r -Log $logText
         Record-Result -Phase 'P13d' -Name "containment '$name' is accepted on Windows" `
             -Pass (-not $rejected) -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected"
-        $m = [regex]::Match($logText, '(?im)selected\s+tier\s*[:=]?\s*([A-Za-z0-9_\- ]+)')
+        $m = [regex]::Match($logText, '(?im)selected\s+(?:isolation\s+)?tier\s*[:=]?\s*([A-Za-z0-9_\-]+)')
         $tiers[$name] = $(if ($m.Success) { $m.Groups[1].Value.Trim() } else { '' })
     }
     $bothReported = ($tiers['process'] -and $tiers['processcontainer'])

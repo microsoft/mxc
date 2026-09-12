@@ -204,12 +204,6 @@ function Phase-UiPolicyMatrix {
                Expect = @{ HANDLES = 'allowed' } }
             @{ Name = 'iso-container'; Label = 'pcUi.isolation=container'; BpUiIsolation = 'container'
                Expect = @{ HANDLES = 'blocked' } }
-            # isolation is a free-form string in the wire model, so an
-            # unrecognized value is reachable and is documented to fall back
-            # to full isolation rather than to no isolation.
-            @{ Name = 'iso-bogus';     Label = 'pcUi.isolation=<unrecognized> defaults to full isolation'
-               BpUiIsolation = 'not-a-real-isolation-level'
-               Expect = @{ HANDLES = 'blocked' } }
 
             # --- processContainer.ui.systemSettings: 4 documented values --
             @{ Name = 'sys-all';   Label = 'pcUi.systemSettings=all';   BpUiSystemSettings = 'all'
@@ -236,6 +230,17 @@ function Phase-UiPolicyMatrix {
         foreach ($case in $cases) {
             Invoke-UiPolicyCase -Case $case -Phase 'P4e' -HwndVal $hwndVal -HostPid $PID
         }
+
+        # isolation is a closed enum on the wire, so an unrecognized value is
+        # refused at deserialize; the resolver's fallback arm is unreachable
+        # from JSON. systemSettings is a free string and does reach it.
+        $cfg = New-Config -Name 'ui-policy-iso-bogus' -CommandLine "`"$UiProbeDebug`" HANDLES" `
+            -ReadWrite @((Join-Path $ScratchRoot 'rw')) -BpUiIsolation 'not-a-real-isolation-level'
+        $log = Join-Path $ScratchRoot 'logs\ui-policy-iso-bogus.log'
+        $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
+        Record-Result -Phase 'P4e' -Name 'pcUi.isolation=<unrecognized> is rejected (closed enum)' `
+            -Pass (Test-WasRejected -Run $r -Log (Read-Log $log)) `
+            -Detail "exit=$($r.ExitCode)"
 
         # The allowed half of desktopSystemControl=true that cannot be probed.
         # Recorded rather than omitted so the matrix does not read as complete.

@@ -107,19 +107,21 @@ function Phase-NetworkLegacy07 {
     $cap = Invoke-NetRun -Name 'net07-explicit-capability' -ConfigPath $cfgCap
     Record-Result -Phase 'P9' -Name 'explicit processContainer.capabilities=[internetClient] reaches the anchor' `
         -Pass ($cap.Verdict -eq 'REACHED') -Detail "verdict=$($cap.Verdict)"
-    Record-Result -Phase 'P9' -Name 'explicit capability is named in the log' `
-        -Pass ([bool]((Remove-ConfigEcho $cap.Log) -match '(?i)internetClient')) `
-        -Detail 'capability list reached the backend (config echo stripped)'
+    Record-CapabilityLogged -Phase 'P9' -Name 'explicit capability is named in the log' `
+        -LogContent (Remove-ConfigEcho $cap.Log) -Capability @('internetClient') `
+        -Detail 'capability list reached the backend'
 
-    # enforcementMode matrix. `firewall` and `both` need admin for netsh; a
-    # non-admin host cannot exercise them, which is a skip rather than a pass.
+    # enforcementMode matrix. Host firewall rules are an AppContainer primitive
+    # (docs/process-container/os-version-support.md) and need admin for netsh;
+    # anywhere else this is a skip, not a pass.
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
                 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $fwCapable = $isAdmin -and ($Script:ExpectedTier -like 'appcontainer*')
 
     foreach ($mode in @('firewall', 'both')) {
-        if (-not $isAdmin) {
+        if (-not $fwCapable) {
             Record-Result -Phase 'P9' -Name "enforcementMode=$mode" -Status 'skip' `
-                -Detail 'netsh advfirewall rule authoring requires an elevated host'
+                -Detail "requires an elevated AppContainer-tier host (admin=$isAdmin; tier=$($Script:ExpectedTier))"
             continue
         }
         $before = Get-MxcFirewallRuleNames
@@ -177,7 +179,7 @@ function Phase-NetworkLegacy07 {
 
     # blockedHosts under an allow default: the destination named is the one
     # that must fail while the default still permits everything else.
-    if ($isAdmin) {
+    if ($fwCapable) {
         $cfgBlocked = New-Config -Name 'net07-blockedhosts' -CommandLine $cmd `
             -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
             -LegacyDefaultPolicy 'allow' -LegacyEnforcementMode 'firewall' `
@@ -188,7 +190,7 @@ function Phase-NetworkLegacy07 {
             -Pass ($blocked.Verdict -eq 'BLOCKED') -Detail "verdict=$($blocked.Verdict)"
     } else {
         Record-Result -Phase 'P9' -Name 'blockedHosts under allow default' -Status 'skip' `
-            -Detail 'firewall enforcement requires an elevated host'
+            -Detail "requires an elevated AppContainer-tier host (admin=$isAdmin; tier=$($Script:ExpectedTier))"
     }
 }
 

@@ -64,20 +64,19 @@ function Phase-ProcessPlumbing {
     $rw = Join-Path $ScratchRoot 'rw'
     $ro = Join-Path $ScratchRoot 'ro'
 
-    # --- env delivery. The harness has always DELIVERED process.env (the
-    # destructive-probe override) but never asserted it arrives, so the T3
-    # env-replacement behavior documented at the top of this file is untested.
-    # Values with spaces and an embedded `=` catch the two classic parse bugs.
+    # --- env delivery. process.env replaces the environment outright, so the
+    # block must stay viable; values with spaces and an embedded `=` catch the
+    # two classic parse bugs.
     $envCfg = New-Config -Name 'plumb-env' `
         -CommandLine "$env:SystemRoot\System32\cmd.exe /c echo FOO=[%MXC_TEST_FOO%] EQ=[%MXC_TEST_EQ%]" `
         -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) `
-        -Env (@("SystemRoot=$env:SystemRoot", "MXC_TEST_FOO=a b c", "MXC_TEST_EQ=k=v")) -TimeoutMs 20000
+        -Env (Get-MinimalEnv -Extra @('MXC_TEST_FOO=a b c', 'MXC_TEST_EQ=k=v')) -TimeoutMs 20000
     $envLog = Join-Path $ScratchRoot 'logs\plumb-env.log'
     $rEnv = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $envCfg -LogPath $envLog -TimeoutSec 40
     Record-Result -Phase 'P11' -Name 'process.env value with spaces reaches the child intact' `
-        -Pass ([bool]($rEnv.Stdout -match '\[a b c\]')) -Detail "stdout=$(($rEnv.Stdout).Trim())"
+        -Pass ([bool]($rEnv.Stdout -match '\[a b c\]')) -Detail "exit=$($rEnv.ExitCode); stdout=$(Format-Snippet $rEnv.Stdout)"
     Record-Result -Phase 'P11' -Name 'process.env value with an embedded = reaches the child intact' `
-        -Pass ([bool]($rEnv.Stdout -match '\[k=v\]')) -Detail "stdout=$(($rEnv.Stdout).Trim())"
+        -Pass ([bool]($rEnv.Stdout -match '\[k=v\]')) -Detail "exit=$($rEnv.ExitCode); stdout=$(Format-Snippet $rEnv.Stdout)"
 
     # --- cwd. Explicit process.cwd must be honored.
     $cwdCfg = New-Config -Name 'plumb-cwd' `
@@ -159,20 +158,20 @@ function Phase-ProcessPlumbing {
     Record-Result -Phase 'P11' -Name 'process.timeout fires near the deadline (not after the workload finishes)' `
         -Pass ($timeoutRan -and ($sw.Elapsed.TotalSeconds -lt 45)) `
         -Detail ("ran={0}; elapsed={1:N1}s; timeout=4s; workload=120s" -f $timeoutRan, $sw.Elapsed.TotalSeconds)
-    # Match the runner's own timeout message, not the generic word: the
-    # config carries `"timeout": 4000` and wxc-exec's request dump prints
-    # `Script timeout: 4000`, both of which /timed?\s*out/ matches (time + out),
-    # so the loose pattern is green whether or not anything was ever killed.
-    # Streams are cleaned individually — a single joined string would be cut at
-    # the first echo boundary and discard everything appended after it.
+    # Match the runner's own message, not the bare word: the config carries
+    # `"timeout": 4000` and the request dump prints `Script timeout: 4000`,
+    # which a loose /timed?\s*out/ would match without anything being killed.
+    # Streams are cleaned individually; joining first would truncate at the
+    # first echo boundary.
     $timeoutSignal = @(
         (Remove-ConfigEcho "$($rTimeout.Stdout)"),
         (Remove-ConfigEcho "$($rTimeout.Stderr)"),
         (Remove-ConfigEcho (Read-Log $timeoutLog))
     ) -join "`n"
+
     Record-Result -Phase 'P11' -Name 'timeout is reported, not silent' `
         -Pass ($timeoutRan -and ($timeoutSignal -match '(?i)(script )?timed out after \d+\s*ms')) `
-        -Detail "ran=$timeoutRan; a killed workload must say why"
+        -Detail "ran=$timeoutRan; exit=$($rTimeout.ExitCode); tail=$(Format-Snippet $timeoutSignal)"
 
     Start-Sleep -Seconds 2
     $survivors = @(Get-Process -Name $unique -ErrorAction SilentlyContinue)

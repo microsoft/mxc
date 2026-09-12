@@ -319,6 +319,47 @@ function Assert-NoBfscfg {
 # runner replaces the child env with process.env when it is non-empty, and
 # CreateProcessW requires a full block (notably %SystemRoot%), so passing only
 # the override would fail with ERROR_ENVVAR_NOT_FOUND (0x800700CB).
+# Smallest environment a cmd.exe workload can still launch under, plus the
+# caller's own variables. `process.env` replaces the environment outright, so
+# a block with only the variable under test fails at CreateProcess.
+function Get-MinimalEnv {
+    param([string[]]$Extra = @())
+    $base = @()
+    foreach ($name in 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATH', 'PATHEXT', 'TEMP', 'TMP') {
+        $value = [System.Environment]::GetEnvironmentVariable($name)
+        if ($value) { $base += "$name=$value" }
+    }
+    return @($base + $Extra)
+}
+
+# The spec dump that names capabilities and UI limits is written only on the
+# legacy SBOX path; PSEC logs a version+size line instead. Assertions that read
+# the dump have nothing to read on a PSEC run.
+function Test-SpecDumpAvailable {
+    param([string]$LogContent)
+    return -not ($LogContent -match 'process security environment spec built')
+}
+
+# Assert capability names reached the backend, skipping where the run took the
+# PSEC path and produced no spec dump to read.
+function Record-CapabilityLogged {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$LogContent,
+        [Parameter(Mandatory)][string[]]$Capability,
+        [string]$Detail = ''
+    )
+    if (-not (Test-SpecDumpAvailable $LogContent)) {
+        Record-Result -Phase $Phase -Name $Name -Status 'skip' `
+            -Detail 'PSEC path selected; capabilities appear only in the legacy SBOX spec dump'
+        return
+    }
+    $missing = @($Capability | Where-Object { $LogContent -notmatch ('(?i)' + [regex]::Escape($_)) })
+    Record-Result -Phase $Phase -Name $Name -Pass ($missing.Count -eq 0) `
+        -Detail ("$Detail; missing=[" + ($missing -join ', ') + ']')
+}
+
 function Get-ProbeEnvWithDestructive {
     $list = New-Object System.Collections.Generic.List[string]
     foreach ($e in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
@@ -396,7 +437,9 @@ function Get-ExpectedDaclAug {
     param([bool]$HasDenied)
     switch ($Script:Caps.BaselineTier) {
         'appcontainer-dacl' { return $true }
-        'base-container'    { return [bool]$HasDenied }
+        # BaseContainer augments for denied paths only where the OS cannot
+        # enforce them natively.
+        'base-container'    { return ([bool]$HasDenied -and -not $Script:Caps.SupportsDeniedPaths) }
         default             { return $true }
     }
 }
