@@ -39,6 +39,42 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
+# Assert the documented floor: with every UI knob permissive, a contained
+# process gets every UI capability.
+#
+# UIPolicy_Schema.md:95 maps clipboard="all" to no UILIMIT flags and "Allowed"
+# for both directions; os-version-support.md:185 marks clipboard, systemSettings
+# and desktopSystemControl supported on every build. No doc says containment
+# removes them. So anything still denied here is a real defect, not a quirk of
+# the test host, and it is reported as one -- it also explains at a glance why
+# the individual allow cases below went red.
+function Measure-UiReachable {
+    $tags = @('READCLIPBOARD', 'WRITECLIPBOARD', 'SYSTEMPARAMETERS', 'DISPLAYSETTINGS', 'DESKTOP')
+    $cfg = New-Config -Name 'ui-policy-baseline' -CommandLine "`"$UiProbeDebug`" $($tags -join ' ')" `
+        -ReadWrite @((Join-Path $ScratchRoot 'rw')) -Env (Get-ProbeEnvWithDestructive) `
+        -UiDisable $false -Clipboard 'all' -BpUiSystemSettings 'all' -BpUiDesktopControl $true `
+        -BpUiIsolation 'desktop'
+    $log = Join-Path $ScratchRoot 'logs\ui-policy-baseline.log'
+    $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
+
+    $verdicts = @([regex]::Matches($r.Stdout, '(?m)^[A-Z][A-Z0-9_]*=(?:PASS|FAIL|INCONCLUSIVE)\s*$'))
+    if ($r.ExitCode -ne 0 -or $verdicts.Count -eq 0) {
+        Record-Result -Phase 'P4e' -Name 'baseline: a fully permissive UI policy grants every UI capability' -Pass $false `
+            -Detail "the baseline case did not run (exit=$($r.ExitCode); verdicts=$($verdicts.Count))"
+        return
+    }
+
+    # FAIL from the probe means the operation succeeded, i.e. the capability is
+    # granted -- which is what a permissive policy must produce.
+    $denied = @($tags | Where-Object { $r.Stdout -notmatch "(?m)^$_=FAIL\s*$" })
+
+    $shown = if ($denied.Count) { $denied -join ', ' } else { '<none>' }
+    Record-Result -Phase 'P4e' -Name 'baseline: a fully permissive UI policy grants every UI capability' `
+        -Pass ($denied.Count -eq 0) `
+        -Detail "still denied: $shown (UIPolicy_Schema.md:95 and os-version-support.md:185 document these as allowed)"
+}
+
+
 # Run one UI-policy case and assert each expected tag verdict.
 #
 # $Case.Expect maps a probe tag to 'blocked' or 'allowed'. Only the tags named
@@ -111,6 +147,28 @@ function Invoke-UiPolicyCase {
             }
         }
 
+        if ($got -eq 'INCONCLUSIVE') {
+            $diag = if ($r.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
+            # ui.disable=true engages the Win32k mitigation, which stops user32
+            # from loading. Losing the GUI subsystem outright is strictly
+            # stronger than the individual limit, so it satisfies "blocked".
+            if ($Case.ContainsKey('GuiGoneIsBlocked') -and $want -eq 'blocked' -and $diag -match 'user32') {
+                Record-Result -Phase $Phase -Name $name -Pass $true `
+                    -Detail "expected=blocked; GUI subsystem unavailable (Win32k mitigation); diag=$diag"
+                continue
+            }
+            # Nothing documents the probe being unable to run here, so this is a
+            # finding rather than a skip.
+            Record-Result -Phase $Phase -Name $name -Pass $false `
+                -Detail "expected=$want; the probe could not exercise $tag and no policy here explains that; diag=$diag"
+            continue
+        }
+
+        # A contained process still gets the documented capability when the knob
+        # is permissive (UIPolicy_Schema.md:95, os-version-support.md:185).
+        # Measure-UiReachable reports the contradiction once; the per-knob cases
+        # below stay red so a real regression is never hidden behind a skip.
+
         $expectToken = if ($want -eq 'blocked') { 'PASS' } else { 'FAIL' }
         Record-Result -Phase $Phase -Name $name -Pass ($got -eq $expectToken) `
             -Detail "expected=$want; got=$gotV; full=$summaryV"
@@ -124,6 +182,8 @@ function Invoke-UiPolicyCase {
 # knob actually governs, so a failure names the exact mapping that broke.
 function Phase-UiPolicyMatrix {
     Section 'Phase 4e: UI policy resolution matrix (every documented value)'
+
+    Measure-UiReachable
 
     # The HANDLES probe needs a USER handle owned by a process OUTSIDE the
     # job. Created once and shared by every case; harmless for the rest.
@@ -241,6 +301,7 @@ function Phase-UiDisableOverrides {
         BpUiIsolation      = 'desktop'
         BpUiDesktopControl = $true
         BpUiSystemSettings = 'all'
+        GuiGoneIsBlocked   = $true
         Expect             = @{
             READCLIPBOARD    = 'blocked'
             WRITECLIPBOARD   = 'blocked'
