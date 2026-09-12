@@ -213,10 +213,11 @@ pub fn validate_working_directory(
     }
 
     Err(format!(
-        "process.cwd must be an absolute path (e.g. {}), got '{cwd}'. Schema 0.9.0-alpha and \
+        "process.cwd must be an absolute path (e.g. {}), got '{}'. Schema 0.9.0-alpha and \
          later reject a relative working directory because it resolves against the host \
          process's working directory.",
-        style.example()
+        style.example(),
+        crate::config_deserialize::escape_diagnostic_text(cwd)
     ))
 }
 
@@ -410,6 +411,18 @@ mod tests {
                 assert_eq!(resp.failure_phase, FailurePhase::Rejected);
             }
         }
+    }
+
+    #[test]
+    fn a_rejected_cwd_is_escaped_before_it_reaches_the_diagnostic() {
+        let req = request_with_cwd(
+            "0.9.0-alpha",
+            ContainmentBackend::Bubblewrap,
+            "sub\nerror: forged\u{202e}",
+        );
+        let message = validate_common(&req).unwrap_err().error_message;
+        assert!(!message.contains('\n'), "raw newline in: {message}");
+        assert!(message.contains("\\n") && message.contains("\\u{202e}"));
     }
 
     #[test]
