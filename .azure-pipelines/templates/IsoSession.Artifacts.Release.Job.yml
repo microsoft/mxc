@@ -246,7 +246,7 @@ jobs:
       folderlocation: $(wingetDirectory)/manifests
       owners: ${{ parameters.ESRPInfo.OwnersEmail }}
       approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
-      waitforreleasecompletion: true
+      waitforreleasecompletion: false
       serviceendpointurl: https://api.esrp.microsoft.com
       mainpublisher: ESRPRELPACMAN
       domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
