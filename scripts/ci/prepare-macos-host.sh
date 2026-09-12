@@ -76,8 +76,14 @@ assert_workload_interpreters() {
     fi
 }
 
+# Diagnostic check for if SIP is enabled or disabled.
+report_system_volume_protection() {
+    echo "SIP: $(csrutil status 2>&1 | head -1)"
+}
+
 # Runs for every backend: this is host inventory, not a backend prerequisite.
 assert_workload_interpreters
+report_system_volume_protection
 
 case "$backend" in
     seatbelt)
