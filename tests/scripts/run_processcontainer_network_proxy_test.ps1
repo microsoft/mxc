@@ -5,14 +5,11 @@
 #
 # runtimeConfig.networkProxy and proxy peer identity.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -65,10 +54,9 @@ Initialize-WpcContext @PSBoundParameters
 #     identity-less REQUIRES hostLoopback allow;
 #   * schema 0.8 proxy requests never fall back to SBOX or AppContainer.
 #
-# The env-var contract is asserted by having the contained workload print its
-# own environment. That is the only way to see what actually reached the
-# child; a log line saying MXC configured a proxy does not prove the child
-# received it.
+# The env-var contract is asserted by having the workload print its own
+# environment — a log line saying MXC configured a proxy does not prove the
+# child received it.
 # -----------------------------------------------------------------------
 function Phase-NetworkProxy {
     Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'

@@ -5,22 +5,17 @@
 #
 # processContainer.captureDenials -- Windows denial capture (Learning Mode).
 #
-# Nothing in the suite set this section before. It is worth its own area for a
-# reason beyond completeness: `outputPath` is validated up front by
-# validate_capture_denials_output_path, so its four documented rejections are
-# decided during config parsing and never reach the launch API. That makes
-# Phase 14a the rare process-container coverage that produces real signal on a
-# host which cannot start a container at all -- unlike almost every behavioral
-# assertion in this suite, it is not hostage to host provisioning.
+# `outputPath` is validated by validate_capture_denials_output_path during
+# config parsing, so Phase 14a's four rejections never reach the launch API —
+# rare process-container coverage that still produces signal on a host which
+# cannot start a container. The behavioral half (14b/14c) is host-dependent
+# and fails honestly where a run cannot start.
 #
-# The behavioral half (14b/14c) is host-dependent and degrades honestly: where
-# a run cannot start, those assertions fail rather than pretending.
-#
-# Documented contract asserted here (docs/schema.md, updated 2026-09-10):
+# Documented contract (docs/schema.md, updated 2026-09-10):
 #   * mode "block" (default) keeps access denied and logs it; "allow" permits
 #     and logs it, relaxing deny-by-default and emitting a security warning
-#   * outputPath must be absolute, must not be a root or an existing
-#     directory, and its parent directory must already exist
+#   * outputPath must be absolute, not a root or existing directory, and its
+#     parent must already exist
 #   * a unique per-run id is stamped into the output stem, and the actual path
 #     is printed on stderr
 #   * retainEtl defaults to false
@@ -30,8 +25,7 @@
 #
 #   .\run_processcontainer_capture_denials_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(

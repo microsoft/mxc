@@ -3,73 +3,37 @@
 #
 # run_processcontainer_all_tests.ps1
 #
-# Entry point for the Windows process-container (AppContainer / BaseContainer)
-# suite. Probes the host once, then dispatches each area to its own
-# run_processcontainer_*_test.ps1 and merges the results.
+# Entry point for the Windows process-container suite. Probes the host once,
+# then dispatches each area to its own run_processcontainer_*_test.ps1 and
+# merges the results.
 #
-# The harness is capability-driven and runs on any Windows host: it derives the
-# EXPECTED containment tier from the runtime --probe signals rather than
-# hardcoding it (see Get-HostCapabilities in lib\WinProcessContainer.Common.ps1).
+# Tier scope: T1 (base-container) and T3 (appcontainer-dacl). T2
+# (appcontainer-bfs) is off by default behind the `tier2_bfs` Cargo feature
+# and is not covered — what remains below is a guard, not coverage. bfscfg.exe
+# hard-locks the bfs.sys minifilter on 25H2, so Test-Preflight refuses to run
+# when either binary reports `bfsCompiledIn=true`, every child re-runs that
+# gate via Assert-BfsSafety, and Assert-NoBfscfg post-checks each log. A hit
+# is MXC-FATAL (exit 78), not a recorded failure. Tier selection is natural:
+# there is no -ForceTier.
 #
-# Tier scope:
-#   T1 (BaseContainer) and T3 (AppContainer + DACL) only. T2 (`appcontainer-bfs`)
-#   is NOT covered — it is off by default behind the `tier2_bfs` Cargo feature
-#   and is not in use, so the suite records no assertions about it. What remains
-#   below is a guard, not coverage.
+# $Script:ExpectedTier is derived once from --probe and passed to every child:
+# base-container when BaseContainer is usable, otherwise appcontainer-dacl.
 #
-# Safety model (`tier2_bfs` Cargo feature OFF, the default):
-#   * The suite never invokes bfscfg.exe, which hard-locks the bfs.sys
-#     minifilter on 25H2.
-#   * Test-Preflight refuses to run if either wxc-exec binary reports
-#     `bfsCompiledIn=true` in --probe output. This is the load-bearing gate;
-#     everything else is belt-and-suspenders. It applies on every build, so no
-#     OS-version branching is needed. Every child re-runs the gate
-#     (Assert-BfsSafety) so a directly invoked script cannot skip it.
-#   * With `tier2_bfs` off, `fallback_detector::find_bfscfg_exe` returns
-#     `Ok(None)` unconditionally, `appcontainer-bfs` is never selected, and the
-#     dispatcher falls back to BaseContainer (T1, when usable) or
-#     AppContainer + DACL (T3).
-#   * Every run is post-checked by Assert-NoBfscfg. If a log shows bfscfg being
-#     spawned, or `appcontainer-bfs` being selected, that is MXC-FATAL: the
-#     child exits 78 and dispatch stops immediately. These raise rather than
-#     record, precisely because they are guards and not test coverage.
-#   * Tier selection is NATURAL — there is no -ForceTier and no MXC_FORCE_TIER
-#     manipulation (that env var is `#[cfg(test)]`-gated and has no effect on a
-#     production wxc-exec).
+# Schema: configs are authored at 0.8.0-alpha. The legacy network fields
+# (defaultPolicy / enforcementMode / allowedHosts / blockedHosts /
+# allowLocalNetwork / network.proxy) stay pinned to 0.7.0-alpha, since 0.8 is
+# where the directional network.egress / network.ingress shape became the
+# documented way to express network intent. New-Config switches lanes when a
+# -Legacy* parameter is supplied.
 #
-# Tier expectations are identical for every policy shape:
-#   * BaseContainer usable -> `base-container`
-#   * otherwise            -> `appcontainer-dacl`
-# $Script:ExpectedTier (derived once at startup, passed to every child) drives
-# every tier assertion.
+# Network areas assert the DOCUMENTED contract (docs/process-container/
+# networking.md, docs/sandbox-policy/0.8.0/networking/networking.md), not
+# current behavior. Where the backend has not caught up the assertion fails,
+# which is the intended signal.
 #
-# Schema version:
-#   Configs are authored at 0.8.0-alpha ($Script:SchemaVersion). The LEGACY
-#   network fields — defaultPolicy / enforcementMode / allowedHosts /
-#   blockedHosts / allowLocalNetwork / network.proxy — are pinned to 0.7.0-alpha
-#   ($Script:LegacySchemaVersion), because 0.8 is where the directional
-#   network.egress / network.ingress shape became the documented way to express
-#   network intent. New-Config switches lanes automatically when a -Legacy*
-#   parameter is supplied.
-#
-# What the network areas assert:
-#   The DOCUMENTED contract, not the current implementation. The authoritative
-#   sources are docs/process-container/networking.md and
-#   docs/sandbox-policy/0.8.0/networking/networking.md. Where the backend has
-#   not caught up, the assertion FAILS — that is the intended signal. A suite
-#   that only encodes present behavior cannot tell anyone the backend drifted
-#   from its spec.
-#
-# Prerequisites are failures, not skips:
-#   * -RequireTier <tier> aborts when the host does not naturally select that
-#     tier. Without it, a mis-provisioned T1 runner silently runs the T3
-#     assertions and reports green having proven nothing about BaseContainer.
-#   * The egress anchor is probed from the HOST before any network area runs. A
-#     host with no connectivity would read every positive assertion as
-#     "blocked", so an unreachable anchor aborts. -SkipNetwork is the explicit
-#     opt-out for air-gapped bring-up.
-#   * A child that records no assertions at all fails. Reporting success for a
-#     script that proved nothing is the false green this suite exists to avoid.
+# Prerequisites are failures, not skips: -RequireTier aborts on a tier
+# mismatch, an unreachable egress anchor aborts (-SkipNetwork opts out), and a
+# child that records zero assertions fails.
 #
 # Usage:
 #   .\run_processcontainer_all_tests.ps1

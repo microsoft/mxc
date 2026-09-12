@@ -3,27 +3,24 @@
 #
 # run_processcontainer_lifecycle_test.ps1
 #
-# lifecycle.* and the process.* knobs no area had ever set.
+# lifecycle.* and the process.* knobs no other area sets.
 #
-# Before this area, `lifecycle.destroyOnExit`, `lifecycle.preservePolicy`,
-# `process.inheritDefaultEnv`, `telemetry.enabled` and the `containment:
-# "process"` intent alias were all completely unexercised, and `process.env`
-# was only ever supplied one way.
+# Covers `lifecycle.destroyOnExit`, `lifecycle.preservePolicy`,
+# `process.inheritDefaultEnv`, `telemetry.enabled` and the
+# `containment: "process"` intent alias.
 #
-# The most valuable assertion here is the `inheritDefaultEnv` version gate.
-# docs/schema.md (updated 2026-09-10) marks the field `0.9.0-alpha+`, and the
-# stable surface uses deny_unknown_fields, so at 0.8 it must be REJECTED, not
-# quietly ignored. A field that is silently dropped on an older schema is the
-# worst possible outcome for a caller: the config looks accepted and the
-# environment is wrong. Phase 13b pins both sides of that gate.
+# The key assertion is the `inheritDefaultEnv` version gate. docs/schema.md
+# (updated 2026-09-10) marks the field `0.9.0-alpha+`, and the stable surface
+# uses deny_unknown_fields, so at 0.8 it must be REJECTED. A silently dropped
+# field is the worst outcome for a caller: the config looks accepted and the
+# environment is wrong. Phase 13b pins both sides.
 #
 # Part of the Windows process-container suite. Normally invoked by
 # run_processcontainer_all_tests.ps1. Runs standalone too:
 #
 #   .\run_processcontainer_lifecycle_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -220,14 +217,11 @@ function Phase-ProcessEnv {
 # Phase 13d -- containment intent, telemetry kill-switch, version range
 #
 # `containment: "process"` is the intent alias; on Windows it must resolve to
-# the same concrete backend as `processcontainer`. Asserted by comparing the
-# selected tier reported by both spellings, so this cannot pass on a host
-# where neither runs.
+# the same backend as `processcontainer`, asserted by comparing the selected
+# tier under both spellings so it cannot pass where neither runs.
 #
-# `telemetry.enabled` is the config kill-switch. It is one of three
-# independent terms and can only ever subtract, so the only safe assertion is
-# that both values are accepted -- setting it to true must NOT be read as
-# consent, and nothing here should imply otherwise.
+# `telemetry.enabled` can only ever subtract from consent, so the only safe
+# assertion is that both values are accepted. true is not consent.
 # -----------------------------------------------------------------------
 function Phase-IntentTelemetryVersion {
     Section 'Phase 13d: containment intent, telemetry kill-switch, version range'

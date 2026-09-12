@@ -6,31 +6,21 @@
 # processContainer.leastPrivilege (LPAC), processContainer.learningMode, and
 # the legacy 0.7 network.proxy shapes.
 #
-# Three gaps closed here:
+# LPAC coverage previously lived only in run_lpacac_test.ps1, outside this
+# suite and outside CI's process-container area list; `learningMode` and the
+# legacy proxy builder parameters were unexercised entirely.
 #
-#   * `leastPrivilege` had a New-Config parameter that no area ever passed.
-#     LPAC coverage lived only in run_lpacac_test.ps1, which is outside this
-#     suite and therefore outside CI's process-container area list.
-#   * `learningMode` was never set anywhere.
-#   * The three legacy proxy parameters (-LegacyProxyUrl,
-#     -LegacyProxyLocalhost, -LegacyProxyBuiltinTestServer) and
-#     -LegacyAllowLocalNetwork were likewise dead: declared, documented, and
-#     never exercised. A dead builder parameter is worse than a missing one,
-#     because it reads as coverage that does not exist.
-#
-# LPAC interacts with backend tier selection: native PSEC capture cannot
-# combine with leastPrivilege (docs/schema.md), and least-privilege mode makes
-# a run PSEC-ineligible (should_use_process_security_environment). Phase 15a
-# asserts the documented incompatibility rather than the tier, because the
-# tier depends on the host.
+# LPAC interacts with tier selection: native PSEC capture cannot combine with
+# leastPrivilege (docs/schema.md), and least-privilege mode makes a run
+# PSEC-ineligible. Phase 15a asserts the documented incompatibility rather
+# than the tier, which depends on the host.
 #
 # Part of the Windows process-container suite. Normally invoked by
 # run_processcontainer_all_tests.ps1. Runs standalone too:
 #
 #   .\run_processcontainer_privilege_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(

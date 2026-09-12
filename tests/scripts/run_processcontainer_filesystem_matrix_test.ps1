@@ -5,14 +5,11 @@
 #
 # Read-write / read-only / denied / unlisted filesystem access matrix.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_filesystem_matrix_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -176,19 +165,10 @@ function Phase-T3Forced {
 
     $aclControlBefore = Get-Acl-Snapshot $control
 
-    # No outer cmd /c "..." wrapper, no NUL device redirects. Hypothesis
-    # under test: every previously-passing AppContainer command in this
-    # harness uses either a file redirect or no redirect at all. The
-    # earlier matrix attempt was the first test to use `>nul`/`2>nul`,
-    # and every clause failed. AppContainer may not grant access to the
-    # NUL device by default. Dropping the redirects lets `type` dump
-    # the file contents to stdout (parser ignores non-TAG lines) and
-    # lets `echo`'s error messages go to captured stderr.
-    # type's stdout goes to the inherited stdout (the harness captures
-    # it). type's stderr goes to inherited stderr on read failure
-    # (e.g. "Access is denied") — also captured. Both are fine: the
-    # harness's regex parser only consumes lines that match
-    # ^(TAG)=(PASS|FAIL)$ and ignores everything else.
+    # No `>nul` redirects: AppContainer does not reliably grant access to the
+    # NUL device, and every clause of an earlier matrix attempt using it
+    # failed. Without them `type` dumps to stdout and errors go to stderr;
+    # both are fine, since the parser only consumes ^(TAG)=(PASS|FAIL)$.
     function Probe-Read  { param($tag, $path, $name) "(type ""$path\$name"") && echo $tag=PASS || echo $tag=FAIL" }
     function Probe-Write { param($tag, $path, $name) "(echo data > ""$path\$name"") && echo $tag=PASS || echo $tag=FAIL" }
     $clauses = @(

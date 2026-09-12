@@ -4,25 +4,17 @@
 # WinProcessContainer.Common.ps1 — shared helpers for the Windows
 # process-container suite (run_processcontainer_*.ps1).
 #
-# Dot-source this, do not Import-Module it. Dot-sourcing a .ps1 merges its
-# functions into the caller's scope, so a `$Script:` assignment made here
-# lands in the CALLING script. Initialize-WpcContext relies on that to
-# populate the context variables every helper below reads by bare name
-# ($ScratchRoot, $WxcDebug, $Script:ExpectedTier, ...). Converting this file
-# to a module would bind those names to the module scope instead and every
-# helper would read $null.
+# Dot-source this, do not Import-Module it: helpers read context variables
+# ($ScratchRoot, $Script:ExpectedTier, ...) that Initialize-WpcContext sets in
+# the caller's scope. As a module those names would bind to module scope.
 
-# The UI-mitigation probe binary refuses EXITWINDOWS / WIN32K by default —
-# running those operations outside a sandbox can log out the interactive
-# user. The contained child must see MXC_PROBE_DESTRUCTIVE_OK=1 to attempt
-# them. NOTE: the AppContainer (T3) runner REPLACES the child environment with
-# the config's `process.env` whenever it is non-empty (it only falls back to
-# CreateEnvironmentBlock when env is empty), so a process-level `$env:` here
-# would NOT reach the child. The override is therefore delivered per-run via
-# New-Config -Env (see Get-ProbeEnvWithDestructive). That env block must be
-# COMPLETE — CreateProcessW requires at least %SystemRoot% and fails with
-# ERROR_ENVVAR_NOT_FOUND (0x800700CB) on a one-var block — so we pass the full
-# current environment plus the override, not just the override alone.
+# The probe binary refuses EXITWINDOWS / WIN32K unless it sees
+# MXC_PROBE_DESTRUCTIVE_OK=1 — running them uncontained can log the user out.
+# The T3 runner replaces the child environment with `process.env` when that is
+# non-empty, so a process-level `$env:` never reaches the child; the override
+# goes per-run through New-Config -Env (see Get-ProbeEnvWithDestructive). That
+# block must be complete — CreateProcessW needs at least %SystemRoot% and
+# fails with ERROR_ENVVAR_NOT_FOUND on a one-var block.
 
 
 # -----------------------------------------------------------------------
@@ -74,15 +66,11 @@ function Section {
     Write-Host ('=' * 72) -ForegroundColor Cyan
 }
 
-# Probe binaries report each checked operation as TAG=PASS / TAG=FAIL, where
-# PASS/FAIL describe the *probe's* notion of the outcome, not the harness
-# verdict. Surfacing those raw tokens next to the harness's own [PASS]/[FAIL]
-# reads as a contradiction (e.g. a green [PASS] line containing "got=FAIL").
-# These helpers translate the probe tokens into semantic verbs for display
-# only — the wire protocol and the parsing regexes are unchanged. Callers pass
-# the verb pair for the probe family: UI/atom probes use blocked/allowed
-# (PASS = the constraint blocked the op); the filesystem matrix uses
-# allowed/denied (PASS = the access succeeded).
+# Probes report TAG=PASS / TAG=FAIL, where PASS/FAIL describe the probe's
+# notion of the outcome, not the harness verdict — so a green [PASS] line
+# containing "got=FAIL" reads as a contradiction. These translate the tokens
+# into verbs for display only. Callers pass the verb pair for the probe
+# family: UI probes use blocked/allowed, the filesystem matrix allowed/denied.
 function Format-Verdict {
     param([string]$Verdict, [string]$Pass, [string]$Fail)
     switch ($Verdict) {
@@ -315,10 +303,7 @@ function Assert-NoBfscfg {
 # Config generation
 # -----------------------------------------------------------------------
 # Build a COMPLETE environment block (current process env + the destructive
-# override) for delivery to the contained probe via New-Config -Env. The T3
-# runner replaces the child env with process.env when it is non-empty, and
-# CreateProcessW requires a full block (notably %SystemRoot%), so passing only
-# the override would fail with ERROR_ENVVAR_NOT_FOUND (0x800700CB).
+# override) for the contained probe. See the note at the top of this file.
 # Smallest environment a cmd.exe workload can still launch under, plus the
 # caller's own variables. `process.env` replaces the environment outright, so
 # a block with only the variable under test fails at CreateProcess.
@@ -478,17 +463,13 @@ function Test-Win32kMitigationApplied {
 }
 
 # The two helpers above read BaseContainer's "[ui subsystem]" telemetry, which
-# is produced by log_sandbox_spec() decoding the legacy SBOX FlatBuffer. That
-# call sits behind `if !use_process_security_environment`, so a run that took
-# the PSEC / CreateProcessSecurityEnvironment path emits NO UI telemetry at all
-# -- regardless of how faithfully the limits were applied. Asserting on those
-# tokens there is unsound in BOTH directions: a positive assertion fails even
-# though the restriction holds, and a NEGATED one ("mitigation not applied")
-# passes vacuously, which is the more dangerous of the two.
+# log_sandbox_spec() emits only behind `if !use_process_security_environment`.
+# A PSEC run emits none of it regardless of how the limits were applied, so
+# asserting on those tokens is unsound both ways — and a NEGATED assertion
+# passes vacuously, which is the dangerous direction.
 #
-# Detection is positive-proof and fail-closed: skip only when the log actually
-# shows the PSEC spec being built. A run that died before building any spec
-# matches neither marker and is asserted as before, so a broken run still fails.
+# Fail-closed: skip only on positive proof that PSEC built a spec. A run that
+# died earlier matches neither marker and is asserted as before.
 function Test-UiTelemetryAvailable {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
     if ($Script:ExpectedTier -eq 'appcontainer-dacl') { return $true }
@@ -900,14 +881,12 @@ function Assert-RequiredTier {
 # Network test infrastructure
 # -----------------------------------------------------------------------
 
-# Documented in docs/process-container/networking.md §2: PSEC is the ONLY
+# Documented in docs/process-container/networking.md §2: PSEC is the only
 # ProcessContainer path that receives schema 0.8 egress filters, proxy peer
-# identity, or host-loopback configuration. Legacy SBOX and the AppContainer
-# fallback reject those. The probe does not name the process-creation contract
-# directly, so the tier stands in for it: `base-container` is the only tier
-# that can be on PSEC. On a base-container host that is actually running the
-# transitional SBOX contract the PSEC-only assertions will fail — which is the
-# correct signal, not a false green.
+# identity, or host-loopback configuration. The probe does not name the
+# process-creation contract, so the tier stands in for it — `base-container`
+# is the only tier that can be on PSEC. A base-container host still running
+# the transitional SBOX contract fails these, which is the correct signal.
 function Test-PsecEligible {
     return ($Script:ExpectedTier -eq 'base-container')
 }
@@ -936,13 +915,10 @@ function Get-AnchorFetchCommand {
 # Classify a completed run into REACHED / BLOCKED / NORUN. NORUN covers "the
 # sandbox never got far enough to print", which no network assertion may score.
 #
-# ONLY stdout is examined, and that is load-bearing. On every failure path
-# wxc-exec flushes its diagnostic buffer to stderr, and that buffer contains
-# the redacted config — including `process.commandLine`, which holds the
-# literal text `echo NET=REACHED`. Scanning stderr therefore scores every
-# failed run as REACHED, which makes NORUN unreachable and turns every guard
-# built on it into a no-op. The workload's own output goes to stdout, which
-# carries no config echo.
+# Only stdout is examined, and that is load-bearing: on failure wxc-exec
+# flushes the redacted config to stderr, and that echo contains the literal
+# `echo NET=REACHED` from process.commandLine. Scanning stderr would score
+# every failed run REACHED and make NORUN unreachable.
 function Get-NetVerdict {
     param([Parameter(Mandatory)] $Result)
     $out = "$($Result.Stdout)"
@@ -953,33 +929,14 @@ function Get-NetVerdict {
 
 # Strip wxc-exec's redacted config/request echo out of a captured stream.
 #
-# Any assertion that searches a log or stderr for a token is otherwise
-# searching the harness's OWN config text: a config carrying
-# `"timeout": 4000` matches /timeout/, and one carrying
-# `capabilities: ["internetClient"]` matches /internetClient/, so the
-# assertion passes whether or not the backend ever honored the field — the
-# exact silent-drop it was written to catch.
-# Strip wxc-exec's redacted config/request echo out of a captured stream.
+# Without this, a log assertion searches the harness's own config text: a
+# config carrying `capabilities: ["internetClient"]` matches /internetClient/
+# whether or not the backend honored it — the silent drop it exists to catch.
 #
-# Any assertion that searches a log or stderr for a token is otherwise
-# searching the harness's OWN config text: a config carrying
-# `"timeout": 4000` matches /timeout/, and one carrying
-# `capabilities: ["internetClient"]` matches /internetClient/, so the
-# assertion passes whether or not the backend ever honored the field — the
-# exact silent-drop it was written to catch.
-#
-# The echo is a PREFIX, not a suffix. wxc-exec writes three sections up front
-# (`SECTION: JSON Config (redacted)`, `SECTION: Request simplified`, and
-# `SECTION: Full \`ExecutionRequest\` configuration (redacted)`) and only then
-# calls resolve_runner, which produces the tier selection, the capability list
-# and every backend line. So the echoed block must be CUT OUT and the tail
-# kept — truncating at the first marker would discard all the real output and
-# leave every log assertion structurally unable to pass.
-#
-# The JSON bodies are skipped by brace depth rather than by matching a closing
-# line: a Windows path can legitimately contain braces (a sandboxed TEMP
-# directory is `...\sandbox.{<guid>}\...`), but they are balanced within the
-# one line that holds them, so the running depth is unaffected.
+# The echo is a prefix, so cut it out and keep the tail; truncating at the
+# first marker would discard the tier selection and every backend line.
+# JSON bodies are skipped by brace depth because a sandboxed TEMP path
+# contains braces, balanced within its own line.
 function Remove-ConfigEcho {
     param([string]$Text)
     if (-not $Text) { return '' }
@@ -1028,23 +985,15 @@ function Test-VerdictsRan {
 
 # "The backend refused this policy" — as distinct from "the run fell over".
 #
-# Two different failures are indistinguishable by exit code alone:
-#
-#   * Invoke-Wxc synthesizes ExitCode = -1 with empty stdout on timeout.
-#   * wxc-exec itself exits -1 when the launch API fails (e.g. WIN32_ERROR(5)
-#     on a host that never ran `wxc-host-prep prepare-system-drive`).
-#
-# Either would score every "must be rejected" assertion green on a host where
-# nothing can run at all. The documented contract for an unsupported policy is
-# a typed error raised during validation, BEFORE the container starts, so a
-# run that got as far as calling the launch API did not reject the policy —
-# it accepted it and then died for an unrelated reason, which is the opposite
-# of what the assertion claims.
+# Exit code alone cannot tell them apart: Invoke-Wxc synthesizes -1 on timeout,
+# and wxc-exec exits -1 when the launch API fails on an unprepared host. Either
+# would score every "must be rejected" assertion green on a host where nothing
+# runs. An unsupported policy is a typed error raised BEFORE the container
+# starts, so anything that got further accepted the policy and died elsewhere.
 function Test-WasRejected {
     param(
         [Parameter(Mandatory)] [object]$Run,
-        # Log text (config echo already stripped, or not — the markers matched
-        # here are emitted by the runner, never by a config).
+        # Markers matched here come from the runner, never from a config echo.
         [string]$Log
     )
     $result = $(if ($Run.PSObject.Properties['Result']) { $Run.Result } else { $Run })
@@ -1054,43 +1003,29 @@ function Test-WasRejected {
 
     $text = $Log
     if (-not $text -and $Run.PSObject.Properties['Log']) { $text = $Run.Log }
+    # Reached the launch API, so validation had already accepted the policy.
     if ($text -and ($text -match '(?i)create_process_failed|CreateProcessInSandbox failed|CreateProcessSecurityEnvironment failed')) {
-        # Reached the launch API, so validation had already accepted the
-        # policy. This is a host-provisioning failure, not a rejection.
         return $false
     }
-    # Same reasoning, one step earlier and much broader. Once a tier has been
-    # selected the config is through validation, so everything after it --
-    # a failed loopback exemption, an unavailable proxy, a DACL refusal --
-    # is a backend or host failure wearing a non-zero exit code.
-    #
-    # Without this, any policy that parses fine but cannot be APPLIED on an
-    # under-provisioned host scores as "correctly rejected", which is the
-    # precise false green this helper exists to prevent.
+    # Tier selected means validation passed; every later failure is a backend
+    # or host problem wearing a non-zero exit code.
     if ($text -and ($text -match '(?i)selected isolation tier')) { return $false }
-    # The typed error code says it directly: validation failures surface as
-    # config_parse or policy_validation, never backend_error.
+    # Validation failures surface as config_parse or policy_validation.
     if ($text -and ($text -match '"code"\s*:\s*"backend_error"')) { return $false }
     if ($Run.PSObject.Properties['Stderr'] -and
         ("$($Run.Stderr)" -match '"code"\s*:\s*"backend_error"')) { return $false }
-    # `runner_unavailable` on `containment` means no tier could be constructed
-    # for the requested backend on THIS host -- BaseContainer absent, BFS not
-    # compiled in, DACL augmentation refused. The config was never judged on
-    # its merits, so counting it as a rejection would credit the policy under
-    # test for a host limitation. It is emitted as a ConfigRejected event,
-    # which is why the typed-code checks above do not catch it.
+    # No tier could be built on this host, so the policy was never judged.
+    # Emitted as a ConfigRejected event, which the typed checks above miss.
     if ($text -and ($text -match '"reason"\s*:\s*"runner_unavailable"')) { return $false }
     return $true
 }
 
 # The non-network counterpart of Get-NetVerdict's NORUN state.
 #
-# Every negative assertion ("the sentinel was NOT printed", "no survivor was
-# left", "the exit code was non-zero") is satisfied by a workload that never
-# started, so on a mis-provisioned host such a phase reports green having
-# proven nothing. New-ProbeCommand prefixes an unconditional marker echo;
-# Test-WorkloadRan then separates "the policy denied it" from "the sandbox
-# never launched". A negative assertion must be AND-ed with this.
+# Every negative assertion is satisfied by a workload that never started, so
+# on a mis-provisioned host it reports green having proven nothing.
+# New-ProbeCommand prefixes an unconditional marker echo; a negative assertion
+# must be AND-ed with this.
 $Script:RanMarker = 'MXCRAN-7b21'
 
 function New-ProbeCommand {
@@ -1299,9 +1234,16 @@ $Script:WpcRepoRoot   = Split-Path -Parent (Split-Path -Parent $Script:WpcScript
 
 function Initialize-WpcContext {
     # Resolves every path and switch the suite needs and publishes them into
-    # the calling script's scope. The scripts declare their parameters WITHOUT
-    # defaults and splat $PSBoundParameters here, so this function is the one
-    # place a default is written down.
+    # the calling script's scope. Area scripts declare their parameters
+    # WITHOUT defaults and splat $PSBoundParameters here, so this is the one
+    # place a default is written down. Notes on the shared parameters:
+    #   -CapsJson      host --probe results, so 24 children need not re-probe;
+    #                  absent means probe here.
+    #   -RequireTier   deliberately not [ValidateSet]-decorated: the attribute
+    #                  binds to the variable and this function assigns through
+    #                  it, so the value is validated below instead.
+    #   -ReuseScratch  set by the entry script, which owns and has already
+    #                  populated the tree; standalone runs get a fresh one.
     [CmdletBinding()]
     param(
         [string]$RepoRoot,

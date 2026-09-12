@@ -5,14 +5,11 @@
 #
 # JOB_OBJECT_UILIMIT_* mitigation matrix (docs/process-container/UIPolicy_Schema.md).
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_ui_mitigations_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -55,19 +44,14 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 # Phase 4b — UI mitigation behavior matrix (host baseline tier, debug build)
 #
-# Phase 4 already asserts that Win32k mitigation applied telemetry fires
-# when ui.disable=true and that UI Job Object assigned fires unconditionally.
-# Those checks only prove the parent reached the corresponding API. This
-# phase runs an in-sandbox probe binary that *attempts the operations the
-# UI restrictions are documented to block*, then asserts the kernel
-# actually denied them.
+# Phase 4 asserts only that the parent reached the corresponding API. This
+# phase runs an in-sandbox probe that attempts the operations the UI
+# restrictions are documented to block, then asserts the kernel denied them.
 #
-# Scenario A: ui.disable=false + maximal base_process_ui blocks ->
-#   every JOB_OBJECT_UILIMIT_* bit is set. Run all probes EXCEPT WIN32K
-#   and assert each is reported PASS (operation was blocked).
-# Scenario B: ui.disable=true -> Win32k mitigation. Run WIN32K alone and
-#   assert the child process never printed WIN32K=FAIL (mitigation killed
-#   it on the GetMessageW syscall).
+# Scenario A: ui.disable=false + maximal base_process_ui blocks -> every
+#   JOB_OBJECT_UILIMIT_* bit set. Every probe except WIN32K must report PASS.
+# Scenario B: ui.disable=true -> Win32k mitigation. WIN32K alone; the child
+#   must never print WIN32K=FAIL.
 # -----------------------------------------------------------------------
 function Phase-UiMitigationMatrix {
     Section 'Phase 4b: UI mitigation behavior matrix (host baseline tier)'
@@ -75,23 +59,15 @@ function Phase-UiMitigationMatrix {
     $rw = Join-Path $ScratchRoot 'rw'
 
     # ---------------- Scenario A: maximal UILIMIT bits -----------------
-    # ui: disable=false (so Win32k is allowed but UILIMIT bits gate
-    # specific operations), clipboard=none (block both R+W),
-    # injection=false. base_process_ui: isolation=container (HANDLES +
-    # GLOBALATOMS), desktopSystemControl=false (DESKTOP + EXITWINDOWS),
-    # systemSettings=none (SYSTEMPARAMETERS + DISPLAYSETTINGS), ime=false.
-    # NOTE: GLOBALATOMS is NOT probed here. JOB_OBJECT_UILIMIT_GLOBALATOMS
-    # does not fail the atom APIs — it gives the job a private atom table —
-    # so it cannot be verified with the simple "API failed -> PASS" matrix.
-    # Phase-GlobalAtomIsolation covers it with a bidirectional isolation test.
-    # Create a hidden window owned by THIS (out-of-job) process. Its USER handle
-    # is what the HANDLES probe must NOT be able to use: JOB_OBJECT_UILIMIT_HANDLES
-    # does not stop FindWindow from returning HWNDs — it blocks USING handles
-    # owned by processes outside the job — so the probe calls
-    # GetWindowThreadProcessId on the HWND. That reads window-manager state
-    # directly (no WM_GETTEXT / SendMessage), so it is not confounded by UIPI or
-    # the target pumping messages. PASS = it could not resolve the owner (limit
-    # blocked the handle use); FAIL = it read back our process id.
+    # GLOBALATOMS is not probed here: the limit gives the job a private atom
+    # table rather than failing the atom APIs, so it cannot be verified with
+    # the "API failed -> PASS" matrix. Phase-GlobalAtomIsolation covers it.
+    #
+    # Create a hidden window owned by THIS out-of-job process. HANDLES does not
+    # stop FindWindow from returning HWNDs — it blocks USING handles owned by
+    # processes outside the job — so the probe calls GetWindowThreadProcessId,
+    # which reads window-manager state directly and is not confounded by UIPI.
+    # PASS = could not resolve the owner; FAIL = read back our process id.
     $handleTitle = "MxcHandleProbe_$([guid]::NewGuid().ToString('N'))"
     $winHost = New-Object Mxc.WindowHost
     $winHost.Start($handleTitle)
@@ -135,21 +111,12 @@ function Phase-UiMitigationMatrix {
             Record-Result -Phase 'P4b' -Name "scenarioA: $tag" -Pass ($got -eq 'PASS') -Detail "expected=blocked; got=$gotV; full=$fullV"
         }
 
-        # INJECTION (JOB_OBJECT_UILIMIT_INJECTION, 0x200) is handled separately
-        # from the hard-assertion loop above. The probe creates and foregrounds
-        # its OWN window before SendInput so the kernel's foreground-accessible
-        # check (which precedes the injection job-limit check and silently skips
-        # input when the foreground belongs to another inaccessible process)
-        # passes and the limit is actually evaluated. Outcomes:
-        #   * build < 26100 (canBlockInputInjection false) -> SKIP (bit dropped).
-        #   * INJECTION=INCONCLUSIVE -> the probe could not own the foreground on
-        #     this desktop, so the limit was never exercised -> SKIP (not a
-        #     verdict); the injected/gle pair would be ambiguous.
-        #   * INJECTION=PASS -> owned foreground and SendInput was blocked
-        #     (injected 0/1 gle=5): enforced -> hard PASS.
-        #   * INJECTION=FAIL -> owned foreground but the event went through
-        #     (injected 1/1 gle=0): genuinely not enforced -> WARN, not a green
-        #     PASS. Auto-promotes to PASS once enforcement is on.
+        # INJECTION is handled outside the hard-assertion loop. The probe
+        # foregrounds its own window first so the kernel's foreground check
+        # (which precedes the injection limit) passes and the limit is really
+        # evaluated. SKIP on build < 26100 (bit dropped) or on INCONCLUSIVE
+        # (never owned the foreground); PASS when SendInput was blocked; WARN
+        # rather than green when it went through, auto-promoting once enforced.
         $injDiag = if ($rA.Stdout -match '(?m)^INJECTION=DIAG\s+(?<d>.+?)\s*$') { $matches['d'] } else { '<no diag>' }
         $injInconclusive = [bool]($rA.Stdout -match '(?m)^INJECTION=INCONCLUSIVE\s*$')
         if (-not $Script:Caps.CanBlockInputInjection) {

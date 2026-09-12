@@ -5,37 +5,26 @@
 #
 # Full UI policy resolution matrix.
 #
-# Phase 4b proves the MAXIMAL lockdown works: every knob at its most
-# restrictive setting blocks every probe. That is one point in the space.
-# This area walks the rest of it -- every documented value of every UI knob,
-# including the values that are supposed to ALLOW an operation.
+# Phase 4b proves maximal lockdown — one point in the space. This area walks
+# the rest: every documented value of every UI knob, including the values that
+# are supposed to ALLOW an operation.
 #
-# The expectations come from `resolve_ui_restrictions`
-# (src/core/wxc_common/src/ui_policy.rs), whose mapping is "the named thing is
-# the thing you keep": clipboard=read allows reading and blocks writing;
-# systemSettings=display allows display changes and blocks parameter changes.
-# Each policy value maps onto a probe tag that is expected to come back
-# blocked or allowed, so an inverted or dropped mapping fails here.
+# Expectations come from `resolve_ui_restrictions`
+# (src/core/wxc_common/src/ui_policy.rs), whose rule is "the named thing is
+# the thing you keep": clipboard=read allows reading and blocks writing.
 #
-# Allow-direction coverage matters more than it looks. A restriction flag
-# wired to the wrong bit, or set unconditionally regardless of policy, still
-# passes every blocked-direction assertion in Phase 4b. Only an allow case
-# catches it.
+# Allow-direction coverage matters: a flag wired to the wrong bit, or set
+# unconditionally, still passes every blocked-direction assertion in 4b.
 #
-# SAFETY: EXITWINDOWS is never probed in a case where it is expected to be
-# allowed. The probe calls ExitWindowsEx(EWX_LOGOFF|EWX_FORCEIFHUNG); when the
-# UI limit is absent that is a real logoff of the operator's session, not a
-# refused call. Those cases record an explicit skip rather than silently
-# dropping the tag, so the gap stays visible in the results.
+# SAFETY: EXITWINDOWS is never probed where it is expected to be allowed —
+# that would be a real logoff of the operator's session. Those cases record an
+# explicit skip so the gap stays visible.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_ui_policy_matrix_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -52,17 +41,12 @@ param(
     # the child scripts do not each re-run --probe. Absent (a standalone run)
     # means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -261,19 +245,14 @@ function Phase-UiPolicyMatrix {
 # -----------------------------------------------------------------------
 # Phase 4f -- ui.disable=true overrides every individual allow
 #
-# Documented: when ui.disable is true, every restriction flag is set
-# regardless of the other knobs. So a config that asks for maximal permission
-# on every other knob must still come back fully blocked. This is the one
-# case where a permissive knob is expected NOT to take effect, which makes it
-# the natural place for an override regression to hide.
+# Documented: ui.disable=true sets every restriction flag regardless of the
+# other knobs, so maximal permission everywhere must still come back fully
+# blocked. The one case where a permissive knob is expected NOT to take
+# effect, and so the natural place for an override regression to hide.
 #
-# WIN32K is not probed here: ui.disable=true also engages the Win32k
-# mitigation, which terminates the process at the first Win32k syscall, and
-# every tag below is a Win32k call. See Phase 4b scenario B, which asserts the
-# mitigation itself. On a host where the mitigation is active the child dies
-# before printing, and the tags come back <missing> -> these assertions fail
-# rather than silently passing, which is the honest outcome for a probe that
-# could not run.
+# WIN32K is not probed: ui.disable also engages the Win32k mitigation, which
+# kills the process at the first Win32k syscall — and every tag here is one.
+# Phase 4b scenario B asserts the mitigation itself.
 # -----------------------------------------------------------------------
 function Phase-UiDisableOverrides {
     Section 'Phase 4f: ui.disable=true overrides permissive knobs'

@@ -5,14 +5,11 @@
 #
 # Exit codes, stdio, cwd, timeouts, and orphan reaping.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_process_plumbing_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -126,13 +115,10 @@ function Phase-ProcessPlumbing {
     # backgrounds a uniquely-named sleep that far outlasts the deadline: if it
     # is still running afterwards, teardown left a survivor.
     #
-    # The survivor is identified by PROCESS NAME, via a copy of powershell.exe
-    # renamed to a unique token. Matching on MainWindowTitle does not work —
-    # the child is started by a sandboxed parent with no window and redirected
-    # handles, so MainWindowTitle is always empty and the check can never find
-    # a survivor (it would be tautologically green). Win32_Process.CommandLine
-    # would work but is CIM-backed, and CIM is unavailable on locked-down
-    # hosts. A renamed copy needs neither.
+    # Identified by PROCESS NAME, via a copy of powershell.exe renamed to a
+    # unique token. MainWindowTitle is always empty for a sandboxed child, so
+    # that check would be tautologically green; Win32_Process.CommandLine is
+    # CIM-backed and unavailable on locked-down hosts.
     $unique = "MXCLEAK$((Get-Random -Maximum 99999))"
     $survivorExe = Join-Path $rw "$unique.exe"
     Copy-Item -LiteralPath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `

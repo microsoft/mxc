@@ -5,27 +5,17 @@
 #
 # processContainer.capabilities -- the AppContainer capability list.
 #
-# Before this area the suite exercised exactly one capability value
-# (`internetClient`, in the network areas) and nothing at all about the list's
-# own rules. The parser has two documented rejections and an otherwise fully
-# open contract, none of which had coverage.
+# The list is NOT a closed enum: the schema types it as `items: {type:
+# string}` and the parser validates only that no entry contains a comma and
+# that no entry names a reserved learning-mode capability. Everything else is
+# passed to the sandbox verbatim, so a misspelled capability is accepted and
+# silently grants nothing. Phase 12b pins that down.
 #
-# The list is NOT a closed enum: the schema types it as `items: {type: string}`
-# and the parser validates only that no entry contains a comma and that no
-# entry names a reserved learning-mode capability. Anything else is passed
-# through to the sandbox verbatim, so a misspelled capability is accepted and
-# silently grants nothing. Phase 12b pins that behavior down, because it is a
-# failure mode a user reaches by typo and the only thing standing between
-# "accepted and inert" and "rejected" is a test.
-#
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_capabilities_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -42,17 +32,12 @@ param(
     # the child scripts do not each re-run --probe. Absent (a standalone run)
     # means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -137,14 +122,11 @@ function Phase-CapabilityRejections {
 # -----------------------------------------------------------------------
 # Phase 12b -- the open contract
 #
-# `capabilities` is an open string list. These assertions document what that
-# actually means for a caller, including the part that is arguably a footgun:
-# a misspelled capability is accepted without complaint and grants nothing.
-#
-# The expectation asserted here is the permissive one (accepted and inert),
-# because that is what the schema's `items: {type: string}` and the parser's
+# `capabilities` is an open string list, so a misspelled capability is
+# accepted without complaint and grants nothing. The permissive expectation
+# is asserted because that is what `items: {type: string}` and the parser's
 # comma/reserved-only validation describe. If MXC ever tightens this to a
-# closed enum, this assertion is the one that should flip, deliberately.
+# closed enum, this is the assertion that should flip.
 # -----------------------------------------------------------------------
 function Phase-CapabilityContract {
     Section 'Phase 12b: processContainer.capabilities open contract'
@@ -195,16 +177,12 @@ function Phase-CapabilityContract {
 # -----------------------------------------------------------------------
 # Phase 12c -- registryRead does what its name says
 #
-# There is no documented behavioral contract for individual capability names,
-# so this asserts only the direction a caller can reasonably rely on: a
-# workload granted registryRead can read HKLM.
+# No doc gives a behavioral contract for individual capability names, so this
+# asserts only the direction a caller can rely on: registryRead can read HKLM.
 #
-# The reverse is deliberately NOT asserted as a failure. AppContainers get
+# The reverse is deliberately not asserted as a failure — AppContainers get
 # read access to much of HKLM through ALL APPLICATION PACKAGES regardless of
-# the capability, so "denied without registryRead" is not a claim any doc
-# makes and is very likely false. The no-capability run is recorded as
-# information so the pair is visible, but it cannot fail the suite for
-# behavior nothing promised.
+# the capability. The no-capability run is recorded as information only.
 # -----------------------------------------------------------------------
 function Phase-RegistryReadCapability {
     Section 'Phase 12c: registryRead behavior'

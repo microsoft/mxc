@@ -5,14 +5,11 @@
 #
 # Bidirectional global atom table isolation.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_global_atom_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -55,21 +44,15 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 # Phase 4c — GLOBALATOMS bidirectional isolation (host baseline tier)
 #
-# JOB_OBJECT_UILIMIT_GLOBALATOMS does NOT make the atom APIs fail — the
-# documented behavior is that each job gets its own private atom table, so
-# GlobalAddAtomW still succeeds inside the container. The restriction is
-# therefore verified as *isolation* between the host's session-global atom
-# table and the contained job's private table, in BOTH directions:
+# GLOBALATOMS does not make the atom APIs fail — each job gets its own
+# private atom table, so GlobalAddAtomW still succeeds inside the container.
+# The restriction is verified as isolation, in both directions:
 #
-#   * host -> guest: the host plants a global atom and passes its name to the
-#     probe. The probe must NOT be able to find it. Decided by the probe and
-#     printed as GLOBALATOMS_HOST_TO_GUEST=PASS|FAIL.
-#   * guest -> host: the probe adds its own atom, creates the ready file, and
-#     blocks until the host creates the release file. While the probe holds
-#     the atom alive the host checks its own global table and must NOT find
-#     it. Decided here (the job-private table is torn down when the container
-#     exits, so the check MUST happen while the probe is still alive — hence
-#     the handshake).
+#   * host -> guest: the host plants a global atom; the probe must not find
+#     it (GLOBALATOMS_HOST_TO_GUEST=PASS|FAIL).
+#   * guest -> host: the probe adds an atom and blocks on a release file
+#     while the host checks its own table. The handshake is required — the
+#     job-private table is torn down when the container exits.
 # -----------------------------------------------------------------------
 function Invoke-GlobalAtomProbe {
     # Runs the GLOBALATOMS bidirectional handshake once with the given

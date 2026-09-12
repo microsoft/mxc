@@ -5,14 +5,11 @@
 #
 # Denied-path enforcement on the natively selected tier.
 #
-# Part of the Windows process-container suite. Normally invoked by
-# run_processcontainer_all_tests.ps1, which probes the host once and passes
-# the shared context down. Runs standalone too:
+# Normally invoked by run_processcontainer_all_tests.ps1; runs standalone too:
 #
 #   .\run_processcontainer_denied_paths_test.ps1 -RequireTier base-container
 #
-# Exit codes: 0 = every assertion passed, 1 = at least one failed (or none
-# ran), 78 = MXC-FATAL safety abort, which stops the whole suite.
+# Exit codes: 0 = all passed, 1 = a failure or zero assertions, 78 = fatal.
 
 [CmdletBinding()]
 param(
@@ -25,21 +22,13 @@ param(
     [string]$ScratchRoot,
     [string]$ResultsJson,
     [string]$CargoLog,
-    # Host capabilities probed once by the entry script and handed down, so
-    # nineteen child processes do not each re-run --probe. Absent (a standalone
-    # run) means probe the host here.
     [string]$CapsJson,
-    # Not [ValidateSet]-decorated: the attribute binds to the variable, and
-    # Initialize-WpcContext assigns through it. It validates the value instead.
     [string]$RequireTier,
     [string]$ExternalAnchorUrl,
     [string]$UnlistedDestinationUrl,
     [switch]$SkipNetwork,
     [switch]$SkipReleaseLane,
     [switch]$KeepArtifacts,
-    # Set by the entry script, which owns the scratch tree and has already
-    # populated it. A standalone run leaves this off and gets a freshly wiped
-    # tree of its own.
     [switch]$ReuseScratch
 )
 
@@ -54,22 +43,14 @@ Initialize-WpcContext @PSBoundParameters
 # -----------------------------------------------------------------------
 # Phase 4d — Tier 1 (BaseContainer) deny-ACE empirical test
 #
-# Asserts that the deny ACE the dispatcher applies on the T1 path
-# actually denies the BaseContainer-spawned child access to the path.
-# This is the empirical answer to phase-4 review #4 ("BaseContainer
-# might not run under the AppContainer SID, in which case the deny ACE
-# targets a principal the child does not run as → silent no-op").
+# Asserts that the deny ACE the dispatcher applies on the T1 path actually
+# denies the BaseContainer-spawned child. BaseContainer might not run under
+# the AppContainer SID, in which case the ACE targets a principal the child
+# is not, and the deny is a silent no-op.
 #
-# Strategy:
-#   1. Skip the phase entirely unless BaseContainer is *usable* on this
-#      host (most current 25H2 hosts have either no API or a disabled
-#      one, where Tier 1 is never selected). Usability is read from the
-#      selected tier, not raw symbol presence: a present-but-disabled
-#      API still resolves to T3, so forcing T1 there cannot exercise the
-#      deny.
-#   2. Create a marker file under a denied directory. Force T1. Have the
-#      child try to `type` the marker. The child must exit non-zero AND
-#      not echo the marker contents.
+# Skipped unless BaseContainer is usable, read from the selected tier rather
+# than symbol presence: a present-but-disabled API still resolves to T3,
+# where forcing T1 cannot exercise the deny.
 # -----------------------------------------------------------------------
 function Phase-T1DenyForced {
     Section 'Phase 4d: T1 deny-ACE empirical test (skipped if BC not usable)'
