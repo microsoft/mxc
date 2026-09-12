@@ -84,6 +84,93 @@ impl ContainmentBackend {
             | ContainmentBackend::Vm => None,
         }
     }
+
+    /// Path shape an explicit `process.cwd` must have for this backend on
+    /// `scope`.
+    ///
+    /// The shape follows the *target* the path is handed to, not the host MXC
+    /// runs on. Those coincide everywhere except one-shot vs. state-aware WSLc.
+    pub fn working_directory_style(&self, scope: WorkingDirectoryScope) -> WorkingDirectoryStyle {
+        match self {
+            ContainmentBackend::ProcessContainer
+            | ContainmentBackend::WindowsSandbox
+            | ContainmentBackend::IsolationSession => WorkingDirectoryStyle::Windows,
+            // NanVix and Hyperlight reject any working directory today; both
+            // run a POSIX-style guest, so a future implementation inherits the
+            // right shape rather than an exemption. `Vm` is non-Windows-only —
+            // a Windows host resolves that intent to `WindowsSandbox`.
+            ContainmentBackend::Lxc
+            | ContainmentBackend::Bubblewrap
+            | ContainmentBackend::Seatbelt
+            | ContainmentBackend::MicroVm
+            | ContainmentBackend::Hyperlight
+            | ContainmentBackend::Vm => WorkingDirectoryStyle::Unix,
+            // One-shot WSLc takes a Windows *host* path and translates it into
+            // the container; state-aware exec takes the in-container path.
+            ContainmentBackend::Wslc => match scope {
+                WorkingDirectoryScope::OneShot => WorkingDirectoryStyle::Windows,
+                WorkingDirectoryScope::Exec => WorkingDirectoryStyle::Unix,
+            },
+        }
+    }
+}
+
+/// The lifecycle surface a `process.cwd` is bound for. A backend can read the
+/// same field against a different target on each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectoryScope {
+    /// A one-shot run.
+    OneShot,
+    /// A state-aware `exec` against an already-provisioned sandbox.
+    Exec,
+}
+
+/// The path shape a backend treats as absolute for `process.cwd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectoryStyle {
+    /// Windows paths: `C:\dir`, `C:/dir`, or a UNC/device path.
+    Windows,
+    /// POSIX paths: `/dir`, plus the home-anchored `~` forms the Seatbelt
+    /// profile expands.
+    Unix,
+}
+
+impl WorkingDirectoryStyle {
+    /// Whether `path` is absolute in this style — i.e. it cannot resolve
+    /// against the launching process's working directory.
+    pub fn is_absolute(self, path: &str) -> bool {
+        match self {
+            WorkingDirectoryStyle::Windows => is_windows_absolute(path),
+            WorkingDirectoryStyle::Unix => is_unix_absolute(path),
+        }
+    }
+
+    /// An absolute path in this style, for error messages.
+    pub fn example(self) -> &'static str {
+        match self {
+            WorkingDirectoryStyle::Windows => "C:\\workspace",
+            WorkingDirectoryStyle::Unix => "/workspace",
+        }
+    }
+}
+
+/// These deliberately do not use `std::path::Path::is_absolute`, which answers
+/// for the *host* MXC was compiled for rather than for the target backend.
+fn is_windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let is_sep = |b: u8| b == b'\\' || b == b'/';
+    // UNC and device paths (`\\server\share`, `\\?\C:\dir`).
+    if bytes.len() >= 2 && is_sep(bytes[0]) && is_sep(bytes[1]) {
+        return true;
+    }
+    // A drive letter is only absolute when it is also rooted: `C:dir` is
+    // relative to that drive's current directory, and `\dir` to its current
+    // drive.
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && is_sep(bytes[2])
+}
+
+fn is_unix_absolute(path: &str) -> bool {
+    path.starts_with('/') || path == "~" || path.starts_with("~/")
 }
 
 impl From<crate::wire::Containment> for ContainmentBackend {

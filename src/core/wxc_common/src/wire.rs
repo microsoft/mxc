@@ -168,6 +168,14 @@ pub struct Process {
     /// the system drive root; Seatbelt applies the same precedence with a `/`
     /// fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a
     /// working directory outright. See `docs/schema.md` ("Working Directory").
+    ///
+    /// From schema 0.9 on, a supplied value must be absolute for the target the
+    /// path reaches — `C:\workspace` or a UNC path for the Windows backends,
+    /// `/workspace` (or a `~` path on Seatbelt) for the Unix ones. WSL
+    /// Container reads it as a Windows host path one-shot and as an
+    /// in-container path on a state-aware `exec`. A relative path is rejected
+    /// because it would resolve against the launching process's working
+    /// directory.
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
     ///

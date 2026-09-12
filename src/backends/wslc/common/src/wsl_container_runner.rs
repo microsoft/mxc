@@ -1509,21 +1509,30 @@ impl WSLContainerRunner {
 
         let _cwd_cstr;
         if !request.working_directory.is_empty() {
-            if let Some(container_cwd) =
+            // One-shot takes a Windows host path and translates it to its
+            // in-container mount point. An untranslatable value fails the
+            // launch rather than being dropped.
+            let Some(container_cwd) =
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
-            {
-                _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
-                    &mut process_settings,
-                    _cwd_cstr.as_bytes().as_ptr() as PCSTR,
-                );
-                if hr != S_OK {
-                    return Err(sdk_error(
-                        "WslcSetProcessSettingsWorkingDirectory failed",
-                        hr,
-                        "",
-                    ));
-                }
+            else {
+                return Err(WslcError::Rejected(format!(
+                    "process.cwd must be a Windows drive path that maps into the container \
+                     (e.g. C:\\workspace -> /mnt/c/workspace), got {:?}",
+                    request.working_directory
+                ))
+                .into_response());
+            };
+            _cwd_cstr = format!("{}\0", container_cwd);
+            let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
+                &mut process_settings,
+                _cwd_cstr.as_bytes().as_ptr() as PCSTR,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsWorkingDirectory failed",
+                    hr,
+                    "",
+                ));
             }
         }
 

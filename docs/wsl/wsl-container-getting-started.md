@@ -409,6 +409,17 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### `process.cwd`
+
+One-shot takes a **Windows host path** and translates it the way mounts are
+translated: `C:\workspace` runs the process in `/mnt/c/workspace`. A value that
+cannot be translated — a UNC path, or an in-container path such as
+`/workspace` — is **rejected**. It was previously dropped without a diagnostic,
+leaving the process in the container's default directory.
+
+State-aware `exec` is the reverse: it takes the in-container path (`/workspace`)
+directly and rejects anything that does not start with `/`.
+
 ### `ui` is not supported
 
 A `ui` section is **rejected** — the backend has no mechanism to enforce UI
