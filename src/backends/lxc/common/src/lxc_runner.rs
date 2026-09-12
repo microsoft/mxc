@@ -141,8 +141,8 @@ impl LxcScriptRunner {
         logger: &mut Logger,
     ) -> Result<(NetworkIptablesManager, Option<IngressManager>), String> {
         let mut fw_manager = NetworkIptablesManager::new(container_name, hook_point);
-        fw_manager.set_preserve_policy(!self.cleanup_policy);
         Self::egress_apply_outcome(fw_manager.apply_legacy_rules(policy, logger))?;
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
 
         let mut ingress_manager = None;
         if let Some(pid) = netns_pid {
@@ -164,8 +164,8 @@ impl LxcScriptRunner {
         logger: &mut Logger,
     ) -> Result<(NetworkIptablesManager, Option<IngressManager>), String> {
         let mut fw_manager = NetworkIptablesManager::new(container_name, hook_point);
-        fw_manager.set_preserve_policy(!self.cleanup_policy);
         Self::egress_apply_outcome(fw_manager.apply_directional_rules(policy, logger))?;
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
 
         let mut ingress_manager = None;
         if let Some(pid) = netns_pid {
@@ -706,6 +706,68 @@ mod tests {
             policy,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_failed_egress_apply_tears_down_its_debris_even_under_preserve_policy() {
+        let fake = crate::network_iptables::test_firewall::install();
+
+        // Succeed through both chain creations, then refuse the first rule and
+        // every command the rollback uses to undo it, so the chains survive the
+        // failed apply and teardown has something left to remove.
+        fake.script_results(vec![
+            Ok(()),
+            Ok(()),
+            Ok(()),
+            Err("append refused".to_string()),
+            Err("flush refused".to_string()),
+            Err("delete refused".to_string()),
+            Err("flush refused".to_string()),
+            Err("delete refused".to_string()),
+        ]);
+
+        let runner = LxcScriptRunner::new(
+            &LxcConfig::default(),
+            "preserve-rollback-test",
+            &LifecycleConfig {
+                preserve_policy: true,
+                ..LifecycleConfig::default()
+            },
+        );
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            allowed_hosts: vec!["192.0.2.10".to_string()],
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let outcome = runner.set_up_network_rules_for_v07(
+            "preserve-rollback-test",
+            EgressHookPoint::Unhooked,
+            None,
+            &policy,
+            &mut logger,
+        );
+        let failure = outcome.err();
+
+        assert!(
+            failure.is_some(),
+            "a firewall apply whose rule append fails must report failure; output={failure:?}"
+        );
+
+        let issued = fake.issued();
+        let chain_deletes = issued
+            .iter()
+            .filter(|cmd| cmd.iter().any(|arg| arg == "-X"))
+            .count();
+        assert!(
+            chain_deletes > 2,
+            "input=preservePolicy=true, rule append and rollback both refused; \
+             expected the surviving chains to be deleted again after the rollback's \
+             own two attempts failed, because preservePolicy preserves a policy and \
+             not the debris of one that never applied; \
+             chain deletes={chain_deletes}; output={issued:?}"
+        );
     }
 
     #[test]

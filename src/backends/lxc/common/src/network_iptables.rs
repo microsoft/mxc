@@ -1727,7 +1727,7 @@ mod proxy_spec;
 mod ga_egress_spec;
 
 #[cfg(test)]
-mod test_firewall {
+pub(crate) mod test_firewall {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
@@ -1742,9 +1742,9 @@ mod test_firewall {
         static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     }
 
-    pub(super) struct FakeFirewall;
+    pub(crate) struct FakeFirewall;
 
-    pub(super) fn install() -> FakeFirewall {
+    pub(crate) fn install() -> FakeFirewall {
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(State {
                 issued: Vec::new(),
@@ -1768,14 +1768,19 @@ mod test_firewall {
             self
         }
 
-        pub(super) fn fail_commands_matching(&self, needle: &str, stderr: &str) -> &Self {
+        pub(crate) fn fail_commands_matching(&self, needle: &str, stderr: &str) -> &Self {
             Self::with_state(|state| {
                 state.fail_matching = Some((needle.to_string(), stderr.to_string()));
             });
             self
         }
 
-        pub(super) fn issued(&self) -> Vec<Vec<String>> {
+        pub(crate) fn script_results(&self, results: Vec<Result<(), String>>) -> &Self {
+            Self::with_state(|state| state.scripted = results.into());
+            self
+        }
+
+        pub(crate) fn issued(&self) -> Vec<Vec<String>> {
             Self::with_state(|state| state.issued.clone())
         }
 
