@@ -109,10 +109,10 @@ function Phase-UiMitigationMatrix {
                 Record-Result -Phase 'P4b' -Name 'scenarioA: INJECTION' -Status 'pass' -Detail "expected=blocked; got=blocked; diag=$injDiag"
             } else {
                 # Owned the foreground but the injection still went through ->
-                # the limit was not enforced. Non-failing WARN so the suite stays
-                # green where OS enforcement is not yet active.
+                # the limit was not enforced. The build-support gate above
+                # already excused hosts that lack the flag, so this is real.
                 $injGotV = Format-Verdict $injGot 'blocked' 'allowed'
-                Record-Result -Phase 'P4b' -Name 'scenarioA: INJECTION enforcement' -Status 'warn' -Detail "expected=blocked; got=$injGotV; NOT ENFORCED; diag=$injDiag"
+                Record-Result -Phase 'P4b' -Name 'scenarioA: INJECTION enforcement' -Pass $false -Detail "expected=blocked; got=$injGotV; NOT ENFORCED; diag=$injDiag"
             }
         }
 

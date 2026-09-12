@@ -55,7 +55,19 @@ function Phase-T1DenyForced {
     # vacuously (the run aborts, so the child never echoes the secret). Skip
     # until the capability is present; it then asserts real deny enforcement.
     if (-not $Script:Caps.SupportsDeniedPaths) {
-        Record-Result -Phase 'P4d' -Name 'BaseContainer deny-ACE enforcement' -Status 'skip' -Detail 'BaseContainer does not yet support deniedPaths (no SANDBOX_CAP_DENY_PATHS)'
+        # Enforcement cannot be tested, but the documented refusal can: the
+        # PSEC path rejects deniedPaths outright rather than running unenforced
+        # (base_container_runner.rs:2285).
+        $rejDir = Join-Path $ScratchRoot 'deniedT1-unsupported'
+        New-Item -ItemType Directory -Force -Path $rejDir | Out-Null
+        $rejCfg = New-Config -Name 'denied-unsupported' `
+            -CommandLine "$env:SystemRoot\System32\cmd.exe /c echo hi" `
+            -ReadWrite @((Join-Path $ScratchRoot 'rw')) -Denied @($rejDir)
+        $rejLog = Join-Path $ScratchRoot 'logs\denied-unsupported.log'
+        $rej = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $rejCfg -LogPath $rejLog -TimeoutSec 30
+        Record-Result -Phase 'P4d' -Name 'deniedPaths is refused, not silently unenforced, without SANDBOX_CAP_DENY_PATHS' `
+            -Pass (Test-WasRejected $rej) `
+            -Detail "exit=$($rej.ExitCode); stderr=$(Format-Snippet $rej.Stderr)"
         return
     }
 

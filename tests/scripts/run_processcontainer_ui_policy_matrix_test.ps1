@@ -142,7 +142,7 @@ function Invoke-UiPolicyCase {
                 continue
             }
             if ($want -eq 'blocked' -and $got -ne 'PASS') {
-                Record-Result -Phase $Phase -Name $name -Status 'warn' -Detail "expected=blocked; got=$gotV; NOT ENFORCED; diag=$diag"
+                Record-Result -Phase $Phase -Name $name -Pass $false -Detail "expected=blocked; got=$gotV; NOT ENFORCED; diag=$diag"
                 continue
             }
         }

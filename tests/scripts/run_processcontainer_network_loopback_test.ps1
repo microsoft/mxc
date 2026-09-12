@@ -105,9 +105,15 @@ function Phase-NetworkHostLoopback {
             if ($accepted) {
                 Record-Result -Phase 'P8d' -Name 'hostLoopback=allow reaches the host loopback anchor (PSEC 1.1)' `
                     -Pass $true -Detail 'bidirectional host-loopback grant honored'
-            } else {
+            } elseif ($rejected) {
                 Record-Result -Phase 'P8d' -Name 'hostLoopback=allow rejected (PSEC 1.1 ingress contract unavailable)' `
                     -Status 'skip' -Detail "exit=$($allow.Result.ExitCode); documented fallback when contract 1.1 is absent"
+            } else {
+                # Neither enforced nor refused. Calling this a skip would name an
+                # outcome that did not happen.
+                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow reaches the host loopback anchor (PSEC 1.1)' `
+                    -Pass $false `
+                    -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); neither reached the anchor nor produced a typed rejection"
             }
         } else {
             $rejected = Test-WasRejected $allow
