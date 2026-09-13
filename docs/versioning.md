@@ -114,6 +114,40 @@ Both files are generated development artifacts rather than released schemas.
 See [Schema Code Generation](schema-codegen.md) for their regeneration commands
 and independent drift gates.
 
+### Typed state-aware dispatch
+
+Exact development requests adapt directly to a `StateAwareOperation` and
+cross-cutting `ExecutionRequest`. The operation determines its phase:
+provision retains a backend tag and optional runtime configuration, while
+start, exec, stop, and deprovision carry their required sandbox ID.
+`ParsedStateAwareRequest` exposes read-only accessors, not independently
+writable phase, containment, or payload fields. Successful production requests
+retain neither raw backend JSON nor source text.
+
+The engine resolves provision by containment and later phases by the sandbox
+ID prefix. After the existing experimental and build-availability gates, its
+checked binding helpers produce `BoundStateAwareRequest<B>` for both relayed
+lifecycle dispatch and streaming exec. An incompatible operation/backend pair
+is an error, never an absent configuration or a fallback to another backend.
+The dispatcher borrows configuration for validation, then moves it into the
+phase method. It does not deserialize backend payloads.
+
+Configuration presence is preserved: absent provision configuration is `None`,
+a present empty object is `Some(Config { ...: None })`, and an explicit empty
+`appId` remains `Some("")`. Outer absent/empty experimental wrappers that have
+the same backend meaning need not survive. WSLC uses runtime-owned
+`models::WslcProvisionConfig`; the backend still chooses an omitted image's
+default. Top-level telemetry and network/UI presence flags remain in common
+normalization. Source-aware errors remain at exact structural deserialization.
+
+Independent test-only rolling observations retain legacy payload extraction for
+differential coverage, including intentional exact-stricter rejections such as
+`appId: null`. They are not production request types or dispatch inputs.
+Recording backends cover binding, configuration delivery, validation order,
+dry-run behavior, and both exec topologies without requiring live sandboxes.
+This migration changes no registered JSON contract or generated schema/type
+artifact.
+
 ### Trust boundary vs schema defaults
 
 Schemas in `stable/` are immutable: they document the input shape that was
