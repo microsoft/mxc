@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Enables the MXC_FORCE_TIER environment override for dedicated test executors.
+# Never enable this feature for production binaries.
+force-tier-testing = []
 # Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).
 # OFF by default: production wxc-exec cannot resolve or spawn bfscfg.exe,
 # and `fallback_detector::detect` naturally falls through T2 to T3 because

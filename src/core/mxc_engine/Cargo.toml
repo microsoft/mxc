@@ -58,6 +58,8 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "dep:isolation_session_common",
 ]
+# Forwards the test-executor-only ProcessContainer tier override.
+force-tier-testing = ["appcontainer_common/force-tier-testing"]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs"]
 
