@@ -83,7 +83,7 @@ fn emit_ts_with_banner(schema: &Value, banner: &str) -> String {
 
     if let Some(Value::Object(defs)) = root.get("definitions") {
         for (name, def) in defs {
-            emit_definition(&mut out, name, def);
+            emit_definition(&mut out, name, def, defs);
         }
     }
 
@@ -136,7 +136,12 @@ fn collect_references(value: &Value, references: &mut Vec<String>) {
 }
 
 /// Emit one named definition: an enum (string union) or an object interface.
-fn emit_definition(out: &mut String, name: &str, def: &Value) {
+fn emit_definition(
+    out: &mut String,
+    name: &str,
+    def: &Value,
+    definitions: &serde_json::Map<String, Value>,
+) {
     let obj = match def.as_object() {
         Some(o) => o,
         None => {
@@ -157,7 +162,7 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         return;
     }
 
-    if let Some(variants) = object_union_variants(obj) {
+    if let Some(variants) = object_union_variants(obj, definitions) {
         push_doc(out, obj.get("description"));
         out.push_str(&format!(
             "export type {name} = {};\n\n",
@@ -179,18 +184,26 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
     emit_object(out, name, obj_as_map(def));
 }
 
-fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
+fn object_union_variants(
+    obj: &serde_json::Map<String, Value>,
+    definitions: &serde_json::Map<String, Value>,
+) -> Option<Vec<String>> {
     let one_of = obj.get("oneOf")?.as_array()?;
     let all_properties = one_of
         .iter()
+        .filter_map(|branch| object_union_branch(branch, definitions))
+        .map(|(_, branch)| branch)
         .filter_map(|branch| branch.get("properties").and_then(Value::as_object))
         .flat_map(|properties| properties.keys().cloned())
         .collect::<std::collections::BTreeSet<_>>();
     let mut variants = Vec::with_capacity(one_of.len());
 
     for branch in one_of {
-        let branch = branch.as_object()?;
+        let (reference, branch) = object_union_branch(branch, definitions)?;
         if branch.get("type").and_then(Value::as_str) != Some("object") {
+            return None;
+        }
+        if reference.is_some() && is_open_object(branch) {
             return None;
         }
         let properties = branch.get("properties")?.as_object()?;
@@ -221,10 +234,37 @@ fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<Str
                 .difference(&branch_properties)
                 .map(|name| format!("{}?: never", field_key(name))),
         );
-        variants.push(format!("{{ {} }}", fields.join("; ")));
+        if let Some(reference) = reference {
+            variants.push(format!(
+                "{} & {{ {} }}",
+                ref_name(reference),
+                fields
+                    .into_iter()
+                    .filter(|field| field.ends_with("?: never"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        } else {
+            variants.push(format!("{{ {} }}", fields.join("; ")));
+        }
     }
 
     Some(variants)
+}
+
+fn object_union_branch<'a>(
+    branch: &'a Value,
+    definitions: &'a serde_json::Map<String, Value>,
+) -> Option<(Option<&'a str>, &'a serde_json::Map<String, Value>)> {
+    let branch = branch.as_object()?;
+    match branch.get("$ref").and_then(Value::as_str) {
+        Some(reference) => {
+            let name = reference.strip_prefix("#/definitions/")?;
+            let definition = definitions.get(name)?.as_object()?;
+            Some((Some(reference), definition))
+        }
+        None => Some((None, branch)),
+    }
 }
 
 /// Collect a string-union's members from either a `oneOf` of single-value
@@ -347,17 +387,38 @@ fn ts_type(prop: &Value) -> (String, bool) {
 
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
         let mut nullable = false;
-        let mut ty = "unknown".to_string();
+        let mut types = Vec::new();
         for branch in any_of {
             if is_null_schema(branch) {
                 nullable = true;
             } else {
                 let (t, n) = ts_type(branch);
-                ty = t;
+                if !types.contains(&t) {
+                    types.push(t);
+                }
                 nullable = nullable || n;
             }
         }
+        let ty = match types.as_slice() {
+            [] => "unknown".to_string(),
+            [only] => only.clone(),
+            _ => types.join(" | "),
+        };
         return (ty, nullable);
+    }
+
+    if let Some(Value::Array(one_of)) = obj.get("oneOf") {
+        let mut types = Vec::new();
+        for branch in one_of {
+            let (ty, nullable) = ts_type(branch);
+            if nullable {
+                types.push("null".to_string());
+            }
+            if !types.contains(&ty) {
+                types.push(ty);
+            }
+        }
+        return (types.join(" | "), false);
     }
 
     match obj.get("type") {
@@ -429,7 +490,7 @@ fn push_doc(out: &mut String, description: Option<&Value>) {
     if let Some(text) = description.and_then(|v| v.as_str()) {
         out.push_str("/**\n");
         for line in jsdoc_lines(text) {
-            out.push_str(&format!(" * {line}\n"));
+            out.push_str(&jsdoc_line(" *", &line));
         }
         out.push_str(" */\n");
     }
@@ -440,9 +501,21 @@ fn push_field_doc(out: &mut String, description: Option<&Value>) {
     if let Some(text) = description.and_then(|v| v.as_str()) {
         out.push_str("  /**\n");
         for line in jsdoc_lines(text) {
-            out.push_str(&format!("   * {line}\n"));
+            out.push_str(&jsdoc_line("   *", &line));
         }
         out.push_str("   */\n");
+    }
+}
+
+/// Render one JSDoc body line under `prefix`, leaving a paragraph break as a
+/// bare `*` rather than `* ` — a trailing space on a blank line is a
+/// whitespace error that `git diff --check` (and most linters) reject, and a
+/// doc comment with a paragraph break would otherwise emit one.
+fn jsdoc_line(prefix: &str, line: &str) -> String {
+    if line.is_empty() {
+        format!("{prefix}\n")
+    } else {
+        format!("{prefix} {line}\n")
     }
 }
 
@@ -459,6 +532,33 @@ fn jsdoc_lines(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn paragraph_breaks_in_docs_carry_no_trailing_whitespace() {
+        // A blank JSDoc line must be a bare `*`: `* ` is a trailing-whitespace
+        // error that `git diff --check` rejects in the committed artifacts.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "field": { "description": "First.\n\nSecond.", "type": "string" }
+            },
+            "definitions": {
+                "Thing": {
+                    "description": "Top.\n\nBottom.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(ts.contains("\n *\n"), "definition paragraph break: {ts}");
+        assert!(ts.contains("\n   *\n"), "field paragraph break: {ts}");
+        for line in ts.lines() {
+            assert_eq!(line, line.trim_end(), "trailing whitespace in: {line:?}");
+        }
+    }
 
     #[test]
     fn emits_string_union_from_one_of() {
@@ -568,6 +668,80 @@ mod tests {
         assert!(
             ts.contains(
                 "export type Proxy = { url: string; builtin?: never } | { builtin: true; url?: never };"
+            ),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_non_nullable_any_of_as_a_union() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Choice": {
+                    "anyOf": [
+                        { "$ref": "#/definitions/Legacy" },
+                        { "$ref": "#/definitions/Directional" }
+                    ]
+                },
+                "Legacy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                },
+                "Directional": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(
+            ts.contains("export type Choice = Legacy | Directional;"),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_exclusive_ref_object_union() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Choice": {
+                    "oneOf": [
+                        { "$ref": "#/definitions/Legacy" },
+                        { "$ref": "#/definitions/Directional" }
+                    ]
+                },
+                "Legacy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "defaultPolicy": { "type": "string" },
+                        "allowLocalNetwork": { "type": "boolean" }
+                    },
+                    "required": ["defaultPolicy", "allowLocalNetwork"]
+                },
+                "Directional": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "egress": { "type": "object" },
+                        "ingress": { "type": "object" }
+                    },
+                    "required": ["egress", "ingress"]
+                }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(
+            ts.contains(
+                "export type Choice = Legacy & { egress?: never; ingress?: never } | Directional & { allowLocalNetwork?: never; defaultPolicy?: never };"
             ),
             "{ts}"
         );

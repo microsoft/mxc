@@ -185,6 +185,29 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void IsolationSessionProvisionOptions_AcceptsDirectionalUnrestrictedNetwork()
+    {
+        var options = new IsolationSessionProvisionOptions(
+            new StateAwareNetworkPolicy
+            {
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                Ingress = new NetworkIngressPolicy
+                {
+                    Default = NetworkAction.Allow,
+                    HostLoopback = NetworkAction.Allow,
+                },
+            });
+
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.IsolationSession,
+            options);
+        var network = envelope["network"]!.AsObject();
+        Assert.Equal("allow", network["egress"]!["default"]!.GetValue<string>());
+        Assert.Equal("allow", network["ingress"]!["default"]!.GetValue<string>());
+        Assert.Equal("allow", network["ingress"]!["hostLoopback"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void BuildProvisionEnvelope_RevalidatesMutatedIsolationSessionNetwork()
     {
         var options = new IsolationSessionProvisionOptions(
