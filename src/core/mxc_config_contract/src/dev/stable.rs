@@ -334,17 +334,6 @@ pub struct Lxc {
     pub release: String,
 }
 
-string_enum! {
-    /// Launch method for macOS Seatbelt config.
-    #[derive(Debug)]
-    pub enum LaunchMethod {
-        /// Launch the contained process directly through `exec`.
-        Exec => ["exec"],
-        /// Launch the contained application through macOS LaunchServices.
-        Open => ["open"],
-    }
-}
-
 /// macOS Seatbelt backend settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -356,9 +345,6 @@ pub struct Seatbelt {
     /// Whether GUI application access is allowed.
     #[serde(default)]
     pub gui_access: OptionalField<bool>,
-    /// Optional method used to launch the contained process.
-    #[serde(default)]
-    pub launch_method: OptionalField<LaunchMethod>,
     /// Whether the contained process may allocate nested pseudo-terminals.
     #[serde(default)]
     pub nested_pty: OptionalField<bool>,

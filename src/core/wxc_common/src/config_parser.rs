@@ -644,6 +644,7 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
 
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
+    validate_seatbelt_launch_method_version(config)?;
     validate_telemetry_field_version(config)?;
     validate_inherit_default_env_field_version(config)
 }
@@ -671,6 +672,36 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
 
     if has_directional_network || has_runtime_config || has_process_container_network {
         return Err(directional_network_version_error());
+    }
+    Ok(())
+}
+
+fn validate_seatbelt_launch_method_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    let has_launch_method = ["seatbelt", "macos_sandbox"]
+        .into_iter()
+        .filter_map(|key| config.get(key))
+        .filter_map(serde_json::Value::as_object)
+        .any(|seatbelt| seatbelt.contains_key("launchMethod"));
+    if !has_launch_method {
+        return Ok(());
+    }
+    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Ok(version) = semver::Version::parse(version) else {
+        // The ordinary schema-version validator owns malformed-version
+        // diagnostics so this feature gate does not mask the more useful error.
+        return Ok(());
+    };
+    if version.major == 0 && version.minor >= 9 {
+        return Err(WxcError::ConfigParse(
+            "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha; \
+             remove the field (the contained process is always launched with exec)"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -10385,6 +10416,59 @@ mod tests {
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(true));
         assert_eq!(telem.requested_sandbox_kind, Some("process"));
+    }
+
+    #[test]
+    fn seatbelt_launch_method_rejected_from_09_across_one_shot_loaders() {
+        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"seatbelt":{"launchMethod":"open"}}"#;
+        let expected = "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha";
+
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error =
+            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn seatbelt_launch_method_rejected_from_09_under_section_alias() {
+        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"macos_sandbox":{"launchMethod":"exec"}}"#;
+        let mut logger = test_logger();
+
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'seatbelt.launchMethod' was removed"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn seatbelt_launch_method_still_honored_before_09() {
+        // 0.7 and 0.8 are published schemas, so the field keeps working there.
+        for version in ["0.7.0-alpha", "0.8.0-alpha"] {
+            let json = format!(
+                r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"seatbelt":{{"launchMethod":"open"}}}}"#
+            );
+            let mut logger = test_logger();
+
+            let req = load_request_from_json(&json, &mut logger)
+                .unwrap_or_else(|error| panic!("{version} should still accept it: {error:?}"));
+            let cfg = req.seatbelt.expect("seatbelt should be populated");
+            assert!(matches!(
+                cfg.launch_method,
+                crate::models::LaunchMethod::Open
+            ));
+        }
     }
 
     #[test]

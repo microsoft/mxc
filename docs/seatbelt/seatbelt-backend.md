@@ -339,11 +339,25 @@ Set under a top-level `"seatbelt"` key.
 | Option | Type | Default | What it does |
 |---|---|---|---|
 | `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
-| `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
+| `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
-| `launchMethod` | `"exec"` \| `"open"` | `"exec"` | `"exec"` applies `sandbox_init()` then execs directly. `"open"` launches Terminal.app via LaunchServices and sandboxes the inner shell — required only for Terminal.app. |
+| `launchMethod` | `"exec"` \| `"open"` | `"exec"` |`"exec"` applies `sandbox_init()` then execs directly. `"open"` runs the command as the first shell of a Terminal.app instance — and sandboxes that shell. Terminal itself runs unsandboxed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
+
+<details>
+<summary><code>guiAccess</code> — exactly what it opens</summary>
+
+All `mach-lookup` (an allowlist would be fragile — the services GUI frameworks
+need vary by macOS release), plus `mach-register`, `iokit-open` for GPU/Metal,
+`pseudo-tty` with the `/dev/ttys*` and `/dev/ptmx` devices, and POSIX shared
+memory.
+
+It also grants read **and** write across all of `/private/tmp` and
+`/private/var/folders`, regardless of your `filesystem` policy. Deny rules are
+emitted last, so a `deniedPaths` entry still overrides this grant.
+
+</details>
 
 <details>
 <summary><code>keychainAccess</code> — exactly what it opens</summary>
@@ -588,13 +602,11 @@ to the proxy's port and nothing else. What isn't guaranteed is that a client
 uses the proxy at all. See
 [Proxy support](#proxy-support-what-is-and-isnt-enforced).
 
-**GUI support is limited to native apps.** Third-party AppKit apps (Alacritty)
-work with `guiAccess: true` and the default `launchMethod: "exec"`. Terminal.app
-needs `launchMethod: "open"` because Apple Launch Constraints kill it when
-exec'd by an unauthorized parent. Other Apple system apps (Calculator, TextEdit)
-can't be sandboxed at all — Launch Constraints plus no inner shell to constrain.
-Electron apps (VS Code, Spotify) may escape by re-launching via helper
-processes.
+**Terminal.app + Terminal emulators can't start a login shell.** macOS terminals start each
+session through setuid-root `/usr/bin/login`, and a sandboxed process may never
+exec a setuid binary (`forbidden-exec-sugid`). No profile grant lifts that. An
+emulator that can be configured to run a command directly instead of a login
+shell (e.g. iTerm2's *Custom Command*) avoids the setuid exec.
 
 **No container abstraction.** No persistent container to attach to or destroy —
 every invocation is a fresh process tree.
@@ -612,3 +624,17 @@ Sandbox.
 `run_seatbelt_<area>_test.sh` scripts can be run on their own. There is no skip
 path — a missing prerequisite fails, so a green run always means the assertions
 executed.
+
+## Upcoming alpha 0.9 changes
+
+**`launchMethod` is removed in schema `0.9.0-alpha`.** A `0.9` config that still
+sets it is rejected; drop the field and the process is launched with `exec`,
+which is how every other backend behaves. Nothing else about the option changes
+on `0.7.0-alpha` and `0.8.0-alpha` — those are published schemas, so `"open"`
+keeps working there.
+
+In its current form `"open"` puts the sandboxed process in a separate,
+*unsandboxed* instance of Terminal.app. Only the shell inside it is confined;
+Terminal itself never is. If that use case matters to your workload, sandbox a
+terminal emulator such as iTerm2 that can be configured not to start its shell
+as a login shell, and enable `guiAccess` in the config.
