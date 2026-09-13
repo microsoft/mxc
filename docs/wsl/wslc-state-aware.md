@@ -43,12 +43,20 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates the public `experimental.wslc.*` wire schema + cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
 | Policy honor matrix | `src/backends/wslc/common/src/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
 | Daemon client | `src/backends/wslc/common/src/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
 | Daemon | `src/backends/wslc/daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
 | Engine arm | `src/core/mxc_engine/src/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
 | Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
+
+Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
+`experimental.wslc.provision`. Engine-side checked binding preserves an absent
+config, a present empty config, and supplied `image`/`imageTarPath` values
+without reparsing JSON. An omitted image remains `None` until the backend
+chooses its default. The separate rolling `wire::WslcProvisionPhase` survives
+only as schema/type-oracle input and test characterization, not the backend's
+provision associated type.
 
 ## Sandbox IDs
 

@@ -16,8 +16,9 @@ use crate::mxc_error::MxcError;
 #[cfg(test)]
 use crate::network_parser::{directional_network_version_error, supports_directional_network};
 use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
+use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use crate::state_aware_wire::StateAwareWireInput;
+use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use mxc_config_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
@@ -26,6 +27,15 @@ use serde_json::value::RawValue;
 #[cfg(test)]
 use std::borrow::Cow;
 use std::fs;
+
+#[cfg(test)]
+pub(crate) mod legacy_payload_reference;
+#[cfg(test)]
+pub(crate) mod legacy_state_aware_request;
+#[cfg(test)]
+use legacy_state_aware_request::{
+    LegacyMxcRequest, LegacyStateAwareRequest, LegacyStateAwareWireInput,
+};
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -424,17 +434,9 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
             ParseError::OneShot(error)
         });
     }
-    let state_aware = phase.is_some();
     let request = deserialize_development_request(json, phase)?;
-    let adapted =
-        crate::config_contract_adapters::dev::adapt_request(request, json).map_err(|error| {
-            let message = format!("Failed to adapt exact request: {error}");
-            if state_aware {
-                ParseError::StateAware(MxcError::malformed_request(message))
-            } else {
-                ParseError::OneShot(WxcError::ConfigParse(message))
-            }
-        })?;
+    let adapted = crate::config_contract_adapters::dev::adapt_request(request)
+        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
 
     match adapted {
         crate::config_contract_adapters::dev::AdaptedWireRequest::OneShot(config) => {
@@ -698,7 +700,10 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
 /// deserialises the typed model directly from source text so policy errors
 /// retain line and column information (`serde_json::Value` would discard it).
 #[cfg(test)]
-fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+fn parse_mxc_request_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<LegacyMxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
     if discriminator.phase.is_some() {
@@ -708,7 +713,7 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
         convert_wire_state_aware(json_str, discriminator.experimental, logger)
-            .map(MxcRequest::StateAware)
+            .map(LegacyMxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
@@ -726,7 +731,7 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, false)
-            .map(MxcRequest::OneShot)
+            .map(LegacyMxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
 }
@@ -878,6 +883,7 @@ const CURRENT_SCHEMA_VERSION: &str = "0.9.0-alpha";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
+#[cfg(test)]
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
 /// Validate that the schema version (semver) is supported by this binary.
@@ -1102,6 +1108,7 @@ fn validate_single_backend_section(
 /// `containment`. When `containment` is `None` (state-aware non-provision
 /// phases can resolve the backend from `sandboxId`), a single key is
 /// allowed; two or more is unambiguously wrong.
+#[cfg(test)]
 fn validate_experimental_backend_keys(
     containment: Option<&ContainmentBackend>,
     experimental_raw: Option<&serde_json::Value>,
@@ -1913,7 +1920,7 @@ fn convert_wire_config(
 pub(crate) fn parse_rolling_state_aware_wire_input(
     json: &str,
     experimental: Option<&RawValue>,
-) -> Result<StateAwareWireInput, WxcError> {
+) -> Result<LegacyStateAwareWireInput, WxcError> {
     let experimental = experimental.map(RawValue::get);
     let experimental_span = experimental
         .map(|raw| experimental_source_span(json, raw))
@@ -1940,7 +1947,7 @@ pub(crate) fn parse_rolling_state_aware_wire_input(
     // The raw value above is authoritative for state-aware experimental data.
     config.experimental = None;
 
-    Ok(StateAwareWireInput {
+    Ok(LegacyStateAwareWireInput {
         config,
         experimental_raw,
         source_text: json.into(),
@@ -1952,18 +1959,45 @@ fn convert_wire_state_aware(
     json: &str,
     experimental: Option<&RawValue>,
     logger: &mut Logger,
-) -> Result<ParsedStateAwareRequest, WxcError> {
+) -> Result<LegacyStateAwareRequest, WxcError> {
     let input = parse_rolling_state_aware_wire_input(json, experimental)?;
-    normalize_state_aware(input, logger)
+    normalize_legacy_state_aware(input, logger)
 }
 
-/// Apply the state-aware validation and runtime normalization shared by the
-/// rolling and exact-contract parser paths.
+/// Normalize checked exact input without retaining source or backend JSON.
 fn normalize_state_aware(
-    input: StateAwareWireInput,
+    input: StateAwareInput,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    let StateAwareWireInput {
+    let (common, operation) = input.into_parts();
+    let request = normalize_state_aware_common(
+        common,
+        NormalizationContext {
+            phase: operation.phase(),
+            containment: match &operation {
+                StateAwareOperation::Provision(provision) => Some(match provision {
+                    StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
+                    StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
+                    StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
+                }),
+                StateAwareOperation::Start { .. }
+                | StateAwareOperation::Exec { .. }
+                | StateAwareOperation::Stop { .. }
+                | StateAwareOperation::Deprovision { .. } => None,
+            },
+            sandbox_id: operation.sandbox_id(),
+        },
+        logger,
+    )?;
+    Ok(ParsedStateAwareRequest::new(request, operation))
+}
+
+#[cfg(test)]
+fn normalize_legacy_state_aware(
+    input: LegacyStateAwareWireInput,
+    logger: &mut Logger,
+) -> Result<LegacyStateAwareRequest, WxcError> {
+    let LegacyStateAwareWireInput {
         config: mut cfg,
         experimental_raw,
         source_text,
@@ -2028,7 +2062,6 @@ fn normalize_state_aware(
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
 
     let sandbox_id = cfg.sandbox_id.clone();
-    let network_supplied = cfg.network.is_some();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -2067,35 +2100,59 @@ fn normalize_state_aware(
     cfg.process_container = None;
     cfg.lxc = None;
     cfg.lifecycle = None;
-    if phase != Phase::Provision {
-        cfg.containment = sandbox_id
-            .as_deref()
-            .and_then(state_aware_containment_from_id);
-    }
+    let provision_containment = cfg.containment.take();
+    let request = normalize_state_aware_common(
+        cfg,
+        NormalizationContext {
+            phase,
+            containment: provision_containment,
+            sandbox_id: sandbox_id.as_deref(),
+        },
+        logger,
+    )?;
 
-    let require_process = phase == Phase::Exec;
-    let state_aware_wslc_exec = phase == Phase::Exec
-        && cfg
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request = convert_wire_config(cfg, logger, require_process, state_aware_wslc_exec)?;
-    if phase != Phase::Provision && !network_supplied {
-        request.policy.network_egress = None;
-        request.policy.network_ingress = None;
-    }
-
-    Ok(ParsedStateAwareRequest {
+    Ok(LegacyStateAwareRequest {
         request,
         phase,
         containment,
         sandbox_id,
         experimental_raw,
-        // Retain the decoded request text so the dispatcher can deserialize each
-        // `experimental.<backend>.<phase>` sub-slice positionally and report
-        // typed errors with whole-file line/column (parity with base config).
+        // Only the legacy diagnostic reference retains source for positional
+        // phase-fragment errors; production dispatch consumes typed operations.
         source_text: Some(source_text),
     })
+}
+
+/// Temporary routing view; production derives it exclusively from the operation.
+struct NormalizationContext<'a> {
+    phase: Phase,
+    containment: Option<wire::Containment>,
+    sandbox_id: Option<&'a str>,
+}
+
+fn normalize_state_aware_common(
+    mut common: wire::MxcConfig,
+    context: NormalizationContext<'_>,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError> {
+    let network_supplied = common.network.is_some();
+    common.containment = if context.phase == Phase::Provision {
+        context.containment
+    } else {
+        context.sandbox_id.and_then(state_aware_containment_from_id)
+    };
+    let require_process = context.phase == Phase::Exec;
+    let state_aware_wslc_exec = require_process
+        && common
+            .containment
+            .as_ref()
+            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
+    let mut request = convert_wire_config(common, logger, require_process, state_aware_wslc_exec)?;
+    if context.phase != Phase::Provision && !network_supplied {
+        request.policy.network_egress = None;
+        request.policy.network_ingress = None;
+    }
+    Ok(request)
 }
 
 /// Byte range `[start, end)` of the borrowed `experimental` value within the
@@ -2293,9 +2350,16 @@ mod tests {
             phase: Phase,
             containment: Option<ContainmentBackend>,
             sandbox_id: Option<String>,
-            experimental_raw: Option<serde_json::Value>,
-            source_text: Option<String>,
+            provision: Option<ProvisionSnapshot>,
         },
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum ProvisionSnapshot {
+        IsolationSession(Option<Option<String>>),
+        WindowsSandbox,
+        Wslc(Option<(Option<String>, Option<String>)>),
+        InvalidLegacyPayload(String),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -2303,12 +2367,60 @@ mod tests {
             match request {
                 MxcRequest::OneShot(request) => Self::OneShot(request.into()),
                 MxcRequest::StateAware(request) => Self::StateAware {
+                    request: request.request().into(),
+                    phase: request.phase(),
+                    containment: request.containment(),
+                    sandbox_id: request.sandbox_id().map(str::to_owned),
+                    provision: match request.operation() {
+                        StateAwareOperation::Provision(provision) => Some(match provision {
+                            StateAwareProvision::IsolationSession(config) => {
+                                ProvisionSnapshot::IsolationSession(
+                                    config.as_ref().map(|config| config.app_id.clone()),
+                                )
+                            }
+                            StateAwareProvision::WindowsSandbox => {
+                                ProvisionSnapshot::WindowsSandbox
+                            }
+                            StateAwareProvision::Wslc(config) => {
+                                ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
+                                    (config.image.clone(), config.image_tar_path.clone())
+                                }))
+                            }
+                        }),
+                        _ => None,
+                    },
+                },
+            }
+        }
+    }
+
+    impl From<&LegacyMxcRequest> for RequestSnapshot {
+        fn from(request: &LegacyMxcRequest) -> Self {
+            match request {
+                LegacyMxcRequest::OneShot(request) => Self::OneShot(request.into()),
+                LegacyMxcRequest::StateAware(request) => Self::StateAware {
                     request: (&request.request).into(),
                     phase: request.phase,
                     containment: request.containment.clone(),
                     sandbox_id: request.sandbox_id.clone(),
-                    experimental_raw: request.experimental_raw.clone(),
-                    source_text: request.source_text.as_deref().map(str::to_string),
+                    provision: if request.phase == Phase::Provision {
+                        match request.containment {
+                            Some(ContainmentBackend::IsolationSession) => Some(
+                                request.deserialize_config::<crate::models::IsolationSessionProvisionConfig>("isolation_session", "provision")
+                                    .map(|config| ProvisionSnapshot::IsolationSession(config.map(|config| config.app_id)))
+                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
+                            ),
+                            Some(ContainmentBackend::WindowsSandbox) => Some(ProvisionSnapshot::WindowsSandbox),
+                            Some(ContainmentBackend::Wslc) => Some(
+                                request.deserialize_config::<wire::WslcProvisionPhase>("wslc", "provision")
+                                    .map(|config| ProvisionSnapshot::Wslc(config.map(|config| (config.image, config.image_tar_path))))
+                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
+                            ),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    },
                 },
             }
         }
@@ -2494,7 +2606,10 @@ mod tests {
         reason: &'static str,
     }
 
-    fn snapshot(result: Result<MxcRequest, ParseError>, logger: &Logger) -> ParserSnapshot {
+    fn snapshot<T>(result: Result<T, ParseError>, logger: &Logger) -> ParserSnapshot
+    where
+        for<'a> RequestSnapshot: From<&'a T>,
+    {
         let logger = logger.into();
         match result {
             Ok(request) => ParserSnapshot::Accepted(AcceptedSnapshot {
@@ -4680,38 +4795,29 @@ mod tests {
         parsed: &ParsedStateAwareRequest,
         case: &DevelopmentStateAwareRootCase,
     ) {
-        assert_eq!(parsed.phase, case.expected_phase, "{}", case.name);
+        assert_eq!(parsed.phase(), case.expected_phase, "{}", case.name);
         assert_eq!(
-            parsed.containment.as_ref(),
-            case.expected_declared_containment.as_ref(),
+            parsed.containment(),
+            case.expected_declared_containment,
             "{}: declared containment",
             case.name
         );
         assert_eq!(
-            &parsed.request.containment, &case.expected_runtime_containment,
+            parsed.request().containment,
+            case.expected_runtime_containment,
             "{}: runtime containment",
             case.name
         );
         assert_eq!(
-            parsed.sandbox_id.as_deref(),
+            parsed.sandbox_id(),
             case.expected_sandbox_id,
             "{}: sandbox id",
             case.name
         );
         assert_eq!(
-            parsed.request.script_code, case.expected_script,
+            parsed.request().script_code,
+            case.expected_script,
             "{}",
-            case.name
-        );
-        assert!(
-            parsed.experimental_raw.is_none(),
-            "{}: experimental payload",
-            case.name
-        );
-        assert_eq!(
-            parsed.source_text.as_deref(),
-            Some(case.json),
-            "{}: source text",
             case.name
         );
     }
@@ -4729,46 +4835,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exact_parser_preserves_development_raw_experimental_and_telemetry() {
-        let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session",
-            "telemetry": {"enabled": false},
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {"appId": "Contoso.App"}
-                }
-            }
-        }"#;
+    fn development_configuration_json(telemetry_enabled: bool) -> String {
+        format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "phase": "provision",
+                "containment": "isolation_session",
+                "telemetry": {{"enabled": {telemetry_enabled}}},
+                "network": {{
+                    "defaultPolicy": "allow",
+                    "allowLocalNetwork": true
+                }},
+                "experimental": {{
+                    "isolation_session": {{
+                        "provision": {{"appId": "Contoso.App"}}
+                    }}
+                }}
+            }}"#
+        )
+    }
 
-        let parsed = match parse_exact_for_test(json).unwrap() {
-            MxcRequest::StateAware(parsed) => parsed,
-            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
-        };
-
+    fn assert_development_configuration(parsed: &ParsedStateAwareRequest, telemetry_enabled: bool) {
         assert_eq!(
-            parsed.experimental_raw,
-            Some(serde_json::json!({
-                "isolation_session": {
-                    "provision": {"appId": "Contoso.App"}
-                }
-            }))
+            parsed.operation(),
+            &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
+                crate::models::IsolationSessionProvisionConfig {
+                    app_id: Some("Contoso.App".into())
+                },
+            )))
         );
         assert_eq!(
             parsed
-                .request
+                .request()
                 .telemetry
                 .as_ref()
                 .and_then(|telemetry| telemetry.enabled),
-            Some(false)
+            Some(telemetry_enabled)
         );
-        assert_eq!(parsed.source_text.as_deref(), Some(json));
+    }
+
+    #[test]
+    fn exact_parser_preserves_development_configuration_and_telemetry() {
+        for telemetry_enabled in [false, true] {
+            let json = development_configuration_json(telemetry_enabled);
+            let parsed = match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::StateAware(parsed) => parsed,
+                MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+            };
+            assert_development_configuration(&parsed, telemetry_enabled);
+        }
     }
 
     #[test]
@@ -5172,8 +5287,8 @@ mod tests {
         config_json: &str,
         experimental_raw: Option<serde_json::Value>,
         source_text: &str,
-    ) -> StateAwareWireInput {
-        StateAwareWireInput {
+    ) -> LegacyStateAwareWireInput {
+        LegacyStateAwareWireInput {
             config: config_deserialize::from_str(config_json).unwrap(),
             experimental_raw,
             source_text: source_text.into(),
@@ -5181,7 +5296,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_owns_config_and_raw_validations() {
+    fn legacy_normalizer_owns_config_and_raw_validations() {
         let config_input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -5191,7 +5306,7 @@ mod tests {
             None,
             "config validation source",
         );
-        let config_error = match normalize_state_aware(config_input, &mut test_logger()) {
+        let config_error = match normalize_legacy_state_aware(config_input, &mut test_logger()) {
             Ok(_) => panic!("containment on start should be rejected"),
             Err(error) => error,
         };
@@ -5210,7 +5325,7 @@ mod tests {
             Some(serde_json::json!({"seatbelt": {}})),
             "raw validation source",
         );
-        let raw_error = match normalize_state_aware(raw_input, &mut test_logger()) {
+        let raw_error = match normalize_legacy_state_aware(raw_input, &mut test_logger()) {
             Ok(_) => panic!("moved experimental Seatbelt config should be rejected"),
             Err(error) => error,
         };
@@ -5223,7 +5338,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_populates_telemetry_from_neutral_input() {
+    fn legacy_normalizer_populates_telemetry_from_neutral_input() {
         let input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -5234,7 +5349,7 @@ mod tests {
             "telemetry source",
         );
 
-        let parsed = normalize_state_aware(input, &mut test_logger()).unwrap();
+        let parsed = normalize_legacy_state_aware(input, &mut test_logger()).unwrap();
 
         assert_eq!(parsed.phase, Phase::Start);
         assert_eq!(
@@ -5250,7 +5365,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_rejects_moved_experimental_telemetry() {
+    fn legacy_normalizer_rejects_moved_experimental_telemetry() {
         let input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -5260,7 +5375,7 @@ mod tests {
             "malformed telemetry source",
         );
 
-        let error = match normalize_state_aware(input, &mut test_logger()) {
+        let error = match normalize_legacy_state_aware(input, &mut test_logger()) {
             Ok(_) => panic!("moved experimental telemetry should be rejected"),
             Err(error) => error,
         };
@@ -5374,10 +5489,10 @@ mod tests {
         let MxcRequest::StateAware(parsed) = parsed else {
             panic!("expected a state-aware request");
         };
-        assert!(parsed.request.policy.network_proxy.is_enabled());
-        assert!(!parsed.request.policy.network_mode_specified);
-        assert!(parsed.request.policy.allowed_hosts.is_empty());
-        assert!(parsed.request.policy.blocked_hosts.is_empty());
+        assert!(parsed.request().policy.network_proxy.is_enabled());
+        assert!(!parsed.request().policy.network_mode_specified);
+        assert!(parsed.request().policy.allowed_hosts.is_empty());
+        assert!(parsed.request().policy.blocked_hosts.is_empty());
     }
 
     fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
@@ -5407,6 +5522,114 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_public_loaders_deliver_expected_provision_configuration() {
+        for (fixture, expected) in [
+            (
+                "isolation_session_state_aware_provision_appid.json",
+                StateAwareProvision::IsolationSession(Some(
+                    crate::models::IsolationSessionProvisionConfig {
+                        app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".into()),
+                    },
+                )),
+            ),
+            (
+                "isolation_session_state_aware_provision_appid_empty.json",
+                StateAwareProvision::IsolationSession(Some(
+                    crate::models::IsolationSessionProvisionConfig {
+                        app_id: Some(String::new()),
+                    },
+                )),
+            ),
+            (
+                "wslc_state_aware_provision.json",
+                StateAwareProvision::Wslc(Some(crate::models::WslcProvisionConfig {
+                    image: Some("alpine:latest".into()),
+                    image_tar_path: None,
+                })),
+            ),
+        ] {
+            let path = repository_root()
+                .join("tests")
+                .join("configs")
+                .join(fixture);
+            let json = fs::read_to_string(&path).unwrap();
+            let encoded = base64_encode(json.as_bytes());
+            let requests = [
+                load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap(),
+                load_mxc_request(&encoded, &mut test_logger(), true).unwrap(),
+                load_mxc_request_from_json(&json, &mut test_logger()).unwrap(),
+            ];
+            let reference = RequestSnapshot::from(&requests[0]);
+            for request in &requests {
+                assert_eq!(RequestSnapshot::from(request), reference, "{fixture}");
+                let MxcRequest::StateAware(parsed) = request else {
+                    panic!("{fixture}: expected state-aware request");
+                };
+                assert_eq!(
+                    parsed.operation(),
+                    &StateAwareOperation::Provision(expected.clone())
+                );
+                assert_eq!(parsed.phase(), Phase::Provision);
+                assert_eq!(parsed.containment(), Some(expected.containment()));
+                assert!(parsed.sandbox_id().is_none());
+                assert!(!parsed.request().experimental_enabled);
+                assert!(!parsed.request().dry_run);
+                assert!(!parsed.request().policy.ui_specified);
+            }
+        }
+    }
+
+    #[test]
+    fn public_non_provision_loaders_preserve_routing_policy_presence_and_telemetry() {
+        for (id, backend) in [
+            ("iso:example", ContainmentBackend::IsolationSession),
+            ("wsb:example", ContainmentBackend::WindowsSandbox),
+            ("wslc:example", ContainmentBackend::Wslc),
+        ] {
+            for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+                let process = if phase == Phase::Exec {
+                    r#","process":{"commandLine":"echo typed","env":["KEY=value"],"timeout":12}"#
+                } else {
+                    ""
+                };
+                let json = format!(
+                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}},"experimental":{{}}{process}}}"#
+                );
+                let encoded = base64_encode(json.as_bytes());
+                for parsed in [
+                    load_mxc_request_from_json(&json, &mut test_logger()).unwrap(),
+                    load_mxc_request(&encoded, &mut test_logger(), true).unwrap(),
+                ] {
+                    let MxcRequest::StateAware(parsed) = parsed else {
+                        panic!("expected state-aware request");
+                    };
+                    assert_eq!(parsed.phase(), phase);
+                    assert_eq!(parsed.sandbox_id(), Some(id));
+                    assert!(parsed.containment().is_none());
+                    assert_eq!(parsed.request().containment, backend);
+                    assert!(!parsed.request().policy.network_specified);
+                    assert!(!parsed.request().policy.network_mode_specified);
+                    assert!(!parsed.request().policy.ui_specified);
+                    assert!(parsed.request().policy.network_egress.is_none());
+                    assert!(parsed.request().policy.network_ingress.is_none());
+                    assert_eq!(
+                        parsed.request().telemetry.as_ref().unwrap().enabled,
+                        Some(false)
+                    );
+                    assert_eq!(
+                        parsed.request().script_code,
+                        if phase == Phase::Exec {
+                            "echo typed"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn exact_loader_accepts_every_development_state_aware_root() {
         for case in DEVELOPMENT_STATE_AWARE_ROOT_CASES {
             let parsed = load_state_aware(case.json);
@@ -5415,51 +5638,16 @@ mod tests {
     }
 
     #[test]
-    fn exact_loader_preserves_development_experimental_telemetry_and_source_text() {
-        let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session",
-            "telemetry": {
-                "enabled": true
-            },
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.App"
-                    }
-                }
-            }
-        }"#;
+    fn exact_loader_preserves_development_configuration_and_telemetry() {
+        for telemetry_enabled in [false, true] {
+            let json = development_configuration_json(telemetry_enabled);
+            let parsed = load_state_aware(&json);
 
-        let parsed = load_state_aware(json);
-
-        assert_eq!(
-            parsed.experimental_raw,
-            Some(serde_json::json!({
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.App"
-                    }
-                }
-            }))
-        );
-        assert_eq!(
-            parsed
-                .request
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
-        assert!(parsed.request.experimental.test.is_none());
-        assert!(parsed.request.experimental.windows_sandbox.is_none());
-        assert!(parsed.request.experimental.wslc.is_none());
-        assert_eq!(parsed.source_text.as_deref(), Some(json));
+            assert_development_configuration(&parsed, telemetry_enabled);
+            assert!(parsed.request().experimental.test.is_none());
+            assert!(parsed.request().experimental.windows_sandbox.is_none());
+            assert!(parsed.request().experimental.wslc.is_none());
+        }
     }
 
     #[test]
@@ -5467,11 +5655,11 @@ mod tests {
         let omitted = load_state_aware(
             r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wslc:abcd1234"}"#,
         );
-        assert!(!omitted.request.policy.network_specified);
-        assert!(!omitted.request.policy.network_mode_specified);
-        assert!(omitted.request.policy.network_egress.is_none());
-        assert!(omitted.request.policy.network_ingress.is_none());
-        assert!(!omitted.request.policy.network_proxy.is_enabled());
+        assert!(!omitted.request().policy.network_specified);
+        assert!(!omitted.request().policy.network_mode_specified);
+        assert!(omitted.request().policy.network_egress.is_none());
+        assert!(omitted.request().policy.network_ingress.is_none());
+        assert!(!omitted.request().policy.network_proxy.is_enabled());
 
         let proxy_only = load_state_aware(
             r#"{
@@ -5482,9 +5670,9 @@ mod tests {
                 "network": {"proxy": {"url": "http://proxy.example:8080"}}
             }"#,
         );
-        assert!(proxy_only.request.policy.network_specified);
-        assert!(!proxy_only.request.policy.network_mode_specified);
-        assert!(proxy_only.request.policy.network_proxy.is_enabled());
+        assert!(proxy_only.request().policy.network_specified);
+        assert!(!proxy_only.request().policy.network_mode_specified);
+        assert!(proxy_only.request().policy.network_proxy.is_enabled());
 
         let mode = load_state_aware(
             r#"{
@@ -5495,13 +5683,13 @@ mod tests {
                 "network": {"defaultPolicy": "allow"}
             }"#,
         );
-        assert!(mode.request.policy.network_specified);
-        assert!(mode.request.policy.network_mode_specified);
+        assert!(mode.request().policy.network_specified);
+        assert!(mode.request().policy.network_mode_specified);
         assert_eq!(
-            mode.request.policy.default_network_policy,
+            mode.request().policy.default_network_policy,
             NetworkPolicy::Allow
         );
-        assert!(!mode.request.policy.network_proxy.is_enabled());
+        assert!(!mode.request().policy.network_proxy.is_enabled());
     }
 
     #[test]
@@ -5535,9 +5723,9 @@ mod tests {
     }"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "app.exe --flag");
-                assert_eq!(p.request.working_directory, "C:\\tmp");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "app.exe --flag");
+                assert_eq!(p.request().working_directory, "C:\\tmp");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -5553,9 +5741,9 @@ mod tests {
         }"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "app.exe --flag");
-                assert_eq!(p.request.working_directory, "C:\\tmp");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "app.exe --flag");
+                assert_eq!(p.request().working_directory, "C:\\tmp");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -5978,7 +6166,7 @@ mod tests {
             "filesystem": {"readwritePaths": ["C:\\workspace"]}
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(p) => {
+            LegacyMxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Provision);
                 assert_eq!(p.containment, Some(ContainmentBackend::IsolationSession));
                 assert!(p.sandbox_id.is_none());
@@ -5987,7 +6175,7 @@ mod tests {
                 // Non-exec phase: process-related fields stay default.
                 assert!(p.request.script_code.is_empty());
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6001,7 +6189,7 @@ mod tests {
             }
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(p) => {
+            LegacyMxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Start);
                 assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
                 // Assert the nested experimental payload survives extraction
@@ -6015,7 +6203,7 @@ mod tests {
                     })
                 );
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6036,10 +6224,18 @@ mod tests {
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
-                let telem = p.request.telemetry.expect("telemetry should be populated");
+                let telem = p
+                    .request()
+                    .telemetry
+                    .as_ref()
+                    .expect("telemetry should be populated");
                 assert_eq!(telem.enabled, Some(true));
-                // The raw block is still available for per-backend dispatch.
-                assert!(p.experimental_raw.is_some());
+                assert_eq!(
+                    p.operation(),
+                    &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
+                        crate::models::IsolationSessionProvisionConfig { app_id: None },
+                    ))),
+                );
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -6067,8 +6263,8 @@ mod tests {
             "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6140,8 +6336,8 @@ mod tests {
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
         }"#;
         let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(parsed) => parsed,
-            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+            LegacyMxcRequest::StateAware(parsed) => parsed,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
 
         assert!(parsed.request.policy.network_egress.is_none());
@@ -6160,8 +6356,8 @@ mod tests {
             "process": {"commandLine": "echo hi"}
         }"#;
         let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(parsed) => parsed,
-            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+            LegacyMxcRequest::StateAware(parsed) => parsed,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
 
         assert_eq!(parsed.request.containment, ContainmentBackend::Wslc);
@@ -6180,8 +6376,8 @@ mod tests {
             }}"#
         );
         match parse_mxc_request_json(&json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(p) => p.request.policy,
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::StateAware(p) => p.request.policy,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6304,8 +6500,8 @@ mod tests {
             "experimental": null
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(parsed) => assert!(parsed.request.telemetry.is_none()),
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::StateAware(parsed) => assert!(parsed.request.telemetry.is_none()),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6387,8 +6583,8 @@ mod tests {
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "echo hello");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "echo hello");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -6578,11 +6774,11 @@ mod tests {
     fn rolling_parser_allows_provision_without_containment() {
         let json = r#"{"phase":"provision"}"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(parsed) => {
+            LegacyMxcRequest::StateAware(parsed) => {
                 assert_eq!(parsed.phase, Phase::Provision);
                 assert!(parsed.containment.is_none());
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -7594,7 +7790,7 @@ mod tests {
             "ui": {"disable": true}
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            LegacyMxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
             other => panic!("expected state-aware request, got {other:?}"),
         }
     }
@@ -9393,7 +9589,7 @@ mod tests {
             }
         }"#;
         match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            MxcRequest::StateAware(p) => assert_eq!(p.phase(), Phase::Provision),
             _ => panic!("expected state-aware request"),
         }
     }
@@ -9406,11 +9602,11 @@ mod tests {
             "containment": "isolation_session"
         }"#;
         match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            MxcRequest::StateAware(parsed) => {
+            LegacyMxcRequest::StateAware(parsed) => {
                 assert_eq!(parsed.phase, Phase::Provision);
                 assert_eq!(parsed.request.container_id, "sa-container-1");
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 

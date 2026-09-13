@@ -421,7 +421,7 @@ fn run_state_aware_main(
     // Resolve attribution (phase + backend) and telemetry enablement BEFORE
     // dispatch consumes `parsed`. Telemetry is stable and independent of the
     // `--experimental` gate used by experimental containment backends.
-    let phase = parsed.phase.as_str();
+    let phase = parsed.phase().as_str();
     // Whether this invocation is the provision phase: its `sandbox_id` doesn't
     // exist yet, so it always seeds a fresh base rather than deriving one.
     let is_provision = phase == "provision";
@@ -431,7 +431,7 @@ fn run_state_aware_main(
     let sandbox_id = if is_provision {
         None
     } else {
-        parsed.sandbox_id.clone()
+        parsed.sandbox_id().map(str::to_string)
     };
     let resolved_backend = resolve_backend(&parsed).ok();
     let backend = resolved_backend
@@ -439,7 +439,7 @@ fn run_state_aware_main(
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
     let requested_sandbox_kind = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
@@ -475,31 +475,24 @@ fn run_state_aware_main(
     let started = Instant::now();
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
-    let phase_config = parsed.experimental_raw.as_ref().and_then(|raw| {
-        resolved_backend.as_ref().and_then(|backend| {
-            raw.get(backend.wire_name())
-                .and_then(|section| section.get(phase))
-        })
-    });
     let diagnostics_active = logger.has_diagnostic_sink();
     if telemetry_active || diagnostics_active {
         let policy_hash = wxc_common::policy_identity::state_aware_policy_hash(
-            &parsed.request,
+            parsed.request(),
             backend,
-            phase,
-            phase_config,
+            parsed.operation(),
         );
-        let identity = state_aware_policy_identity(parsed.sandbox_id.as_deref());
+        let identity = state_aware_policy_identity(parsed.sandbox_id());
         wxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
-            &parsed.request.schema_version,
+            &parsed.request().schema_version,
         );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)
                 .str("policy_hash", &policy_hash)
-                .str("config_schema_version", &parsed.request.schema_version);
+                .str("config_schema_version", &parsed.request().schema_version);
             logger.log_audit_event(&record);
         }
     }
@@ -1230,7 +1223,7 @@ fn main() {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {
             let telemetry_active = parsed
-                .request
+                .request()
                 .telemetry
                 .as_ref()
                 .map(|config| telemetry::init(config, &mut logger))
@@ -1243,8 +1236,8 @@ fn main() {
             // state-aware path runs without the gate -- a phase-envelope request
             // could provision/start/exec experimental backends with no
             // `--experimental` on the CLI.
-            parsed.request.experimental_enabled = cli.experimental;
-            parsed.request.dry_run = cli.dry_run;
+            parsed.set_experimental_enabled(cli.experimental);
+            parsed.set_dry_run(cli.dry_run);
             run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
         }
         Err(error) => {
@@ -1987,7 +1980,7 @@ mod tests {
         let result = load_mxc_request_with_options(&encoded_policy(policy_json), &mut logger, opts)
             .map(|r| match r {
                 MxcRequest::OneShot(q) => q,
-                MxcRequest::StateAware(p) => p.request,
+                MxcRequest::StateAware(p) => p.into_request(),
             })
             .map_err(ResolveError::from_parse);
         (result, logger.get_buffer().to_string())

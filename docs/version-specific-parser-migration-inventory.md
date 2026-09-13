@@ -71,6 +71,52 @@ phase 8 rebase:
   `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
   expectations retained by the E2E scripts.
 
+## Phase 9B typed-payload acceptance
+
+Phase 9B (Phase 9.5 in the implementation plan) replaces production raw
+state-aware payloads with typed operations and checked backend binding. The
+independent rolling request/extraction reference remains test-only; its
+accepted-value comparisons, explicit presence expectations, and classified
+exact-stricter rejections are retained. No registered contract, corpus request,
+or generated artifact changes in this phase.
+
+Local implementation evidence:
+
+| Gate | Result |
+| --- | --- |
+| Common parser, normalization, binding, and regression tests | 1,146 passed; the recording matrix covers all three backends and five phases, presence, validation order/failure, dry runs, and piped/relayed exec |
+| Removed production APIs | Seven compile-fail documentation tests passed, including five guards for parsed-request construction, raw/source fields, and reparsing |
+| CLI output and entry-point regressions | 62 passed |
+| Windows default | Engine 25, FFI 17, Rust SDK 11 passed |
+| Windows `isolation_session` only | Engine 25, FFI 18, Rust SDK 12 passed |
+| Windows `wslc` only | Engine 24, FFI 17, Rust SDK 11 passed |
+| Windows `isolation_session,wslc` | Engine 24, FFI 18, Rust SDK 12 passed |
+| Backend state-aware unit tests | IsolationSession 31, Windows Sandbox 52, WSLC 30 passed, including backend-owned defaulting and piped-exec refusals |
+| Format and lint | `cargo fmt --all -- --check`; affected packages' `cargo clippy --all-targets -- -D warnings` passed in all four separate Windows configurations and for all three backend crates |
+| Artifacts | `check-contract-codegen.js`, `check-schema-codegen.js`, and `check-sdk-types-codegen.js` passed unchanged |
+| Linux/macOS default | Common, engine, Rust SDK, and FFI cross-compiled with `--all-targets` for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`; only the pre-existing telemetry-consent dead-code warnings also observed before cutover remain |
+
+The engine/FFI commands select `--lib state_aware`; the Rust SDK command selects
+`--test state_aware`. Backend commands select `--lib state_aware`. Linux and
+macOS test targets were compiled, **not executed**: the Windows host has no
+macOS runtime, and the existing WSL distribution has no native Rust toolchain.
+
+Live lifecycle suites were rerun against a combined x64 release build with
+`isolation_session` and `wslc` on a host capable of all three Windows
+state-aware backends. No lifecycle suite skipped:
+
+- IsolationSession passed 62/62.
+- WSLC passed 57/57.
+- Windows Sandbox passed 9/10. Provision, start, repeated exec, PowerShell,
+  timeout recovery, stop, and deprovision passed. The Python workload failed
+  because the guest image had no Python installation on `PATH`, not because
+  state-aware dispatch failed. The guest also logged one 10-second stdio
+  bridge-drain timeout after an echo, but later execs remained healthy.
+
+The Windows runs provide successful provision-through-teardown evidence for
+all three state-aware backends. Native Unix test execution remains outstanding;
+cross-compilation is not counted as native execution evidence.
+
 ## Documents
 
 | Path | Request kind | Classification | Current version | Target version | Existing schema reference | Owner |
