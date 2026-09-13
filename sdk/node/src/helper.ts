@@ -97,15 +97,14 @@ export function makeLogFilePath(dir: string): string {
  *      unprivileged enforcement path. The proxy applies the host policy
  *      for cooperating HTTP clients; raw-socket clients bypass it.
  *
- * This helper auto-promotes `enforcementMode` to `'firewall'` when host
- * lists are present without a proxy — without it, the parser would leave
- * the mode unset and the runtime would silently ignore `allowedHosts` /
- * `blockedHosts`.
+ * Legacy LXC network blocks with no explicit enforcement mode use `'firewall'`
+ * because capabilities are Windows-only. Bubblewrap uses firewall only for
+ * host lists without a proxy.
  *
  * If the caller explicitly passes `enforcementMode: 'capabilities'` we
  * warn: `'capabilities'` is a Windows/AppContainer concept (a token
- * capability mask) and has no Linux equivalent — the Linux runner will
- * not enforce anything and the field is silently dropped.
+ * capability mask) and has no Linux equivalent. The explicit value is left
+ * unchanged so native backend validation can report unsupported combinations.
  *
  * Shared between the explicit `'bubblewrap'` / `'lxc'` builders and the
  * abstract `'process'` branch on Linux (which resolves to Bubblewrap
@@ -130,6 +129,16 @@ export function applyLinuxNetworkPolicy(config: ContainerConfig): void {
       "default mode (auto-promotes to 'firewall' for LXC, or use network.proxy " +
       "for unprivileged Bubblewrap enforcement)."
     );
+  }
+  // LXC cannot enforce Windows AppContainer capabilities, so omitted legacy modes use firewall.
+  const isLegacyNetwork =
+    config.network.egress === undefined && config.network.ingress === undefined;
+  if (
+    config.containment === 'lxc' &&
+    isLegacyNetwork &&
+    config.network.enforcementMode === undefined
+  ) {
+    config.network.enforcementMode = 'firewall';
   }
   const hasProxy = !!config.network.proxy;
   const hasHostRules =

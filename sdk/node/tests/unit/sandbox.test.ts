@@ -1714,6 +1714,26 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.lxc!.distribution, 'alpine');
     });
 
+    it('should use firewall enforcement for legacy LXC policies with or without network access', () => {
+      for (const version of ['0.6.0-alpha', '0.7.0-alpha'] as const) {
+        const noNetwork = createConfigFromPolicy({ version }, 'lxc');
+        assert.strictEqual(noNetwork.network!.defaultPolicy, 'block');
+        assert.strictEqual(noNetwork.network!.enforcementMode, 'firewall');
+
+        const outbound = createConfigFromPolicy({
+          version,
+          network: { allowOutbound: true },
+        }, 'lxc');
+        assert.strictEqual(outbound.network!.defaultPolicy, 'allow');
+        assert.strictEqual(outbound.network!.enforcementMode, 'firewall');
+      }
+    });
+
+    it('should not add a legacy enforcement mode to a schema 0.8 policy', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'lxc');
+      assert.strictEqual(config.network, undefined);
+    });
+
     it('should force enforcementMode=firewall when host filtering is requested', () => {
       // The LXC runner only invokes iptables when network_enforcement_mode is
       // Firewall|Both (see lxc_common::network_iptables). Without this stamp,
