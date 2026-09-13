@@ -16,7 +16,7 @@ concurrency story, and error mapping.
   CLI flag.
 - The wire format consumed by `wxc-exec.exe` for state-aware requests
   (top-level `phase` discriminator, `sandboxId`,
-  `experimental.isolation_session.<phase>` typed config blocks).
+  `experimental.isolation_session.provision` typed configuration).
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
@@ -271,7 +271,7 @@ meaning for this backend.
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
-| `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
+| `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `experimental.isolation_session.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
@@ -295,19 +295,21 @@ Notes on the rows that are not a simple accept/reject:
   is vacuously satisfied and neither asserts anything untrue. Bringing it under
   the single-backend-section check uniformly across backends is tracked
   separately.
-- **Foreign backend sections** are rejected structurally. Provision roots admit
-  only the selected backend's experimental object, while start, exec, stop, and
-  deprovision use closed experimental objects with no backend keys.
-- **`containerId`** is a caller-supplied label, not a restriction. This backend
-  addresses sandboxes by the OS-assigned agent user name, so the field has no
-  effect and ignoring it asserts nothing.
-- **`process` is valid only on one-shot and state-aware exec.** The exact
-  provision, start, stop, and deprovision roots omit it, so a supplied process
-  block is rejected as `malformed_request`.
-- **Mis-slotted `experimental.isolation_session` payloads are rejected
-  structurally.** A nested provision block on a one-shot request is unknown to
-  `OneShotExperimental`; a backend block on start, exec, stop, or deprovision is
-  unknown to that phase's closed experimental object.
+- **Foreign or mis-slotted experimental payloads** are rejected by the exact
+  request root, not silently ignored. Only provision defines the
+  `experimental.isolation_session.provision` input. Exact adaptation carries
+  its runtime configuration directly to checked engine binding; the dispatcher
+  does not navigate or reparse experimental JSON.
+- **`containerId`** is not part of the exact state-aware roots. Lifecycle
+  requests address the sandbox by its returned `sandboxId` after provision.
+- **`process` on non-exec state-aware phases** is structurally rejected. Supply
+  process settings only on exec; other phases do not run a workload.
+
+The absence of a provision member produces `None`; a present empty object
+produces a configuration with `app_id: None`; and an explicit empty `appId`
+remains `Some("")`. Exact input rejects `appId: null`. These distinctions
+survive binding unchanged, so application identity resolution remains owned by
+the backend rather than by the parser or dispatcher.
 
 The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
 fields before backend validation. For example, supplied `ui`, noncanonical
@@ -338,8 +340,10 @@ phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
 per the matrix — provision requires the canonical unrestricted-network
 acknowledgment and post-provision rejects any supplied network policy
-(inheriting an absent one). One-shot enforces all of this via `validate_runner`;
-state-aware enforces it via the `validate_<phase>` hooks.
+(inheriting an absent one). One-shot enforces representable policy through
+`validate_runner`. State-aware fields excluded from an exact phase root fail
+structurally; `validate_<phase>` handles semantic invariants among admitted
+fields.
 
 The one asymmetry is `lifecycle`: one-shot refuses it by value (the defaults
 match what the backend actually does), while the state-aware parser refuses the
@@ -349,13 +353,12 @@ whole section for every backend. See the matrix notes above.
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
-- `experimental.isolation_session.<phase>` — typed per-phase config blocks
-  (`provision` carries optional `appId`; `start` / `exec` / `stop` /
-  `deprovision` use `()`).
+- `experimental.isolation_session.provision` — optional provision configuration;
+  `start` / `exec` / `stop` / `deprovision` carry no backend config.
 - `experimental.isolation_session.provision.appId` — the calling application's
   identifier. Honoured here. The one-shot surface takes no backend
-  configuration at all, so a one-shot `experimental.isolation_session` block is
-  rejected as `malformed_request`.
+  configuration at all, so a supplied one-shot payload is rejected by the
+  closed exact contract as `malformed_request`.
 
 ## Idempotence per phase
 

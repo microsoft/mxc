@@ -60,7 +60,7 @@ fn require_experimental_optin(
         wxc_common::models::ContainmentBackend::WindowsSandbox
             | wxc_common::models::ContainmentBackend::IsolationSession
             | wxc_common::models::ContainmentBackend::Wslc
-    ) && !parsed.request.experimental_enabled
+    ) && !parsed.request().experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
             "{backend:?} is an experimental backend; enable experimental features to use it"
@@ -131,18 +131,21 @@ pub fn run_state_aware(
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         wxc_common::models::ContainmentBackend::Wslc => {
+            let bound = wxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = wslc_common::WslcStateAwareRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
@@ -169,27 +172,30 @@ pub fn exec_state_aware(
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
             Ok(Box::new(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
             Ok(Box::new(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         wxc_common::models::ContainmentBackend::Wslc => {
+            let bound = wxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = wslc_common::WslcStateAwareRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
             Ok(Box::new(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
@@ -221,7 +227,7 @@ fn parse_state_aware(
 ) -> Result<ParsedStateAwareRequest, Error> {
     match wxc_common::config_parser::load_mxc_request_from_json(request_json, logger) {
         Ok(MxcRequest::StateAware(mut parsed)) => {
-            parsed.request.experimental_enabled = experimental;
+            parsed.set_experimental_enabled(experimental);
             Ok(parsed)
         }
         Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
@@ -341,23 +347,23 @@ fn exec_state_aware_attached_with(
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
 
-    if !matches!(parsed.phase, Phase::Exec) {
+    if !matches!(parsed.phase(), Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
             "an attached exec requires the exec phase, got {}",
-            parsed.phase
+            parsed.phase()
         ))));
     }
 
     exec_attached_gate(host_is_interactive)?;
-    let phase = parsed.phase;
-    let sandbox_id = parsed.sandbox_id.clone();
+    let phase = parsed.phase();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
     let requested_sandbox_kind = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
     let telemetry_active = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
@@ -422,7 +428,7 @@ pub fn run_state_aware_json(
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
 
-    if matches!(parsed.phase, Phase::Exec) && !dry_run {
+    if matches!(parsed.phase(), Phase::Exec) && !dry_run {
         return Err(Error::from(MxcError::malformed_request(
             "the exec phase does not return an envelope; run it through one of the exec entry \
              points instead — attached to this process's stdio, or streaming with the caller \
@@ -430,16 +436,16 @@ pub fn run_state_aware_json(
         )));
     }
 
-    let phase = parsed.phase;
+    let phase = parsed.phase();
     let phase_name = phase.as_str();
-    let sandbox_id = parsed.sandbox_id.clone();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
     let requested_sandbox_kind = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
     let telemetry_active = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
@@ -513,21 +519,21 @@ pub fn exec_state_aware_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    if !matches!(parsed.phase, Phase::Exec) {
+    if !matches!(parsed.phase(), Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
             "streaming exec requires the exec phase, got {}",
-            parsed.phase
+            parsed.phase()
         ))));
     }
-    let phase = parsed.phase;
-    let sandbox_id = parsed.sandbox_id.clone();
+    let phase = parsed.phase();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
     let requested_sandbox_kind = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
     let telemetry_active = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
@@ -576,7 +582,6 @@ pub fn exec_state_aware_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainmentBackend, ExecutionRequest};
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::Phase;
     use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
@@ -637,14 +642,12 @@ mod tests {
 
     #[test]
     fn experimental_backend_requires_optin() {
-        let parsed = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Provision,
-            containment: Some(ContainmentBackend::WindowsSandbox),
-            sandbox_id: None,
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = run_state_aware(parsed, false).unwrap_err();
 
@@ -657,14 +660,14 @@ mod tests {
         // The streaming exec entry point applies the same opt-in gate as the
         // envelope dispatcher: a `wslc:` exec without the opt-in must be
         // refused before reaching the backend.
-        let parsed = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Exec,
-            containment: Some(ContainmentBackend::Wslc),
-            sandbox_id: Some("wslc:00000000000000000000000000000000".to_string()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"exec",
+                "sandboxId":"wslc:00000000000000000000000000000000",
+                "process":{"commandLine":"echo typed"}}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = match exec_state_aware(parsed) {
             Ok(_) => {
@@ -806,18 +809,13 @@ mod tests {
     #[cfg(not(all(target_os = "windows", feature = "wslc")))]
     #[test]
     fn feature_off_wslc_returns_backend_unavailable() {
-        let request = ExecutionRequest {
-            experimental_enabled: true,
-            ..ExecutionRequest::default()
-        };
-        let parsed = ParsedStateAwareRequest {
-            request,
-            phase: Phase::Start,
-            containment: Some(ContainmentBackend::Wslc),
-            sandbox_id: Some("wslc:00000000000000000000000000000000".to_string()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"start",
+                "sandboxId":"wslc:00000000000000000000000000000000"}"#,
+            true,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = run_state_aware(parsed, false).unwrap_err();
 
@@ -830,18 +828,13 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {
-        let request = ExecutionRequest {
-            experimental_enabled: true,
-            ..ExecutionRequest::default()
-        };
-        let parsed = ParsedStateAwareRequest {
-            request,
-            phase: Phase::Exec,
-            containment: Some(ContainmentBackend::WindowsSandbox),
-            sandbox_id: Some("wsb:abcd1234".to_string()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
+                "process":{"commandLine":"echo typed"}}"#,
+            true,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = match exec_state_aware(parsed) {
             Ok(_) => panic!("expected the backend to reject the synthetic sandbox id"),
@@ -852,6 +845,179 @@ mod tests {
             MxcErrorCode::UnsupportedPhase,
             "Windows Sandbox exec should dispatch to the backend-specific implementation"
         );
+    }
+
+    fn backend_cases() -> [(&'static str, &'static str, bool); 3] {
+        [
+            (
+                "windows_sandbox",
+                "wsb:abcd1234",
+                cfg!(target_os = "windows"),
+            ),
+            (
+                "isolation_session",
+                "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoid3hjLWFiY2QxMjM0In0",
+                cfg!(all(target_os = "windows", feature = "isolation_session")),
+            ),
+            (
+                "wslc",
+                "wslc:00000000000000000000000000000000",
+                cfg!(all(target_os = "windows", feature = "wslc")),
+            ),
+        ]
+    }
+
+    fn lifecycle_fixture(backend: &str, id: &str, phase: Phase) -> String {
+        let mut value = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": phase.as_str(),
+        });
+        if phase == Phase::Provision {
+            value["containment"] = backend.into();
+            if backend == "isolation_session" {
+                value["network"] = serde_json::json!({
+                    "defaultPolicy": "allow",
+                    "allowLocalNetwork": true,
+                });
+            }
+        } else {
+            value["sandboxId"] = id.into();
+            if phase == Phase::Exec {
+                value["process"] = serde_json::json!({"commandLine": "echo typed"});
+            }
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn every_backend_and_phase_keeps_optin_and_feature_gates_before_binding() {
+        for (backend, id, available) in backend_cases() {
+            for phase in [
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+            ] {
+                let json = lifecycle_fixture(backend, id, phase);
+                let parsed =
+                    parse_state_aware(&json, false, &mut Logger::new(Mode::Buffer)).unwrap();
+                let error = run_state_aware(parsed.clone(), true).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    MxcErrorCode::BackendUnavailable,
+                    "{backend} {phase}"
+                );
+                assert!(error.message.contains("experimental"));
+                let error = exec_state_aware(parsed)
+                    .err()
+                    .expect("opt-in must be required");
+                assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+                assert!(error.message.contains("experimental"));
+
+                if !available {
+                    let parsed =
+                        parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                    let expected = if backend == "windows_sandbox" {
+                        MxcErrorCode::UnsupportedPhase
+                    } else {
+                        MxcErrorCode::BackendUnavailable
+                    };
+                    assert_eq!(
+                        run_state_aware(parsed.clone(), true).unwrap_err().code,
+                        expected,
+                        "{backend} {phase}"
+                    );
+                    assert_eq!(
+                        exec_state_aware(parsed)
+                            .err()
+                            .expect("backend unavailable")
+                            .code,
+                        expected,
+                        "{backend} {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_backends_bind_and_validate_every_phase_without_live_execution() {
+        for (backend, id, available) in backend_cases() {
+            if !available {
+                continue;
+            }
+            for phase in [
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+            ] {
+                let json = lifecycle_fixture(backend, id, phase);
+                let parsed =
+                    parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                let outcome = run_state_aware(parsed.clone(), true)
+                    .unwrap_or_else(|error| panic!("{backend} {phase}: {error}"));
+                let DispatchOutcome::Envelope(envelope) = outcome else {
+                    panic!("dry run must never execute {backend} {phase}");
+                };
+                assert_eq!(envelope, serde_json::json!({"result": {}}));
+                if phase != Phase::Exec {
+                    let error = exec_state_aware(parsed).err().expect("requires exec");
+                    assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+                    assert_eq!(
+                        error.message,
+                        format!("streaming exec requires the exec phase, got {phase}")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_backends_validate_ids_after_binding_even_in_dry_run() {
+        for (backend, id, available) in backend_cases() {
+            if !available {
+                continue;
+            }
+            let prefix = id.split_once(':').unwrap().0;
+            let malformed = format!("{prefix}:invalid-body");
+            for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+                let json = lifecycle_fixture(backend, &malformed, phase);
+                let parsed =
+                    parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                assert_eq!(
+                    run_state_aware(parsed.clone(), true).unwrap_err().code,
+                    MxcErrorCode::MalformedId,
+                    "{backend} {phase}"
+                );
+                if phase == Phase::Exec {
+                    assert_eq!(
+                        exec_state_aware(parsed).err().expect("malformed ID").code,
+                        MxcErrorCode::MalformedId,
+                        "{backend} {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_piped_backends_refuse_streaming_after_typed_binding_without_running() {
+        for (backend, id, available) in backend_cases() {
+            if !available || backend == "isolation_session" {
+                continue;
+            }
+            let json = lifecycle_fixture(backend, id, Phase::Exec);
+            let parsed = parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+            let error = exec_state_aware(parsed)
+                .err()
+                .expect("cannot return streams");
+            assert_eq!(error.code, MxcErrorCode::BackendError);
+            assert!(error.message.contains("cannot return exec streams"));
+            assert!(error.message.contains("Nothing has been run"));
+        }
     }
 
     /// `provision` seeds a vector and persists it once dispatch mints a
