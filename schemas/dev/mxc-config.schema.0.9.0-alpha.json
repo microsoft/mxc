@@ -345,17 +345,36 @@
       ],
       "type": "string"
     },
-    "IsolationSessionNetwork": {
+    "IsolationSessionDirectionalNetwork": {
       "additionalProperties": false,
-      "description": "The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.",
+      "description": "The canonical directional unrestricted-network posture.",
+      "properties": {
+        "egress": {
+          "$ref": "#/definitions/IsolationSessionNetworkEgress",
+          "description": "Required unrestricted outbound posture."
+        },
+        "ingress": {
+          "$ref": "#/definitions/IsolationSessionNetworkIngress",
+          "description": "Required unrestricted inbound and host-loopback posture."
+        }
+      },
+      "required": [
+        "egress",
+        "ingress"
+      ],
+      "type": "object"
+    },
+    "IsolationSessionLegacyNetwork": {
+      "additionalProperties": false,
+      "description": "The canonical legacy unrestricted-network posture retained for compatibility.",
       "properties": {
         "allowLocalNetwork": {
           "$ref": "#/definitions/True",
-          "description": "Required acknowledgment that local network access is allowed."
+          "description": "Legacy unrestricted inbound/local-network posture."
         },
         "defaultPolicy": {
-          "$ref": "#/definitions/IsolationSessionNetworkDefaultPolicy",
-          "description": "Exact `allow` default network policy marker."
+          "$ref": "#/definitions/IsolationSessionLegacyNetworkAllow",
+          "description": "Legacy unrestricted outbound posture."
         }
       },
       "required": [
@@ -364,11 +383,60 @@
       ],
       "type": "object"
     },
-    "IsolationSessionNetworkDefaultPolicy": {
+    "IsolationSessionLegacyNetworkAllow": {
       "enum": [
         "allow"
       ],
       "type": "string"
+    },
+    "IsolationSessionNetwork": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/IsolationSessionLegacyNetwork"
+        },
+        {
+          "$ref": "#/definitions/IsolationSessionDirectionalNetwork"
+        }
+      ]
+    },
+    "IsolationSessionNetworkAllow": {
+      "enum": [
+        "allow"
+      ],
+      "type": "string"
+    },
+    "IsolationSessionNetworkEgress": {
+      "additionalProperties": false,
+      "description": "Unrestricted outbound posture.",
+      "properties": {
+        "default": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow outbound traffic by default."
+        }
+      },
+      "required": [
+        "default"
+      ],
+      "type": "object"
+    },
+    "IsolationSessionNetworkIngress": {
+      "additionalProperties": false,
+      "description": "Unrestricted inbound and host-loopback posture.",
+      "properties": {
+        "default": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow private-network inbound traffic by default."
+        },
+        "hostLoopback": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow bidirectional host-loopback connectivity."
+        }
+      },
+      "required": [
+        "default",
+        "hostLoopback"
+      ],
+      "type": "object"
     },
     "IsolationSessionProvision": {
       "additionalProperties": false,
@@ -394,7 +462,7 @@
     },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for isolation_session",
+      "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture. The historical legacy pair and the standard directional all-allow shape are accepted.",
       "properties": {
         "$schema": {
           "description": "Optional JSON Schema reference for editor validation.",
@@ -409,11 +477,11 @@
         },
         "experimental": {
           "$ref": "#/definitions/IsolationSessionProvisionExperimental",
-          "description": "Optional closed experimental settings."
+          "description": "Optional closed experimental settings containing only `appId`."
         },
         "network": {
           "$ref": "#/definitions/IsolationSessionNetwork",
-          "description": "Required unrestricted-network acknowledgment."
+          "description": "Required unrestricted network posture."
         },
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",

@@ -67,7 +67,16 @@ const policyValidationSkipReason =
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      {
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
+      },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
     assert.ok(
       sandboxId.startsWith('iso:'),

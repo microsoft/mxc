@@ -57,19 +57,32 @@ describe('StateAwareSchemaVersion', () => {
 });
 
 describe('IsolationSessionProvisionConfig', () => {
-  // The one accepted network value: the unrestricted-network acknowledgment.
-  const network: { defaultPolicy: 'allow'; allowLocalNetwork: true } = {
+  const legacyNetwork = {
     defaultPolicy: 'allow',
     allowLocalNetwork: true,
-  };
+  } as const;
+  const directionalNetwork = {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  } as const;
 
-  it('requires the canonical network acknowledgment', () => {
-    const ok: IsolationSessionProvisionConfig = { version: '0.9.0-alpha', network };
-    assert.strictEqual(ok.network.defaultPolicy, 'allow');
-    assert.strictEqual(ok.network.allowLocalNetwork, true);
+  it('requires a canonical unrestricted network posture', () => {
+    const legacy: IsolationSessionProvisionConfig = {
+      version: '0.9.0-alpha',
+      network: legacyNetwork,
+    };
+    const directional: IsolationSessionProvisionConfig = {
+      network: directionalNetwork,
+    };
+    assert.strictEqual(legacy.network.defaultPolicy, 'allow');
+    assert.ok('egress' in directional.network);
+    assert.strictEqual(directional.network.egress?.default, 'allow');
 
-    // @ts-expect-error — no state-aware contract is registered for 0.8.
-    const oldVersion: IsolationSessionProvisionConfig = { version: '0.8.0-alpha', network };
+    const oldVersion: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — no state-aware contract is registered for 0.8.
+      version: '0.8.0-alpha',
+      network: directionalNetwork,
+    };
     assert.ok(oldVersion);
 
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
@@ -109,7 +122,7 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(widened);
   });
 
-  it('rejects any network value other than the canonical acknowledgment', () => {
+  it('rejects restrictive, partial, and mixed network values', () => {
     const block: IsolationSessionProvisionConfig = {
       // @ts-expect-error — defaultPolicy must be 'allow'; the backend cannot enforce a deny.
       network: { defaultPolicy: 'block', allowLocalNetwork: true },
@@ -118,13 +131,27 @@ describe('IsolationSessionProvisionConfig', () => {
       // @ts-expect-error — allowLocalNetwork must be true; inbound is open and cannot be denied.
       network: { defaultPolicy: 'allow', allowLocalNetwork: false },
     };
+    const partialDirectional: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — all three directional axes must explicitly allow.
+      network: { egress: { default: 'allow' } },
+    };
+    const mixed: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — legacy and directional spellings are mutually exclusive.
+      network: {
+        defaultPolicy: 'allow',
+        allowLocalNetwork: true,
+        ...directionalNetwork,
+      },
+    };
     assert.ok(block);
     assert.ok(noLocal);
+    assert.ok(partialDirectional);
+    assert.ok(mixed);
   });
 
   it('rejects filesystem', () => {
     const cfg: IsolationSessionProvisionConfig = {
-      network,
+      network: directionalNetwork,
       // @ts-expect-error — filesystem is rejected at provision; the backend has no host-folder-sharing primitive.
       filesystem: { readwritePaths: ['C:\\workspace'] },
     };
@@ -133,7 +160,7 @@ describe('IsolationSessionProvisionConfig', () => {
 
   it('rejects ui until that feature lands Rust-side', () => {
     const cfg: IsolationSessionProvisionConfig = {
-      network,
+      network: directionalNetwork,
       // @ts-expect-error — ui is not exposed at provision until the Rust runtime honors it.
       ui: { disable: true, clipboard: 'none', injection: false },
     };
@@ -142,7 +169,7 @@ describe('IsolationSessionProvisionConfig', () => {
 
   it('accepts an optional appId', () => {
     const cfg: IsolationSessionProvisionConfig = {
-      network,
+      network: directionalNetwork,
       appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
     };
     assert.strictEqual(cfg.appId, 'PFN:Contoso.App_8wekyb3d8bbwe');
@@ -151,8 +178,8 @@ describe('IsolationSessionProvisionConfig', () => {
   it('accepts an empty appId as a value distinct from omitting it', () => {
     // A future OS API may assign meaning to the empty string, so the SDK must
     // not treat it as equivalent to absent.
-    const empty: IsolationSessionProvisionConfig = { network, appId: '' };
-    const absent: IsolationSessionProvisionConfig = { network };
+    const empty: IsolationSessionProvisionConfig = { network: directionalNetwork, appId: '' };
+    const absent: IsolationSessionProvisionConfig = { network: directionalNetwork };
     assert.strictEqual(empty.appId, '');
     assert.strictEqual(absent.appId, undefined);
     assert.ok('appId' in empty);
@@ -161,7 +188,7 @@ describe('IsolationSessionProvisionConfig', () => {
 
   it('rejects a non-string appId', () => {
     const cfg: IsolationSessionProvisionConfig = {
-      network,
+      network: directionalNetwork,
       // @ts-expect-error — appId is a string.
       appId: 42,
     };

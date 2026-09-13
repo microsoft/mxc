@@ -39,19 +39,50 @@ fn convert_isolation_session_provision_experimental(
 }
 
 fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
-    let contract::IsolationSessionNetwork {
-        allow_local_network: contract::True,
-        default_policy: contract::IsolationSessionNetworkDefaultPolicy,
-    } = value;
-    wire::Network {
-        allow_local_network: Some(true),
-        default_policy: Some(wire::NetworkPolicy::Allow),
-        allowed_hosts: None,
-        enforcement_mode: None,
-        blocked_hosts: None,
-        proxy: None,
-        egress: None,
-        ingress: None,
+    match value {
+        contract::IsolationSessionNetwork::Legacy(value) => {
+            let contract::IsolationSessionLegacyNetwork {
+                allow_local_network: contract::True,
+                default_policy: contract::IsolationSessionLegacyNetworkAllow,
+            } = value;
+            wire::Network {
+                allow_local_network: Some(true),
+                default_policy: Some(wire::NetworkPolicy::Allow),
+                allowed_hosts: None,
+                enforcement_mode: None,
+                blocked_hosts: None,
+                proxy: None,
+                egress: None,
+                ingress: None,
+            }
+        }
+        contract::IsolationSessionNetwork::Directional(value) => {
+            let contract::IsolationSessionDirectionalNetwork { egress, ingress } = value;
+            let contract::IsolationSessionNetworkEgress {
+                default: contract::IsolationSessionNetworkAllow,
+            } = egress;
+            let contract::IsolationSessionNetworkIngress {
+                default: contract::IsolationSessionNetworkAllow,
+                host_loopback: contract::IsolationSessionNetworkAllow,
+            } = ingress;
+            wire::Network {
+                allow_local_network: None,
+                default_policy: None,
+                allowed_hosts: None,
+                enforcement_mode: None,
+                blocked_hosts: None,
+                proxy: None,
+                egress: Some(wire::NetworkEgress {
+                    default: Some(wire::NetworkAction::Allow),
+                    allow: None,
+                    deny: None,
+                }),
+                ingress: Some(wire::NetworkIngress {
+                    default: Some(wire::NetworkAction::Allow),
+                    host_loopback: Some(wire::NetworkAction::Allow),
+                }),
+            }
+        }
     }
 }
 

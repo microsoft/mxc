@@ -8,7 +8,7 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::policy::{NetworkSection, SandboxPolicy};
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
 use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
 
 /// The network acknowledgment this backend requires; an absent policy is
@@ -160,16 +160,13 @@ fn one_shot_requires_the_experimental_optin() {
 /// caller-fixable refusal into an opaque backend error.
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
-    let policy = SandboxPolicy {
-        version: "0.9.0-alpha".to_string(),
-        filesystem: None,
-        // The backend cannot filter the container's network, so it accepts only
-        // an explicit acknowledgment; an absent policy reads as a deny it has no
-        // way to enforce.
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = iso_policy();
+    policy.filesystem = Some(FilesystemSection {
+        readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
     let mut request = build_request_with_containment(
         &policy,
         &Containment::IsolationSession,

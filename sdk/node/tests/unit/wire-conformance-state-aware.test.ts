@@ -53,6 +53,9 @@ import type {
   IsolationSessionProvisionPhase as WireProvisionPhase,
   WslcProvisionPhase as WireWslcProvisionPhase,
 } from '../../src/generated/wire.js';
+import type {
+  IsolationSessionNetwork as ExactIsolationSessionNetwork,
+} from '../../src/generated/v0_9_0_alpha/wire.js';
 
 import type {
   AssertTrue,
@@ -133,6 +136,19 @@ type _ProvisionKeysNonVacuous = AssertTrue<
 type _ProvisionWireKeysNonVacuous = AssertTrue<
   Equivalent<WireKeys<WireProvisionPhase>, 'appId'>
 >;
+
+// The exact schema uses oneOf for the legacy and directional IsolationSession
+// network shapes. A plain TypeScript union accepts an object containing both
+// branches, so this guards the generated XOR exclusions.
+const mixedNetworkShape = {
+  defaultPolicy: 'allow',
+  allowLocalNetwork: true,
+  egress: { default: 'allow' },
+  ingress: { default: 'allow', hostLoopback: 'allow' },
+} as const;
+// @ts-expect-error — exact oneOf rejects mixed legacy and directional fields.
+const mixedWireNetwork: ExactIsolationSessionNetwork = mixedNetworkShape;
+void mixedWireNetwork;
 
 // --- WSLc per-phase wire field-set conformance -----------------------------
 

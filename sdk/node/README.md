@@ -294,6 +294,30 @@ config.process!.commandLine = 'cmd /c whoami';
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
+IsolationSession one-shot execution uses the explicit configuration path and
+requires the standard directional all-allow network posture:
+
+```typescript
+import { ContainerConfig, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const config: ContainerConfig = {
+  version: '0.9.0-alpha',
+  containment: 'isolation_session',
+  process: { commandLine: 'cmd /c whoami' },
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+};
+
+const pty = spawnSandboxFromConfig(config, { experimental: true });
+```
+
+The legacy `defaultPolicy: 'allow'` plus `allowLocalNetwork: true` spelling
+remains accepted during the transition. Selecting the backend or passing
+`experimental: true` never supplies an unrestricted network posture
+automatically.
+
 Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 
 - Stable backends: [`schemas/stable/`](https://github.com/microsoft/mxc/tree/main/schemas/stable/)
@@ -326,11 +350,15 @@ import {
 
 // Every call takes a single options object (3rd arg). Experimental backends
 // must pass `experimental: true`.
-// isolation_session provision requires the unrestricted-network acknowledgment:
-// the container's network cannot be filtered or denied, so you must opt in.
+// isolation_session provision requires its actual unrestricted network posture.
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+  {
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  },
   { experimental: true },
 );
 const opts = { experimental: true };
@@ -343,6 +371,11 @@ const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami
 await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
+
+`IsolationSessionProvisionConfig.network` accepts either the canonical legacy
+pair or the preferred standard directional all-allow shape shown above. Rules,
+proxies, mixed postures, and omission are rejected. The shared lifecycle
+signatures and other backends are unchanged.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
@@ -484,7 +517,7 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
-// has a required member (isolation_session: the network acknowledgment) and
+// has a required member (isolation_session: unrestricted network) and
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
