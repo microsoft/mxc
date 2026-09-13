@@ -6,7 +6,7 @@
     "commandLine": "echo 'Hello from docker-save image!' && cat /etc/alpine-release"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

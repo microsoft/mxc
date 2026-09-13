@@ -1,16 +1,21 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "provision",
-    "containment": "isolation_session",
-    "network": {
-        "defaultPolicy": "allow",
-        "allowLocalNetwork": true
-    },
-    "experimental": {
-        "isolation_session": {
-            "provision": {
-                "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
-            }
-        }
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "experimental": {
+    "isolation_session": {
+      "provision": {
+        "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
+      }
     }
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
 }

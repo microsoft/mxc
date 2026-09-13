@@ -50,8 +50,8 @@ export type ProvisionArgs<C extends StateAwareContainmentBackend> =
  * Without that, a config type could declare a field as required and still be
  * skipped entirely by omitting the argument, which is a guarantee the type
  * appears to offer but does not enforce. IsolationSession relies on this: its
- * explicit unrestricted `network` posture is mandatory, and the backend
- * refuses a provision that omits it.
+ * explicit unrestricted `network` posture is mandatory. Later phases reject
+ * supplied network policy because the posture is fixed at provision.
  */
 export async function provisionSandbox<C extends StateAwareContainmentBackend>(
   containment: C,

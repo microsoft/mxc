@@ -4,6 +4,12 @@ This guide covers adding new OS-level features that flow
 through MXC's process container pipeline. It is specific
 to the Windows process container backend.
 
+Exact v0.9 networking uses directional egress/ingress,
+`runtimeConfig.networkProxy`, and ProcessContainer proxy-peer identity.
+Legacy networking fields remain available only under their published
+contracts. Backend selection continues to depend on host capability and
+requested policy, not on a version-selected weaker implementation.
+
 For which policy aspects this backend can enforce on each Windows 11 release
 (23H2 / 24H2 / 25H2 / 25H2+), see
 [Windows OS-version policy support](./os-version-support.md).

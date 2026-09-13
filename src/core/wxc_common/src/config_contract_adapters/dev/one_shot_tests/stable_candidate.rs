@@ -37,15 +37,10 @@ const PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
         "allowDaclMutation": true
     },
     "network": {
-        "defaultPolicy": "allow",
-        "enforcementMode": "capabilities",
-        "allowLocalNetwork": true,
-        "allowedHosts": ["example.com"],
-        "blockedHosts": ["blocked.com"],
-        "proxy": {
-            "localhost": 8080
-        }
+        "egress": {"default": "deny"},
+        "ingress": {"default": "allow", "hostLoopback": "allow"}
     },
+    "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
     "ui": {
         "disable": true,
         "clipboard": "all",
@@ -101,11 +96,8 @@ const LXC_REQUEST_JSON: &str = r#"{
         "deniedPaths": ["/path/to/denied"]
     },
     "network": {
-        "defaultPolicy": "allow",
-        "enforcementMode": "firewall",
-        "allowLocalNetwork": true,
-        "allowedHosts": ["example.com"],
-        "blockedHosts": ["blocked.com"]
+        "egress": {"default": "allow"},
+        "ingress": {"default": "allow", "hostLoopback": "allow"}
     },
     "ui": {
         "disable": true,
@@ -135,11 +127,8 @@ const SEATBELT_REQUEST_JSON: &str = r#"{
         "deniedPaths": ["/path/to/denied"]
     },
     "network": {
-        "defaultPolicy": "allow",
-        "enforcementMode": "firewall",
-        "allowLocalNetwork": true,
-        "allowedHosts": ["example.com"],
-        "blockedHosts": ["blocked.com"]
+        "egress": {"default": "allow"},
+        "ingress": {"default": "allow", "hostLoopback": "allow"}
     },
     "seatbelt": {
         "profileOverride": "custom-profile.sb",
@@ -222,29 +211,21 @@ const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
 
 struct ProxyCase {
     json: &'static str,
-    localhost: Option<u16>,
-    builtin_test_server: Option<bool>,
-    url: Option<&'static str>,
+    url: &'static str,
 }
 
 const PROXY_CASES: &[ProxyCase] = &[
     ProxyCase {
-        json: r#"{"localhost": 8080}"#,
-        localhost: Some(8080),
-        builtin_test_server: None,
-        url: None,
+        json: r#""http://127.0.0.1:8080""#,
+        url: "http://127.0.0.1:8080",
     },
     ProxyCase {
-        json: r#"{"builtinTestServer": true}"#,
-        localhost: None,
-        builtin_test_server: Some(true),
-        url: None,
+        json: r#""http://[::1]:8080""#,
+        url: "http://[::1]:8080",
     },
     ProxyCase {
-        json: r#"{"url": "http://proxy.example:8080"}"#,
-        localhost: None,
-        builtin_test_server: None,
-        url: Some("http://proxy.example:8080"),
+        json: r#""http://localhost:8080""#,
+        url: "http://localhost:8080",
     },
 ];
 
@@ -279,9 +260,9 @@ const STABLE_CONTAINMENT_CASES: &[ContainmentCase] = &[
     },
 ];
 
-const DEFAULT_NETWORK_POLICY_CASES: &[&str] = &["allow", "block"];
+const DEFAULT_NETWORK_POLICY_CASES: &[&str] = &["allow", "deny"];
 
-const NETWORK_ENFORCEMENT_MODE_CASES: &[&str] = &["capabilities", "firewall", "both"];
+const NETWORK_ENFORCEMENT_MODE_CASES: &[&str] = &["allow", "deny"];
 
 const UI_CLIPBOARD_CASES: &[&str] = &["none", "read", "write", "all"];
 
@@ -306,7 +287,7 @@ fn request_with_proxy(proxy_json: &str) -> String {
         r#"{{
             "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
-            "network": {{"proxy": {proxy_json}}}
+            "runtimeConfig": {{"networkProxy": {proxy_json}}}
         }}"#
     )
 }
@@ -316,7 +297,7 @@ fn request_with_default_network_policy(default_policy: &str) -> String {
         r#"{{
             "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
-            "network": {{"defaultPolicy": "{default_policy}"}}
+            "network": {{"egress": {{"default": "{default_policy}"}}}}
         }}"#
     )
 }
@@ -326,7 +307,7 @@ fn request_with_network_enforcement_mode(enforcement_mode: &str) -> String {
         r#"{{
             "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
-            "network": {{"enforcementMode": "{enforcement_mode}"}}
+            "network": {{"ingress": {{"default": "{enforcement_mode}"}}}}
         }}"#
     )
 }
@@ -454,22 +435,20 @@ fn process_container_request_maps_expected_wire_fields() {
     assert_eq!(fallback.allow_dacl_mutation, Some(true));
 
     let network = wire.network.expect("network should be populated");
+    assert!(network.default_policy.is_none());
+    assert!(network.proxy.is_none());
     assert!(matches!(
-        network.default_policy,
-        Some(super::wire::NetworkPolicy::Allow)
+        network.egress.unwrap().default,
+        Some(super::wire::NetworkAction::Deny)
     ));
     assert!(matches!(
-        network.enforcement_mode,
-        Some(super::wire::NetworkEnforcement::Capabilities)
+        network.ingress.unwrap().host_loopback,
+        Some(super::wire::NetworkAction::Allow)
     ));
-    assert_eq!(network.allow_local_network, Some(true));
-    assert_eq!(network.allowed_hosts.unwrap().as_slice(), &["example.com"]);
-    assert_eq!(network.blocked_hosts.unwrap().as_slice(), &["blocked.com"]);
-
-    let proxy = network.proxy.expect("proxy should be populated");
-    assert_eq!(proxy.localhost, Some(8080));
-    assert!(proxy.builtin_test_server.is_none());
-    assert!(proxy.url.is_none());
+    assert_eq!(
+        wire.runtime_config.unwrap().network_proxy.as_deref(),
+        Some("http://127.0.0.1:8080")
+    );
 
     let ui = wire.ui.expect("ui should be populated");
     assert_eq!(ui.disable, Some(true));
@@ -552,17 +531,16 @@ fn lxc_request_maps_expected_wire_fields() {
     );
 
     let network = wire.network.expect("network should be populated");
+    assert!(network.default_policy.is_none());
+    assert!(network.enforcement_mode.is_none());
     assert!(matches!(
-        network.default_policy,
-        Some(super::wire::NetworkPolicy::Allow)
+        network.egress.unwrap().default,
+        Some(super::wire::NetworkAction::Allow)
     ));
     assert!(matches!(
-        network.enforcement_mode,
-        Some(super::wire::NetworkEnforcement::Firewall)
+        network.ingress.unwrap().default,
+        Some(super::wire::NetworkAction::Allow)
     ));
-    assert_eq!(network.allow_local_network, Some(true));
-    assert_eq!(network.allowed_hosts.unwrap().as_slice(), &["example.com"]);
-    assert_eq!(network.blocked_hosts.unwrap().as_slice(), &["blocked.com"]);
     assert!(network.proxy.is_none());
 
     let ui = wire.ui.expect("ui should be populated");
@@ -619,17 +597,16 @@ fn seatbelt_request_maps_expected_wire_fields() {
     );
 
     let network = wire.network.expect("network should be populated");
+    assert!(network.default_policy.is_none());
+    assert!(network.enforcement_mode.is_none());
     assert!(matches!(
-        network.default_policy,
-        Some(super::wire::NetworkPolicy::Allow)
+        network.egress.unwrap().default,
+        Some(super::wire::NetworkAction::Allow)
     ));
-    assert_eq!(network.allow_local_network, Some(true));
     assert!(matches!(
-        network.enforcement_mode,
-        Some(super::wire::NetworkEnforcement::Firewall)
+        network.ingress.unwrap().default,
+        Some(super::wire::NetworkAction::Allow)
     ));
-    assert_eq!(network.allowed_hosts.unwrap().as_slice(), &["example.com"]);
-    assert_eq!(network.blocked_hosts.unwrap().as_slice(), &["blocked.com"]);
     assert!(network.proxy.is_none());
 
     let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
@@ -814,15 +791,11 @@ fn proxy_variants_map_expected_wire_fields() {
         let json = request_with_proxy(case.json);
 
         let wire = adapt(&json);
-        let proxy = wire
-            .network
-            .expect("network should be populated")
-            .proxy
-            .expect("proxy should be populated");
-
-        assert_eq!(proxy.localhost, case.localhost);
-        assert_eq!(proxy.builtin_test_server, case.builtin_test_server);
-        assert_eq!(proxy.url.as_deref(), case.url);
+        assert!(wire.network.is_none());
+        assert_eq!(
+            wire.runtime_config.unwrap().network_proxy.as_deref(),
+            Some(case.url)
+        );
     }
 }
 
@@ -846,8 +819,10 @@ fn enum_variants_map_expected_wire_values() {
             serde_json::to_value(
                 wire.network
                     .unwrap()
-                    .default_policy
-                    .expect("defaultPolicy should be populated")
+                    .egress
+                    .unwrap()
+                    .default
+                    .expect("egress default should be populated")
             )
             .unwrap(),
             serde_json::json!(default_network_policy)
@@ -862,8 +837,10 @@ fn enum_variants_map_expected_wire_values() {
             serde_json::to_value(
                 wire.network
                     .unwrap()
-                    .enforcement_mode
-                    .expect("enforcementMode should be populated")
+                    .ingress
+                    .unwrap()
+                    .default
+                    .expect("ingress default should be populated")
             )
             .unwrap(),
             serde_json::json!(network_enforcement_mode)

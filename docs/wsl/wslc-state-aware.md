@@ -83,22 +83,33 @@ discriminate via the exit code + whether stdout parses as an envelope.
 
 ## Policy honor matrix
 
-WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs `Bridged`); there is
-no per-host filtering (the container lacks `CAP_NET_ADMIN`, so `allowedHosts` / `blockedHosts` iptables
-rules do not apply — see the empirical finding in the plan history). Proxy is env-var only.
+WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
+`Bridged`); there is no per-host filtering or independent ingress/host-loopback
+restriction primitive. Proxy configuration supplies environment variables, not
+a firewall. Exact v0.9 supports two coherent postures:
+
+| Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |
+| --- | --- | --- | --- |
+| Isolated | `deny` | `deny` | `deny` |
+| Bridged, unrestricted | `allow` | `allow` | `allow` |
+
+Omitted directional values default to deny, so an egress-only allow request is
+rejected rather than claiming its implicit ingress/loopback denies are enforced.
+Mixed postures and per-host rules are rejected. Allowing ingress/host-loopback
+does not create host port forwarding or promise reachability across NAT; it
+acknowledges that WSLC cannot independently restrict those directions.
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|
-| `readwritePaths` / `readonlyPaths` | honored → container volumes | `malformed_request` | `malformed_request` |
-| `deniedPaths` | overlapping/nested under a mount → `policy_validation`; a standalone denied path is accepted because no Deny primitive is needed | `malformed_request` | `malformed_request` |
-| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | `malformed_request` | immutable mode change → `policy_validation` |
-| `network` host filtering (`allowedHosts` / `blockedHosts`) | `policy_validation` | `malformed_request` | `policy_validation` |
-| `network.allowLocalNetwork` | `true` → `policy_validation`; WSLc networking is all-or-nothing and provision has no port-mapping escape hatch | `malformed_request` | mode field → `policy_validation` |
-| `network.enforcementMode` | `capabilities` accepted; `firewall` / `both` → `policy_validation` | `malformed_request` | mode field → `policy_validation` |
-| `network.proxy` | `policy_validation` | `malformed_request` | honored in **`url` form only**; `localhost` / `builtinTestServer` → `policy_validation` |
-| `ui` | `malformed_request` | `malformed_request` | `malformed_request` |
-| `process.timeout` | `malformed_request` | `malformed_request` | honored → `ExecConfig.timeout_ms` |
-| `lifecycle` | `malformed_request` | `malformed_request` | `malformed_request` |
+| `readwritePaths` / `readonlyPaths` | honored → container volumes | rejected | rejected |
+| `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
+| Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
+| `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
+| Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
+| `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| `ui` | rejected | rejected | rejected |
+| `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
+| `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
 The exact `0.9.0-alpha` request root is selected before backend dispatch.
 Fields absent from that phase's closed root fail structurally with
@@ -114,12 +125,17 @@ spawns the daemon, VM, or container.
 
 Filesystem policy is fixed at `provision` and immutable afterwards.
 
-The network **mode** (`defaultPolicy` / `enforcementMode` /
-`allowLocalNetwork` / host lists) is fixed at `provision`. Start, stop, and
-deprovision exclude the entire network section structurally. Exec admits
-`network` only for the cooperative proxy, so an explicit mode field reaches the
-backend and is rejected with `policy_validation` by presence, even when its
-value equals the provision default.
+The directional network posture is fixed at `provision`. Post-provision
+phases reject supplied posture by presence, even when values equal defaults.
+Only exec can supply a cooperative proxy through top-level `runtimeConfig`;
+its request omits `network` so proxy-only execution inherits the existing
+posture. Proxy URLs must address a listener reachable from the guest; a host
+loopback listener is not made guest-reachable by spelling its host address
+`localhost`.
+
+The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
+published contracts is not a v0.9 compatibility fallback. The new v0.9
+directional requirements do not change those published contracts.
 
 ## Error mapping
 

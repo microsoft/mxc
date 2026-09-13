@@ -24,8 +24,7 @@ mod wslc;
 
 pub use containment::{probe_containment, Containment, ContainmentProbeError};
 pub use isolation_session::{
-    IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
-    IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
     StateAwareIsolationSession,

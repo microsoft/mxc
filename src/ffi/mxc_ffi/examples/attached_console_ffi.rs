@@ -96,7 +96,7 @@ fn run() -> i32 {
 
     let provisioned = phase(
         r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     );
     // The sandbox id is opaque by contract — carried verbatim, never parsed.
     let sandbox_id = provisioned
