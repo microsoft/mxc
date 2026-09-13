@@ -3,7 +3,7 @@
 
 param(
     [string]$WxcExec,
-    [string]$PackageName = "Microsoft.WindowsNotepad"
+    [string]$PackageName = "Microsoft.PowerShell"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,8 +16,8 @@ $WxcExec = Resolve-RegressionExecutable $WxcExec "wxc-exec.exe"
 $package = Get-AppxPackage $PackageName | Select-Object -First 1
 if (-not $package) { throw "Package '$PackageName' is not installed for the current user." }
 
-$exe = Get-ChildItem -LiteralPath $package.InstallLocation -Recurse -Filter Notepad.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-if (-not $exe) { throw "No Notepad.exe was found under '$($package.InstallLocation)'." }
+$exe = Get-ChildItem -LiteralPath $package.InstallLocation -Recurse -Filter pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+if (-not $exe) { throw "No pwsh.exe was found under '$($package.InstallLocation)'." }
 
 # Config
 $configJson = @"
@@ -43,7 +43,8 @@ $configJson = @"
 "@
 
 # Command
-$commandLine = "`"$exe`""
+$commandLine = "`"$exe`" -NoProfile -Command `"echo 'Hello from packaged pwsh.exe!'`"; exit 0;"
+$commandLine
 
 $json = Add-RegressionCommandLine $configJson $commandLine
 $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
