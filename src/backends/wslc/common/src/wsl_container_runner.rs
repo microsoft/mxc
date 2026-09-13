@@ -24,12 +24,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+#[cfg(test)]
+use wxc_common::models::NetworkPolicy;
+use wxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
-use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use wxc_common::validator::validate_network_policy_support;
 
 use crate::container_steps::sdk_error;
 use crate::error::WslcError;
@@ -683,8 +685,9 @@ impl ScriptRunner for WSLContainerRunner {
         policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
+        validate_network_policy_support(request, policy::network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
+        policy::validate_directional_network(request).map_err(as_wslc_rejection)?;
         Ok(())
     }
 
@@ -1636,7 +1639,7 @@ impl WSLContainerRunner {
             );
         }
 
-        let is_default_block = request.policy.default_network_policy == NetworkPolicy::Block;
+        let is_default_block = policy::network_is_isolated(request);
         let has_host_rules = policy_mapping::needs_host_filtering(
             is_default_block,
             &request.policy.allowed_hosts,

@@ -18,6 +18,11 @@ import {
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk';
 
+export const isolationSessionNetwork = {
+  egress: { default: 'allow' },
+  ingress: { default: 'allow', hostLoopback: 'allow' },
+} as const;
+
 const require = createRequire(import.meta.url);
 export const sdk = sdkNamespace;
 
@@ -234,10 +239,10 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
 ): Promise<string | undefined> {
   try {
     // Provision needs a backend-valid minimal config. IsolationSession requires
-    // the unrestricted-network acknowledgment at provision (the container's
+    // the directional all-allow network posture at provision (the container's
     // network cannot be filtered or denied); other backends take no required
-    // provision config. Without this the probe would hit `policy_validation` on
-    // an iso-capable host and rethrow it, breaking the suite at module load.
+    // provision config. Without this the probe would fail validation on an
+    // iso-capable host and rethrow it, breaking the suite at module load.
     //
     // The provision call is made per backend rather than once with a cast
     // config. `provisionSandbox`'s trailing parameters are a conditional tuple
@@ -263,7 +268,7 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
         case 'isolation_session': {
           const result = await provisionSandbox(
             'isolation_session',
-            { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+            { network: isolationSessionNetwork },
             { experimental: true },
           );
           return result.sandboxId;
@@ -329,7 +334,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        network: isolationSessionNetwork,
         appId: 'x'.repeat(257),
       },
       { experimental: true },
@@ -343,6 +348,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
     ) {
       return 'wxc-exec lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
     }
+
     if (err instanceof MxcError && err.code === 'policy_validation') {
       return undefined;
     }

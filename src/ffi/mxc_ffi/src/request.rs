@@ -317,7 +317,16 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    if let Some(path) = ignored_paths.first() {
+    // The SDK authoring model recognizes these wire-only legacy names only to
+    // preserve their presence for the version-specific migration diagnostic.
+    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
+    if let Some(path) = ignored_paths.iter().find(|path| {
+        !(accepts_wire_legacy_names
+            && matches!(
+                path.as_str(),
+                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
+            ))
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),
@@ -660,6 +669,55 @@ mod tests {
             error.message.contains("unknown field `timeoutMS`"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""capabilities""#),
+            ] {
+                let request_json = format!(
+                    r#"{{
+                        "policy": {{
+                            "version": "{version}",
+                            "network": {{ "{field}": {value} }}
+                        }},
+                        "command": "echo hi"
+                    }}"#
+                );
+                let error = build_request_from_json(&request_json)
+                    .expect_err("wire-only network names must remain unknown before v0.9");
+                assert!(
+                    error.message.contains(&format!("policy.network.{field}")),
+                    "unexpected error for {version} {field}: {error}"
+                );
+            }
+        }
+
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha",
+                        "network": {{ "{field}": {value} }}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let error = build_request_from_json(&request_json)
+                .expect_err("v0.9 wire-only network names must reach migration validation");
+            assert!(
+                error
+                    .message
+                    .contains("no longer accepts legacy network authoring"),
+                "unexpected error for v0.9 {field}: {error}"
+            );
+        }
     }
 
     #[test]

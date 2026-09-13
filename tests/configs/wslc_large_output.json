@@ -6,7 +6,7 @@
     "commandLine": "for i in $(seq 1 500); do echo \"line $i: $(head -c 80 /dev/urandom | base64 | head -c 80)\"; done && echo 'Large output test complete'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

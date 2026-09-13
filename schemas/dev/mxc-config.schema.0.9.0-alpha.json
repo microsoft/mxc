@@ -7,7 +7,29 @@
   "allOf": [
     {
       "else": {
-        "$ref": "#/definitions/OneShotRequest"
+        "allOf": [
+          {
+            "$ref": "#/definitions/OneShotRequest"
+          },
+          {
+            "else": true,
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "isolation_session"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "required": [
+                "network"
+              ]
+            }
+          }
+        ]
       },
       "if": {
         "required": [
@@ -173,24 +195,6 @@
         }
       ]
     },
-    "DefaultNetworkPolicy": {
-      "oneOf": [
-        {
-          "description": "Allow",
-          "enum": [
-            "allow"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Block",
-          "enum": [
-            "block"
-          ],
-          "type": "string"
-        }
-      ]
-    },
     "DeprovisionExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `deprovision` phase.",
@@ -279,6 +283,10 @@
           "$ref": "#/definitions/Process",
           "description": "Process to execute in the sandbox."
         },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional per-execution runtime values, including the cooperative proxy URL."
+        },
         "sandboxId": {
           "description": "Identifier of the sandbox to execute in.",
           "type": "string"
@@ -345,9 +353,9 @@
       ],
       "type": "string"
     },
-    "IsolationSessionDirectionalNetwork": {
+    "IsolationSessionNetwork": {
       "additionalProperties": false,
-      "description": "The canonical directional unrestricted-network posture.",
+      "description": "The canonical unrestricted-network posture.",
       "properties": {
         "egress": {
           "$ref": "#/definitions/IsolationSessionNetworkEgress",
@@ -363,41 +371,6 @@
         "ingress"
       ],
       "type": "object"
-    },
-    "IsolationSessionLegacyNetwork": {
-      "additionalProperties": false,
-      "description": "The canonical legacy unrestricted-network posture retained for compatibility.",
-      "properties": {
-        "allowLocalNetwork": {
-          "$ref": "#/definitions/True",
-          "description": "Legacy unrestricted inbound/local-network posture."
-        },
-        "defaultPolicy": {
-          "$ref": "#/definitions/IsolationSessionLegacyNetworkAllow",
-          "description": "Legacy unrestricted outbound posture."
-        }
-      },
-      "required": [
-        "allowLocalNetwork",
-        "defaultPolicy"
-      ],
-      "type": "object"
-    },
-    "IsolationSessionLegacyNetworkAllow": {
-      "enum": [
-        "allow"
-      ],
-      "type": "string"
-    },
-    "IsolationSessionNetwork": {
-      "oneOf": [
-        {
-          "$ref": "#/definitions/IsolationSessionLegacyNetwork"
-        },
-        {
-          "$ref": "#/definitions/IsolationSessionDirectionalNetwork"
-        }
-      ]
     },
     "IsolationSessionNetworkAllow": {
       "enum": [
@@ -462,7 +435,7 @@
     },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture. The historical legacy pair and the standard directional all-allow shape are accepted.",
+      "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.",
       "properties": {
         "$schema": {
           "description": "Optional JSON Schema reference for editor validation.",
@@ -560,43 +533,13 @@
       "additionalProperties": false,
       "description": "Network access policy shared by the stable containment backends.",
       "properties": {
-        "allowLocalNetwork": {
-          "description": "Optional permission to bind and accept local network connections.",
-          "type": "boolean"
-        },
-        "allowedHosts": {
-          "description": "Optional hosts allowed when the default policy blocks access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "blockedHosts": {
-          "description": "Optional hosts blocked when the default policy allows access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "defaultPolicy": {
-          "$ref": "#/definitions/DefaultNetworkPolicy",
-          "description": "Optional default network posture."
-        },
         "egress": {
           "$ref": "#/definitions/NetworkEgress",
           "description": "Optional outbound network rules."
         },
-        "enforcementMode": {
-          "$ref": "#/definitions/NetworkEnforcementMode",
-          "description": "Optional network enforcement mechanism."
-        },
         "ingress": {
           "$ref": "#/definitions/NetworkIngress",
           "description": "Optional inbound and host-loopback network rules."
-        },
-        "proxy": {
-          "$ref": "#/definitions/NetworkProxy",
-          "description": "Optional proxy configuration."
         }
       },
       "type": "object"
@@ -643,31 +586,6 @@
         }
       },
       "type": "object"
-    },
-    "NetworkEnforcementMode": {
-      "oneOf": [
-        {
-          "description": "Capabilities",
-          "enum": [
-            "capabilities"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Firewall",
-          "enum": [
-            "firewall"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Both",
-          "enum": [
-            "both"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "NetworkIngress": {
       "additionalProperties": false,
@@ -757,52 +675,6 @@
             "any"
           ],
           "type": "string"
-        }
-      ]
-    },
-    "NetworkProxy": {
-      "description": "One of the proxy configurations accepted by the `0.9.0-alpha` contract.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "Connect to an existing proxy on a non-zero localhost TCP port.",
-          "properties": {
-            "localhost": {
-              "maximum": 65535,
-              "minimum": 1.0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "localhost"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Start and use MXC's built-in test proxy.",
-          "properties": {
-            "builtinTestServer": {
-              "$ref": "#/definitions/True"
-            }
-          },
-          "required": [
-            "builtinTestServer"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Connect through the supplied proxy URL.",
-          "properties": {
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "url"
-          ],
-          "type": "object"
         }
       ]
     },
@@ -1297,7 +1169,7 @@
       "description": "Runtime configuration supplied alongside the sandbox policy.",
       "properties": {
         "networkProxy": {
-          "description": "Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.",
+          "description": "Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.",
           "type": "string"
         }
       },
@@ -1491,12 +1363,6 @@
           "type": "string"
         }
       ]
-    },
-    "True": {
-      "enum": [
-        true
-      ],
-      "type": "boolean"
     },
     "Ui": {
       "additionalProperties": false,

@@ -10,7 +10,7 @@
     "destroyOnExit": true
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

@@ -152,16 +152,40 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
 | `workingDirectory`                      | Not supported (guest CWD is `/`)            |
-| Network policy                          | Host networking + per-host egress filtering |
+| Network policy                          | v0.9 isolated or explicitly unrestricted host networking |
 
 ## Networking
 
-Host networking is **opt-in**. Set `network.defaultPolicy` to `"allow"` to
-enable unrestricted egress; the runner then passes `-allow-host-networking` to
-`nanvixd`. The default (`"block"`) leaves networking disabled, and a guest
-socket call fails with `OSError: [Errno 134]`.
+Host networking is **opt-in**. Exact v0.9 supports two coherent directional
+postures: all three of egress default, ingress default and host-loopback deny
+leaves networking disabled; all three explicitly allow enables unrestricted
+host networking through `-allow-host-networking`. Mixed postures are rejected,
+including egress allow with omitted ingress defaults.
 
-### Per-host egress filtering
+```json
+{
+  "version": "0.9.0-alpha",
+  "containment": "microvm",
+  "process": { "commandLine": "print('network enabled')" },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  }
+}
+```
+
+Disabled networking prevents guest socket creation (`OSError: [Errno 134]`).
+Unrestricted networking includes host-backed bind/listen capabilities;
+NanVix cannot independently enforce ingress or host-loopback restrictions.
+Directional egress rules are explicitly rejected because the legacy IPv4
+filter does not implement their full semantics, including default-deny DNS.
+Runtime proxy configuration is also unsupported.
+
+### Legacy per-host filter implementation (compatibility/reference only)
+
+The following describes the retained legacy runtime filter, not accepted v0.9
+JSON vocabulary. The exact cutover does not silently translate directional
+rules into this weaker contract.
 
 `allowedHosts` and `blockedHosts` are supported and forwarded to the guest's
 host-side socket proxy, which enforces egress at `connect()`. The guest filter
@@ -202,7 +226,7 @@ preflight.
 {
   "containment": "microvm",
   "process": { "commandLine": "import urllib.request; ..." },
-  // Unrestricted egress:
+  // Historical legacy shape, not accepted by the exact v0.9 contract:
   "network": { "defaultPolicy": "allow" }
 }
 ```
@@ -211,7 +235,7 @@ preflight.
 {
   "containment": "microvm",
   "process": { "commandLine": "import urllib.request; ..." },
-  // Allowlist: only example.com and the 10.0.0.0/8 block are reachable.
+  // Historical legacy shape, not accepted by the exact v0.9 contract:
   "network": { "allowedHosts": ["example.com", "10.0.0.0/8"] }
 }
 ```

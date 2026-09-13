@@ -99,16 +99,18 @@ describe('buildStateAwareEnvelope', () => {
       containment: 'isolation_session',
       config: {
         version: '0.9.0-alpha',
-        filesystem: { readwritePaths: ['C:\\workspace'] },
-        network: { defaultPolicy: 'block' },
-        ui: { disable: true, clipboard: 'none', injection: false },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
       },
     });
     assert.strictEqual(env.phase, 'provision');
     assert.strictEqual(env.containment, 'isolation_session');
-    assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\workspace'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
-    assert.deepStrictEqual(env.ui, { disable: true, clipboard: 'none', injection: false });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
     assert.strictEqual(env.experimental, undefined);
     assert.strictEqual(env.sandboxId, undefined);
   });
@@ -675,14 +677,20 @@ describe('wslc state-aware lifecycle', () => {
       containment: 'wslc',
       config: {
         filesystem: { readwritePaths: ['C:\\ws\\rw'] },
-        network: { defaultPolicy: 'allow' },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         image: 'alpine:latest',
         imageTarPath: 'C:\\images\\alpine.tar',
       },
     });
     assert.strictEqual(env.containment, 'wslc');
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\ws\\rw'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'allow' });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
       wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
@@ -694,10 +702,18 @@ describe('wslc state-aware lifecycle', () => {
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
-      config: { network: { defaultPolicy: 'block' } },
+      config: {
+        network: {
+          egress: { default: 'deny' },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        },
+      },
     });
     assert.strictEqual(env.experimental, undefined);
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    });
   });
 
   it('lifts exec process + cooperative proxy network to top-level with no experimental block', () => {
@@ -707,11 +723,13 @@ describe('wslc state-aware lifecycle', () => {
       sandboxId: 'wslc:abc',
       config: {
         process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://127.0.0.1:8888' } },
+        runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
       },
     });
     assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
-    assert.deepStrictEqual(env.network, { proxy: { url: 'http://127.0.0.1:8888' } });
+    assert.deepStrictEqual(env.runtimeConfig, {
+      networkProxy: 'http://127.0.0.1:8888',
+    });
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -723,7 +741,13 @@ describe('wslc state-aware lifecycle', () => {
       _setSpawnImpl(fake.spawn);
       const result = await provisionSandbox(
         'wslc',
-        { image: 'alpine:latest', network: { defaultPolicy: 'block' } },
+        {
+          image: 'alpine:latest',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        },
         testOptions(),
       );
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');

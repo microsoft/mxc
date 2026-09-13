@@ -10,7 +10,8 @@
     "deniedPaths": ["C:\\ddttest\\link\\ghost\\sub\\..\\secret"]
   },
   "network": {
-    "defaultPolicy": "allow"
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "experimental": {
     "wslc": {

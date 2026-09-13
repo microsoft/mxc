@@ -43,7 +43,7 @@ fn rejects_invalid_containment_value() {
 }
 
 #[test]
-fn accepts_every_default_network_policy_value() {
+fn rejects_every_removed_default_network_policy_value() {
     for default_network_policy in ["allow", "block"] {
         let json = format!(
             r#"{{
@@ -55,7 +55,7 @@ fn accepts_every_default_network_policy_value() {
             }}"#
         );
 
-        assert_valid(&json);
+        assert_invalid(&json);
     }
 }
 
@@ -73,7 +73,7 @@ fn rejects_invalid_default_network_policy_value() {
 }
 
 #[test]
-fn accepts_every_network_enforcement_mode_value() {
+fn rejects_every_removed_network_enforcement_mode_value() {
     for network_enforcement_mode in ["capabilities", "firewall", "both"] {
         let json = format!(
             r#"{{
@@ -85,7 +85,7 @@ fn accepts_every_network_enforcement_mode_value() {
             }}"#
         );
 
-        assert_valid(&json);
+        assert_invalid(&json);
     }
 }
 

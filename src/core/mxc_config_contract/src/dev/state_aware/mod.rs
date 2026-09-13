@@ -67,8 +67,7 @@ pub use exec::{ExecExperimental, ExecPhase, ExecRequest};
 pub use phase::{probe_phase, Phase, PhaseProbeError};
 pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
-    IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
-    IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
     StateAwareIsolationSession,

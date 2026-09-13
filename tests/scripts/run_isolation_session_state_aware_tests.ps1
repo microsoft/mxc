@@ -640,9 +640,8 @@ try {
         Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
     } | Out-Null
 
-    # The exact root encodes the only accepted unrestricted-network
-    # acknowledgment, so `block` is rejected during contract parsing.
-    Run-StateAwareTest "provision (non-canonical network rejected structurally)" {
+    # Provision requires the exact directional all-allow network posture.
+    Run-StateAwareTest "provision (restrictive network rejected structurally)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -650,8 +649,93 @@ try {
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
         Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-        Assert-True ($msg -match 'unknown variant `block`.*expected `allow`') "error.message reports the required allow marker (got '$msg')"
+        Assert-True ($msg -match 'network.egress.default') "error.message reports the restrictive network path (got '$msg')"
     } | Out-Null
+
+    # Every legacy network field is rejected even alongside the required
+    # directional all-allow posture.
+    foreach ($field in @('defaultPolicy', 'allowLocalNetwork')) {
+        Run-StateAwareTest "provision (legacy network.$field rejected)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                network = @{
+                    egress = @{ default = 'allow' }
+                    ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+                    $field = if ($field -eq 'defaultPolicy') { 'allow' } else { $true }
+                }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains("network.$field")) "error.message reports the legacy network path (got '$msg')"
+        } | Out-Null
+    }
+
+    foreach ($axis in @('egress', 'ingress')) {
+        Run-StateAwareTest "provision (restrictive $axis default rejected structurally)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                network = @{
+                    egress = @{ default = if ($axis -eq 'egress') { 'deny' } else { 'allow' } }
+                    ingress = @{
+                        default = if ($axis -eq 'ingress') { 'deny' } else { 'allow' }
+                        hostLoopback = 'allow'
+                    }
+                }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains("network.$axis.default")) `
+                "error.message identifies the restrictive network path (got '$msg')"
+        } | Out-Null
+    }
+
+    Run-StateAwareTest "provision (missing network rejected structurally)" {
+        $req = @{
+            phase = 'provision'
+            containment = 'isolation_session'
+            experimental = @{ isolation_session = @{ provision = @{} } }
+        }
+        $r = Invoke-StateAware -Request $req -Experimental -DryRun
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg.Contains('network')) `
+            "error.message identifies the missing network field (got '$msg')"
+    } | Out-Null
+
+    foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+        Run-StateAwareTest "$phase (network redeclaration rejected structurally)" {
+            $req = @{
+                phase = $phase
+                sandboxId = 'iso:unused'
+                network = @{
+                    egress = @{ default = 'allow' }
+                    ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+                }
+            }
+            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'echo NETWORK_MUST_NOT_RUN' } }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains('network') -and $msg.Contains('unknown field `network`')) `
+                "error.message identifies the phase-incompatible network field (got '$msg')"
+        } | Out-Null
+    }
 
     # The exact IsolationSession provision root excludes UI policy. Backend
     # policy unit tests retain the capability-honesty validation coverage.
@@ -715,7 +799,7 @@ try {
             $req = @{
                 phase     = 'start'
                 sandboxId = $script:sandboxId
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
@@ -770,20 +854,23 @@ try {
 
     # Test 3c: exec rejects a request that carries a network policy. The network
     # posture is fixed at provision; any network policy on a post-provision phase
-    # is rejected -- even the canonical acknowledgment.
+    # is rejected -- even an allow policy.
     if ($execedOk) {
         Run-StateAwareTest "exec (network policy rejected post-provision)" {
             $req = @{
                 phase     = 'exec'
                 sandboxId = $script:sandboxId
                 process   = @{ commandLine = 'echo unused' }
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+                "error.message identifies the closed exec network field (got '$msg')"
         } | Out-Null
     }
 

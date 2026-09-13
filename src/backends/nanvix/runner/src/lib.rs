@@ -57,7 +57,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -116,6 +116,12 @@ const ERR_BLOCKED_HOST_UNRESOLVED: &str = concat!(
     "Use an IPv4 literal/CIDR or a host with A records",
 );
 const ERR_PROXY_POLICY: &str = "network proxy is not supported by the NanVix backend";
+const ERR_DIRECTIONAL_NETWORK: &str = "NanVix supports only fully isolated or explicitly \
+    unrestricted directional networking: egress.default, ingress.default and ingress.hostLoopback \
+    must all be deny or all be allow; independent ingress or host-loopback restrictions are not supported";
+const ERR_DIRECTIONAL_FILTERS: &str = "NanVix cannot enforce directional egress rules: its legacy \
+    IPv4 filter has implicit exceptions and does not implement the directional rule contract; \
+    use fully isolated networking or explicitly unrestricted networking without rules";
 const ERR_WORKDIR: &str = "workingDirectory is not supported by the NanVix backend -- guest has its own filesystem namespace";
 
 /// Outcome of resolving a request's egress host lists.
@@ -519,17 +525,52 @@ impl NanVixScriptRunner {
         }
     }
 
-    /// Returns whether the request opts in to host networking.
+    /// Compatibility lowering for legacy requests without directional policy.
     ///
     /// Host networking is enabled when `network.defaultPolicy = "allow"` OR when
     /// a per-host allow/block list is present (a list always implies networking,
     /// regardless of `defaultPolicy`). When enabled, the runner passes
     /// `-allow-host-networking` to nanvixd; per-host lists are additionally
     /// forwarded as `-allow-host`/`-block-host` (see [`Self::spawn_nanvixd`]).
-    fn host_networking_enabled(request: &ExecutionRequest) -> bool {
+    fn legacy_host_networking_enabled(request: &ExecutionRequest) -> bool {
         request.policy.default_network_policy == NetworkPolicy::Allow
             || !request.policy.allowed_hosts.is_empty()
             || !request.policy.blocked_hosts.is_empty()
+    }
+
+    fn resolve_networking_mode(request: &ExecutionRequest) -> Result<bool, NanVixError> {
+        let policy = &request.policy;
+        if policy.network_egress.is_none() && policy.network_ingress.is_none() {
+            return Ok(Self::legacy_host_networking_enabled(request));
+        }
+        if !policy.allowed_hosts.is_empty()
+            || !policy.blocked_hosts.is_empty()
+            || policy
+                .network_egress
+                .as_ref()
+                .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
+        {
+            return Err(NanVixError::Preflight(ERR_DIRECTIONAL_FILTERS.to_string()));
+        }
+        let egress = policy
+            .network_egress
+            .as_ref()
+            .map(|egress| egress.default)
+            .unwrap_or(NetworkAction::Deny);
+        let ingress = policy
+            .network_ingress
+            .as_ref()
+            .map(|ingress| ingress.default)
+            .unwrap_or(NetworkAction::Deny);
+        let host_loopback = policy
+            .network_ingress
+            .as_ref()
+            .map(|ingress| ingress.host_loopback)
+            .unwrap_or(NetworkAction::Deny);
+        if egress != ingress || ingress != host_loopback {
+            return Err(NanVixError::Preflight(ERR_DIRECTIONAL_NETWORK.to_string()));
+        }
+        Ok(egress == NetworkAction::Allow)
     }
 
     /// Resolves a host entry list into IPv4/CIDR literals for nanvixd's
@@ -653,17 +694,19 @@ impl NanVixScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
         }
+        Self::resolve_networking_mode(request)?;
 
         Ok(())
     }
 
-    fn spawn_nanvixd(
+    fn nanvixd_command(
         paths: &ResolvedPaths,
         staging_dir: &Path,
-        host_networking: bool,
+        request: &ExecutionRequest,
         allow_hosts: &[String],
         block_hosts: &[String],
-    ) -> Result<std::process::Child, NanVixError> {
+    ) -> Result<Command, NanVixError> {
+        let host_networking = Self::resolve_networking_mode(request)?;
         let trace = nanvix_trace_enabled();
         // Default: silence nanvixd and inherit stderr so kernel traces (if
         // any) stream straight to the parent terminal without a per-run
@@ -690,7 +733,7 @@ impl NanVixScriptRunner {
         // (validated upstream), so at most one of these loops emits flags.
         // nanvixd requires `-allow-host-networking` for these to take effect,
         // which is guaranteed because a non-empty list forces host_networking
-        // on (see `host_networking_enabled`). The guest daemon auto-exempts the
+        // on (see `legacy_host_networking_enabled`). The guest daemon auto-exempts the
         // DNS port in allowlist mode, so no resolver IPs are added here.
         for host in allow_hosts {
             cmd.arg("-allow-host").arg(host);
@@ -739,9 +782,21 @@ impl NanVixScriptRunner {
             // Suppress nanvixd's env_logger output and per-run log file.
             cmd.env("RUST_LOG", "off");
         }
-        cmd.spawn().map_err(|e| {
-            NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
-        })
+        Ok(cmd)
+    }
+
+    fn spawn_nanvixd(
+        paths: &ResolvedPaths,
+        staging_dir: &Path,
+        request: &ExecutionRequest,
+        allow_hosts: &[String],
+        block_hosts: &[String],
+    ) -> Result<std::process::Child, NanVixError> {
+        Self::nanvixd_command(paths, staging_dir, request, allow_hosts, block_hosts)?
+            .spawn()
+            .map_err(|e| {
+                NanVixError::Platform(format!("failed to spawn {}: {}", NANVIXD_BINARY, e))
+            })
     }
 
     fn start_watchdog(
@@ -937,11 +992,20 @@ impl NanVixScriptRunner {
 impl ScriptRunner for NanVixScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Self::validate_policies(request).map_err(|e| e.to_response())?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        let host_networking = match Self::resolve_networking_mode(request) {
+            Ok(enabled) => enabled,
+            Err(error) => return error.to_response(),
+        };
         let paths = match self.resolve_paths() {
             Ok(p) => p,
             Err(e) => return e.to_response(),
@@ -971,7 +1035,6 @@ impl ScriptRunner for NanVixScriptRunner {
         Self::log_resolved_paths(logger, &paths);
         let _ = writeln!(logger, "NanVix: staging_dir={:?}", staging.path());
 
-        let host_networking = Self::host_networking_enabled(request);
         if host_networking {
             let _ = writeln!(logger, "NanVix: host networking enabled");
         }
@@ -996,7 +1059,7 @@ impl ScriptRunner for NanVixScriptRunner {
         let mut child = match Self::spawn_nanvixd(
             &paths,
             staging.path(),
-            host_networking,
+            request,
             &allow_hosts,
             &block_hosts,
         ) {
@@ -1072,6 +1135,202 @@ mod tests {
 
     // -- Policy validation tests -------------------------------------------------
 
+    fn directional_request(
+        egress: NetworkAction,
+        ingress: NetworkAction,
+        host_loopback: NetworkAction,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(wxc_common::models::NetworkEgressPolicy {
+                    default: egress,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                }),
+                network_ingress: Some(wxc_common::models::NetworkIngressPolicy {
+                    default: ingress,
+                    host_loopback,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn command_arguments(
+        request: &ExecutionRequest,
+        allow_hosts: &[String],
+        block_hosts: &[String],
+    ) -> Result<Vec<String>, NanVixError> {
+        let root = PathBuf::from("nanvix-command-test");
+        let paths = ResolvedPaths {
+            nanvixd: root.join(NANVIXD_BINARY),
+            ramfs: root.join("rootfs.img"),
+            initrd: root.join("python3.initrd"),
+            exe_dir: root.clone(),
+            snapshot_home: root,
+        };
+        let command = NanVixScriptRunner::nanvixd_command(
+            &paths,
+            Path::new("staging"),
+            request,
+            allow_hosts,
+            block_hosts,
+        )?;
+        Ok(command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect())
+    }
+
+    #[test]
+    fn directional_networking_requires_a_coherent_explicit_posture() {
+        let runner = NanVixScriptRunner::new();
+        for egress in [NetworkAction::Deny, NetworkAction::Allow] {
+            for ingress in [NetworkAction::Deny, NetworkAction::Allow] {
+                for host_loopback in [NetworkAction::Deny, NetworkAction::Allow] {
+                    let request = directional_request(egress, ingress, host_loopback);
+                    if egress == ingress && ingress == host_loopback {
+                        runner.validate_runner(&request).unwrap();
+                        assert_eq!(
+                            NanVixScriptRunner::resolve_networking_mode(&request).unwrap(),
+                            egress == NetworkAction::Allow
+                        );
+                        let arguments = command_arguments(&request, &[], &[]).unwrap();
+                        assert_eq!(
+                            arguments
+                                .iter()
+                                .filter(|arg| *arg == "-allow-host-networking")
+                                .count(),
+                            usize::from(egress == NetworkAction::Allow)
+                        );
+                    } else {
+                        let error = runner.validate_runner(&request).unwrap_err();
+                        assert!(error.error_message.contains(ERR_DIRECTIONAL_NETWORK));
+                        assert!(command_arguments(&request, &[], &[]).is_err());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn directional_egress_allow_does_not_implicitly_allow_ingress() {
+        let mut request = directional_request(
+            NetworkAction::Allow,
+            NetworkAction::Allow,
+            NetworkAction::Allow,
+        );
+        request.policy.network_ingress = None;
+        assert!(NanVixScriptRunner::resolve_networking_mode(&request).is_err());
+    }
+
+    #[test]
+    fn directional_filter_requests_are_rejected_before_execution() {
+        for rules in ["allow", "deny"] {
+            let source = format!(
+                r#"{{"version":"0.9.0-alpha","containment":"microvm",
+                    "process":{{"commandLine":"print(1)"}},
+                    "network":{{"egress":{{"default":"allow","{rules}":[{{"to":[{{"cidr":"203.0.113.0/24"}}]}}]}},
+                               "ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#
+            );
+            let mut logger = Logger::new(Mode::Buffer);
+            let parsed =
+                wxc_common::config_parser::load_mxc_request_from_json(&source, &mut logger)
+                    .unwrap();
+            let wxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed else {
+                panic!("expected one-shot");
+            };
+            let error = NanVixScriptRunner::new()
+                .validate_runner(&request)
+                .unwrap_err();
+            assert!(error.error_message.contains(ERR_DIRECTIONAL_FILTERS));
+            assert!(command_arguments(&request, &[], &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn public_directional_fixtures_enable_host_networking() {
+        for source in [
+            include_str!("../../../../../tests/configs/microvm_network.json"),
+            include_str!("../../../../../tests/configs/microvm_network_linux.json"),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let parsed =
+                wxc_common::config_parser::load_mxc_request_from_json(source, &mut logger).unwrap();
+            let wxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed else {
+                panic!("expected one-shot");
+            };
+            NanVixScriptRunner::new().validate_runner(&request).unwrap();
+            assert!(NanVixScriptRunner::resolve_networking_mode(&request).unwrap());
+            assert!(!NanVixScriptRunner::legacy_host_networking_enabled(
+                &request
+            ));
+            let arguments = command_arguments(&request, &[], &[]).unwrap();
+            assert_eq!(
+                arguments.first().map(String::as_str),
+                Some("-allow-host-networking")
+            );
+            assert!(!arguments
+                .iter()
+                .any(|arg| arg == "-allow-host" || arg == "-block-host"));
+        }
+    }
+
+    #[test]
+    fn legacy_launch_arguments_preserve_network_defaults_and_host_filters() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for (default, allow, block, expected_prefix) in [
+                (NetworkPolicy::Block, vec![], vec![], vec![]),
+                (
+                    NetworkPolicy::Allow,
+                    vec![],
+                    vec![],
+                    vec!["-allow-host-networking"],
+                ),
+                (
+                    NetworkPolicy::Block,
+                    vec!["192.0.2.1"],
+                    vec![],
+                    vec!["-allow-host-networking", "-allow-host", "192.0.2.1"],
+                ),
+                (
+                    NetworkPolicy::Block,
+                    vec![],
+                    vec!["192.0.2.0/24"],
+                    vec!["-allow-host-networking", "-block-host", "192.0.2.0/24"],
+                ),
+            ] {
+                let request = ExecutionRequest {
+                    schema_version: version.to_string(),
+                    policy: ContainerPolicy {
+                        default_network_policy: default,
+                        allowed_hosts: allow.into_iter().map(str::to_owned).collect(),
+                        blocked_hosts: block.into_iter().map(str::to_owned).collect(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let arguments = command_arguments(
+                    &request,
+                    &request.policy.allowed_hosts,
+                    &request.policy.blocked_hosts,
+                )
+                .unwrap();
+                let expected: Vec<String> =
+                    expected_prefix.into_iter().map(str::to_owned).collect();
+                assert!(arguments.starts_with(&expected), "{version}: {arguments:?}");
+                assert_eq!(
+                    arguments.iter().any(|arg| arg == "-allow-host-networking"),
+                    !expected.is_empty(),
+                    "{version}: {arguments:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn policy_accepts_readwrite_paths() {
         // Validation passes; the runner fails later on path resolution.
@@ -1136,7 +1395,7 @@ mod tests {
             "a bare allowlist should pass validation"
         );
         // A list implies host networking regardless of defaultPolicy (Block).
-        assert!(NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(NanVixScriptRunner::legacy_host_networking_enabled(&request));
     }
 
     #[test]
@@ -1154,7 +1413,7 @@ mod tests {
             NanVixScriptRunner::validate_policies(&request).is_ok(),
             "a bare blocklist should pass validation"
         );
-        assert!(NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(NanVixScriptRunner::legacy_host_networking_enabled(&request));
     }
 
     #[test]
@@ -1328,7 +1587,9 @@ mod tests {
     fn default_block_no_lists_disables_host_networking() {
         // The default posture (block, no lists) keeps networking off.
         let request = ExecutionRequest::default();
-        assert!(!NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(!NanVixScriptRunner::legacy_host_networking_enabled(
+            &request
+        ));
         let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
         assert!(resolved.allow.is_empty() && resolved.block.is_empty());
         assert!(resolved.warnings.is_empty());
@@ -1347,7 +1608,7 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(NanVixScriptRunner::legacy_host_networking_enabled(&request));
         assert!(
             NanVixScriptRunner::validate_policies(&request).is_ok(),
             "allow posture without per-host filtering should pass validation"
@@ -1388,7 +1649,9 @@ mod tests {
             script_code: "echo test".to_string(),
             ..Default::default()
         };
-        assert!(!NanVixScriptRunner::host_networking_enabled(&request));
+        assert!(!NanVixScriptRunner::legacy_host_networking_enabled(
+            &request
+        ));
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
