@@ -327,8 +327,7 @@ const config: ContainerConfig = {
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
-The legacy `defaultPolicy: 'allow'` plus `allowLocalNetwork: true` spelling
-remains accepted during the transition. Selecting the backend or passing
+Legacy network fields are rejected. Selecting the backend or passing
 `experimental: true` never supplies an unrestricted network posture
 automatically.
 
@@ -386,14 +385,42 @@ await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
-`IsolationSessionProvisionConfig.network` accepts either the canonical legacy
-pair or the preferred standard directional all-allow shape shown above. Rules,
+`IsolationSessionProvisionConfig.network` requires the standard directional
+all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The shared lifecycle
 signatures and other backends are unchanged.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. All state-aware requests default to the exact development schema `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` needs no provision config (it defaults to an `alpine:latest`
+container with no network). A bridged container uses the directional all-allow
+posture:
+
+```typescript
+const provisioned = await provisionSandbox('wslc', {
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+});
+```
+
+Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
+(mounted for the sandbox's lifetime) and a backend-specific `image` /
+`imageTarPath`. Inject a cooperative proxy during exec with
+`runtimeConfig.networkProxy`:
+
+```typescript
+await execInSandboxAsync(provisioned.sandboxId, {
+  process: { commandLine: 'curl https://example.com' },
+  runtimeConfig: { networkProxy: 'http://proxy.example:8080' },
+});
+```
+
+All state-aware requests default to the exact development schema
+`0.9.0-alpha`. See
+[`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
+for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 

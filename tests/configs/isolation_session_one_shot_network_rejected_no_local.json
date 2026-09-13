@@ -3,7 +3,13 @@
   "containerId": "isolation-session-one-shot-network-rejected-no-local",
   "containment": "isolation_session",
   "network": {
-    "defaultPolicy": "allow"
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
   },
   "process": {
     "commandLine": "echo unreachable",

@@ -49,12 +49,14 @@ import type {
 } from '../../src/state-aware-types.js';
 
 import type {
-  Phase as WirePhase,
-  IsolationSessionProvisionPhase as WireProvisionPhase,
-  WslcProvisionPhase as WireWslcProvisionPhase,
-} from '../../src/generated/wire.js';
-import type {
-  IsolationSessionNetwork as ExactIsolationSessionNetwork,
+  IsolationSessionProvision as WireProvisionPhase,
+  WslcProvision as WireWslcProvisionPhase,
+  IsolationSessionProvisionRequest,
+  WslcProvisionRequest,
+  ExecRequest,
+  StartRequest,
+  StopRequest,
+  DeprovisionRequest,
 } from '../../src/generated/v0_9_0_alpha/wire.js';
 
 import type {
@@ -67,8 +69,23 @@ import type {
 
 // --- enum conformance ------------------------------------------------------
 
+type WirePhase = (
+  IsolationSessionProvisionRequest | ExecRequest | StartRequest | StopRequest | DeprovisionRequest
+)['phase'];
 // The lifecycle phase enum must be value-for-value identical to the wire `Phase`.
 type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
+type _ExactWslcNetwork = AssertTrue<
+  Equivalent<NonNullable<WslcProvisionConfig['network']>, NonNullable<WslcProvisionRequest['network']>>
+>;
+type _ExactExecRuntime = AssertTrue<
+  Equivalent<NonNullable<WslcExecConfig['runtimeConfig']>, NonNullable<ExecRequest['runtimeConfig']>>
+>;
+type _ExactIsoNetwork = AssertTrue<
+  Equivalent<
+    NonNullable<IsolationSessionProvisionConfig['network']>,
+    NonNullable<IsolationSessionProvisionRequest['network']>
+  >
+>;
 
 // --- per-phase wire field-set conformance ----------------------------------
 
@@ -88,7 +105,7 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // phase configs surface them publicly but they map to the envelope top level,
 // not under `experimental.<backend>.<phase>`. Listing them here keeps the
 // backend-key set limited to genuinely per-phase wire fields.
-type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem' | 'telemetry';
+type LiftedPhaseKey = 'version' | 'process' | 'network' | 'runtimeConfig' | 'filesystem' | 'telemetry';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;
@@ -136,19 +153,6 @@ type _ProvisionKeysNonVacuous = AssertTrue<
 type _ProvisionWireKeysNonVacuous = AssertTrue<
   Equivalent<WireKeys<WireProvisionPhase>, 'appId'>
 >;
-
-// The exact schema uses oneOf for the legacy and directional IsolationSession
-// network shapes. A plain TypeScript union accepts an object containing both
-// branches, so this guards the generated XOR exclusions.
-const mixedNetworkShape = {
-  defaultPolicy: 'allow',
-  allowLocalNetwork: true,
-  egress: { default: 'allow' },
-  ingress: { default: 'allow', hostLoopback: 'allow' },
-} as const;
-// @ts-expect-error — exact oneOf rejects mixed legacy and directional fields.
-const mixedWireNetwork: ExactIsolationSessionNetwork = mixedNetworkShape;
-void mixedWireNetwork;
 
 // --- WSLc per-phase wire field-set conformance -----------------------------
 
@@ -199,6 +203,9 @@ type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecConfig['process'], Pr
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
+  _ExactWslcNetwork,
+  _ExactExecRuntime,
+  _ExactIsoNetwork,
   _Phase,
   _ProvisionPublicKeys,
   _ProvisionWireKeys,

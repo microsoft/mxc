@@ -20,7 +20,7 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
             r#","telemetry":{}"#,
             r#","network":{}"#,
             r#","_comment":null"#,
-            r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false},"network":{"defaultPolicy":"allow","enforcementMode":"both","allowLocalNetwork":false,"allowedHosts":["example.com"],"blockedHosts":["blocked.example.com"],"proxy":{"url":"http://127.0.0.1:8080"}}"#,
+            r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false},"network":{"egress":{"default":"deny"},"ingress":{"default":"deny"}},"runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}"#,
         ] {
             let source = format!(
                 r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{id}","process":{{"commandLine":"echo hello","cwd":"/work","env":["FIRST=one","SECOND=two"],"timeout":60}}{extra}}}"#
@@ -39,21 +39,21 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
             assert_eq!(process.cwd.as_deref(), Some("/work"));
             assert_eq!(process.env.unwrap(), ["FIRST=one", "SECOND=two"]);
             assert_eq!(process.timeout, Some(60));
-            if extra.contains("defaultPolicy") {
+            if extra.contains("networkProxy") {
                 let network = common.network.unwrap();
                 assert!(matches!(
-                    network.default_policy,
-                    Some(wire::NetworkPolicy::Allow)
+                    network.egress.unwrap().default,
+                    Some(wire::NetworkAction::Deny)
                 ));
                 assert!(matches!(
-                    network.enforcement_mode,
-                    Some(wire::NetworkEnforcement::Both)
+                    network.ingress.unwrap().default,
+                    Some(wire::NetworkAction::Deny)
                 ));
-                assert_eq!(network.allow_local_network, Some(false));
-                assert_eq!(network.allowed_hosts.unwrap(), ["example.com"]);
-                assert_eq!(network.blocked_hosts.unwrap(), ["blocked.example.com"]);
+                assert!(network.allow_local_network.is_none());
+                assert!(network.allowed_hosts.is_none());
+                assert!(network.blocked_hosts.is_none());
                 assert_eq!(
-                    network.proxy.unwrap().url.as_deref(),
+                    common.runtime_config.unwrap().network_proxy.as_deref(),
                     Some("http://127.0.0.1:8080")
                 );
                 assert_eq!(common.telemetry.unwrap().enabled, Some(false));

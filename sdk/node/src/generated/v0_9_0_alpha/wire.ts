@@ -32,8 +32,6 @@ export interface CaptureDenials {
 
 export type CaptureDenialsMode = "block" | "allow";
 
-export type DefaultNetworkPolicy = "allow" | "block";
-
 /**
  * Experimental settings accepted by the `deprovision` phase.
  */
@@ -113,6 +111,10 @@ export interface ExecRequest {
    */
   process: Process;
   /**
+   * Optional per-execution runtime values, including the cooperative proxy URL.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
    * Identifier of the sandbox to execute in.
    */
   sandboxId: string;
@@ -157,9 +159,9 @@ export interface Filesystem {
 export type IsolationSessionContainment = "isolation_session";
 
 /**
- * The canonical directional unrestricted-network posture.
+ * The canonical unrestricted-network posture.
  */
-export interface IsolationSessionDirectionalNetwork {
+export interface IsolationSessionNetwork {
   /**
    * Required unrestricted outbound posture.
    */
@@ -169,24 +171,6 @@ export interface IsolationSessionDirectionalNetwork {
    */
   ingress: IsolationSessionNetworkIngress;
 }
-
-/**
- * The canonical legacy unrestricted-network posture retained for compatibility.
- */
-export interface IsolationSessionLegacyNetwork {
-  /**
-   * Legacy unrestricted inbound/local-network posture.
-   */
-  allowLocalNetwork: True;
-  /**
-   * Legacy unrestricted outbound posture.
-   */
-  defaultPolicy: IsolationSessionLegacyNetworkAllow;
-}
-
-export type IsolationSessionLegacyNetworkAllow = "allow";
-
-export type IsolationSessionNetwork = IsolationSessionLegacyNetwork & { egress?: never; ingress?: never } | IsolationSessionDirectionalNetwork & { allowLocalNetwork?: never; defaultPolicy?: never };
 
 export type IsolationSessionNetworkAllow = "allow";
 
@@ -237,7 +221,7 @@ export interface IsolationSessionProvisionExperimental {
 /**
  * A complete state-aware `provision` request for IsolationSession.
  *
- * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture. The historical legacy pair and the standard directional all-allow shape are accepted.
+ * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.
  */
 export interface IsolationSessionProvisionRequest {
   /**
@@ -309,37 +293,13 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Optional permission to bind and accept local network connections.
-   */
-  allowLocalNetwork?: boolean;
-  /**
-   * Optional hosts allowed when the default policy blocks access.
-   */
-  allowedHosts?: string[];
-  /**
-   * Optional hosts blocked when the default policy allows access.
-   */
-  blockedHosts?: string[];
-  /**
-   * Optional default network posture.
-   */
-  defaultPolicy?: DefaultNetworkPolicy;
-  /**
    * Optional outbound network rules.
    */
   egress?: NetworkEgress;
   /**
-   * Optional network enforcement mechanism.
-   */
-  enforcementMode?: NetworkEnforcementMode;
-  /**
    * Optional inbound and host-loopback network rules.
    */
   ingress?: NetworkIngress;
-  /**
-   * Optional proxy configuration.
-   */
-  proxy?: NetworkProxy;
 }
 
 export type NetworkAction = "allow" | "deny";
@@ -361,8 +321,6 @@ export interface NetworkEgress {
    */
   deny?: NetworkRule[];
 }
-
-export type NetworkEnforcementMode = "capabilities" | "firewall" | "both";
 
 /**
  * Inbound and host-loopback network policy.
@@ -411,11 +369,6 @@ export interface NetworkPort {
 }
 
 export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
-
-/**
- * One of the proxy configurations accepted by the `0.9.0-alpha` contract.
- */
-export type NetworkProxy = { localhost: number; builtinTestServer?: never; url?: never } | { builtinTestServer: True; localhost?: never; url?: never } | { url: string; builtinTestServer?: never; localhost?: never };
 
 /**
  * One outbound rule, matching destinations and ports.
@@ -710,7 +663,7 @@ export type ProvisionPhase = "provision";
  */
 export interface RuntimeConfig {
   /**
-   * Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.
+   * Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.
    */
   networkProxy?: string;
 }
@@ -870,8 +823,6 @@ export interface TestFeature {
 }
 
 export type TransportProtocol = "tcp";
-
-export type True = true;
 
 /**
  * Cross-platform user-interface policy.

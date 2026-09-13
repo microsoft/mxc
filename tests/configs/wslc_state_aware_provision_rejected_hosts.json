@@ -3,8 +3,11 @@
     "phase": "provision",
     "containment": "wslc",
     "network": {
-        "defaultPolicy": "allow",
-        "allowedHosts": ["example.com"]
+        "egress": {
+          "default": "allow",
+          "allow": [{ "to": [{ "cidr": "192.0.2.0/24" }] }]
+        },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
     },
     "experimental": {
         "wslc": {
