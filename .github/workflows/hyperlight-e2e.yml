@@ -48,6 +48,12 @@ jobs:
         working-directory: src
         run: cargo build --features hyperlight --target x86_64-pc-windows-msvc
 
+      - name: Test Hyperlight v0.9 migration rejections
+        shell: pwsh
+        run: |
+          ./tests/scripts/run_hyperlight_network_migration_test.ps1 `
+            -WxcExecPath (Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe")
+
       - name: Diagnose hypervisor environment
         shell: pwsh
         run: ./scripts/ci/diagnose-whp.ps1

@@ -3,9 +3,62 @@
 
 use crate::common::{assert_invalid, assert_valid};
 
+#[test]
+fn every_removed_property_is_rejected_from_every_request_root() {
+    use mxc_config_contract::dev::parse_request;
+    let roots = [
+        r#""process":{"commandLine":"echo"}"#,
+        r#""phase":"exec","sandboxId":"wslc:id","process":{"commandLine":"echo"}"#,
+        r#""phase":"provision","containment":"wslc""#,
+        r#""phase":"provision","containment":"windows_sandbox""#,
+        r#""phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#,
+        r#""phase":"start","sandboxId":"iso:id""#,
+        r#""phase":"stop","sandboxId":"iso:id""#,
+        r#""phase":"deprovision","sandboxId":"iso:id""#,
+    ];
+    for root in roots {
+        let valid = format!(r#"{{"version":"0.9.0-alpha",{root}}}"#);
+        assert!(parse_request(&valid).is_ok(), "{valid}");
+        for field in [
+            r#""defaultPolicy":"allow""#,
+            r#""enforcementMode":"capabilities""#,
+            r#""allowedHosts":[]"#,
+            r#""blockedHosts":[]"#,
+            r#""allowLocalNetwork":false"#,
+            r#""proxy":{"url":"http://localhost:8080"}"#,
+        ] {
+            let invalid = format!(r#"{{"version":"0.9.0-alpha",{root},"network":{{{field}}}}}"#);
+            assert!(parse_request(&invalid).is_err(), "{invalid}");
+        }
+    }
+}
+
+#[test]
+fn exec_runtime_proxy_is_a_closed_optional_string_surface() {
+    use mxc_config_contract::dev::parse_request;
+    for runtime in [
+        r#"{"networkProxy":null}"#,
+        r#"{"networkProxy":true}"#,
+        r#"{"networkProxy":8080}"#,
+        r#"{"proxy":"http://localhost:8080"}"#,
+        r#"{"networkProxy":"first","networkProxy":"second"}"#,
+    ] {
+        let source = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:id","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
+        );
+        assert!(parse_request(&source).is_err(), "{source}");
+    }
+    for runtime in [r#"{}"#, r#"{"networkProxy":"http://proxy.example:8080"}"#] {
+        let source = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:id","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
+        );
+        assert!(parse_request(&source).is_ok(), "{source}");
+    }
+}
+
 // Network proxy tests
 #[test]
-fn accepts_localhost_proxy_port_boundaries() {
+fn rejects_removed_localhost_proxy_even_at_valid_port_boundaries() {
     for proxy_port in [1, 65535] {
         let json = format!(
             r#"{{
@@ -19,7 +72,7 @@ fn accepts_localhost_proxy_port_boundaries() {
             }}"#
         );
 
-        assert_valid(&json);
+        assert_invalid(&json);
     }
 }
 
@@ -43,7 +96,7 @@ fn rejects_localhost_proxy_port_out_of_bounds() {
 }
 
 #[test]
-fn accepts_builtin_test_server_true() {
+fn rejects_removed_builtin_test_server_even_when_true() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "network": {
@@ -54,7 +107,7 @@ fn accepts_builtin_test_server_true() {
         "process": {"commandLine": "echo"}
     }"#;
 
-    assert_valid(json);
+    assert_invalid(json);
 }
 
 #[test]
@@ -110,11 +163,7 @@ fn rejects_builtin_test_server_non_boolean_values() {
 fn accepts_url_proxy() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "network": {
-            "proxy": {
-                "url": "http://myproxy:8080"
-            }
-        },
+        "runtimeConfig": {"networkProxy": "http://myproxy:8080"},
         "process": {"commandLine": "echo"}
     }"#;
 

@@ -7,7 +7,7 @@
     "env": ["MY_VAR=hello_from_host", "GREETING=world"]
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

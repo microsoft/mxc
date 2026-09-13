@@ -663,10 +663,8 @@ deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
 IsolationSession requires a `StateAwareNetworkPolicy` describing its actual
-unrestricted posture. Prefer directional allow defaults for egress, ingress,
-and host loopback. The canonical legacy allow pair remains accepted during the
-additive v0.9 transition. Empty, restrictive, mixed, rule-bearing, or
-proxy-bearing policies are rejected. This does not add IsolationSession to the
+unrestricted posture, with directional allow defaults for egress, ingress, and
+host loopback. Legacy fields are rejected. Empty, restrictive, mixed, rule-bearing, or
 public one-shot run/spawn surface.
 
 ```csharp

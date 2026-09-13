@@ -321,7 +321,10 @@ fn input<C: Case>(phase: Phase) -> Value {
     if phase == Phase::Provision {
         value["containment"] = json!(C::BACKEND);
         if C::BACKEND == "isolation_session" {
-            value["network"] = json!({"defaultPolicy":"allow","allowLocalNetwork":true});
+            value["network"] = json!({
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            });
         }
     } else {
         value["sandboxId"] = json!(format!("{}:test-id", C::PREFIX));

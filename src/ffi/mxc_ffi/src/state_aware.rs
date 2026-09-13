@@ -485,7 +485,7 @@ mod tests {
             let json = format!(
                 "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
                  \"containment\":\"isolation_session\",\n  \
-                 \"network\":{{\"defaultPolicy\":\"allow\",\"allowLocalNetwork\":true}},\n  \
+                 \"_comment\":\"typed payload diagnostic\",\n  \
                  \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
             );
             let mut out = call_opt(&json, true, true);
@@ -516,8 +516,10 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
-            "experimental": {"isolation_session": {"provision": {"appId": "x".repeat(257)}}},
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+            "experimental": {"isolation_session": {"provision": {
+                "appId": "x".repeat(257)
+            }}},
         })
         .to_string();
         let mut out = call_opt(&json, true, true);
@@ -731,7 +733,7 @@ mod tests {
         // discriminates it from the other refusals, which share this status.
         let (status, outcome, mut err) = attached(
             r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-                "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             true,
         );
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);

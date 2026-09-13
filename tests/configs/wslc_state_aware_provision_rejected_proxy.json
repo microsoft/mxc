@@ -3,8 +3,11 @@
     "phase": "provision",
     "containment": "wslc",
     "network": {
-        "defaultPolicy": "allow",
-        "proxy": { "url": "http://127.0.0.1:8888" }
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
+    },
+    "runtimeConfig": {
+        "networkProxy": "http://127.0.0.1:8888"
     },
     "experimental": {
         "wslc": {

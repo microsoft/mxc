@@ -6,7 +6,7 @@
     "commandLine": "echo 'Hello from WSL Container!' && uname -a"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

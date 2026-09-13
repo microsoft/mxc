@@ -57,7 +57,7 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
         let json = format!(
             "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
              \"containment\":\"isolation_session\",\n  \
-             \"network\":{{\"defaultPolicy\":\"allow\",\"allowLocalNetwork\":true}},\n  \
+             \"_comment\":\"typed payload diagnostic\",\n  \
              \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
         );
         let error = run_state_aware_json(&json, true, true).unwrap_err();
@@ -80,8 +80,10 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
-            "experimental": {"isolation_session": {"provision": {"appId": app_id}}},
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+            "experimental": {"isolation_session": {"provision": {
+                "appId": app_id
+            }}},
         })
         .to_string();
         let result = run_state_aware_json(&json, true, true).unwrap();
@@ -94,8 +96,10 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
         "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
-        "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
-        "experimental": {"isolation_session": {"provision": {"appId": "x".repeat(257)}}},
+        "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+        "experimental": {"isolation_session": {"provision": {
+            "appId": "x".repeat(257)
+        }}},
     })
     .to_string();
     let error = run_state_aware_json(&json, true, true).unwrap_err();

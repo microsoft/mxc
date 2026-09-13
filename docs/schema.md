@@ -101,14 +101,10 @@ that actual posture through the standard directional network fields:
 ```
 
 All three directional values must be explicitly `allow`; omission defaults to
-deny. Rules, mixed postures, and proxies are rejected. During the additive v0.9
-transition, the currently valid legacy spelling
-(`defaultPolicy: "allow"` plus `allowLocalNetwork: true`, with no host rules,
-proxy, or non-default enforcement) remains accepted as an alternative. An
-absent or empty `network` object is rejected. The existing experimental
+deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
+An absent or empty `network` object is rejected. The existing experimental
 execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
 unchanged by this addition.
-
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or

@@ -147,7 +147,10 @@ import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-s
 
 const policy = {
   version: '0.9.0-alpha',
-  network: { allowOutbound: true },
+  network: {
+    egress: { default: 'allow' as const },
+    ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+  },
 };
 
 const config = createConfigFromPolicy(policy, 'wslc');
@@ -289,30 +292,30 @@ no separate `--setup-wslc` step is required.
 
 ### Network configuration
 
-| Policy | WSLC Behavior |
+| Exact v0.9 policy | WSLC behavior |
 |---|---|
-| `"allowOutbound": true` | Bridged networking (full access) |
-| `"allowOutbound": false` | No networking (isolated) |
+| Egress, ingress, and host-loopback defaults all `allow` | Bridged networking without independent directional filtering |
+| All three defaults `deny` (also the omitted defaults) | No networking (isolated) |
+| Mixed allow/deny directions or egress rules | Rejected; WSLC cannot enforce that combination |
 
-> **`allowedHosts` / `blockedHosts` do not work on WSLC today.** They are
-> accepted by the config builders (for parity across the SDKs), but the backend
-> enforces them with in-container `iptables`, and the container is not granted
-> `CAP_NET_ADMIN` — so the rules cannot be installed and the run **fails at
-> spawn** rather than silently going unenforced. Express WSLC network intent
-> with `allowOutbound` until enforcement moves to a VM-level network policy API.
+> **No per-host filtering primitive exists.** The container lacks
+> `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
+> unenforced. The removed legacy `allowOutbound` authoring and wire host-list
+> vocabulary must not be used for v0.9. Published-version compatibility is
+> separate from these new directional declarations.
 
 ### Network proxy (cooperative, unprivileged)
 
-WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `network.proxy`
+WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `runtimeConfig.networkProxy`
 routes a container's egress through a proxy you provide. WSLC cannot apply an
 `iptables` drop-floor — the container has no `CAP_NET_ADMIN` and MXC has no
-VM-level enforcement hook — so, exactly like the Bubblewrap backend,
+VM-level enforcement hook — so
 enforcement is *cooperative*, applied by handing the workload proxy environment
 variables that well-behaved clients honor.
 
 **How it works**
 
-1. When `network.proxy` is set, the runner translates it into the
+1. When `runtimeConfig.networkProxy` is set, the runner translates it into the
    `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` environment
    variables inside the container (via `WslcSetProcessSettingsEnvVariables`).
    Any caller-supplied values for these keys — including `NO_PROXY` /
@@ -325,7 +328,7 @@ variables that well-behaved clients honor.
 2. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.) honor
    the env vars and their traffic flows through the proxy.
 
-**Only the `url` form is supported.** A WSLC container runs in its own network
+**The runtime field contains a URL string.** A WSLC container runs in its own network
 namespace (a separate WSL system VM), so a host- or distro-loopback proxy is
 **not reachable** from inside the container. The proxy must be a routable
 address the container can reach:
@@ -336,25 +339,24 @@ address the container can reach:
   "containment": "wslc",
   "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
   "network": {
-    "defaultPolicy": "allow",
-    "proxy": { "url": "http://proxy.example:8080" }
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
+  "runtimeConfig": { "networkProxy": "http://proxy.example:8080" },
   "experimental": { "wslc": { "image": "alpine:latest" } }
 }
 ```
 
-The `localhost` and `builtinTestServer` proxy forms are **rejected at
-config-parse time** for WSLC (they imply a host-loopback / MXC-run proxy that
-the container cannot reach). The proxy also requires `defaultPolicy: "allow"`
-and no `allowedHosts` / `blockedHosts`: the container must have outbound
-networking to reach the proxy, and host lists are not forwarded to it — configs
-that combine the proxy with a `block` default or host lists are **rejected**.
+The removed `network.proxy` object and its `localhost`/`builtinTestServer`
+forms are rejected by exact v0.9. One-shot proxy use requires the unrestricted
+bridged posture shown above; a proxy cannot make isolated networking reach an
+external listener. State-aware exec instead supplies only `runtimeConfig` and
+inherits its provisioned network posture.
 
 ### Per-host filtering is not supported
 
-WSLC **cannot** enforce per-host egress filtering. `allowedHosts` with
-`defaultPolicy: "block"` (an allowlist) or `blockedHosts` with
-`defaultPolicy: "allow"` (a blocklist) would require in-container `iptables`
+WSLC **cannot** enforce per-host egress filtering. Directional allow/deny rules
+would require in-container `iptables`
 rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
 `Privileged` flag does not grant it), so those rules cannot be applied — and MXC
 has no VM-level enforcement hook either (WSLC cannot expose one without breaking
@@ -366,13 +368,16 @@ WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
 blockedHosts with defaultPolicy='allow') is not supported. ...
 ```
 
-Use `network.proxy` (with `defaultPolicy: "allow"`) for cooperative host
-filtering at the proxy layer, or remove the host lists. The bare
-`defaultPolicy` forms with **no** host lists remain supported: `"block"` is a
-full network cutoff and `"allow"` is full outbound (NAT).
+Use a runtime proxy with unrestricted bridged networking for cooperative host
+filtering at the proxy layer. Without filtering rules, v0.9 accepts isolated
+deny/deny/deny or unrestricted allow/allow/allow across egress, ingress, and
+host-loopback. Mixed directions are rejected because no independent restriction
+primitive exists.
 
-### `enforcementMode` must be `capabilities`
+### Legacy enforcement and inbound fields (published contracts only)
 
+The following compatibility rules apply to legacy published contracts, not
+v0.9, which structurally rejects `enforcementMode` and `allowLocalNetwork`.
 `network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
 reason as per-host filtering: both ask for per-rule firewall enforcement inside a
 container that has no `CAP_NET_ADMIN` to apply it with. The default
@@ -380,7 +385,7 @@ container that has no `CAP_NET_ADMIN` to apply it with. The default
 all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
 rather than refused merely for being present.
 
-### Inbound: `allowLocalNetwork` is not supported
+#### Legacy inbound: `allowLocalNetwork` is not supported
 
 `network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
 inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
@@ -398,10 +403,11 @@ default, is a no-op and is accepted.)
   custom HTTP clients, statically-linked binaries that ignore the env) are
   **not** contained. WSLC cannot provide a hard network floor — the container
   has no `CAP_NET_ADMIN` and MXC has no VM-level enforcement hook. For strict
-  network isolation, use `"allowOutbound": false` (no networking) instead.
+  network isolation in v0.9, use the deny/deny/deny posture instead.
 - **Consumer-provided proxy.** MXC does not start a proxy for WSLC; you supply
-  a reachable one via `url`. Any host filtering is the proxy's responsibility —
-  the runner does not forward `allowedHosts` / `blockedHosts` to it.
+  a reachable URL via `runtimeConfig.networkProxy`. Host filtering is the
+  proxy's responsibility; directional rules cannot be combined to create a
+  firewall WSLC does not have.
 
 ### Filesystem mounts
 

@@ -10,6 +10,12 @@ from #1125. The rebase added 73 JSON documents and removed one, producing 67
 additional equivalent accepts and five additional shared rejections without
 changing the seven classified exact-stricter results.
 
+This branch is a combined delivery: it makes exact contracts authoritative
+and completes the v0.9 directional-network cutover. The latter is a breaking
+contract/backend migration rather than parser plumbing, and is documented
+separately below so reviewers can evaluate and revert the two concerns
+independently.
+
 ## Summary
 
 | Classification | Documents | Migration |
@@ -25,9 +31,10 @@ All migrated documents target the mutable exact development contract because eve
 
 Three versionless files under `tests/policy` are intentionally absent from this inventory: `request-directional-network.json`, `request-process-container.json`, and `request-wslc.json` are policy-builder inputs rather than complete request documents, and both parsers already reject them in the nine-document shared-rejection set.
 
-## Post-migration disposition
+## Phase 9B post-migration disposition
 
-Version migration removed 118 of the 125 recorded divergences. The remaining
+At the Phase 9B checkpoint, version migration removed 118 of the 125 recorded
+divergences. The remaining
 seven now characterize only the test-scoped rolling parser; authoritative
 public loading rejects every document through its exact contract:
 
@@ -45,16 +52,17 @@ public loading rejects every document through its exact contract:
   from the 0.9 exec root, while `wslc_common::policy` retains direct backend
   validation coverage.
 
-The differential harness continues to record the seven exact-stricter results
+At that checkpoint, the differential harness recorded seven exact-stricter results
 so later contract changes cannot accidentally weaken the exact boundary. It
 also compares every corpus document through the public loader and the exact
-parser oracle. The retained rolling characterization is platform-sensitive:
-Windows records 333 equivalent accepts and 14 shared rejections, while Linux
-records 332 equivalent accepts and 15 shared rejections. Both retain seven
-classified exact-stricter rejections, no exact-looser acceptance, and no
-accepted-model mismatch. Assertion failures list the shared-rejection files so
-future platform-specific movement is attributable rather than represented only
-by aggregate counts.
+parser oracle. After the development-contract cutover moved three formerly convergent
+documents into the explicit removal inventory, the retained rolling
+characterization is platform-sensitive: Windows records 330 equivalent accepts
+and 14 shared rejections, while Linux records 329 equivalent accepts and 15
+shared rejections. Both retain no exact-looser acceptance and no accepted-model
+mismatch. Assertion failures list the shared-rejection files so future
+platform-specific movement is attributable rather than represented only by
+aggregate counts.
 
 ## Validation
 
@@ -71,7 +79,7 @@ producer-migration rebase:
   eight were confirmed as intentionally invalid exemptions.
 - Schema-version, exact-contract codegen, SDK wire-type codegen, and package
   version-sync gates passed.
-- The seven residual fixtures were exercised through the rebuilt
+- The seven residual fixtures at that checkpoint were exercised through the rebuilt
   `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
   expectations retained by the E2E scripts.
 
@@ -126,8 +134,7 @@ cross-compilation is not counted as native execution evidence.
 The implementation builds on typed state-aware payload dispatch.
 The new form uses the standard directional network shape with
 `egress.default`, `ingress.default`, and `ingress.hostLoopback` all explicitly
-set to `allow`. The canonical legacy allow pair remains accepted as a
-compatibility alternative.
+set to `allow`. Legacy network fields are rejected.
 
 The implementation preserves validation boundaries, authored policy presence,
 legacy policy hashes, and published contracts. Node and C# expose pre-build
@@ -163,6 +170,79 @@ schema probe.
 established merely by adding those steps. No skipped suite, cross-target check,
 or dry run is counted as live execution. The inherited denied-path/debug-output
 issue is not attributed to this implementation.
+
+## Phase 10B-10D directional cutover
+
+This atomic cutover is based on rebased Phase 10A at `16ed3c81`.
+Exact v0.9 removes the six legacy networking fields from every request root;
+published v0.6/v0.7/v0.8 contracts remain unchanged. IsolationSession requires
+the explicit backend acknowledgment, and state-aware runtime proxy moves to
+top-level `runtimeConfig.networkProxy` on exec.
+
+The user approved a constrained WSLC directional mapping: deny/deny/deny is
+isolated, while explicit allow/allow/allow is unrestricted bridged networking.
+Mixed postures, including allowed egress with implicit denied ingress, are
+rejected rather than claiming independent firewall enforcement. Proxy-only
+exec inherits the provisioned posture, and its endpoint is kept guest-routable.
+
+Review also identified the missing NanVix host-network mapping. The approved
+resolution supports disabled all-deny or explicitly unrestricted all-allow,
+wires that mode into the actual daemon launch, and rejects directional
+filtering that the legacy IPv4/DNS-exception filter cannot faithfully enforce.
+Positive network fixtures declare all three allows; the negative suite checks
+full isolation and explicit unsupported-filter rejection instead of retaining
+removed `blockedHosts` syntax.
+
+Corpus migration retains older published-version fixtures and higher-level
+v0.8 authoring goldens. It updates 65 JSON files and the corresponding request
+producers, including all 15 bridged WSLC fixtures. The final differential
+inventory reported by the native gate is 282 documents: 263 convergent parser
+accepts, nine shared rejects, and ten explicitly classified exact-stricter
+cases.
+
+Three additional schema-negative fixtures are deliberate, not migration
+omissions:
+
+- `hyperlight_networking.json` and `hyperlight_networking_blocked.json`
+  retain unsupported hostname-policy input as removed-syntax rejection tests.
+  The implementation does not resolve DNS at migration time or replace a
+  hostname restriction with allow-all.
+- `wslc_state_aware_provision_rejected_proxy.json` verifies that provision
+  does not accept exec-only `runtimeConfig`; it is not a valid provision
+  template.
+
+The retained rolling model remains a test/reference and compatibility
+representation, not an alternate production parser. Native Unix execution and
+live lifecycle/enforcement evidence are distinct from local compile, unit,
+schema, and dry-run results; unsupported hosts and skipped cases must not be
+reported as successful E2E runs.
+
+### Cutover verification
+
+The final local ladder ran against one unchanged source snapshot after review
+fixes, with actual exit codes retained for each command:
+
+| Check | Result |
+| --- | --- |
+| Rust format / workspace check | Passed |
+| Affected Rust check and clippy | Passed with default, IsolationSession, WSLC, and combined features; microvm feature check also passed |
+| Common parser / documentation | 1,167 unit tests and seven documentation tests passed |
+| Exact contracts / emitter | All contract feature suites and ten emitter tests passed |
+| Backend units | IsolationSession 194; WSLC policy 90 and state-aware 30; NanVix 40 passed |
+| CLI units | 62 passed |
+| Node SDK | Build and integration type-check passed; 343 unit tests passed, 19 skipped |
+| Managed SDK | 64 lifecycle and 81 sandbox tests passed in each of the four native-feature configurations |
+| Versioning logic | 70 tests passed through the existing CI `npm test` command, including the recursive cutover guard |
+| Generated artifacts / corpus | Exact, rolling, SDK-type, version and corpus gates passed; 277 raw configs validated with 11 explicit negatives |
+| Native CLI boundaries | 23 contract/WSLC/IsolationSession dry runs and eight NanVix posture dry runs passed without lifecycle execution |
+| Cross-target checks | Linux/macOS checks passed; native Unix tests and live backend runs were not performed |
+
+Review findings were resolved before publication: shared C# Boolean and
+initialized-list APIs remain source-compatible with published-version
+authoring, including historical serialization defaults; NanVix mode selection
+now drives actual host-network enablement instead of merely advertising
+capability bits. The new schema-guard regressions reside in the existing
+versioning test discovery directory.
 
 ## Documents
 

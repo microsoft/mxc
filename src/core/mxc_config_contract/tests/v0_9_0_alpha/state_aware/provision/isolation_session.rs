@@ -21,8 +21,8 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {{
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
             }},
             {additional_fields}
         }}"#
@@ -47,8 +47,8 @@ fn request_with_containment_value(containment: &str) -> String {
             "phase": "provision",
             "containment": {containment},
             "network": {{
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
             }}
         }}"#
     )
@@ -61,8 +61,8 @@ fn accepts_minimal_provision_request() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_valid(json);
@@ -77,9 +77,9 @@ fn accepts_provision_request_with_optional_fields() {
         "phase": "provision",
         "containment": "isolation_session",
         "network": {
-            "defaultPolicy": "allow",
-            "allowLocalNetwork": true
-        },
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            },
         "telemetry": {
             "enabled": true
         },
@@ -115,9 +115,9 @@ fn accepts_provision_telemetry_enabled_values() {
                 "phase": "provision",
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }},
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }},
                 "telemetry": {{
                     "enabled": {enabled}
                 }}
@@ -136,9 +136,9 @@ fn provision_phase_accepts_exact_and_escaped_spelling() {
                 "phase": "{phase}",
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }}
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }}
             }}"#
         );
         assert_valid(&json);
@@ -154,9 +154,9 @@ fn provision_request_rejects_other_phases() {
                 "phase": "{phase}",
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }}
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }}
             }}"#
         );
         assert_invalid(&json);
@@ -172,9 +172,9 @@ fn containment_accepts_exact_and_escaped_spelling() {
                 "phase": "provision",
                 "containment": "{containment}",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }}
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }}
             }}"#
         );
         assert_valid(&json);
@@ -187,8 +187,8 @@ fn rejects_missing_required_provision_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -197,8 +197,8 @@ fn rejects_missing_required_provision_fields() {
             "version": "0.9.0-alpha",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -207,8 +207,8 @@ fn rejects_missing_required_provision_fields() {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -248,8 +248,8 @@ fn rejects_null_required_provision_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -259,8 +259,8 @@ fn rejects_null_required_provision_fields() {
             "phase": null,
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -270,8 +270,8 @@ fn rejects_null_required_provision_fields() {
             "phase": "provision",
             "containment": null,
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             }
     }"#;
     assert_invalid(json);
@@ -316,9 +316,9 @@ fn rejects_non_string_phase_field() {
                 "phase": {phase},
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }}
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }}
             }}"#
         );
         assert_invalid(&json);
@@ -334,9 +334,9 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
                 "phase": "provision",
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }},
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }},
                 "telemetry": {{
                     "enabled": {enabled}
                 }}
@@ -368,8 +368,8 @@ fn rejects_unknown_provision_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "unknownField": "unknown"
     }"#;
@@ -383,8 +383,8 @@ fn rejects_unknown_provision_experimental_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "experimental": {
                 "unknownField": "unknown"
@@ -400,8 +400,8 @@ fn rejects_unknown_provision_experimental_telemetry_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "telemetry": {
                     "unknownField": "unknown"
@@ -417,8 +417,8 @@ fn rejects_unknown_provision_experimental_isolation_session_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "experimental": {
                 "isolation_session": {
@@ -436,8 +436,8 @@ fn rejects_unknown_provision_experimental_isolation_session_provision_fields() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "experimental": {
                 "isolation_session": {
@@ -559,9 +559,9 @@ fn rejects_invalid_version_field() {
                 "phase": "provision",
                 "containment": "isolation_session",
                 "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }}
+                "egress": {{"default": "allow"}},
+                "ingress": {{"default": "allow", "hostLoopback": "allow"}}
+            }}
             }}"#
         );
         assert_invalid(&json);
@@ -575,9 +575,9 @@ fn rejects_unknown_phase_value() {
         "phase": "startup",
         "containment": "isolation_session",
         "network": {
-            "defaultPolicy": "allow",
-            "allowLocalNetwork": true
-        }
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            }
     }"#;
 
     assert_invalid(json);
@@ -628,10 +628,11 @@ fn rejects_invalid_experimental_object_types() {
 }
 
 #[test]
-fn network_default_policy_accepts_exact_and_escaped_spelling() {
-    for default_policy in ["allow", "all\\u006fw"] {
-        let network_fields =
-            format!(r#""defaultPolicy": "{default_policy}", "allowLocalNetwork": true"#);
+fn network_allow_actions_accept_exact_and_escaped_spelling() {
+    for allow in ["allow", "all\\u006fw"] {
+        let network_fields = format!(
+            r#""egress": {{"default": "{allow}"}}, "ingress": {{"default": "{allow}", "hostLoopback": "{allow}"}}"#
+        );
         assert_valid(&request_with_network_fields(&network_fields));
     }
 }
@@ -697,8 +698,8 @@ fn rejects_unknown_network_fields() {
 #[test]
 fn rejects_duplicate_network_fields() {
     for network_fields in [
-        r#""defaultPolicy": "allow", "defaultPolicy": "allow", "allowLocalNetwork": true"#,
-        r#""defaultPolicy": "allow", "allowLocalNetwork": true, "allowLocalNetwork": true"#,
+        r#""egress": {"default": "allow"}, "egress": {"default": "allow"}, "ingress": {"default": "allow", "hostLoopback": "allow"}"#,
+        r#""egress": {"default": "allow"}, "ingress": {"default": "allow"}, "ingress": {"default": "allow", "hostLoopback": "allow"}"#,
     ] {
         assert_invalid(&request_with_network_fields(network_fields));
     }

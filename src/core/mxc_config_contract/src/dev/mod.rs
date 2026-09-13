@@ -235,8 +235,8 @@ pub use experimental::{
     TransportProtocol,
 };
 pub use network::{
-    DefaultNetworkPolicy, Network, NetworkAction, NetworkEgress, NetworkEnforcementMode,
-    NetworkIngress, NetworkPeer, NetworkPort, NetworkProtocol, NetworkProxy, NetworkRule,
+    Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
+    NetworkProtocol, NetworkRule,
 };
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
@@ -254,8 +254,7 @@ pub use state_aware::{probe_phase, Phase, PhaseProbeError};
 pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
 pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
 pub use state_aware::{
-    IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
-    IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
     StateAwareIsolationSession,

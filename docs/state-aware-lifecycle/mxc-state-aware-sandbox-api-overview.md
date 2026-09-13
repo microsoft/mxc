@@ -300,7 +300,10 @@ Provision and exec — the two most distinctive shapes. Reference §7.4 has all 
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -315,19 +318,17 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.9.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  }
 }
 ```
 
 ```rust
-// Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allow_local_network = true
-//   request.policy.network_specified = true
-// (the same one-shot path the parser already uses). No filesystem policy
-// appears because this backend refuses it at every phase. The dispatcher
-// then calls:
-backend.provision(&request, /* config */ None)
+// Exact adaptation carries the all-allow network policy on the request. After
+// checked binding and backend validation, the dispatcher calls:
+backend.provision(&request, Some(provision_config))
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -379,12 +380,13 @@ The SDK constructs `{ stdout: "hello\n", stderr: "", exitCode: 0 }` from PTY eve
 
 The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>`.
 Cross-backend exec fields flow through top-level `process`. Cross-cutting fields
-(`filesystem` / `network` / `ui`) on the per-(backend, phase) Config map directly to
+(`filesystem` / `network` / `runtimeConfig` / `ui`) on the per-(backend, phase) Config map directly to
 top-level wire fields (backend declares per-phase honor per reference §10.3). The
 SDK Config exposes only the cross-cutting fields the runtime currently honors —
-for IsolationSession at provision that's `network` — the required unrestricted-network
-acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork: true }`); `filesystem` is
-rejected.
+for IsolationSession, provision requires the backend-specific true-only
+the directional all-allow network posture field and rejects `network` and filesystem
+grants. WSLC exec can supply `runtimeConfig.networkProxy` without restating
+the network posture fixed at provision.
 
 ## Error codes
 

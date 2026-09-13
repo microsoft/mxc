@@ -2,6 +2,13 @@
 
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
+For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
+and `network.ingress`, with proxy runtime values under `runtimeConfig`.
+Legacy host lists and enforcement-mode fields in older examples are not
+accepted in v0.9. Preserve their original published contract when reproducing
+legacy behavior; do not relabel an old request as v0.9 without migrating its
+policy. See [the schema migration reference](../schema.md).
+
 ## Overview
 
 On Linux, MXC uses LXC to create lightweight containers for script execution. This provides:

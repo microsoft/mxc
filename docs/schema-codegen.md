@@ -76,6 +76,14 @@ The exact schema is both the authoring contract and the runtime contract for
 document's declared version; it does not validate the whole corpus against the
 rolling schema.
 
+The v0.9 cutover guard follows request-root references recursively and rejects
+any reachable legacy network field (`defaultPolicy`, `enforcementMode`,
+`allowedHosts`, `blockedHosts`, `allowLocalNetwork`, or `proxy` under a network
+policy). State-aware exec uses `runtimeConfig.networkProxy`; IsolationSession
+provision requires its explicit backend acknowledgment. The retained rolling
+schema may describe compatibility fields, but cannot make those fields valid
+in an exact v0.9 request.
+
 The CLI command-override entry point splices `process.commandLine` before exact
 parsing. Therefore the exact contract and schema correctly require `process`
 and a non-empty `process.commandLine`; a pre-splice policy document is not

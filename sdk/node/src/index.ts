@@ -16,6 +16,11 @@
  * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
  * `processContainer.network.allowedProxyPeer` through `createConfigFromPolicy`.
  * These fields cannot be mixed with legacy network fields.
+ * Schema `0.9.0-alpha` requires directional networking; explicit legacy
+ * inputs (including false and empty lists) produce migration errors.
+ * WSLC state-aware exec uses top-level `runtimeConfig.networkProxy` without
+ * restating network posture. IsolationSession provision requires
+ * directional egress, ingress, and host-loopback defaults set to `allow`.
  *
  * @example
  * ```typescript
@@ -54,6 +59,7 @@ export {
   NetworkRuleConfig,
   NetworkEgressConfig,
   NetworkIngressConfig,
+  DirectionalNetworkConfig,
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,

@@ -3,7 +3,8 @@
     "phase": "provision",
     "containment": "wslc",
     "network": {
-        "defaultPolicy": "allow"
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
     },
     "experimental": {
         "wslc": {
