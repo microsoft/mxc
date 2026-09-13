@@ -48,15 +48,19 @@ public loading rejects every document through its exact contract:
 The differential harness continues to record the seven exact-stricter results
 so later contract changes cannot accidentally weaken the exact boundary. It
 also compares every corpus document through the public loader and the exact
-parser oracle. The retained rolling characterization remains 333 equivalent
-accepts, 14 shared rejections, seven classified exact-stricter rejections, no
-exact-looser acceptance, and no accepted-model mismatch.
+parser oracle. The retained rolling characterization is platform-sensitive:
+Windows records 333 equivalent accepts and 14 shared rejections, while Linux
+records 332 equivalent accepts and 15 shared rejections. Both retain seven
+classified exact-stricter rejections, no exact-looser acceptance, and no
+accepted-model mismatch. Assertion failures list the shared-rejection files so
+future platform-specific movement is attributable rather than represented only
+by aggregate counts.
 
 ## Validation
 
 The full-suite validation below ran on 2026-09-04 after exact dispatch became
 authoritative. The config-corpus count was refreshed on 2026-09-11 after the
-phase 8 rebase:
+producer-migration rebase:
 
 - Rust formatting, workspace check, and workspace clippy completed without
   warnings.
@@ -71,10 +75,10 @@ phase 8 rebase:
   `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
   expectations retained by the E2E scripts.
 
-## Phase 9B typed-payload acceptance
+## Typed-payload acceptance
 
-Phase 9B (Phase 9.5 in the implementation plan) replaces production raw
-state-aware payloads with typed operations and checked backend binding. The
+The typed-payload migration replaces production raw state-aware payloads with
+typed operations and checked backend binding. The
 independent rolling request/extraction reference remains test-only; its
 accepted-value comparisons, explicit presence expectations, and classified
 exact-stricter rejections are retained. No registered contract, corpus request,
@@ -116,6 +120,49 @@ state-aware backends. No lifecycle suite skipped:
 The Windows runs provide successful provision-through-teardown evidence for
 all three state-aware backends. Native Unix test execution remains outstanding;
 cross-compilation is not counted as native execution evidence.
+
+## IsolationSession unrestricted-network implementation
+
+The implementation builds on typed state-aware payload dispatch.
+The new form uses the standard directional network shape with
+`egress.default`, `ingress.default`, and `ingress.hostLoopback` all explicitly
+set to `allow`. The canonical legacy allow pair remains accepted as a
+compatibility alternative.
+
+The implementation preserves validation boundaries, authored policy presence,
+legacy policy hashes, and published contracts. Node and C# expose pre-build
+directional authoring; Rust's existing state-aware JSON entry point accepts the
+new form. No Rust/C# one-shot backend support was added.
+
+Local evidence for the public integration:
+
+| Gate | Result |
+| --- | --- |
+| Common parser/adapter/identity tests | 1,165 passed; seven documentation tests passed |
+| IsolationSession backend unit tests | 194 passed |
+| CLI unit tests | 62 passed |
+| Contract/schema tests | All contract feature suites passed; schema emitter tests passed |
+| Rust feature matrix | Check, clippy, and engine/FFI/Rust SDK state-aware suites passed separately for default, isolation_session, wslc, and both |
+| Node SDK | 381 passed, 19 skipped; compile-time wire conformance included |
+| C# lifecycle/native-boundary tests | 51 passed in each of the four Windows feature configurations |
+| Native CLI | Dry runs covered one-shot/provision legacy and directional forms plus missing/empty/restrictive cases; no sandbox was created |
+| Generated schema | Twenty-six new-form acceptance/rejection cases passed through the existing AJV validator |
+| Artifacts/corpus | Exact/rolling/SDK codegen, schema-version, and existing 277-config corpus gates passed |
+| Linux/macOS | Default cross-target checks passed, with existing telemetry-consent warnings; native tests were not executed locally |
+
+The native CI build jobs now explicitly select the common/contract and
+engine/FFI/Rust SDK state-aware suites that dependency compilation alone did
+not execute. The existing macOS common-crate test selection is retained.
+The Azure Linux additions follow its existing native-x64 test restriction;
+the GitHub Linux matrix runs on its native x64 and ARM64 runners.
+New contract fixtures also put the network-posture matrix under the existing
+Rust fixture and generated-schema gates rather than relying only on a manual
+schema probe.
+
+**Acceptance limitations remain explicit:** native Unix CI execution is not
+established merely by adding those steps. No skipped suite, cross-target check,
+or dry run is counted as live execution. The inherited denied-path/debug-output
+issue is not attributed to this implementation.
 
 ## Documents
 

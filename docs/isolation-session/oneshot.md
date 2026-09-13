@@ -131,20 +131,23 @@ invocations, without changing the manager's interface. See
         "timeout": 30000
     },
     "network": {
-        "defaultPolicy": "allow",
-        "allowLocalNetwork": true
-    },
-    "experimental": {
-        "isolation_session": {}
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
     }
 }
 ```
 
-The one-shot surface takes **no backend configuration at all** — there is no
-`experimental.isolation_session` field in the exact one-shot contract. Anything
-supplied there is rejected at the structural boundary as `malformed_request`.
-Process options (`cwd`, `env`, `timeout`) read from the existing top-level
-`process` section, matching the contract every other backend honors.
+The directional shape explicitly describes the backend's actual unrestricted
+posture across egress, ingress, and host loopback. All three values are
+required; rules, proxies, mixed postures, and omission are rejected.
+
+During the additive v0.9 transition, the existing canonical legacy form
+(`defaultPolicy: "allow"` and `allowLocalNetwork: true`, with no host rules,
+proxy, or non-default enforcement) remains accepted as an alternative.
+
+`appId` and the nested `provision` section are state-aware-only and are
+rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
+in the top-level `process` section.
 
 Run with: `wxc-exec.exe --experimental config.json`.
 
@@ -245,14 +248,15 @@ the rationale for each disposition, and the error mapping live in
 | `process.commandLine` | **honored** (required) |
 | `process.cwd` / `process.env` / `process.timeout` | **honored** |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
-| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
+| `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required preferred form** |
+| `network` — canonical legacy allow (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during the transition |
+| `network` — absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.provision` | rejected as `malformed_request` — the exact one-shot contract has no IsolationSession backend configuration |
+| `experimental.isolation_session` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
@@ -279,12 +283,11 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
-  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
-  workloads programmatically **on the one-shot path**. Today the one-shot
-  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
-  `wxc-exec` directly), and it takes no backend configuration; the
-  state-aware lifecycle *is* SDK-exposed.
+- **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
+  `spawn_sandbox` behind the `isolation_session` feature and experimental
+  opt-in. The Node JSON/config path (`spawnSandboxFromConfig`) and
+  `wxc-exec` support the required network posture. The C# SDK still reaches
+  IsolationSession only through the state-aware lifecycle APIs.
 
 ## Test Plan
 
@@ -292,8 +295,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is rejected as an unknown field by the exact one-shot contract |
-| Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
+| Config parsing | `config_parser.rs` | Directional and retained legacy network shapes, closure, and phase-specific field rejection |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; directional and legacy unrestricted forms; empty/restrictive/mixed policy rejection; unchanged post-provision rules |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
@@ -395,11 +398,8 @@ wxc-exec.exe --experimental hello.json
     "timeout": 30000
   },
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
-  "experimental": {
-    "isolation_session": {}
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   }
 }
 ```

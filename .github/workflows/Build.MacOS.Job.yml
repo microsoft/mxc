@@ -54,6 +54,14 @@ jobs:
         run: cargo test --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
 
+      - name: Test exact contracts and state-aware SDK boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --target aarch64-apple-darwin -p mxc_config_contract --all-features
+          cargo test --locked --release --target aarch64-apple-darwin -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk --test state_aware
+
       - name: Verify artifact payload
         shell: bash
         run: |

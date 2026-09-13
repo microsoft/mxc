@@ -626,18 +626,26 @@ the Rust parser and TypeScript SDK constants.
 deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
+IsolationSession requires a `StateAwareNetworkPolicy` describing its actual
+unrestricted posture. Prefer directional allow defaults for egress, ingress,
+and host loopback. The canonical legacy allow pair remains accepted during the
+additive v0.9 transition. Empty, restrictive, mixed, rule-bearing, or
+proxy-bearing policies are rejected. This does not add IsolationSession to the
+public one-shot run/spawn surface.
+
 ```csharp
-// IsolationSession accepts only the unrestricted-network posture, and refuses
-// an absent policy: its container runs on a network MXC can neither filter nor
-// deny, so the caller states that posture.
 var provisioned = MxcLifecycle.ProvisionSandbox(
     StateAwareContainment.IsolationSession,
     new IsolationSessionProvisionOptions(
-    new StateAwareNetworkPolicy
-    {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
-        AllowLocalNetwork = true,
-    }));
+        new StateAwareNetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        }));
 SandboxId id = provisioned.SandboxId;   // opaque — carry it forward, never parse it
 
 // Provision mints host-side resources, so deprovision has to run even when a

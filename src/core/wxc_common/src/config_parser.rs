@@ -2362,6 +2362,21 @@ mod tests {
         InvalidLegacyPayload(String),
     }
 
+    /// Frozen mirror of the runtime IsolationSession provision config as it
+    /// stood before the unrestricted-network contract changed.
+    ///
+    /// The legacy payload path is the independent *baseline* the exact parser is
+    /// characterized against. Pointing it at the live runtime type would let it
+    /// silently learn every field added to that type afterwards, so the baseline
+    /// would grow the acknowledgment the exact contract has not yet exposed and
+    /// stop being independent. Freezing the shape here keeps the reference
+    /// describing the old parser, which is its only job.
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct FrozenLegacyIsolationSessionProvisionConfig {
+        app_id: Option<String>,
+    }
+
     impl From<&MxcRequest> for RequestSnapshot {
         fn from(request: &MxcRequest) -> Self {
             match request {
@@ -2406,7 +2421,7 @@ mod tests {
                     provision: if request.phase == Phase::Provision {
                         match request.containment {
                             Some(ContainmentBackend::IsolationSession) => Some(
-                                request.deserialize_config::<crate::models::IsolationSessionProvisionConfig>("isolation_session", "provision")
+                                request.deserialize_config::<FrozenLegacyIsolationSessionProvisionConfig>("isolation_session", "provision")
                                     .map(|config| ProvisionSnapshot::IsolationSession(config.map(|config| config.app_id)))
                                     .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
                             ),
@@ -3110,9 +3125,19 @@ mod tests {
 
         let version = object.get("version")?.as_str()?;
         if version == "0.9.0-alpha" {
+            // The one-shot IsolationSession section is a closed contract that
+            // accepts only the unrestricted-network acknowledgment. The rolling
+            // parser stores whatever it finds there and lets the backend decide;
+            // the exact contract refuses any other member outright. Matching on
+            // the section's own path keeps this specific to that surface rather
+            // than exempting one-shot unknown fields generally.
             let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
                 && exact.category == ErrorCategory::TypedStructure
-                && exact.message.contains("unknown field `isolation_session`");
+                && exact
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("experimental.isolation_session"))
+                && exact.message.contains("unknown field");
             let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
                 && matches!(
                     exact.category,
@@ -4293,6 +4318,7 @@ mod tests {
         let mut blockers = Vec::new();
         let mut equivalent_accepts = 0;
         let mut shared_rejections = 0;
+        let mut shared_rejection_files = Vec::new();
 
         for path in &files {
             let relative = path
@@ -4340,6 +4366,7 @@ mod tests {
                     ParserSnapshot::Rejected(exact_diagnostic),
                 ) => {
                     shared_rejections += 1;
+                    shared_rejection_files.push(relative.clone());
                     if let Some(expected) = expected.get(relative.as_str()) {
                         blockers.push(format!(
                             "{relative}: expected {:?} exact-stricter divergence, but both parsers rejected",
@@ -4449,10 +4476,16 @@ mod tests {
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
         );
+        let expected_inventory = if cfg!(target_os = "linux") {
+            (354, 332, 15)
+        } else {
+            (354, 333, 14)
+        };
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
-            (354, 333, 14),
-            "the migration corpus inventory changed; regenerate the migration report and explain the delta"
+            expected_inventory,
+            "the migration corpus inventory changed; regenerate the migration report and explain the delta\nshared rejections:\n{}",
+            shared_rejection_files.join("\n"),
         );
     }
 
@@ -4860,7 +4893,7 @@ mod tests {
             parsed.operation(),
             &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
                 crate::models::IsolationSessionProvisionConfig {
-                    app_id: Some("Contoso.App".into())
+                    app_id: Some("Contoso.App".into()),
                 },
             )))
         );
@@ -6233,7 +6266,7 @@ mod tests {
                 assert_eq!(
                     p.operation(),
                     &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-                        crate::models::IsolationSessionProvisionConfig { app_id: None },
+                        crate::models::IsolationSessionProvisionConfig::default(),
                     ))),
                 );
             }

@@ -200,7 +200,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         // Structural only — MXC does not judge what a valid application
         // identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {

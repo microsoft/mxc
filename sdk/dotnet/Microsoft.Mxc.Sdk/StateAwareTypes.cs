@@ -37,6 +37,12 @@ public enum StateAwareNetworkDefault
 /// </summary>
 public sealed class StateAwareNetworkPolicy
 {
+    /// <summary>Directional outbound posture.</summary>
+    public NetworkEgressPolicy? Egress { get; set; }
+
+    /// <summary>Directional inbound and host-loopback posture.</summary>
+    public NetworkIngressPolicy? Ingress { get; set; }
+
     /// <summary>The default action for outbound traffic.</summary>
     public StateAwareNetworkDefault? DefaultPolicy { get; set; }
 
@@ -86,8 +92,8 @@ public abstract class StateAwareProvisionOptions
 public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOptions
 {
     /// <summary>
-    /// Creates options with the unrestricted-network acknowledgement required
-    /// by IsolationSession.
+    /// Creates options with an unrestricted network posture accepted by
+    /// IsolationSession.
     /// </summary>
     public IsolationSessionProvisionOptions(StateAwareNetworkPolicy network)
     {
@@ -96,7 +102,8 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
     }
 
     /// <summary>
-    /// Required unrestricted posture: default allow with local network access.
+    /// Required unrestricted posture. The API accepts the historical legacy
+    /// pair or directional allow defaults for egress, ingress, and host loopback.
     /// </summary>
     public StateAwareNetworkPolicy Network { get; set; }
 
@@ -108,15 +115,29 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
         string parameterName)
     {
         ArgumentNullException.ThrowIfNull(network, parameterName);
-        if (network.DefaultPolicy != StateAwareNetworkDefault.Allow
-            || network.AllowLocalNetwork != true
-            || network.AllowedHosts is { Count: > 0 }
-            || network.BlockedHosts is { Count: > 0 }
-            || network.Proxy is not null)
+        var legacy = network.DefaultPolicy == StateAwareNetworkDefault.Allow
+            && network.AllowLocalNetwork == true
+            && network.AllowedHosts is null
+            && network.BlockedHosts is null
+            && network.Proxy is null
+            && network.Egress is null
+            && network.Ingress is null;
+        var directional = network.DefaultPolicy is null
+            && network.AllowLocalNetwork is null
+            && network.AllowedHosts is null
+            && network.BlockedHosts is null
+            && network.Proxy is null
+            && network.Egress?.Default == NetworkAction.Allow
+            && network.Egress.Allow is null
+            && network.Egress.Deny is null
+            && network.Ingress?.Default == NetworkAction.Allow
+            && network.Ingress.HostLoopback == NetworkAction.Allow;
+        if (!legacy && !directional)
         {
             throw new ArgumentException(
-                "IsolationSession requires default allow with local network access, "
-                    + "no host rules, and no proxy.",
+                "IsolationSession requires either default allow with local network access, "
+                    + "or directional allow defaults for egress, ingress, and host loopback; "
+                    + "rules and proxies are not supported.",
                 parameterName);
         }
     }

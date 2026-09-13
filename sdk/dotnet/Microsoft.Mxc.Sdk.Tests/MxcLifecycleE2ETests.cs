@@ -103,8 +103,12 @@ public class MxcLifecycleE2ETests
             new IsolationSessionProvisionOptions(
                 new StateAwareNetworkPolicy
                 {
-                    DefaultPolicy = StateAwareNetworkDefault.Allow,
-                    AllowLocalNetwork = true,
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                    Ingress = new NetworkIngressPolicy
+                    {
+                        Default = NetworkAction.Allow,
+                        HostLoopback = NetworkAction.Allow,
+                    },
                 })
             {
                 AppId = null,
