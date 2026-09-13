@@ -1,41 +1,34 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan and decision record. Phases 1-6.5 are merged
-through PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941,
-#949, #966, #968, and #1027. The legacy rolling-model v0.8 release shipped
-from tag `v0.8.0`; Phase 6.5 reconstructed its exact Rust contract and
-advanced exact development to `0.9.0-alpha`.
+Status: implementation plan and decision record. Phases 1-9 are merged through
+PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941, #949, #966,
+#968, #1027, #969, #1091, #1096, #1097, #1099, and #1104. The legacy
+rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5 reconstructed
+its exact Rust contract and advanced exact development to `0.9.0-alpha`.
 
-The implementation PR stack was published through Phase 9.5 as of 2026-09-08,
-with seven PRs open at that checkpoint. Phase 10a and the atomic 10b-10d
-cutover are now published on their implementation branches, with no PRs
-opened for those branches yet. "Complete" below means
-implemented, not merged or fully accepted; native Unix and live-backend
-acceptance remain outstanding.
+Phase 9.5 and both Phase 10 pull requests remain open. "Complete" below means
+implemented and locally verified, not merged. Native Unix execution remains
+the principal host-dependent acceptance gap.
 
-| Scope | PR | Published tip |
+| Scope | PR | Current or merged tip |
 | --- | --- | --- |
 | Phase 7a: command-before-parse integration | #969 | `aa6c12d3` |
 | Phase 7.2: shared state-aware normalization | #1091 | `c3519b3d` |
 | Phase 7.3: private exact parser and builders | #1096 | `b13c0bae` |
 | Phase 7.4: differential equivalence harness | #1097 | `3b411771` |
-| Phase 8: producer and corpus migration | #1099 | `92581c44` |
-| Phase 9: authoritative exact dispatch | #1104 | `1116d233` |
-| Phase 9.5: typed state-aware dispatch | #1123 | `2ae06e78` |
-| Phase 10a: additive IsolationSession acknowledgment | Not opened | `16ed3c81` |
-| Phases 10b-10d: directional-only v0.9 cutover | Not opened | `8722f343` |
+| Phase 8: producer and corpus migration | #1099 | `4ba1f344` |
+| Phase 9: authoritative exact dispatch | #1104 | `9c2097e4` |
+| Phase 9.5: typed state-aware dispatch | #1123 | `36786cae` |
+| Phase 10a: additive IsolationSession directional networking | #1133 | `a8556c61` |
+| Phases 10b-10d: directional-only v0.9 cutover | #1145 | `fe31abec` |
 
-The stack root was rebased onto `origin/main` at `29702c3a` on 2026-09-04.
-Review fixes and subsequent restacks were published with explicit leases on
-2026-09-05; #1096 and #1104 are each a single commit relative to their stack
-bases. Phase 7.5 is maintained on this dedicated plan branch. Phase 9.5 was
-published as a single commit in #1123 on 2026-09-08, with acceptance pending.
-The rewritten Phase 9a/9b tips are `1116d233`/`2ae06e78`; Phase 10a was
-squashed and restacked on that parent as `16ed3c81`. The atomic 10b-10d
-implementation is published as `8722f343` on
-`user/gudge/version_specific_config_parsers_phase10b`. Phase 11a is the next
-unimplemented unit. The planned end state after Phases
-10-11 publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
+Phase 8 merged on 2026-09-11 and Phase 9 merged on 2026-09-13. Phase 9.5 is
+published as a single commit in #1123 with successful Windows lifecycle
+acceptance recorded and native Unix execution still outstanding. Phase 10a is
+published as one commit in #1133, stacked on Phase 9.5. The atomic Phase
+10b-10d implementation is published as one commit in #1145, stacked on Phase
+10a. Phase 11a is the next unimplemented unit. The planned end state after
+Phases 10-11 publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 The phase descriptions retain the design and behavior at each intermediate
 boundary. In particular, references to rolling production authority in Phase 7
@@ -390,7 +383,7 @@ let contract::IsolationSessionNetwork {
 
 The reason is that a discarded field is usually paired with a hardcoded
 destination value — a phase, a containment, or the IsolationSession
-unrestricted-network acknowledgment. With `_`, widening the contract type
+unrestricted-network posture. With `_`, widening the contract type
 (`string_marker!` unit struct becomes an enum, `True` becomes a bool) still
 compiles and the adapter silently keeps stamping the old value. The exact type
 pattern turns that into a compile error at precisely the sites whose output the
@@ -682,7 +675,7 @@ structurally:
 
 - Windows Sandbox accepts provision-time filesystem policy and no
   backend-specific provision payload (`ProvisionConfig = ()`)
-- IsolationSession accepts the top-level network acknowledgment and optional
+- IsolationSession accepts the required top-level unrestricted network policy and optional
   `experimental.isolation_session.provision.appId`
 - WSLC accepts provision-time filesystem and network policy plus optional
   `experimental.wslc.provision.image` and `imageTarPath`
@@ -1007,9 +1000,7 @@ This step is primarily mechanical and is suitable for delegation.
 
 ### Phase 9: Enable exact dispatch
 
-Status: complete at rewritten tip `1116d233` on
-`user/gudge/version_specific_config_parsers_phase9a`, open as PR #1104 and
-stacked on Phase 8 PR #1099.
+Status: merged in PR #1104 as `9c2097e4` on 2026-09-13.
 
 Replace the major/minor range check with exact registry dispatch.
 
@@ -1086,12 +1077,12 @@ unchanged.
 
 ### Phase 9.5: Replace raw state-aware dispatch payloads
 
-Status: implemented at rewritten tip `2ae06e78` on
+Status: implemented at `36786cae` on
 `user/gudge/version_specific_config_parsers_phase9b`, published as PR #1123
-stacked on Phase 9a PR #1104. Native Linux/macOS execution and successful live
-lifecycle acceptance for all three Windows backends remain outstanding.
-The six design decisions and acceptance gates below were agreed on 2026-09-05;
-implementation does not by itself satisfy the full phase acceptance criteria.
+and stacked on merged Phase 9 PR #1104. Live Windows acceptance has passed for
+IsolationSession, WSLC, and Windows Sandbox. Native Linux/macOS execution
+remains outstanding. The six design decisions and acceptance gates below were
+agreed on 2026-09-05.
 
 Phase 9 makes exact contracts authoritative, which removes the rolling parser's
 open experimental subtree from the production trust boundary. Phase 9.5 then
@@ -1502,13 +1493,12 @@ nor backend behavior, with all six acceptance gates satisfied.
 
 ### Phase 10: Finalize the v0.9 stable candidate
 
-Phase 10a is squashed and restacked as `16ed3c81`. The atomic Phase 10b-10d
-cutover is implemented and published as `8722f343`. Its exact contracts,
-backend mapping, Rust/Node/C# authoring, generated artifacts, request corpus,
-and documentation are updated together. The feature branch's
-`docs/version-specific-parser-migration-inventory.md` records the actual local
-verification and remaining native Unix/live-backend acceptance limitations.
-Implementation completion is not a claim that those host-dependent gates ran.
+Phase 10a is published as PR #1133 at `a8556c61`. The atomic Phase 10b-10d
+cutover is published as PR #1145 at `fe31abec`. Its exact contracts, backend
+mapping, Rust/Node/C# authoring, generated artifacts, request corpus, and
+documentation are updated together. The implementation branch's
+`docs/version-specific-parser-migration-inventory.md` records the completed
+local and CI validation and the remaining native Unix acceptance limitations.
 
 Directional networking shipped in v0.8 through the rolling stack and is already
 present in the exact v0.8 and v0.9 contracts. Phase 10 therefore does not
@@ -1521,25 +1511,26 @@ before publication:
   surfaces to directional networking
 - preserve adapters that translate each published legacy Network contract into
   the canonical runtime model
-- resolve the IsolationSession unrestricted-network acknowledgment without
-  pretending MXC enforces policy values that the backend cannot honor
+- express IsolationSession's inherently unrestricted network through the
+  standard directional all-allow policy without pretending MXC enforces
+  restrictions that the backend cannot honor
 - retain presence information equivalent to `network_specified` and
   `ui_specified`, so backend validation can distinguish omission from an
   explicit policy request
 
-The IsolationSession acknowledgment requires a deliberate design. A dedicated
-acknowledgment field, rather than borrowed Network policy values, would remain
-stable across future Network vocabulary changes and describe caller intent
-honestly. Any spelling change includes corpus, SDK, backend validation, and
-documentation updates.
+IsolationSession uses the standard network model rather than a backend-specific
+acknowledgment marker. Phase 10a accepts either the canonical legacy all-allow
+pair or the directional all-allow posture. The atomic cutover removes the
+legacy alternative and requires `network.egress.default`,
+`network.ingress.default`, and `network.ingress.hostLoopback` to be explicit
+`allow` values, with no rules or proxy.
 
 The removed v0.9 fields are `network.defaultPolicy`,
 `network.enforcementMode`, `network.allowedHosts`, `network.blockedHosts`,
 `network.allowLocalNetwork`, and `network.proxy`. Their behavior is represented
-through directional egress/ingress, runtime proxy configuration, explicit
-backend acknowledgments, or a specific migration error; it is never silently
-dropped. Publication must fail if any of these legacy fields remains reachable
-from a v0.9 one-shot or state-aware root.
+through directional egress/ingress, runtime proxy configuration, or a specific
+migration error; it is never silently dropped. Publication must fail if any of
+these legacy fields remains reachable from a v0.9 one-shot or state-aware root.
 
 The phase must be end-to-end and leave the tree green. It includes the v0.9
 contract and adapters, published-version translations, canonical runtime
@@ -1692,7 +1683,7 @@ Good tasks to delegate:
 
 ### Implementation PR plan
 
-**Adopted 2026-09-02; status updated 2026-09-10.** The work uses ten reviewable
+**Adopted 2026-09-02; status updated 2026-09-13.** The work uses ten reviewable
 PRs rather than one PR per fine-grained work item or one very large PR per
 major phase. Each PR must build and test green on its own; later PRs may be
 stacked while review is in progress, but merge in the order below.
@@ -1702,11 +1693,11 @@ stacked while review is in progress, but merge in the order below.
 | 1 / #1091 | Phase 7.2 | Extract the shared state-aware normalization seam and repair the state-aware adapter tests | Complete at `c3519b3d` |
 | 2 / #1096 | Phase 7.3 | Add the private exact parser path and test-only versioned policy builders | Complete at `b13c0bae` |
 | 3 / #1097 | Phase 7.4 | Add the differential harness and its executable file-level divergence inventory | Complete at `3b411771` |
-| 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Complete at `92581c44` |
-| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Complete at `1116d233` |
-| 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `2ae06e78`; acceptance pending |
-| 7 | Phase 10a | Add the IsolationSession acknowledgment and scoped runtime preparation without removing legacy v0.9 input yet | Implemented at `16ed3c81`; native/live acceptance pending; PR not opened |
-| 8 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Implemented at `8722f343`; native/live acceptance pending; PR not opened |
+| 4 / #1099 | Phase 8 | Migrate producers, SDK envelopes, configs, examples, and schema references | Merged as `4ba1f344` |
+| 5 / #1104 | Phase 9 | Make exact registry dispatch authoritative and retire version-insensitive deserialization | Merged as `9c2097e4` |
+| 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `36786cae`; PR open |
+| 7 / #1133 | Phase 10a | Add the standard directional IsolationSession all-allow posture without removing legacy v0.9 input yet | Implemented at `a8556c61`; PR open |
+| 8 / #1145 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Implemented at `fe31abec`; PR open |
 | 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state | Not started |
 | 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling artifacts, metadata, and test-only parser/builder oracles | Not started |
 
@@ -2124,15 +2115,14 @@ widening one of those types changes the deserializer and the generated const
 together. Adapters then fail to compile and the artifact drift gate fails,
 rather than either failing alone.
 
-**Phase 10's v0.9 Network cleanup becomes reviewable.** The IsolationSession
-unrestricted-network acknowledgment is encoded structurally as the exact
-values `network.defaultPolicy: "allow"` and `network.allowLocalNetwork: true`
-on the provision root. Once Phase 6 lands, that acknowledgment appears in a
-generated schema and a generated TypeScript oracle as two constants attached
-to a backend that cannot enforce either of them. Whichever way Phase 10
-resolves the acknowledgment, it then produces a reviewable artifact diff and
-cannot land as a Rust-only change. The same applies to `ExecRequest.network`
-and `WslcProvisionRequest.network`.
+**Phase 10's v0.9 Network cleanup becomes reviewable.** The transitional
+IsolationSession unrestricted posture is encoded structurally as either the
+legacy `network.defaultPolicy: "allow"` plus
+`network.allowLocalNetwork: true` pair or the directional all-allow shape.
+Both appear in the generated schema and TypeScript oracle. Phase 10's final
+removal of the legacy alternative therefore produces a reviewable artifact
+diff and cannot land as a Rust-only change. The same applies to
+`ExecRequest.network` and `WslcProvisionRequest.network`.
 
 **Phase 11 reuses the version dispatch.** The generator's `--version`
 selection is exact and registry-driven from the outset, with published
@@ -3704,14 +3694,14 @@ though the override machinery itself is identical in both.
 | Legacy v0.8 release | Treat tag `v0.8.0` and stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` as immutable; reconstruct Rust types without regenerating the released schema |
 | Version progression | Phase 6.5 moves exact development to `0.9.0-alpha`; Phase 11 publishes v0.9 and opens `0.10.0-alpha` development |
 | v0.9 Network surface | Remove legacy Network fields from every v0.9 one-shot and state-aware root before publication; published v0.6/v0.7/v0.8 contracts retain their immutable syntax |
-| Phase 10a acknowledgment location | Backend-specific under `experimental.isolation_session`: directly on the one-shot section and inside `provision` for state-aware requests |
-| Phase 10a acknowledgment value | `acknowledgeUnrestrictedNetwork` is an optional true-only marker; omission does not acknowledge unrestricted networking, and the legacy acknowledgment remains available during 10a |
-| Phase 10a acknowledgment coexistence | Accept legacy-only, acknowledgment-only, and both consistent forms during 10a; reject an explicit empty network section, incompatible restrictions/proxies, or neither form |
-| Phase 10a acknowledgment validation | Preserve existing boundaries: conditional acknowledgment presence is structural for state-aware provision; one-shot retains its common/backend-policy failure path; invalid supplied values remain structural errors |
-| Phase 10a runtime representation | Keep the common policy model and pass typed acknowledgment separately through backend-specific runtime configuration; distinguish authored policy from implicit defaults using existing presence information |
-| Phase 10a SDK compatibility | Preserve shared SDK APIs while permitting documented source changes confined to IsolationSession's experimental API; design its post-cutover acknowledgment API in 10a so 10b-10d does not reshape it again |
-| Phase 10a SDK construction | Add explicit acknowledgment to existing pre-build authoring/configuration surfaces, preserve original network omission, and avoid post-normalization repair setters or unrelated backend-support expansion |
-| Phase 10a policy identity | Preserve existing hashes; acknowledgment-bearing requests add an explicit scoped acknowledgment/presence projection, with intentionally distinct identities for legacy-only, new-only, and combined forms |
+| Phase 10a IsolationSession representation | Use the standard top-level `network` section on one-shot and state-aware provision requests; do not add a backend-specific acknowledgment marker |
+| Phase 10a unrestricted posture | Directional egress default, ingress default, and ingress host loopback must all be explicit `allow`, with no rules or proxy |
+| Phase 10a coexistence | Accept either the canonical legacy all-allow pair or the directional all-allow shape; reject mixed, empty, restrictive, rule-bearing, proxy-bearing, or omitted policy |
+| Phase 10a validation | State-aware provision requires one accepted shape structurally; one-shot validates the directional semantics at the existing backend-policy boundary until the final cutover |
+| Phase 10a runtime representation | Reuse the common canonical network model and existing authored-presence flags; no separate acknowledgment transport or runtime marker exists |
+| Phase 10a SDK compatibility | Preserve shared SDK APIs while permitting narrowly scoped changes to IsolationSession's experimental types and required provision options |
+| Phase 10a SDK construction | Author the standard network policy before serialization and preserve the distinction between omitted, empty, legacy, directional, and mixed input |
+| Phase 10a policy identity | Preserve existing legacy identities and project directional policy through the ordinary network identity; no backend-specific acknowledgment projection exists |
 | Contract authority | Versioned Rust types own structure and local value rules; shared conversion and validators own cross-field and backend semantics |
 | Differential validation | Compare rolling and exact paths in tests rather than dual-running both parsers in production |
 | Programmatic policy construction | Prepare direct typed exact builders under tests in Phase 7, keep rolling construction authoritative, and promote the exact builders with the common Phase 9 cutover |
@@ -3728,10 +3718,9 @@ though the override machinery itself is identical in both.
 
 ### Publication and version-transition decision record
 
-The current forward sequence is Phase 8 migration, Phase 9 exact dispatch,
-Phase 9.5 typed state-aware payload migration, Phase 10 removal of legacy v0.9
-Network fields and stable-candidate completion, then Phase 11 publication of
-`0.9.0-alpha` with `0.10.0-alpha` opened for development.
+The remaining forward sequence is to merge Phase 9.5 (#1123), Phase 10a
+(#1133), and the Phase 10b-10d cutover (#1145), then implement Phase 11
+publication of `0.9.0-alpha` with `0.10.0-alpha` opened for development.
 
 The historical sequence that established the v0.8/v0.9 starting point was
 agreed 2026-08-20, after PR #961 shipped directional networking on the rolling
@@ -3808,7 +3797,7 @@ is the intended consequence of the Phase 11 rule, recorded here as a choice.
 - Per-version policy-builder forking remains deferred until that builder exists.
 - State-aware producer migration to v0.9 remains Phase 8 work.
 - Phase 10 retains only work not already shipped by the rolling v0.8 networking
-  implementation, notably the IsolationSession acknowledgment redesign and
+  implementation, notably the IsolationSession unrestricted-posture redesign and
   published-version translation.
 
 ## 5. Appendices
@@ -4016,40 +4005,41 @@ network.proxy
 ```
 
 Their behavior must move to directional egress and ingress, runtime proxy
-configuration, ProcessContainer proxy-peer identity, the dedicated
-IsolationSession acknowledgment, or an explicit migration error. No adapter,
-builder, SDK, or backend may silently discard a removed field.
+configuration, ProcessContainer proxy-peer identity, the required
+IsolationSession directional all-allow posture, or an explicit migration
+error. No adapter, builder, SDK, or backend may silently discard a removed
+field.
 
 | # | Work item | Primary files or surfaces | Change | Completion condition |
 | --- | --- | --- | --- | --- |
 | 1 | Require authoritative exact dispatch | Phase 9 parser router | Dependency | Declared v0.6/v0.7/v0.8 requests already dispatch through their immutable contracts before v0.9 removes syntax |
-| 2 | Design the IsolationSession acknowledgment | Contract, SDKs, backend validation, docs | Addition and change | A dedicated field and type honestly acknowledge unrestricted networking without borrowing unenforceable Network policy values |
+| 2 | Design the IsolationSession unrestricted posture | Contract, SDKs, backend validation, docs | Addition and change | The standard directional network model expresses the backend's actual all-allow behavior without a backend-specific marker |
 | 3 | Remove legacy fields from the v0.9 one-shot contract | `mxc_config_contract::dev::network`, `dev::one_shot` | Deletion and change | No v0.9 one-shot request can structurally express any removed field |
-| 4 | Remove legacy fields from v0.9 state-aware roots | `dev::state_aware::exec`, WSLC provision, IsolationSession provision | Deletion and change | Exec and provision expose only directional policy, runtime proxy, or the dedicated acknowledgment |
-| 5 | Replace the current IsolationSession marker pair | IsolationSession provision contract | Deletion and addition | The exact `defaultPolicy=allow` plus `allowLocalNetwork=true` pair is gone and the acknowledgment is required instead |
-| 6 | Regenerate exact v0.9 artifacts | Exact development schema and generated TypeScript oracle | Generated change | Both artifacts expose no legacy v0.9 fields and include the acknowledgment |
+| 4 | Remove legacy fields from v0.9 state-aware roots | `dev::state_aware::exec`, WSLC provision, IsolationSession provision | Deletion and change | Exec and provision expose only directional policy and runtime proxy at their supported locations |
+| 5 | Replace the IsolationSession legacy pair | IsolationSession one-shot and provision contracts | Deletion and addition | The exact `defaultPolicy=allow` plus `allowLocalNetwork=true` pair is gone and directional all-allow is required |
+| 6 | Regenerate exact v0.9 artifacts | Exact development schema and generated TypeScript oracle | Generated change | Both artifacts expose no legacy v0.9 fields and model the directional IsolationSession posture |
 | 7 | Add a recursive publication guard | Contract schema tests and `check-contract-codegen.js` | Test addition | Publication fails if a removed field remains reachable from any v0.9 request root |
-| 8 | Update v0.9 development adapters | Development common, one-shot, and state-aware adapters | Change and deletion | Directional fields, runtime proxy, and acknowledgment map exhaustively into the canonical runtime representation |
+| 8 | Update v0.9 development adapters | Development common, one-shot, and state-aware adapters | Change and deletion | Directional fields and runtime proxy map exhaustively into the canonical runtime representation |
 | 9 | Preserve published-version adapters | v0.6, v0.7, and v0.8 adapters | Change only when runtime types require it | Published legacy syntax remains accepted and translates without loss |
 | 10 | Finalize the canonical runtime network model | `wxc_common::models`, wire compatibility types, network parser | Change and deletion | Backend-facing policy is independent of whether input used published legacy or v0.9 directional syntax |
 | 11 | Preserve field-presence information | `ContainerPolicy`, adapters, normalization | Change and tests | Network, network-mode, runtime-proxy, and UI presence remain distinguishable from explicit defaults |
 | 12 | Add explicit migration diagnostics | Exact parser and contract error rendering | Addition | Removed v0.9 fields produce actionable migration errors where practical |
 | 13 | Move proxy configuration to its v0.9 location | Contract, adapters, runtime configuration, SDKs | Change and deletion | Cooperative runtime proxy behavior uses `runtimeConfig.networkProxy`; `network.proxy` is unreachable in v0.9 |
-| 14 | Update IsolationSession validation | Shared policy validation plus one-shot and state-aware runners | Change | Provision and one-shot consume the acknowledgment; later phases reject redeclaration |
+| 14 | Update IsolationSession validation | Shared policy validation plus one-shot and state-aware runners | Change | Provision and one-shot require directional all-allow; later phases reject network redeclaration |
 | 15 | Update WSLC policy handling | WSLC backend, state-aware normalization and dispatch, SDKs | Change | Provision uses directional posture and exec uses runtime proxy without restating immutable network mode |
 | 16 | Update ProcessContainer policy mapping | AppContainer and BaseContainer configuration and validation | Change | Directional egress, ingress, host loopback, runtime proxy, and peer identity remain correctly lowered |
 | 17 | Update Seatbelt, Bubblewrap, and LXC translations | Backend policy builders and validators | Change | Each backend receives canonical directional policy while published legacy inputs retain behavior through adapters |
 | 18 | Update per-version Rust policy builders | Test-only builders introduced in Phase 7.3 | Change and addition | Published builders emit their frozen syntax and the v0.9 builder emits directional-only syntax |
-| 19 | Update the Node SDK surface | Public types, one-shot builder, state-aware types, helpers, tests | Change and deletion | v0.9 emitters cannot generate legacy fields and expose runtime proxy plus acknowledgment |
-| 20 | Update the C# SDK surface | Policy POCOs, lifecycle types, converters, tests | Change and deletion | C# emits the same v0.9 shape and acknowledgment as Rust and Node |
+| 19 | Update the Node SDK surface | Public types, one-shot builder, state-aware types, helpers, tests | Change and deletion | v0.9 emitters cannot generate legacy fields and expose directional policy plus runtime proxy |
+| 20 | Update the C# SDK surface | Policy POCOs, lifecycle types, converters, tests | Change and deletion | C# emits the same directional v0.9 shape as Rust and Node |
 | 21 | Confirm FFI behavior | Rust FFI and managed parity gates | Tests and possible change | No ABI change occurs unless required; JSON crossing FFI follows the selected exact version builder |
 | 22 | Migrate every v0.9 configuration | Configs, examples, exact fixtures, state-aware envelopes | Change | No document declaring v0.9 uses legacy Network syntax |
 | 23 | Update invalid and migration fixtures | Contract fixtures and parser tests | Addition and change | Every removed field is rejected on each applicable v0.9 root while published acceptance remains pinned |
 | 24 | Add adapter and runtime equivalence tests | Versioned adapters and parser tests | Addition | Equivalent published-legacy and v0.9-directional policies normalize to equivalent runtime behavior |
-| 25 | Update backend unit and integration tests | Rust backend crates | Addition and change | Every backend proves directional enforcement, presence handling, proxy behavior, and acknowledgment validation |
+| 25 | Update backend unit and integration tests | Rust backend crates | Addition and change | Every backend proves directional enforcement, presence handling, proxy behavior, and IsolationSession all-allow validation |
 | 26 | Update SDK tests | Node and C# unit and integration suites | Addition and change | Serialization and lifecycle tests prove SDKs emit no legacy v0.9 fields |
 | 27 | Update applicable E2E tests | Backend validation scripts and `wxc_e2e_tests` | Change | Representative one-shot and state-aware v0.9 directional requests execute on each applicable platform |
-| 28 | Update documentation | Schema, networking specification, backend docs, SDK READMEs, examples, this plan | Change and deletion | All v0.9 guidance is directional-only and explains acknowledgment and migration |
+| 28 | Update documentation | Schema, networking specification, backend docs, SDK READMEs, examples, this plan | Change and deletion | All v0.9 guidance is directional-only and explains IsolationSession's required posture and migration |
 | 29 | Run codegen and versioning gates | Contract and SDK generation scripts | Execution | Exact artifacts match Rust and published artifacts remain immutable |
 | 30 | Run the cross-platform quality gate | Rust, Node, C#, backend and E2E suites | Execution | Format, compile, lint, unit, SDK, contract, and applicable platform tests all pass |
 
@@ -4061,16 +4051,17 @@ intermediate contract.
 
 | Subphase | Scope | PR boundary |
 | --- | --- | --- |
-| 10a | Add the dedicated IsolationSession acknowledgment and scoped runtime preparation additively while legacy v0.9 input remains accepted | Implemented on the phase10a branch; PR pending |
-| 10b | Remove legacy fields from the v0.9 contract, update generated artifacts, adapters, policy builders, and migration diagnostics | Implemented in `8722f343` |
-| 10c | Update backend validation and enforcement plus Rust, Node, C#, and FFI producer surfaces | Implemented in `8722f343` |
-| 10d | Migrate the corpus, add publication guards, update documentation, and run the cross-platform quality gate | Implemented in `8722f343`; native/live acceptance pending |
+| 10a | Add the standard directional IsolationSession all-allow posture additively while the canonical legacy pair remains accepted | Implemented in `a8556c61`; PR #1133 open |
+| 10b | Remove legacy fields from the v0.9 contract, update generated artifacts, adapters, policy builders, and migration diagnostics | Implemented in `fe31abec` |
+| 10c | Update backend validation and enforcement plus Rust, Node, C#, and FFI producer surfaces | Implemented in `fe31abec` |
+| 10d | Migrate the corpus, add publication guards, update documentation, and run the cross-platform quality gate | Implemented in `fe31abec`; PR #1145 open |
 
-PR 7 is deliberately additive and leaves all existing requests valid. PR 8 is
-the atomic cutover: contract removal, producer migration, generated artifacts,
+PR #1133 is deliberately additive and retains the canonical legacy
+IsolationSession pair while adding the directional form. PR #1145 is the
+atomic cutover: contract removal, producer migration, generated artifacts,
 backend behavior, tests, and documentation land together so no merged tree
-declares v0.9 fields that its SDKs still emit or removes fields its corpus still
-uses.
+declares v0.9 fields that its SDKs still emit or removes fields its corpus
+still uses.
 
 #### Phase 10b implementation decision: WSLC directional posture
 
@@ -4113,15 +4104,34 @@ gets explicit rejection coverage. The legacy filter implementation remains for
 compatibility/reference; published contracts are not changed or down-versioned
 to hide the new v0.9 boundary.
 
-#### Phase 10a design decisions
+#### Phase 10a final design
 
-The eight decisions below are adopted. Concrete implementation details must
-stay within these boundaries; a material departure requires an explicit
-revision rather than silently reopening the design.
+**Revised 2026-09-12 before PR #1133 opened:** use the standard top-level
+network model rather than a backend-specific acknowledgment marker.
+
+| Concern | Final design |
+| --- | --- |
+| Wire location | Top-level `network` on one-shot and state-aware provision requests |
+| Directional posture | `egress.default=allow`, `ingress.default=allow`, and `ingress.hostLoopback=allow`, with no rules or proxy |
+| Additive compatibility | Phase 10a accepts either the canonical legacy all-allow pair or the directional shape; mixed and omitted forms are rejected |
+| Final cutover | Phase 10b removes the legacy pair and requires directional all-allow |
+| Runtime representation | Existing canonical network policy and authored-presence flags; no backend-specific marker |
+| SDK representation | Standard network types on Rust, Node, and C# surfaces |
+| Policy identity | Existing network projection; no acknowledgment-specific hash member |
+| Post-provision behavior | Network is fixed at provision and cannot be redeclared on later phases |
+
+This revision was implemented in #1133 and #1145. The earlier proposal below
+is retained only as a superseded decision record; none of its
+`acknowledgeUnrestrictedNetwork` wire or runtime design shipped.
+
+#### Superseded Phase 10a acknowledgment proposal
+
+The eight decisions below were recorded on 2026-09-08 and superseded by the
+final design above on 2026-09-12.
 
 ##### Decision 1: acknowledgment location
 
-**Adopted 2026-09-08:** use Option A, the backend-specific experimental
+**Superseded 2026-09-12:** the earlier proposal used Option A, the backend-specific experimental
 location:
 
 | Surface | Acknowledgment path |
@@ -4142,7 +4152,7 @@ or policy hashing.
 
 ##### Decision 2: acknowledgment name and value
 
-**Adopted 2026-09-08:** use Option A, the affirmative action spelling
+**Superseded 2026-09-12:** the earlier proposal used Option A, the affirmative action spelling
 `acknowledgeUnrestrictedNetwork` with a true-only value:
 
 ```json
@@ -4166,7 +4176,7 @@ and diagnostics.
 
 ##### Decision 3: transitional coexistence
 
-**Adopted 2026-09-08:** use Option A, accepting consistent redundancy while
+**Superseded 2026-09-12:** the earlier proposal used Option A, accepting consistent redundancy while
 preserving the distinction between an absent and an explicitly empty network
 section.
 
@@ -4199,7 +4209,7 @@ used for each rejection; those are adopted in Decision 4 below.
 
 ##### Decision 4: validation ownership and diagnostics
 
-**Adopted 2026-09-08:** use Option A for 10a, preserving the existing validation
+**Superseded 2026-09-12:** the earlier proposal used Option A for 10a, preserving the existing validation
 boundaries rather than moving acknowledgment enforcement wholesale to an
 earlier or later layer.
 
@@ -4231,7 +4241,7 @@ in this choice; it can be reconsidered separately.
 
 ##### Decision 5: runtime representation and preparation scope
 
-**Adopted 2026-09-08:** use Option A, keeping the existing common policy model
+**Superseded 2026-09-12:** the earlier proposal used Option A, keeping the existing common policy model
 and passing the typed acknowledgment separately to IsolationSession policy
 validation.
 
@@ -4264,7 +4274,7 @@ defaults or adding the acknowledgment field.
 
 ##### Decision 6: SDK compatibility boundary
 
-**Adopted 2026-09-08:** use Option B. Preserve shared SDK source compatibility,
+**Superseded 2026-09-12:** the earlier proposal used Option B. Preserve shared SDK source compatibility,
 but permit narrowly scoped, documented source changes to IsolationSession's
 experimental API. This permits a break where useful; it does not require one.
 
@@ -4294,7 +4304,7 @@ stable-only v0.9 contract and moves experimental requests to v0.10 development.
 
 ##### Decision 7: SDK entry points and omission handling
 
-**Adopted 2026-09-08:** use Option A, extending existing authoring/configuration
+**Superseded 2026-09-12:** the earlier proposal used Option A, extending existing authoring/configuration
 surfaces so acknowledgment is explicit before serialization and normalization.
 Keep general execution/lifecycle entry points and shared SDK usage intact,
 using the scoped IsolationSession API freedom adopted in Decision 6.
@@ -4333,7 +4343,7 @@ projection is adopted in Decision 8 below.
 
 ##### Decision 8: policy identity and hashing
 
-**Adopted 2026-09-08:** use Option A, preserving existing hashes while
+**Superseded 2026-09-12:** the earlier proposal used Option A, preserving existing hashes while
 explicitly distinguishing acknowledgment-bearing requests and the relevant
 presence information. This maintains existing audit/telemetry plumbing; it is
 not a new hashing system, runtime policy model, or authorization mechanism.
