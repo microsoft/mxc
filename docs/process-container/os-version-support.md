@@ -28,7 +28,7 @@ For the enforcement mechanisms themselves see the
 ## Enforcement tiers
 
 The Windows backend selects one of three isolation tiers at runtime
-(`src/backends/appcontainer/common/src/fallback_detector.rs`). Which tiers are
+(`src/backends/process_container/common/src/fallback_detector.rs`). Which tiers are
 available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
@@ -174,7 +174,7 @@ available there to block private-network egress.
 
 UI restrictions map to Job Object `JOB_OBJECT_UILIMIT_*` flags plus the
 `disallowWin32kSystemCalls` process mitigation. They are applied in **both** T1
-and T3 (`src/backends/appcontainer/common/src/job_object.rs`), so they are
+and T3 (`src/backends/process_container/common/src/job_object.rs`), so they are
 available regardless of tier — subject to per-flag build gating. The effective
 mask is always `requested & supported`, so the kernel is never handed a flag it
 would reject; `wxc-exec --probe` reports what a host can enforce.
@@ -197,14 +197,14 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 ## Sources
 
-- Tier selection: `src/backends/appcontainer/common/src/fallback_detector.rs`,
-  `src/backends/appcontainer/common/src/dispatcher.rs`
+- Tier selection: `src/backends/process_container/common/src/fallback_detector.rs`,
+  `src/backends/process_container/common/src/dispatcher.rs`
 - BaseContainer capability probing (`SANDBOX_CAP_*`,
   `Experimental_QuerySandboxSupport`) and FlatBuffer `SandboxSpec` construction:
-  `src/backends/appcontainer/common/src/base_container_runner.rs`
+  `src/backends/process_container/common/src/base_container_runner.rs`
 - UI-limit build gating (`MIN_BUILD_FOR_IME_LIMIT`,
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
-  `src/backends/appcontainer/common/src/job_object.rs`
+  `src/backends/process_container/common/src/job_object.rs`
 - FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)

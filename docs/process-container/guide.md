@@ -96,7 +96,7 @@ into `external/windows-sdk/BaseContainerSpecification.fbs`.
 
 ### 5. Update BaseContainerRunner in MXC
 
-In `src/backends/appcontainer/common/src/base_container_runner.rs`, update
+In `src/backends/process_container/common/src/base_container_runner.rs`, update
 `build_sandbox_spec` to include your new data:
 
 ```rust
@@ -142,7 +142,7 @@ Verify the most-restrictive default is applied.
 | OS enforcement | Microsoft Windows OS source (internal) | `processmodel` component |
 | MXC FlatBuffer copy | mxc | `external/windows-sdk/BaseContainerSpecification.fbs` |
 | MXC generated bindings | mxc | `src/core/generated/base_container_specification/` (regenerated) |
-| MXC executor | mxc | `src/backends/appcontainer/common/src/base_container_runner.rs` |
+| MXC executor | mxc | `src/backends/process_container/common/src/base_container_runner.rs` |
 | MXC Config schema | mxc | `schemas/dev/mxc-config.schema.*.json` |
 | MXC SDK mapping | mxc | `sdk/node/src/sandbox.ts` |
 | MXC SDK types | mxc | `sdk/node/src/types.ts` |

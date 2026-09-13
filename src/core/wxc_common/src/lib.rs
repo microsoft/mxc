@@ -73,7 +73,7 @@ pub mod unix_proxy_coordinator;
 
 /// Test-only helper for env-var serialization within this crate's
 /// `filesystem_dacl` tests. The same shape lives in
-/// `backends/appcontainer/common/src/test_env.rs`; each crate has its
+/// `backends/process_container/common/src/test_env.rs`; each crate has its
 /// own `ENV_LOCK` because the env-var contention is only within a
 /// single test binary.
 #[cfg(all(test, target_os = "windows"))]
