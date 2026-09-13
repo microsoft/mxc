@@ -58,7 +58,12 @@ impl ScriptRunner for IsolationSessionRunner {
         // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
         validate_provision_policy(request).map_err(ScriptResponse::from)?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         Ok(())
     }
 

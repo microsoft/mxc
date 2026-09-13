@@ -68,6 +68,72 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
 }
 
 #[test]
+fn isolation_session_unrestricted_network_forms_map_without_loss() {
+    let legacy = r#""network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#;
+    let directional = r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
+    let request = |fields: &str| {
+        format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+        )
+    };
+
+    for (fields, expected_app_id) in [
+        (format!(",{legacy}"), None),
+        (format!(",{directional}"), None),
+        (
+            format!(
+                r#",{directional},"experimental":{{"isolation_session":{{"provision":{{"appId":"Contoso.App"}}}}}}"#
+            ),
+            Some("Contoso.App"),
+        ),
+    ] {
+        let json = request(&fields);
+        let (common, operation) = adapt(&json);
+        assert_clean_common(&common);
+        assert_common_matches_legacy(&json, &common);
+        assert!(common.network.is_some(), "{json}");
+        let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) =
+            operation
+        else {
+            panic!("wrong operation");
+        };
+        assert_eq!(
+            config.and_then(|config| config.app_id),
+            expected_app_id.map(str::to_owned),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn isolation_session_provision_requires_a_complete_unrestricted_posture() {
+    for fields in [
+        "",
+        r#","experimental":{}"#,
+        r#","experimental":{"isolation_session":{"provision":{"appId":"Contoso.App"}}}"#,
+        r#","network":{}"#,
+        r#","network":{"defaultPolicy":"block","allowLocalNetwork":true}"#,
+        r#","network":{"egress":{"default":"allow"}}"#,
+        r#","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"deny"}}"#,
+    ] {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+        );
+        assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+}
+
+#[test]
+fn isolation_session_network_is_provision_only() {
+    for phase in ["start", "stop", "deprovision"] {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"iso:example","network":{{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#
+        );
+        assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+}
+
+#[test]
 fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
     for (fields, expected) in [
         ("", None),

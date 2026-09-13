@@ -148,6 +148,32 @@ dry-run behavior, and both exec topologies without requiring live sandboxes.
 This migration changes no registered JSON contract or generated schema/type
 artifact.
 
+### Additive IsolationSession directional networking
+
+The mutable `0.9.0-alpha` contract now accepts the standard directional
+all-allow posture for IsolationSession:
+
+```json
+{
+  "egress": { "default": "allow" },
+  "ingress": { "default": "allow", "hostLoopback": "allow" }
+}
+```
+
+During the transition, the existing canonical legacy network spelling remains
+accepted as an alternative. Rules, proxies, mixed postures, an empty network
+object, or omission remain errors. State-aware provision requires `network`
+structurally; one-shot retains its existing backend-policy validation boundary.
+
+The policy continues through the ordinary cross-cutting network model and
+policy identity. No backend-specific acknowledgment field, transport, or hash
+projection is introduced.
+
+The affected development schema and TypeScript oracles are regenerated from
+their Rust sources. Published v0.6/v0.7/v0.8 contracts are unchanged, and this
+additive step does not remove legacy v0.9 networking fields or retire the
+test-only rolling reference.
+
 ### Trust boundary vs schema defaults
 
 Schemas in `stable/` are immutable: they document the input shape that was

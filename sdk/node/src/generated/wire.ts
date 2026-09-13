@@ -139,13 +139,13 @@ export interface IsolationSession {
 
 /**
  * Provision-phase IsolationSession configuration (state-aware lifecycle).
- * 
+ *
  * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
 export interface IsolationSessionProvisionPhase {
   /**
    * Optional identifier for the calling application.
-   * 
+   *
    * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
   appId?: string | null;
@@ -359,13 +359,13 @@ export interface Process {
   cwd?: string | null;
   /**
    * Environment variables as `"KEY=VALUE"` strings.
-   * 
+   *
    * Omit the field to give the child the backend's default environment (on Windows, the user's profile block). Supply it — including as an empty array — and it is used verbatim; MXC adds nothing to it unless `inheritDefaultEnv` is set.
    */
   env?: string[] | null;
   /**
    * Start from the backend's default environment and layer `env` on top of it, rather than replacing it (default false).
-   * 
+   *
    * This exists because the default environment is not something a caller can assemble: on Windows it is the user's profile block, which only the OS can produce. Entries in `env` override same-named defaults. Has no effect on backends whose default environment is empty, and none when `env` is omitted (that already yields the default).
    */
   inheritDefaultEnv?: boolean | null;
@@ -586,7 +586,7 @@ export interface Wslc {
 
 /**
  * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
- * 
+ *
  * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
  */
 export interface WslcProvisionPhase {

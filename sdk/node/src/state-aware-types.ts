@@ -73,17 +73,42 @@ export interface IsolationSessionProvisionConfig extends StateAwareConfig {
    */
   appId?: string;
   /**
-   * Unrestricted-network acknowledgment (**required**). The isolation session
-   * container runs on a network MXC cannot filter or deny — outbound is open,
-   * and a process inside can listen on a port reachable from outside via
-   * localhost. The caller must explicitly acknowledge this; the ONLY accepted
-   * value is `{ defaultPolicy: 'allow', allowLocalNetwork: true }`. Any other
-   * network policy (including omission, which the backend treats as the
-   * unenforceable default-deny) is rejected at provision. The posture is fixed
-   * at provision, so `network` is not accepted on the post-provision phases.
+   * Required unrestricted-network posture. The API accepts the historical
+   * legacy pair or the standard directional all-allow form. Rules, proxies,
+   * mixed postures, and omission are rejected.
    */
-  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
+  network: IsolationSessionNetworkConfig;
 }
+
+/** Network spellings that truthfully describe IsolationSession. */
+export type IsolationSessionNetworkConfig =
+  | {
+      defaultPolicy: 'allow';
+      allowLocalNetwork: true;
+      enforcementMode?: never;
+      allowedHosts?: never;
+      blockedHosts?: never;
+      proxy?: never;
+      egress?: never;
+      ingress?: never;
+    }
+  | {
+      egress: {
+        default: 'allow';
+        allow?: never;
+        deny?: never;
+      };
+      ingress: {
+        default: 'allow';
+        hostLoopback: 'allow';
+      };
+      enforcementMode?: never;
+      defaultPolicy?: never;
+      allowLocalNetwork?: never;
+      allowedHosts?: never;
+      blockedHosts?: never;
+      proxy?: never;
+    };
 
 export type IsolationSessionStartConfig = StateAwareConfig;
 

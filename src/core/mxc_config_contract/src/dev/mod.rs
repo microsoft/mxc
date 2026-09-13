@@ -254,9 +254,11 @@ pub use state_aware::{probe_phase, Phase, PhaseProbeError};
 pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
 pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
 pub use state_aware::{
-    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
-    IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
+    IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    StateAwareIsolationSession,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{StartExperimental, StartPhase, StartRequest};

@@ -85,7 +85,28 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. There is no trimming, case folding, or normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such; JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+The top-level `network` field is required. Prefer the standard directional
+all-allow posture; the canonical legacy allow pair remains accepted during the
+transition.
+
+For example:
+
+```json
+{
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  }
+}
+```
+
+The exact provision contract requires either this complete directional shape
+or the valid legacy network form. Supplying neither, mixing forms, or adding
+rules or proxy settings is a structural `malformed_request` error.
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
@@ -159,9 +180,9 @@ the executable.
 ### Start
 
 **Config (none).** Start takes only the `sandboxId`; it accepts no per-phase
-payload. The one-shot surface likewise takes **no backend configuration at
-all**, so anything under `experimental.isolation_session` is rejected by the
-exact one-shot contract as `malformed_request`.
+payload or repeated network posture. The one-shot surface uses the top-level
+`network` section, not a state-aware phase object or `appId`; those
+wrong-nesting cases are rejected as `malformed_request`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -198,14 +219,15 @@ backend has no host-folder-sharing primitive, so there is nothing to honor.
 
 The container's network is unrestricted (outbound open; a process inside can
 listen on a port reachable from outside via localhost) and MXC has no
-primitive to filter or deny it. So the network policy is honesty-gated rather
-than silently accepted: **provision** (and one-shot) accept only the canonical
-unrestricted-network acknowledgment — `defaultPolicy=allow` +
-`allowLocalNetwork=true`, no `allowedHosts`/`blockedHosts`, no proxy, default
-enforcement — and refuse anything else, including an absent policy (which
-defaults to the unenforceable `block`). On the **post-provision** phases the
-network posture is fixed at provision, so any supplied network policy is
-rejected and an absent one is inherited.
+primitive to filter or deny it. **Provision** and one-shot therefore require
+an explicit unrestricted network posture. In v0.9, the preferred form sets
+`network.egress.default`, `network.ingress.default`, and
+`network.ingress.hostLoopback` to `allow`. The canonical legacy form
+(`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy,
+default enforcement) remains valid during the transition as an alternative. An absent or
+empty network object, restrictions, mixed postures, rules, or proxy settings
+remain rejected. On **post-provision** phases the posture is fixed: supplied
+network policy is rejected, and absence is inherited.
 
 UI policy is rejected at every phase, on both surfaces, and **no `ui` posture is
 truthful for this backend** — there is no value combination that could be
@@ -231,8 +253,8 @@ input injection is blocked. Field by field:
 Only `injection: false` is honest, and it cannot be expressed on its own: the
 other two fields materialize to defaults that are both false here. So there is
 nothing to accept, and no acknowledgment-style gate is possible — unlike
-`network`, where the canonical unrestricted acknowledgment *is* a true statement
-about the container.
+`network`, where the explicit all-allow posture *is* a true statement about the
+container.
 
 Accepting a `ui` block would also assert the Win32k attack-surface reduction that
 `disable: true` implies. That one is not a boundary property at all: a Win32k
@@ -242,31 +264,32 @@ isolation does nothing for it.
 **An omitted `ui` is accepted, and applies no restriction.** The schema's
 default-deny reading ("an omitted `ui` is equivalent to full lockdown") does
 **not** hold on this backend. The asymmetry with the network gate — which
-*requires* a positive acknowledgment and refuses an absent policy — is
+requires an explicit all-allow posture and refuses its absence — is
 deliberate, and rests on how the two defaults fail. An absent `network` defaults
 to `block` while the container's network is genuinely open to the outside world,
-so the caller is exposed and must acknowledge it. An absent `ui` defaults to
+so the caller must explicitly describe the actual posture. An absent `ui` defaults to
 lockdown while the contained code's UI reach never leaves its own session, so
 nothing is exposed to acknowledge. Absence is also not a caller statement of
 intent; refusing it would fail every request that omits the section, which is
 ceremony rather than a control.
 
-The only caller-supplied knob the backend accepts beyond the network
-acknowledgment is the optional `appId`, at provision.
+The only caller-supplied knob the backend accepts beyond the network posture is
+the optional `appId`, at provision.
 
 The matrix covers the full surface a caller can express, on both the one-shot
 and state-aware paths. Dispositions come from the closed set in §10.3 of the
 [state-aware design](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md),
-plus `required` for the network acknowledgment and `n/a` where a field has no
+plus `required` for the network posture and `n/a` where a field has no
 meaning for this backend.
 
 | Field | one-shot | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|---|
 | `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
-| `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | **required** | rejected | rejected | rejected | rejected |
+| Unrestricted network posture, using directional all-allow or the canonical legacy form | **required** | **required** | rejected | rejected | rejected | rejected |
+| `policy.network` — canonical legacy `allow` spelling (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during the transition | accepted during the transition | rejected | rejected | rejected | rejected |
 | `policy.network` — any other **supplied** value (host rules, proxy, `defaultPolicy=block`) | rejected | rejected | rejected | rejected | rejected | rejected |
-| `policy.network` — **absent** | rejected (defaults to the unenforceable `block`) | rejected (same) | inherited from provision | inherited | inherited | inherited |
+| `policy.network` — **absent** | rejected | rejected | inherited from provision | inherited | inherited | inherited |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
@@ -305,11 +328,11 @@ Notes on the rows that are not a simple accept/reject:
 - **`process` on non-exec state-aware phases** is structurally rejected. Supply
   process settings only on exec; other phases do not run a workload.
 
-The absence of a provision member produces `None`; a present empty object
-produces a configuration with `app_id: None`; and an explicit empty `appId`
-remains `Some("")`. Exact input rejects `appId: null`. These distinctions
-survive binding unchanged, so application identity resolution remains owned by
-the backend rather than by the parser or dispatcher.
+With either valid network spelling, an absent provision member remains `None`,
+while a present empty object remains a configuration with absent fields. An
+explicit empty `appId` remains `Some("")`, and exact input rejects `appId:
+null`. These distinctions survive binding unchanged, so application identity
+resolution remains owned by the backend.
 
 The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
 fields before backend validation. For example, supplied `ui`, noncanonical
@@ -338,12 +361,12 @@ Both modes share the same policy matrix above. Every `policy.filesystem`
 field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
 phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
-per the matrix — provision requires the canonical unrestricted-network
-acknowledgment and post-provision rejects any supplied network policy
-(inheriting an absent one). One-shot enforces representable policy through
-`validate_runner`. State-aware fields excluded from an exact phase root fail
-structurally; `validate_<phase>` handles semantic invariants among admitted
-fields.
+per the matrix — provision requires an unrestricted network posture in either
+accepted v0.9 form, and post-provision rejects supplied network policy
+(inheriting absence). One-shot enforces
+representable policy through `validate_runner`. State-aware fields excluded from
+an exact phase root fail structurally; `validate_<phase>` handles semantic
+invariants among admitted fields.
 
 The one asymmetry is `lifecycle`: one-shot refuses it by value (the defaults
 match what the backend actually does), while the state-aware parser refuses the
@@ -356,9 +379,8 @@ whole section for every backend. See the matrix notes above.
 - `experimental.isolation_session.provision` — optional provision configuration;
   `start` / `exec` / `stop` / `deprovision` carry no backend config.
 - `experimental.isolation_session.provision.appId` — the calling application's
-  identifier. Honoured here. The one-shot surface takes no backend
-  configuration at all, so a supplied one-shot payload is rejected by the
-  closed exact contract as `malformed_request`.
+  identifier. Honoured here and not accepted by the one-shot surface;
+  supplying it there is rejected as `malformed_request`.
 
 ## Idempotence per phase
 
