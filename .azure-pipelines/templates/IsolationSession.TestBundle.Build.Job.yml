@@ -181,6 +181,7 @@ jobs:
 
       & dotnet publish $project -c Release -r win-x64 `
           -p:MxcWithIsolationSession=true `
+          --source "https://pkgs.dev.azure.com/shine-oss/mxc/_packaging/MxcDependencies/nuget/v3/index.json" `
           --self-contained true -o $out --nologo
       if ($LASTEXITCODE -ne 0) {
           throw "Publishing Microsoft.Mxc.Sdk.Tests failed with exit code $LASTEXITCODE"
