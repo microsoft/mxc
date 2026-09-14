@@ -54,11 +54,6 @@ fn rejects_duplicate_root_fields() {
                 r#""filesystem": {"readonlyPaths": ["/first"]}, "filesystem": {"readonlyPaths": ["/second"]}"#,
             ),
             (
-                "fallback",
-                version_and_process.as_str(),
-                r#""fallback": {"allowDaclMutation": true}, "fallback": {"allowDaclMutation": false}"#,
-            ),
-            (
                 "network",
                 version_and_process.as_str(),
                 r#""network": {"defaultPolicy": "allow"}, "network": {"defaultPolicy": "block"}"#,

@@ -243,9 +243,9 @@ pub fn daemon_alive(record: &DaemonRecord) -> bool {
 /// by another user (who would retain implicit `WRITE_DAC`).
 #[cfg(windows)]
 pub fn set_owner_only_dir(dir: &Path) -> Result<()> {
-    wxc_common::filesystem_dacl::set_owner_only_dacl(dir, true)
+    wxc_common::filesystem_security::set_owner_only_dacl(dir, true)
         .map_err(|e| anyhow::Error::new(e).context(format!("secure dir {dir:?}")))?;
-    let owned = wxc_common::filesystem_dacl::owner_is_self(dir)
+    let owned = wxc_common::filesystem_security::owner_is_self(dir)
         .map_err(|e| anyhow::Error::new(e).context(format!("read owner of {dir:?}")))?;
     if !owned {
         anyhow::bail!(
@@ -310,7 +310,7 @@ fn verify_record_trust(path: &Path) -> Result<()> {
         if !p.exists() {
             return Ok(());
         }
-        let owned = wxc_common::filesystem_dacl::owner_is_self(p)
+        let owned = wxc_common::filesystem_security::owner_is_self(p)
             .map_err(|e| anyhow::Error::new(e).context(format!("read owner of {p:?}")))?;
         if !owned {
             anyhow::bail!(
@@ -336,7 +336,7 @@ fn verify_record_trust(_path: &Path) -> Result<()> {
 /// Apply an owner-only DACL to an existing file.
 #[cfg(windows)]
 fn set_owner_only_file(path: &Path) -> Result<()> {
-    wxc_common::filesystem_dacl::set_owner_only_dacl(path, false)
+    wxc_common::filesystem_security::set_owner_only_dacl(path, false)
         .map_err(|e| anyhow::Error::new(e).context(format!("secure file {path:?}")))
 }
 

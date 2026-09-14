@@ -163,17 +163,10 @@ pub fn mark_cleanup_deferred(sid_string: &str, reason: &str, logger: &mut Logger
     let _ = writeln!(logger, "cleanup deferred: {}", reason);
 }
 
-/// Clean up a sandbox: clear BFS filesystem policies, delete the AppContainer
-/// profile, and remove the tracking registry entry. Best-effort and idempotent
-/// -- failures are logged but do not propagate as errors.
-///
-/// Order matters: BFS policies must be cleared before the AppContainer profile
-/// is deleted (BFS needs the SID, which is derived from the profile identity).
+/// Delete the AppContainer profile and remove its tracking registry entry.
+/// Best-effort and idempotent -- failures are logged but do not propagate.
 pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
-    // Step 1: Clear BFS filesystem policies (must happen before profile deletion).
-    crate::filesystem_bfs::FileSystemBfsManager::clear_policy(identity, logger);
-
-    // Step 2: Delete the AppContainer profile.
+    // Delete the AppContainer profile.
     let Ok(wide_identity) = widestring::U16CString::from_str(identity) else {
         let _ = writeln!(
             logger,
@@ -196,8 +189,30 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
         }
     }
 
-    // Step 3: Delete the registry tracking entry.
+    // Delete the registry tracking entry.
     delete_tracking_key(sid_string, logger);
+}
+
+/// Explicitly delete a legacy SBOX AppContainer profile.
+pub fn delete_app_container_profile(identity: &str, logger: &mut Logger) -> bool {
+    let Ok(wide_identity) = widestring::U16CString::from_str(identity) else {
+        logger.log_line(&format!(
+            "Failed to convert AppContainer identity to UTF-16: {identity}"
+        ));
+        return false;
+    };
+    match unsafe { DeleteAppContainerProfile(PCWSTR(wide_identity.as_ptr())) } {
+        Ok(()) => {
+            logger.log_line(&format!("Deleted AppContainer profile: {identity}"));
+            true
+        }
+        Err(error) => {
+            logger.log_line(&format!(
+                "Failed to delete AppContainer profile '{identity}': {error}"
+            ));
+            false
+        }
+    }
 }
 
 /// Removes the tracking entry for a sandbox that never launched.

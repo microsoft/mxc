@@ -337,17 +337,6 @@
       ],
       "type": "object"
     },
-    "Fallback": {
-      "additionalProperties": false,
-      "description": "Operator consent for containment fallback behavior.",
-      "properties": {
-        "allowDaclMutation": {
-          "description": "Whether the runtime may mutate host filesystem DACLs as a fallback.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "Filesystem": {
       "additionalProperties": false,
       "description": "Filesystem access policy.",
@@ -840,10 +829,6 @@
         "containment": {
           "$ref": "#/definitions/OneShotContainment",
           "description": "Optional containment selection."
-        },
-        "fallback": {
-          "$ref": "#/definitions/Fallback",
-          "description": "Optional fallback consent."
         },
         "filesystem": {
           "$ref": "#/definitions/Filesystem",

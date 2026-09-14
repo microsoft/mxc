@@ -11,7 +11,7 @@ public class MxcSandboxProcessTests
 {
     // Real spawn requires a host able to launch a sandboxed process (an
     // elevated, host-prepped Windows host, or a capable Linux/macOS host). CI
-    // lanes that provide one set MXC_E2E_HOST_PREPPED=1 to opt in; elsewhere the
+    // PSEC-capable lanes set MXC_E2E_HOST_PREPPED=1 to opt in; elsewhere the
     // gated tests skip.
     private static bool HostCanSpawn =>
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1";

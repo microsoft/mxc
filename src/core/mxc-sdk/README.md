@@ -403,17 +403,13 @@ The handle is modelled on [`std::process::Child`]:
   non-streamed stdio.
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
-**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
+**Windows ProcessContainer (PSEC)**, and — behind their
 compile-time features — **WSLC** and **IsolationSession**. Neither WSLC nor
 IsolationSession requires a runtime experimental opt-in.
 
-> **Windows note:** the ProcessContainer backend resolves to a concrete
-> isolation tier by host capability, using the **same** three-tier fallback as
-> the `wxc-exec` executor: BaseContainer (native OS sandbox API) when usable,
-> otherwise AppContainer + BFS (`bfscfg.exe`) when available, otherwise
-> AppContainer + DACL. The streaming handle owns any host-DACL guard, so ACE
-> restore outlives the child. A host with none of the tiers available surfaces a
-> clear error rather than silently running unsandboxed.
+> **Windows note:** the ProcessContainer backend requires the native PSEC
+> contract. A host where PSEC is unavailable or cannot represent the requested
+> policy returns a clear error rather than silently weakening containment.
 
 ## State-aware lifecycle
 
@@ -655,6 +651,5 @@ curated engine surface and wraps the engine's streaming handle in [`Sandbox`].
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not (yet) depend on
 this crate. The engine reuses the same backend crates they do; on Windows both
 the streaming and the run-to-completion paths share
-`appcontainer_common::dispatcher`'s tier selection (`select_backend_with_fallback`),
-so they agree on the BaseContainer / AppContainer + BFS / AppContainer + DACL
-tier and spawn the appropriate handle.
+`appcontainer_common::dispatcher`, so they use the same native PSEC
+selection and fail-closed behavior.

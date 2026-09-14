@@ -25,9 +25,6 @@
       "/secret"
     ]
   },
-  "fallback": {
-    "allowDaclMutation": false
-  },
   "network": {
     "egress": {"default": "deny"},
     "ingress": {"default": "allow", "hostLoopback": "allow"}

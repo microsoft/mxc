@@ -44,13 +44,10 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src
-        # Explicit feature set (no --all-features): tier2_bfs must NOT ship
-        # on Win 11 25H2 (bfscfg.exe risks an OS hang).
         cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
             plm.exe
-            wxc-host-prep.exe
             winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe

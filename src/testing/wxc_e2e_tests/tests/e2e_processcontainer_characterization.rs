@@ -1,37 +1,24 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Windows ProcessContainer (AppContainer / BaseContainer) executor
-//! **characterization** tests.
+//! Windows native ProcessContainer executor characterization tests.
 //!
 //! These lock in the *current* run-to-completion behavior of the `wxc-exec.exe`
 //! ProcessContainer path before the unified `SandboxBackend`/`Runner` refactor
 //! lands. They assert what the code does **today**.
 //!
-//! ProcessContainer execution requires an elevated, host-prepped Windows host
-//! (see `docs/host-prep.md`). Standard CI runners are **not** capable, so these
-//! tests skip unless a prepared lane sets `MXC_E2E_HOST_PREPPED=1`
-//! (`host_prepped_optin()`), and additionally skip if `wxc-exec.exe` has not
-//! been built or the host is missing process prerequisites. They therefore
-//! never red-fail on incapable CI, but lock in behavior on a prepared box.
+//! ProcessContainer execution requires an enabled native PSEC contract.
+//! These tests skip unless a capable lane opts in and `wxc-exec.exe` is built.
 //!
-//! Scope note: env inheritance is intentionally not characterized here — the
-//! AppContainer "clean environment" model differs from the Unix backends. cwd
-//! *is* characterized (see the two `*_process_cwd*` tests below), because both
-//! Windows runners resolve an empty `process.cwd` to a concrete directory
+//! Scope note: env inheritance is intentionally not characterized here. cwd
+//! *is* characterized (see the two `*_process_cwd*` tests below), because the
+//! Windows runner resolves an empty `process.cwd` to a concrete directory
 //! rather than passing `NULL` to the launch API.
 //!
-//! Tier note: the ProcessContainer tier (BaseContainer vs AppContainer+DACL) is
-//! **not** independently selectable from a config — the dispatcher derives it
-//! purely from host capability. A dedicated executor built with the
-//! `force-tier-testing` feature can override selection through `MXC_FORCE_TIER`;
-//! normal production executors do not honor it. Without that feature these tests
-//! exercise whichever tier the prepared lane resolves to; running them on both a
-//! BaseContainer-capable and a downlevel host covers both tiers. Because that is
-//! not enforceable in ordinary CI, the tier-independent guarantee — that neither
-//! runner can resolve a `NULL` cwd — is additionally locked in by the unit tests
-//! on the shared `appcontainer_common::working_directory` mapping both launch
-//! sites call, which run on every lane with no host prerequisites.
+//! ProcessContainer uses only native PSEC. The
+//! tier-independent guarantee that the runner never resolves a `NULL` cwd is
+//! additionally locked in by unit tests on the shared
+//! `appcontainer_common::working_directory` mapping.
 #![cfg(target_os = "windows")]
 
 use std::fs;
@@ -39,14 +26,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use wxc_e2e_tests::{
-    has_platform_exec, host_prepped_optin, run_platform_config_value, CommandResult,
+    has_platform_exec, processcontainer_optin, run_platform_config_value, CommandResult,
 };
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
 
 /// Whether the ProcessContainer characterization prerequisites are present.
 fn ready() -> bool {
-    has_platform_exec() && host_prepped_optin()
+    has_platform_exec() && processcontainer_optin()
 }
 
 /// Build a one-shot config that omits `containment` so the binary selects its

@@ -25,35 +25,12 @@ For the enforcement mechanisms themselves see the
 > describes *what the code can enforce if run there* — it is below the
 > officially supported floor and is not a support commitment.
 
-## Enforcement tiers
+## Native ProcessContainer availability
 
-The Windows backend selects one of three isolation tiers at runtime
-(`src/backends/process_container/common/src/fallback_detector.rs`). Which tiers are
-available bounds what policy can be enforced.
-
-| Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
-|------|-----------|:--:|:--:|:--:|:--:|
-| **T1** BaseContainer | PSEC `CreateProcessSecurityEnvironment` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when an OS contract is enabled, else falls back to T3 |
-| **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
-| **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
-
-- **T1 (BaseContainer)** requires an enabled processmodel.dll PSEC contract.
-  This is a 25H2+ capability. Usability is resolved up front by
-  `BaseContainerRunner::is_usable_for_request()` so tier selection never picks
-  a T1 that cannot launch the requested policy.
-- **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
-  later, but the `tier2_bfs` Cargo feature is **off** in all shipping builds
-  because invoking `bfscfg.exe` can deadlock the host on 25H2. Treat T2 as
-  unavailable.
-- **T3 (AppContainer + DACL)** is the universal fallback and enforces
-  filesystem policy via host path ACEs on every release.
-
-## Process security environment preference
-
-BaseContainer requests use the PSEC process-security-environment contract
-whenever its runtime probe succeeds and the contract can represent the complete
-requested policy, independent of schema version. Otherwise selection continues
-through the AppContainer fallback tiers.
+The Windows backend requires the native PSEC process-security-environment
+contract. There is no AppContainer, BFS, SBOX, or host-DACL fallback. Runtime
+probing is authoritative: if PSEC is unavailable or cannot represent the
+complete request, MXC fails before launch.
 
 The PSEC probe requires:
 
@@ -61,118 +38,42 @@ The PSEC probe requires:
 - `QueryProcessSecurityEnvironmentSupport`
 - `CloseProcessSecurityEnvironment`
 
-When `processContainer.captureDenials` is present, MXC treats PSEC plus the
-official V2 Learning Mode exports as one native capture capability set:
+When `processContainer.captureDenials` is present, MXC additionally requires the official V2 Learning Mode exports:
 
 - `StartLearningModeTrace`
 - `StopLearningModeTrace`
 - `CloseLearningModeTrace`
 
-When that complete set is available, MXC uses PSEC with native V2 capture.
-Otherwise it retains the highest AppContainer containment tier that can fully
-honor the request (AppContainer+BFS or AppContainer+DACL) and pairs it with
-the guarded WPR capture provider. The elevated guardian filters the host-wide
-trace to OS-observed process lifetime windows: before the suspended sandbox
-child resumes, the authenticated owner sends its job and still-owned root
-process HANDLE values. The guardian duplicates both from that authenticated
-process, verifies the duplicated process belongs to the duplicated job, and
-retains the stable process handle. The root generation uses exact kernel
-creation/exit FILETIMEs read from that handle (with the exit time read only
-after WPR stops). For every descendant new-process notification, the guardian
-opens and retains a process handle, verifies membership in the duplicated job,
-and reads exact creation/exit FILETIMEs. Denial filtering uses those
-handle-attested lifetimes directly; it does not infer process generations from
-host-wide ETL lifecycle timestamps. At finish, job accounting
-`TotalProcesses` must equal the retained unique root-plus-descendant
-generations, so missing or inconsistent membership notifications fail closed.
-Guarded capture tracks at most 4096 root-plus-descendant process generations
-per execution. Exceeding that bound fails capture teardown and emits no denial
-output rather than continuing with an incomplete process scope.
-The owner never supplies PID/time scopes. Only bounded actionable denial data
-returns; raw ETL does not cross into the SDK result. If no containment tier can
-honor the policy, or the guarded PLM helper is unavailable, the request fails
-as `backend_unavailable`.
-
-Internal validation confirmed the earlier contract on build `26657.1002` does
-not provide native capture, while the full V2 contract on build `26663.1000`
-is accepted. These builds are validation points, not a
-public release-floor commitment; runtime probing is the source of truth.
-
-The PSEC contract cannot represent `processContainer.leastPrivilege`, so those
-requests continue to an AppContainer fallback tier. Similarly,
-`filesystem.deniedPaths` uses PSEC only when
-`QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`;
-otherwise selection continues to AppContainer.
-`processContainer.filesystem.enumeratePaths` is PSEC-only: it requires contract
-version 1.1 plus `PSE_SUPPORT_FS_ENUMERATE`, and fails rather than falling back
-to a tier that would broaden enumeration-only access.
+Internal validation builds are evidence for the probe implementation, not a public release-floor commitment.
 
 ## Filesystem policy
 
-| Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
+| Aspect | 23H2 | 24H2 | 25H2 | Current prerelease and later |
 |--------|:--:|:--:|:--:|:--:|
-| `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
+| `readwritePaths` / `readonlyPaths` grants | ❌ | ❌ | ❌ | ✅ PSEC |
 | `processContainer.filesystem.enumeratePaths` | ❌ | ❌ | ❌ | ⚠️ PSEC 1.1 only when `PSE_SUPPORT_FS_ENUMERATE` is reported |
-| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when PSEC reports `PSE_SUPPORT_FS_DENY`, otherwise dispatched to T3) |
-| BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
+| `deniedPaths` | ❌ | ❌ | ❌ | ⚠️ PSEC only when `PSE_SUPPORT_FS_DENY` is reported |
 
-Notes:
-- On 25H2+, T1 can grant `readwrite`/`readonly` paths natively through PSEC.
-  `deniedPaths` under T1 additionally requires the `PSE_SUPPORT_FS_DENY` bit
-  reported by `QueryProcessSecurityEnvironmentSupport`; otherwise selection
-  continues to T3, which applies DENY ACEs.
-- `processContainer.filesystem.enumeratePaths` maps to PSEC 1.1 `fs_enumerate`. It permits directory
-  queries and listing under the caller's user access without granting file
-  content reads. BFS and DACL fallback tiers cannot represent this
-  distinction, so MXC rejects the request when the PSEC capability is absent.
-  It is also incompatible with `processContainer.leastPrivilege`; MXC rejects
-  that combination instead of broadening access through fallback.
-- On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
-  filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
+`processContainer.filesystem.enumeratePaths` permits directory queries and
+listing under the caller's user access without granting file-content reads. It
+is incompatible with `processContainer.leastPrivilege`; unsupported
+combinations fail rather than broadening access.
 
 ## Network policy
 
-The release matrix describes the legacy schema 0.6/0.7 implementation.
-
-| Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
-|--------|:--:|:--:|:--:|:--:|
-| Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
-| Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ | ✅ |
-| Proxy | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (PSEC or AppContainer compatibility) |
-
-Notes:
-- Capability- and firewall-based network enforcement is an AppContainer
-  primitive and works on every release.
-- OS-configured WinHTTP proxy is available through PSEC when the complete
-  runtime proxy request is compatible. Other proxy requests use the
-  AppContainer compatibility fallback.
-- The AppContainer compatibility path uses `winhttp-proxy-shim.exe`. It is not
-  the forward-looking proxy architecture; support for the model-2 BaseContainer
-  contract should replace this fallback in a separate change.
-
-Schema 0.8 support is selected by runtime contract rather than Windows release:
-
-| Schema 0.8 capability | PSEC | AppContainer fallback |
-|---|:---:|:---:|
-| Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request |
-| Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ |
-| `allowedProxyPeer` or `ingress.hostLoopback: "allow"` | ✅ | ❌ |
-| `runtimeConfig.networkProxy` | ✅ | ❌ |
-
-PSEC owns the WFP policy lifetime through workload completion. The
-AppContainer fallback rejects
-`egress.default: "deny"` with `ingress.default: "allow"` because
-`privateNetworkClientServer` is bidirectional and no schema 0.8 WFP filter is
-available there to block private-network egress.
+Network policy is enforced only when the active PSEC contract advertises the
+required capabilities. Schema 0.8 directional defaults, explicit egress rules,
+proxy peer identity, host-loopback policy, and runtime proxy configuration fail
+closed when the corresponding native support is unavailable.
 
 ## UI restrictions
 
 UI restrictions map to Job Object `JOB_OBJECT_UILIMIT_*` flags plus the
-`disallowWin32kSystemCalls` process mitigation. They are applied in **both** T1
-and T3 (`src/backends/process_container/common/src/job_object.rs`), so they are
-available regardless of tier — subject to per-flag build gating. The effective
-mask is always `requested & supported`, so the kernel is never handed a flag it
-would reject; `wxc-exec --probe` reports what a host can enforce.
+`disallowWin32kSystemCalls` process mitigation. They are applied by the native
+PSEC runner (`src/backends/process_container/common/src/job_object.rs`) —
+subject to per-flag build gating. The effective mask is always
+`requested & supported`, so the kernel is never handed a flag it would reject;
+`wxc-exec --probe` reports what a host can enforce.
 
 | Restriction (`ui` field) | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------------------------|:--:|:--:|:--:|:--:|
@@ -192,8 +93,7 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 ## Sources
 
-- Tier selection: `src/backends/process_container/common/src/fallback_detector.rs`,
-  `src/backends/process_container/common/src/dispatcher.rs`
+- Native dispatch: `src/backends/process_container/common/src/dispatcher.rs`
 - BaseContainer PSEC capability probing and specification construction:
   `src/backends/process_container/common/src/base_container_runner.rs`,
   `src/backends/process_container/common/src/base_container_helpers.rs`

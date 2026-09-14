@@ -727,7 +727,8 @@ exception messages and stack traces. See
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
-  need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
+  need a PSEC-capable host and skip, with a reason, unless
+  `MXC_E2E_HOST_PREPPED=1`.
   The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
   reports that backend, which needs both a build with
   `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set

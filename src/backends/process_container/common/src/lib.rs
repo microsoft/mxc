@@ -1,18 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AppContainer + BaseContainer backend family, including the
-//! T1/T2/T3 isolation-tier fallback ladder and the Windows-only
-//! support modules they depend on (job objects, BFS policy,
-//! network/proxy plumbing, sandbox tracking, launch diagnostics).
+//! Native ProcessContainer backend using PSEC.
 //!
 //! All modules are Windows-only. The crate links unconditionally so
 //! `wxc-exec` (which always targets Windows) can depend on it
 //! without feature gates, while cross-platform consumers of
-//! `wxc_common` are unaffected by AppContainer code.
+//! `wxc_common` are unaffected by Windows backend code.
 
-#[cfg(target_os = "windows")]
-pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 mod base_container_helpers;
 #[cfg(target_os = "windows")]
@@ -22,19 +17,13 @@ pub mod capture_output;
 #[cfg(target_os = "windows")]
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
-pub mod fallback_detector;
-#[cfg(target_os = "windows")]
-pub mod filesystem_bfs;
-#[cfg(target_os = "windows")]
-pub mod guarded_capture;
+mod environment;
 #[cfg(target_os = "windows")]
 pub mod job_object;
 #[cfg(target_os = "windows")]
 pub mod launch_diagnostics;
 #[cfg(target_os = "windows")]
 mod native_capture;
-#[cfg(target_os = "windows")]
-pub mod network_manager;
 #[cfg(target_os = "windows")]
 mod network_policy_helpers;
 #[cfg(target_os = "windows")]

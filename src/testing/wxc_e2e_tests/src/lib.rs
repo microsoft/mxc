@@ -588,17 +588,16 @@ pub fn has_bwrap() -> bool {
 
 /// Opt-in switch for the Windows ProcessContainer characterization tests.
 ///
-/// AppContainer/BaseContainer execution requires an elevated, host-prepped
-/// Windows host (see `docs/host-prep.md`). Standard CI runners are NOT capable,
-/// so these tests are skipped unless a host-prepped lane explicitly sets
-/// `MXC_E2E_HOST_PREPPED=1`. This keeps them from ever red-failing on incapable
-/// CI while still being runnable on a prepared box.
-pub fn host_prepped_optin() -> bool {
+/// ProcessContainer execution requires a PSEC-capable Windows host. Standard
+/// CI runners are not necessarily capable, so these tests are skipped unless a
+/// capable lane explicitly sets the historically named
+/// `MXC_E2E_HOST_PREPPED=1` switch.
+pub fn processcontainer_optin() -> bool {
     let enabled = std::env::var("MXC_E2E_HOST_PREPPED").as_deref() == Ok("1");
     if !enabled {
         println!(
-            "SKIPPED: ProcessContainer characterization requires a host-prepped Windows host; \
-             set MXC_E2E_HOST_PREPPED=1 on a prepared lane to enable"
+            "SKIPPED: ProcessContainer characterization requires a PSEC-capable Windows host; \
+             set MXC_E2E_HOST_PREPPED=1 on a capable lane to enable"
         );
     }
     enabled

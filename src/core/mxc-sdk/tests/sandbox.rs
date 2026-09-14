@@ -234,21 +234,18 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 }
 
 // ---------------------------------------------------------------------------
-// Windows ProcessContainer (AppContainer + BaseContainer) — integration tests.
+// Windows ProcessContainer (PSEC) — integration tests.
 //
 // These exercise two capture/timeout regressions: the process handle being
 // closed before the wait completed, and a finite timeout killing only the
-// direct child so it never fired. ProcessContainer resolves to BaseContainer or
-// AppContainer by host capability; these guards hold for whichever backend the
-// host selects.
-// They run a real sandbox, so they require an elevated, host-prepped Windows
-// host (see docs/host-prep.md) and are therefore `#[ignore]`d — run them with
-// `cargo test -p mxc-sdk -- --ignored` on such a host.
+// direct child so it never fired. They run a real native ProcessContainer and
+// are therefore `#[ignore]`d — run them with
+// `cargo test -p mxc-sdk -- --ignored` on a PSEC-capable host.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+#[ignore = "requires a PSEC-capable Windows host"]
 fn process_container_captures_stdout() {
     // Regression guard: a valid exit code and captured stdout prove the
     // process handle was not closed out from under the wait.

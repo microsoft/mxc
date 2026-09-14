@@ -32,9 +32,6 @@ Linux / macOS (`.sh`):
 | `run_basicprocess_test.ps1` | Basic process container test | `wxc-exec.exe` |
 | `run_lpacac_test.ps1` | LPAC container test | `wxc-exec.exe` |
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
-| `run_filesystem_bfs_test.ps1` | BFS filesystem test | `wxc-exec.exe` |
-| `run_filesystem_bfsreadonly_test.ps1` | BFS read-only filesystem test | `wxc-exec.exe` |
-| `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |
@@ -45,8 +42,6 @@ Linux / macOS (`.sh`):
 | `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and network access for image setup (or pre-pulled images with `-SkipSetup`) |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
-| `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
-| `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
 | `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
@@ -78,20 +73,15 @@ these dispatchers, which map a matrix backend id to the suites above:
 
 | Dispatcher | Platforms | Backend ids |
 |------------|-----------|-------------|
-| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
-handler name. Ids that share a suite have their own case in the dispatcher:
-`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
-determines the tier it expects from the host's own `wxc-exec --probe`.
-`process-t1` additionally fails the job up front if `--probe` does not report
-`base-container`, so a host that fell back to another tier cannot report green.
-`process-t3` additionally runs `T3-Workloads.ps1`; both suites run even if the
-first one fails, and the job reports their exit codes together.
+handler name. The `process` case requires `wxc-exec --probe` to report an
+enabled native PSEC contract, then runs a filesystem smoke test.
 
 ```powershell
-scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `
+scripts\ci\run_backend_validation_tests.ps1 -Backend process `
     -BinaryDirectory <dir> -Architecture x64
 ```
 
@@ -180,29 +170,25 @@ The `wxc_e2e_tests` crate runs executor E2E tests directly against
 ```powershell
 cd src
 cargo test -p wxc_e2e_tests              # Executor E2E tests (skips if prereqs missing)
-cargo test -p wxc_e2e_tests -- --ignored # Include BFS, networking, and stress tests
+cargo test -p wxc_e2e_tests -- --ignored # Include native ProcessContainer, networking, and stress tests
 ```
 
 ### Ignored tests
 
-The following tests are marked `#[ignore]` because they require velocity key
-61714527 (BFS deadlock fix) enabled on the machine. AppContainer process
-isolation with brokered filesystem or networking depends on this fix.
-Run them explicitly on capable machines with
+The following tests are marked `#[ignore]` because they require an enabled
+native PSEC contract, and some require additional host capabilities.
+Run them explicitly on a capable machine with
 `cargo test -p wxc_e2e_tests -- --ignored`:
 
 | Test | Reason |
 |------|--------|
-| `test_appcontainer_basic` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_appcontainer_lpac` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs_readonly` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs_spaces` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_pwsh_setlocation` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_tests\configs` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_processcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
-| `test_on_repeat` | Stress test (loops BFS tests) |
+| `test_processcontainer_basic` | Requires native PSEC |
+| `test_processcontainer_filesystem*` | Requires native PSEC |
+| `test_pwsh_setlocation` | Requires native PSEC |
+| `test_tests\configs` | Requires the configured native backends |
+| `test_examples` | Requires the configured native backends |
+| `test_processcontainer_proxy` | Requires compatible native proxy support and elevation |
+| `test_on_repeat` | Stress test |
 
 ## MicroVM E2E
 

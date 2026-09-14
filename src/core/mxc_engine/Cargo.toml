@@ -27,11 +27,6 @@ windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
-# Elevated PLM guardian client, used to adapt appcontainer_common's
-# GuardedCaptureFactory/GuardedCaptureSession DI traits (guarded-WPR
-# captureDenials fallback) without appcontainer_common depending on plm
-# directly.
-plm = { workspace = true }
 # ProcessLifetime / AnalysisResult types shared across the guarded-capture DI
 # boundary; appcontainer_common and plm already depend on this crate.
 learning_mode_core = { workspace = true }
@@ -59,11 +54,6 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "dep:isolation_session_common",
 ]
-# Forwards the test-executor-only ProcessContainer tier override.
-force-tier-testing = ["appcontainer_common/force-tier-testing"]
-# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
-tier2_bfs = ["appcontainer_common/tier2_bfs"]
-
 [dev-dependencies]
 mxc_config_contract.workspace = true
 wxc_common = { workspace = true, features = ["test-support"] }

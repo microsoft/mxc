@@ -61,15 +61,6 @@ fn convert_filesystem(value: contract::Filesystem) -> wire::Filesystem {
     }
 }
 
-fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
-    let contract::Fallback {
-        allow_dacl_mutation,
-    } = value;
-    wire::Fallback {
-        allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
 fn convert_default_network_policy(value: contract::DefaultNetworkPolicy) -> wire::NetworkPolicy {
     match value {
         contract::DefaultNetworkPolicy::Allow => wire::NetworkPolicy::Allow,
@@ -218,7 +209,7 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         lifecycle,
         process,
         filesystem,
-        fallback,
+        fallback: _,
         network,
         lxc,
         process_container,
@@ -240,7 +231,6 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
             .map(convert_process_container),
         lxc: lxc.into_option().map(convert_lxc),
         filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: None,
         ui: ui.into_option().map(convert_ui),
@@ -526,7 +516,6 @@ mod tests {
         assert!(wire.process_container.is_none());
         assert!(wire.lxc.is_none());
         assert!(wire.filesystem.is_none());
-        assert!(wire.fallback.is_none());
         assert!(wire.network.is_none());
         assert!(wire.ui.is_none());
         assert!(wire.seatbelt.is_none());
@@ -577,9 +566,6 @@ mod tests {
             filesystem.denied_paths.unwrap().as_slice(),
             &["/path/to/denied"]
         );
-
-        let fallback = wire.fallback.expect("fallback should be populated");
-        assert_eq!(fallback.allow_dacl_mutation, Some(true));
 
         let network = wire.network.expect("network should be populated");
         assert!(matches!(
@@ -721,9 +707,6 @@ mod tests {
         assert!(filesystem.readwrite_paths.is_none());
         assert!(filesystem.readonly_paths.is_none());
         assert!(filesystem.denied_paths.is_none());
-
-        let fallback = wire.fallback.expect("fallback should be populated");
-        assert!(fallback.allow_dacl_mutation.is_none());
 
         let network = wire.network.expect("network should be populated");
         assert!(network.default_policy.is_none());

@@ -43,27 +43,24 @@
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
-//! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
-//! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | Bubblewrap | Linux | [`Containment::Process`] |
+//! | Seatbelt | macOS | [`Containment::Process`] |
+//! | ProcessContainer (PSEC) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |
 //!
-//! [`Containment::Lxc`] models explicit LXC settings, but the in-process
-//! [`run`] and [`spawn_sandbox`] APIs return
-//! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
-//! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
-//!
-//! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature; neither requires a runtime
-//! experimental opt-in. WSLC's container has no stdin (the WSLC SDK exposes no
+//! WSLC and IsolationSession are **experimental**: build with the crate's
+//! `wslc` / `isolation_session` feature, and call
+//! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
+//! on the request. WSLC's container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //! IsolationSession is also reachable through the state-aware lifecycle below,
 //! which additionally serves an attached, pseudo-console exec.
 //!
-//! A concrete backend selected on another host returns an [`Error`] with
-//! [`ErrorCode::UnsupportedContainment`].
+//! Backends with no [`Containment`] variant return an [`Error`] with
+//! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
+//! binaries for those.
 //!
 //! # Diagnosing a failure
 //!
@@ -98,7 +95,8 @@
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-//! let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! request.set_experimental(true);
 //! let output = run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
@@ -214,7 +212,8 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
 ///
 /// `experimental` is the in-process equivalent of the executor's
-/// `--experimental` flag. Windows Sandbox is refused with
+/// `--experimental` flag. The experimental backends — WindowsSandbox,
+/// IsolationSession and WSLc — are refused with
 /// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.

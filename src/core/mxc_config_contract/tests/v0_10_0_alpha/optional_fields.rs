@@ -8,7 +8,6 @@ fn accepts_empty_optional_objects() {
     for field in [
         r#""lifecycle": {}"#,
         r#""filesystem": {}"#,
-        r#""fallback": {}"#,
         r#""network": {}"#,
         r#""ui": {}"#,
         r#""processContainer": {}"#,
@@ -100,11 +99,6 @@ fn rejects_null_optional_fields() {
                 "filesystem",
                 version_and_process.as_str(),
                 r#""filesystem": null"#,
-            ),
-            (
-                "fallback",
-                version_and_process.as_str(),
-                r#""fallback": null"#,
             ),
             (
                 "network",
@@ -202,11 +196,6 @@ fn rejects_null_optional_fields() {
                 "filesystem.deniedPaths",
                 version_and_process.as_str(),
                 r#""filesystem": {"deniedPaths": null}"#,
-            ),
-            (
-                "fallback.allowDaclMutation",
-                version_and_process.as_str(),
-                r#""fallback": {"allowDaclMutation": null}"#,
             ),
             (
                 "network.defaultPolicy",

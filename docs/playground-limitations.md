@@ -6,24 +6,21 @@
 
 ## Platform Support
 
-| Feature | Windows 24H2 (build 26100) | Windows 25H2+ (build 26600+) | Linux |
-|---------|---------------------------|------------------------------|-------|
-| AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
-| BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works when the BaseContainer feature is enabled; otherwise falls back to AppContainer+DACL | N/A |
-| BFS filesystem brokering | ❌ Broker helper not available | ⚠️ Disabled (`tier2_bfs` off; `bfscfg.exe` risks host hang) | N/A |
-| Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
-| Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
+| Feature | Windows 24H2 (build 26100) | Current prerelease and later Windows | Linux |
+|---------|---------------------------|--------------------------------------|-------|
+| ProcessContainer | ❌ Native PSEC contract unavailable | ✅ When PSEC runtime probing succeeds | N/A |
+| Proxy (ProcessContainer) | N/A | ✅ PSEC | N/A |
 | LXC containers | N/A | N/A | ✅ Works |
 
 ## Shell Compatibility in Containers
 
-| Shell | AppContainer (v0.4.0) | BaseContainer (v0.5.0) default UI | BaseContainer with relaxed UI |
-|-------|----------------------|-----------------------------------|-------------------------------|
-| cmd.exe | ✅ Works | ✅ Works (even with Win32k disabled) | ✅ Works |
-| powershell.exe (5.1) | ✅ Works | ❌ DLL_INIT_FAILED (ui_restrictions=0x03FF) | ✅ Works (set isolation=desktop) |
-| pwsh.exe (7+) | ✅ Works (if installed system-wide) | ❌ Same as PS 5.1 | ✅ Works (set isolation=desktop) |
-| python.exe | ⚠️ Needs ALL APPLICATION PACKAGES ACL | ❌ Same as PS 5.1 | Untested |
-| curl.exe | ✅ Works | ✅ Works (no Win32k needed) | ✅ Works |
+| Shell | BaseContainer default UI | BaseContainer with relaxed UI |
+|-------|--------------------------|-------------------------------|
+| cmd.exe | ✅ Works | ✅ Works |
+| powershell.exe (5.1) | ❌ DLL_INIT_FAILED with full UI lockdown | ✅ Works (set isolation=desktop) |
+| pwsh.exe (7+) | ❌ Same as PS 5.1 | ✅ Works (set isolation=desktop) |
+| python.exe | ❌ Same as PS 5.1 | Untested |
+| curl.exe | ✅ Works | ✅ Works |
 
 ### PowerShell in BaseContainer
 
@@ -36,62 +33,31 @@ access to desktop handles.
 relax handle/atoms restrictions. This allows PowerShell to initialize while still enforcing
 other restrictions (clipboard, injection, etc.).
 
-### Python in AppContainers
-
-Per-user Python installs (`AppData\Local\Python\`) cannot be executed inside AppContainers
-because they lack `ALL APPLICATION PACKAGES` ACL. System-wide Python installs (`C:\Python*`)
-work if the ACL is set:
-
-```
-icacls C:\Python314 /grant "ALL APPLICATION PACKAGES:(OI)(CI)(RX)" /T
-```
-
-### git and files created by an elevated process
-
-git refuses a repository whose owner is not the caller (`fatal: detected dubious
-ownership`). It makes one exception — a repo owned by `BUILTIN\Administrators` is
-accepted if the caller is *itself* an elevated administrator — and a contained
-process can never qualify, because the AppContainer token drops that membership.
-
-An elevated process's token hands out `BUILTIN\Administrators` as the default
-owner of everything it creates, so **any repo cloned or created while elevated is
-unusable from inside a container**, even though the same repo works fine on the
-host. Create it unelevated, reassign the owner, or add it to `safe.directory` in
-protected (system/global) git config.
-
-This is a Windows security model limitation, not an MXC bug.
 
 ## Network Limitations
 
 ### DNS Resolution
 
-| Method | AppContainer | BaseContainer |
-|--------|-------------|---------------|
-| PowerShell `Invoke-WebRequest` | ❌ DNS fails (uses .NET, not WinHTTP) | ❌ Same |
-| WinHTTP COM (`WinHttp.WinHttpRequest.5.1`) | ⚠️ See below | ⚠️ See below |
-| curl.exe | ✅ Works with proxy shim (0.4.0) | ❌ Doesn't use WinHTTP auto-proxy |
+| Method | ProcessContainer |
+|--------|------------------|
+| PowerShell `Invoke-WebRequest` | ❌ DNS fails (uses .NET, not WinHTTP) |
+| WinHTTP COM (`WinHttp.WinHttpRequest.5.1`) | ⚠️ See below |
+| curl.exe | ❌ Doesn't use WinHTTP auto-proxy |
 
 ### PowerShell `Invoke-WebRequest` DNS Issue
 
 `Invoke-WebRequest` uses .NET's `HttpClient` which performs DNS resolution in-process.
-Inside an AppContainer without DNS access, this fails even when `internetClient` capability
-is granted. `internetClient` enables TCP connections but does not grant DNS resolution
-for .NET's resolver.
+Inside ProcessContainer without DNS access, this fails because .NET performs
+DNS resolution in-process.
 
 **Workaround:** Use WinHTTP-based tools (curl.exe with proxy shim, or WinHTTP COM object)
 instead of `Invoke-WebRequest` for network tests.
 
 ### Proxy Routing
 
-**AppContainer (v0.4.0):** The SDK uses `winhttp-proxy-shim.exe` (requires admin/elevation)
-to set per-AppContainer WinHTTP proxy policy via the DNS cache service. Tools that use
-WinHTTP with `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` (like curl.exe) respect this policy.
-Tools that use their own DNS resolution (.NET HttpClient, PowerShell) do not.
-
-**BaseContainer (v0.5.0):** The proxy URL is passed in the FlatBuffer spec to
-the PSEC specification. The OS-level `appinfosvc` configures WinHTTP proxy for the
-container. System-level WinHTTP sessions use the proxy. App-created
-WinHTTP sessions may or may not pick it up depending on how they're initialized.
+The proxy URL is passed in the PSEC specification. The OS-level `appinfosvc`
+configures WinHTTP proxy for the container. System-level WinHTTP sessions use
+the proxy; app-created sessions may depend on how they are initialized.
 
 ### Admin Requirements
 
@@ -101,7 +67,7 @@ WinHTTP sessions may or may not pick it up depending on how they're initialized.
 | BFS filesystem brokering | No |
 | Network (capabilities only) | No |
 | Network (firewall rules) | Yes — `netsh advfirewall` |
-| Proxy shim (v0.4.0) | Yes — elevated winhttp-proxy-shim |
+| SBOX proxy shim | Yes — elevated winhttp-proxy-shim |
 | Proxy (v0.5.0 BaseContainer) | No — handled by OS |
 
 ## UI Restrictions (BaseContainer)

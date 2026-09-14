@@ -116,7 +116,7 @@
           "type": "string"
         },
         {
-          "description": "Windows AppContainer / BaseContainer.",
+          "description": "Windows native ProcessContainer (PSEC).",
           "enum": [
             "processcontainer"
           ],
@@ -244,20 +244,6 @@
             }
           ],
           "description": "WSL container backend config."
-        }
-      },
-      "type": "object"
-    },
-    "Fallback": {
-      "additionalProperties": false,
-      "description": "AppContainer DACL-mutation fallback policy.",
-      "properties": {
-        "allowDaclMutation": {
-          "description": "Allow the runner to mutate DACLs as a fallback.",
-          "type": [
-            "boolean",
-            "null"
-          ]
         }
       },
       "type": "object"
@@ -1231,17 +1217,6 @@
         }
       ],
       "description": "Experimental features. Only honored when `--experimental` is passed."
-    },
-    "fallback": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Fallback"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "AppContainer DACL-mutation fallback policy (Windows)."
     },
     "filesystem": {
       "anyOf": [

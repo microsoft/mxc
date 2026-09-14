@@ -25,7 +25,6 @@ pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
     assert!(common.process_container.is_none());
     assert!(common.lxc.is_none());
     assert!(common.seatbelt.is_none());
-    assert!(common.fallback.is_none());
     assert!(common.ui.is_none());
 }
 
@@ -37,7 +36,6 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
         r#""containment":"wslc""#,
         r#""experimental":{}"#,
         r#""containerId":"container""#,
-        r#""fallback":{}"#,
         r#""seatbelt":{}"#,
         r#""processContainer":{}"#,
         r#""lxc":{}"#,

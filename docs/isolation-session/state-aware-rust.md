@@ -289,7 +289,6 @@ meaning for this backend.
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
-| `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
 | `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
@@ -309,11 +308,6 @@ Notes on the rows that are not a simple accept/reject:
   filesystem and network policy are rejected outright, leaving nothing to
   preserve. On the state-aware path the parser rejects the whole `lifecycle`
   section for every backend, so no per-value handling applies.
-- **`fallback`** is `n/a` rather than `rejected`. `allowDaclMutation` gates an
-  AppContainer-only DACL fallback this backend never performs, so either value
-  is vacuously satisfied and neither asserts anything untrue. Bringing it under
-  the single-backend-section check uniformly across backends is tracked
-  separately.
 - **Foreign or mis-slotted experimental payloads** are rejected by the exact
   request root, not silently ignored. Only provision defines the
   `isolationSession.provision` input. Exact adaptation carries

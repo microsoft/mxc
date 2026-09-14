@@ -11,15 +11,14 @@
     Directory holding the downloaded build artifact.
 
 .EXAMPLE
-    ./scripts/ci/prepare-windows-host.ps1 -Backend process-t3 -BinaryDirectory artifacts/bin
+    ./scripts/ci/prepare-windows-host.ps1 -Backend process -BinaryDirectory artifacts/bin
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'wslc',
         'windows-sandbox',
@@ -163,31 +162,6 @@ function Write-HostOsVersion {
     Write-Host "Host OS: $caption"
     Write-Host "Host OS release: $release (build $build)"
     Write-Host "Host OS edition: $($values['EditionID']); architecture: $env:PROCESSOR_ARCHITECTURE"
-}
-
-function Initialize-ProcessContainerHost {
-    $hostPrep = Join-Path $BinaryDirectory 'wxc-host-prep.exe'
-    if (-not (Test-Path $hostPrep)) {
-        Exit-WithError "wxc-host-prep.exe not found in $BinaryDirectory"
-    }
-
-    # The AppContainer tier needs the system-drive ACEs and the \Device\Null
-    # security descriptor. --no-sacl keeps the descriptor within what a CI host
-    # can grant without SeSecurityPrivilege.
-    #
-    # This runs for process-t1 as well as process-t3. A T1 host selects
-    # BaseContainer for most policies, but the suite deliberately drives the
-    # AppContainer fallback tiers too, and an unprepared host fails the launch
-    # with WIN32_ERROR(5) instead of reporting a policy result.
-    & $hostPrep prepare-system-drive
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "wxc-host-prep prepare-system-drive failed with exit code $LASTEXITCODE"
-    }
-
-    & $hostPrep prepare-null-device --no-sacl
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "wxc-host-prep prepare-null-device failed with exit code $LASTEXITCODE"
-    }
 }
 
 # Verify the interpreters test suites drive inside the sandbox, following
@@ -637,8 +611,6 @@ Install-PackagedTooling
 Assert-WorkloadInterpreters
 
 switch ($Backend) {
-    'process-t1' { Initialize-ProcessContainerHost }
-    'process-t3' { Initialize-ProcessContainerHost }
     'microvm' { Initialize-MicroVmHost }
     'wslc' { Initialize-WslcHost }
     default { Write-Host "$Backend has no artifact-only Windows test prerequisites yet." }

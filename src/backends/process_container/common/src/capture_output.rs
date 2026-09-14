@@ -3,9 +3,8 @@
 
 //! Shared `processContainer.captureDenials` JSON-output plumbing.
 //!
-//! Both the native BaseContainer capture path (`base_container_runner`,
-//! decoding its own sealed ETL) and the guarded-WPR legacy-tier fallback
-//! (`appcontainer_runner`, consuming an already-decoded [`AnalysisResult`]
+//! Both native PSEC capture (decoding its own sealed ETL) and transitional
+//! SBOX guarded-WPR capture (consuming an already-decoded [`AnalysisResult`]
 //! handed back by the elevated PLM guardian) must emit byte-for-byte the same
 //! [`DenialsDocument`] JSON shape, username-redacted verbose logging sibling,
 //! [`CaptureDenialsOutput`] summary, and resolved output-path convention.
