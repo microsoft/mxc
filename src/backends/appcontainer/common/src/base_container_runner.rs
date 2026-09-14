@@ -55,6 +55,7 @@ use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported,
     diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
+    validate_required_child_env,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -2194,6 +2195,7 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -3929,6 +3931,21 @@ mod tests {
         let request = ExecutionRequest::default();
 
         assert!(BaseContainerRunner::validate_legacy_sbox_network_contract(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_sparse_verbatim_environment_before_host_probes() {
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest {
+            env: Some(vec!["SystemRoot=C:\\Windows".to_string()]),
+            ..Default::default()
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("BaseContainer must reject the environment before launch");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("LOCALAPPDATA"));
     }
 
     #[test]
