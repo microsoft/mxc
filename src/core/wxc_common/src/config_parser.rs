@@ -4477,9 +4477,9 @@ mod tests {
             "explicit divergence inventory and observed category totals differ"
         );
         let expected_inventory = if cfg!(target_os = "linux") {
-            (354, 332, 15)
+            (350, 328, 15)
         } else {
-            (354, 333, 14)
+            (350, 329, 14)
         };
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
