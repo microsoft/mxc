@@ -996,7 +996,7 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe_with_guarded_capture_availability(
+        let output = appcontainer_common::probe::run_probe(
             &request,
             mxc_engine::guarded_capture_available(),
         );

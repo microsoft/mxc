@@ -128,19 +128,11 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
     }
 }
 
-/// Probe backend support for `request`.
-pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
-    run_probe_with_guarded_capture_availability(request, true)
-}
-
 /// Run the probe with the availability of the guarded WPR capture fallback.
 ///
 /// The concrete guarded-capture implementation lives above this crate in
 /// `mxc_engine`, which supplies this capability to the executor probe.
-pub fn run_probe_with_guarded_capture_availability(
-    request: &ExecutionRequest,
-    guarded_capture_available: bool,
-) -> ProbeOutput {
+pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) -> ProbeOutput {
     use crate::base_container_runner::BaseContainerRunner;
 
     let base_container_usable = BaseContainerRunner::is_usable_for_request(request);
@@ -488,7 +480,7 @@ mod tests {
             ..Default::default()
         };
 
-        let output = run_probe(&request_with_policy(policy));
+        let output = run_probe(&request_with_policy(policy), true);
 
         assert_eq!(output.tier, Some("base-container"));
         assert!(output.probes.native_capture_available);
@@ -503,11 +495,30 @@ mod tests {
             ..Default::default()
         };
 
-        let output = run_probe(&request_with_policy(policy));
+        let output = run_probe(&request_with_policy(policy), true);
 
         assert_ne!(output.tier, Some("base-container"));
         assert!(!output.probes.native_capture_available);
         assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn public_probe_rejects_unavailable_guarded_capture() {
+        let _guard = CaptureCapabilityGuard::set(false, false);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+
+        let output = run_probe(&request_with_policy(policy), false);
+
+        assert!(output.tier.is_none());
+        assert!(!output.probes.native_capture_available);
+        assert!(!output.probes.guarded_capture_available);
+        assert_eq!(
+            output.error.as_deref(),
+            Some("guarded WPR captureDenials fallback is unavailable")
+        );
     }
 
     #[test]
@@ -524,7 +535,7 @@ mod tests {
     fn run_probe_with_force_tier() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let request = ExecutionRequest::default();
-        let out = run_probe(&request);
+        let out = run_probe(&request, true);
         assert_eq!(out.tier, Some("appcontainer-bfs"));
         assert_eq!(out.needs_dacl_augmentation, Some(false));
         assert!(out.error.is_none());
@@ -533,9 +544,9 @@ mod tests {
     #[test]
     fn run_probe_handles_dacl_disabled_error() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut request = ExecutionRequest::default();
-        request.policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&request);
+        let mut policy = ContainerPolicy::default();
+        policy.fallback.allow_dacl_mutation = false;
+        let out = run_probe(&request_with_policy(policy), true);
         assert!(out.tier.is_none());
         assert!(out.needs_dacl_augmentation.is_none());
         assert!(out.error.is_some());
@@ -549,9 +560,9 @@ mod tests {
     #[test]
     fn omitted_fields_when_error() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut request = ExecutionRequest::default();
-        request.policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&request);
+        let mut policy = ContainerPolicy::default();
+        policy.fallback.allow_dacl_mutation = false;
+        let out = run_probe(&request_with_policy(policy), true);
         let v = serde_json::to_value(&out).expect("to_value");
         let obj = v.as_object().expect("object");
         assert!(
@@ -571,7 +582,7 @@ mod tests {
     fn probe_always_emits_isolation_session_available() {
         // The SDK's isolation-session gate reads this non-optional field, so
         // it must always serialize (never omitted), even when false.
-        let out = run_probe(&ExecutionRequest::default());
+        let out = run_probe(&ExecutionRequest::default(), true);
         let v = serde_json::to_value(&out).expect("to_value");
         let probes = v["probes"].as_object().expect("probes object");
         assert!(
