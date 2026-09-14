@@ -123,7 +123,7 @@ fn publication_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     }
 
     let schema = match version {
-        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::publication_schema(),
+        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::publication_schema()?,
         ContractVersion::V0_8_0Alpha
         | ContractVersion::V0_6_0Alpha
         | ContractVersion::V0_7_0Alpha => {
@@ -206,11 +206,31 @@ fn versions_json() -> Value {
                     "adapterPath": descriptor.adapter_path(),
                     "builderPath": descriptor.builder_path(),
                     "fixturePath": descriptor.fixture_path(),
-                    "schemaSha256": descriptor.schema_sha256()
+                    "schemaSha256": descriptor.schema_sha256(),
+                    "publicationProfile": publication_profile_json(*version)
                 })
             })
             .collect(),
     )
+}
+
+fn publication_profile_json(version: ContractVersion) -> Value {
+    match version {
+        ContractVersion::V0_9_0Alpha => {
+            let profile = mxc_config_contract::dev::V0_9_0_ALPHA_PUBLICATION_PROFILE;
+            json!({
+                "oneShot": profile.one_shot,
+                "stateAwareBackends": profile
+                    .state_aware_backends
+                    .iter()
+                    .map(|backend| backend.as_str())
+                    .collect::<Vec<_>>()
+            })
+        }
+        ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_8_0Alpha => Value::Null,
+    }
 }
 
 fn registry_json() -> Value {
@@ -388,6 +408,11 @@ mod tests {
         assert_eq!(
             development["typescriptPath"],
             "sdk/node/src/generated/v0_9_0_alpha/wire.ts"
+        );
+        assert_eq!(development["publicationProfile"]["oneShot"], true);
+        assert_eq!(
+            development["publicationProfile"]["stateAwareBackends"],
+            json!([])
         );
     }
 

@@ -28,6 +28,7 @@ function published(overrides = {}) {
     builderPath: "builder-path",
     fixturePath: "fixture-path",
     schemaSha256: "a".repeat(64),
+    publicationProfile: null,
     ...overrides,
   };
 }
@@ -42,6 +43,7 @@ test("published identities remain immutable", () => {
     ["adapterPath", "different"],
     ["builderPath", "different"],
     ["schemaSha256", "b".repeat(64)],
+    ["publicationProfile", { oneShot: true, stateAwareBackends: [] }],
   ]) {
     assert.match(
       validatePublishedHistory(

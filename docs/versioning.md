@@ -298,13 +298,15 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- publish \
   --version 0.9.0-alpha --next-dev 0.10.0-alpha --dry-run
 ```
 
-After the contract, adapter, builder, fixtures, and development consumers have
-been prepared in the publication change, omit `--dry-run`. The command emits
-the stable-candidate one-shot schema only and reports its normalized SHA-256
-digest. Author the lifecycle transition and digest in the Rust
-`ContractVersion`/`CONTRACTS` registry, then regenerate
-`schemas/contract-registry.generated.json`. Experimental and state-aware request roots
-are never copied into the published contract.
+After the selected contract roots, adapters, builders, fixtures, and
+development consumers have been prepared in the publication change, omit
+`--dry-run`. The command emits the schema chosen by the Rust publication
+profile and reports its normalized SHA-256 digest. A selected state-aware
+backend contributes its provision root plus the shared start, exec, stop, and
+deprovision roots. The `experimental` block and every backend that still
+requires experimental authorization remain excluded. Author the lifecycle
+transition and digest in the Rust `ContractVersion`/`CONTRACTS` registry, then
+regenerate `schemas/contract-registry.generated.json`.
 
 **In `models.rs`:**
 ```rust
