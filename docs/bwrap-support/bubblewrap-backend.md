@@ -404,7 +404,11 @@ Schema `0.8.0-alpha` adds a directional network shape that replaces the
 `defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
 `egress` and `ingress` section. The two shapes are **mutually exclusive**: a
 config that mixes legacy and directional fields is a parse error, and one that
-uses directional fields on a pre-0.8 schema is refused by the parser with
+uses directional fields on a pre-0.8 schema is refused at deserialization —
+the declared version selects a closed contract with no directional fields, so
+the error names the unknown field at `network.egress`. Callers that build an
+`ExecutionRequest` programmatically skip the parser and hit the backend's own
+twin of this check, which reports
 `network.egress, network.ingress, runtimeConfig, and processContainer.network
 require schema version 0.8 or later`.
 
