@@ -2,41 +2,44 @@
 // Licensed under the MIT License.
 
 import { Worker } from 'node:worker_threads';
-import { MxcError, type MxcErrorFields } from './errors.js';
-import type { NativeRunResult } from './native-run.js';
+import { MxcError, type MxcErrorFields } from '../errors.js';
+import type { BindingSandboxRequest } from './request.js';
+import type { BindingRunResult } from './run.js';
 
-export interface NativeRunWorkerData {
-  requestJson: string;
+export interface BindingRunWorkerData {
+  request: BindingSandboxRequest;
 }
 
-export type NativeRunWorkerMessage =
-  | { ok: true; result: NativeRunResult }
+export type BindingRunWorkerMessage =
+  | { ok: true; result: BindingRunResult }
   | { ok: false; error: MxcErrorFields };
 
 /** @internal Minimal worker surface used by deterministic unit tests. */
-export interface NativeRunWorkerLike {
-  on(event: 'message', listener: (message: NativeRunWorkerMessage) => void): this;
+export interface BindingRunWorkerLike {
+  on(event: 'message', listener: (message: BindingRunWorkerMessage) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'exit', listener: (code: number) => void): this;
 }
 
-type WorkerFactory = (data: NativeRunWorkerData) => NativeRunWorkerLike;
+type WorkerFactory = (data: BindingRunWorkerData) => BindingRunWorkerLike;
 
 const defaultWorkerFactory: WorkerFactory = (data) => new Worker(
-  new URL('./native-run-worker-entry.js', import.meta.url),
+  new URL('./run-worker-entry.js', import.meta.url),
   { workerData: data, execArgv: [] },
 );
 
 let workerFactory = defaultWorkerFactory;
 
 /** @internal Replaces the worker factory for one process's unit tests. */
-export function _setNativeRunWorkerFactory(factory?: WorkerFactory): void {
+export function _setBindingRunWorkerFactory(factory?: WorkerFactory): void {
   workerFactory = factory ?? defaultWorkerFactory;
 }
 
-export function runNativeRequestAsync(requestJson: string): Promise<NativeRunResult> {
+export function runBindingRequestAsync(
+  request: BindingSandboxRequest,
+): Promise<BindingRunResult> {
   return new Promise((resolve, reject) => {
-    const worker = workerFactory({ requestJson });
+    const worker = workerFactory({ request });
     let settled = false;
     const finish = (action: () => void) => {
       if (settled) return;
