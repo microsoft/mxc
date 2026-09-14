@@ -109,6 +109,22 @@ pub(crate) enum ProbeFailure {
     Internal(String),
 }
 
+impl ProbeFailure {
+    /// Record that cleanup also failed, which only a timeout carries: the other
+    /// variants describe a child that was never started, or one whose own
+    /// status was the problem.
+    fn with_cleanup_error(self, cleanup_error: Option<io::Error>) -> Self {
+        match self {
+            Self::TimedOut {
+                cleanup_error: already,
+            } => Self::TimedOut {
+                cleanup_error: already.or(cleanup_error),
+            },
+            other => other,
+        }
+    }
+}
+
 /// Run `command` to completion, bounded by `deadline`.
 ///
 /// `command` supplies the program and arguments; stdio, process group and
@@ -176,10 +192,12 @@ pub(crate) fn run_bounded(
         if let Err(err) = receive_reader(&stdout_rx, &mut stdout)
             .and_then(|_| receive_reader(&stderr_rx, &mut stderr))
         {
-            terminate_and_reap(&mut child, process_group);
+            let cleanup_error = terminate_and_reap(&mut child, process_group);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            return Err(err);
+            #[cfg(target_os = "linux")]
+            let cleanup_error = cleanup_error.or(group_cleanup_error);
+            return Err(err.with_cleanup_error(cleanup_error));
         }
 
         #[cfg(target_os = "linux")]
@@ -464,21 +482,32 @@ fn terminate_probe_tree(child: &mut std::process::Child, _process_group: u32) ->
 /// what could not be stopped.
 fn terminate_and_reap(child: &mut std::process::Child, process_group: u32) -> Option<io::Error> {
     let kill_error = terminate_probe_tree(child, process_group).err();
-    reap_bounded(child);
-    kill_error
+
+    // A failed kill explains the surviving child better than the reap timeout
+    // it causes.
+    kill_error.or_else(|| reap_bounded(child))
 }
 
 /// Collect `child`'s exit status, giving up after [`REAP_TIMEOUT`].
 ///
+/// Returns the reason the child could not be confirmed stopped, which is not
+/// always a failed kill: `SIGKILL` succeeds against a process wedged in
+/// uninterruptible I/O, and it stays unreaped anyway.
+///
 /// Split from [`terminate_and_reap`] so the bound is testable against a child
 /// that is still running — the case a successful kill never produces.
-fn reap_bounded(child: &mut std::process::Child) {
+fn reap_bounded(child: &mut std::process::Child) -> Option<io::Error> {
     let deadline = Instant::now() + REAP_TIMEOUT;
     loop {
         match child.try_wait() {
-            // Reaped, or unreapable and waiting cannot help.
-            Ok(Some(_)) | Err(_) => break,
-            Ok(None) if Instant::now() >= deadline => break,
+            Ok(Some(_)) => return None,
+            Err(error) => return Some(error),
+            Ok(None) if Instant::now() >= deadline => {
+                return Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("probe did not exit within {REAP_TIMEOUT:?} of being killed"),
+                ))
+            }
             Ok(None) => thread::sleep(REAP_POLL_INTERVAL),
         }
     }
@@ -583,7 +612,7 @@ mod tests {
             .expect("spawn");
 
         let started = Instant::now();
-        reap_bounded(&mut child);
+        let cleanup_error = reap_bounded(&mut child);
         let elapsed = started.elapsed();
 
         assert!(
@@ -592,6 +621,12 @@ mod tests {
         );
         // The child outlived the reap, which is the point being asserted.
         assert!(matches!(child.try_wait(), Ok(None)));
+        let cleanup_error = cleanup_error.expect("abandoning a live child must be reported");
+        assert_eq!(
+            cleanup_error.kind(),
+            io::ErrorKind::TimedOut,
+            "a child that outlived the reap must not be reported as clean cleanup"
+        );
 
         let _ = child.kill();
         let _ = child.wait();

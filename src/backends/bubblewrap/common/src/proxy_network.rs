@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1044,7 +1044,7 @@ fn run_probe(
             // A banner this large is not the tool we meant to interrogate, and
             // the backend/flag checks downstream read the text -- so a partial
             // read must not be treated as an answer.
-            if captured.stdout.truncated {
+            if captured.stdout.truncated || captured.stderr.truncated {
                 return Err(format!(
                     "Bubblewrap: '{label}' produced more than {} bytes of output; \
                      refusing to judge a truncated banner",
@@ -1421,17 +1421,43 @@ pub fn probe_proxy_enforcement() -> Result<(), String> {
 /// reintroduce exactly the unbounded wait this exists to remove; the cost is
 /// that a child the walk had in flight is left running and unreaped.
 ///
+/// At most one walk may be in flight: without the gate, a host wedged badly
+/// enough to time out would strand another thread on every call. An overlapping
+/// caller waits for it within its own budget rather than being refused, so a
+/// healthy walk does not make the answer depend on call scheduling.
+///
 /// `walk` is a parameter so a test can supply one that never returns — the
 /// only way to prove this supervision does anything.
 fn supervise_preflight<F>(budget: Duration, walk: F) -> Result<(), String>
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
+    supervise_preflight_with(&PREFLIGHT_GATE, budget, walk)
+}
+
+/// [`supervise_preflight`] against a caller-supplied gate, so a test that
+/// deliberately strands a worker cannot wedge the shared one.
+fn supervise_preflight_with<F>(
+    gate: &'static PreflightGate,
+    budget: Duration,
+    walk: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
     let deadline = Instant::now() + budget;
+    let Some(slot) = gate.claim_until(deadline) else {
+        return Err(format!(
+            "Bubblewrap: an earlier proxy-enforcement pre-flight probe did not return within \
+             {budget:?}, so this host cannot be confirmed"
+        ));
+    };
+
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker = thread::Builder::new()
         .name("mxc-proxy-preflight".to_string())
         .spawn(move || {
+            let _slot = slot;
             let _ = sender.send(walk());
         });
     if let Err(error) = worker {
@@ -1452,23 +1478,103 @@ where
     }
 }
 
-pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
-    // Probing costs eight subprocess spawns, and the host's tooling does not
-    // change under a running process often enough to pay that on every
-    // sandbox. Cache the *success* only: a failure is usually "the operator
-    // has not installed slirp4netns yet", and caching that would keep failing
-    // long after they did.
-    //
-    // Caching across use cases is safe because the probe asks the same
-    // questions either way -- only the wording of a failure differs, and
-    // failures are never cached.
-    static PROBED: OnceLock<()> = OnceLock::new();
-    if PROBED.get().is_some() {
-        return Ok(());
+/// Admits one pre-flight walk at a time, making later callers wait for the
+/// one in flight instead of refusing them outright.
+struct PreflightGate {
+    in_flight: Mutex<bool>,
+    available: Condvar,
+}
+
+static PREFLIGHT_GATE: PreflightGate = PreflightGate::new();
+
+impl PreflightGate {
+    const fn new() -> Self {
+        Self {
+            in_flight: Mutex::new(false),
+            available: Condvar::new(),
+        }
     }
-    probe_dependencies_uncached(use_case, ProbeBudget::unbounded())?;
-    let _ = PROBED.set(());
-    Ok(())
+
+    fn claim_until(&'static self, deadline: Instant) -> Option<PreflightSlot> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if !*in_flight {
+                *in_flight = true;
+                return Some(PreflightSlot(self));
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (next, wait) = self
+                .available
+                .wait_timeout(in_flight, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            in_flight = next;
+            if wait.timed_out() && *in_flight {
+                return None;
+            }
+        }
+    }
+}
+
+/// Permission to run one pre-flight walk, held by the worker rather than the
+/// caller: a timed-out caller returns while its walk still owns the slot.
+struct PreflightSlot(&'static PreflightGate);
+
+impl Drop for PreflightSlot {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .0
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *in_flight = false;
+        self.0.available.notify_one();
+    }
+}
+
+pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
+    static PROBED: OnceLock<()> = OnceLock::new();
+
+    probe_dependencies_caching(
+        &PROBED,
+        use_case,
+        ProbeBudget::unbounded(),
+        real_probe_command,
+    )
+}
+
+/// [`probe_dependencies`] against a caller-supplied cache, so the reuse rules
+/// are testable without a process-global `OnceLock`.
+///
+/// Only the tool and version checks are cached, and only on success: a failure
+/// usually means the operator has not installed slirp4netns yet. The
+/// namespace-allocation check stays outside, because unlike a package on PATH
+/// the kernel's answer changes under a running process.
+fn probe_dependencies_caching<F>(
+    cache: &OnceLock<()>,
+    use_case: PrivateNetworkUse,
+    budget: ProbeBudget,
+    command: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &[&str]) -> Command,
+{
+    if cache.get().is_none() {
+        probe_stable_dependencies(use_case, budget, &command)?;
+        let _ = cache.set(());
+    }
+
+    check_private_namespaces(
+        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
+        use_case,
+        budget,
+    )
 }
 
 /// Tools the in-namespace rules are programmed with: `(binary, probe flag,
@@ -1544,6 +1650,24 @@ fn probe_dependencies_with<F>(
 where
     F: Fn(&str, &[&str]) -> Command,
 {
+    probe_stable_dependencies(use_case, budget, &command)?;
+    check_private_namespaces(
+        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
+        use_case,
+        budget,
+    )
+}
+
+/// The half of the walk whose answers are fixed by what is installed: tool
+/// presence, version banners, and the `iptables` backend.
+fn probe_stable_dependencies<F>(
+    use_case: PrivateNetworkUse,
+    budget: ProbeBudget,
+    command: &F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &[&str]) -> Command,
+{
     let requirement = use_case.requirement();
     let slirp = run_probe(
         command("slirp4netns", &["--version"]),
@@ -1578,12 +1702,6 @@ where
              --map-current-user and --keep-caps support"
         ));
     }
-
-    check_private_namespaces(
-        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
-        use_case,
-        budget,
-    )?;
 
     // The in-namespace rules are programmed with these, so a host missing them
     // must fail here rather than deep inside supervisor startup.
@@ -3039,6 +3157,99 @@ mod tests {
         assert!(!shell_failed_to_start(1));
     }
 
+    /// Cache reuse, in the three shapes that matter: a remembered success, a
+    /// failure that is retried, and reuse across use cases.
+    #[test]
+    fn the_cache_remembers_tools_but_re_checks_namespaces() {
+        use std::cell::RefCell;
+
+        let log = RefCell::new(Vec::new());
+        let counting = |program: &str, args: &[&str]| {
+            log.borrow_mut()
+                .push(format!("{program} {}", args.join(" ")));
+            walk_stub_for(program, None)
+        };
+
+        // `unshare --help` is a stable check; the bare `unshare` carrying
+        // `--map-current-user` is the namespace allocation.
+        let namespace_runs = || {
+            log.borrow()
+                .iter()
+                .filter(|call| call.contains("--map-current-user"))
+                .count()
+        };
+        let stable_runs = || {
+            log.borrow()
+                .iter()
+                .filter(|call| call.starts_with("slirp4netns"))
+                .count()
+        };
+
+        let cache = OnceLock::new();
+        let run = |use_case| {
+            let _ =
+                probe_dependencies_caching(&cache, use_case, ProbeBudget::unbounded(), counting);
+            (stable_runs(), namespace_runs())
+        };
+
+        let after_first = run(PrivateNetworkUse::ProxyOnlyEgress);
+        let after_second = run(PrivateNetworkUse::ProxyOnlyEgress);
+        // The cache is shared across use cases, which ask the same questions.
+        let after_other_use_case = run(PrivateNetworkUse::FirewallEnforcement);
+
+        assert_eq!(
+            after_second.0, after_first.0,
+            "a warm cache must not re-run the tool checks"
+        );
+        assert_eq!(
+            after_other_use_case.0, after_first.0,
+            "the cache is shared across use cases, which ask the same questions"
+        );
+        assert!(
+            after_second.1 > after_first.1 && after_other_use_case.1 > after_second.1,
+            "the namespace check must run on every call, warm cache or not: {after_first:?} \
+             then {after_second:?} then {after_other_use_case:?}"
+        );
+    }
+
+    /// A failure must not be remembered: it usually means the operator has not
+    /// installed the tooling yet.
+    #[test]
+    fn a_failed_walk_is_retried_rather_than_remembered() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0_u32);
+        let cache = OnceLock::new();
+        let failing = |_: &str, _: &[&str]| {
+            attempts.set(attempts.get() + 1);
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 1"]);
+            command
+        };
+
+        probe_dependencies_caching(
+            &cache,
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::unbounded(),
+            failing,
+        )
+        .expect_err("a host whose tooling fails must not be reported usable");
+        let after_first = attempts.get();
+
+        probe_dependencies_caching(
+            &cache,
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::unbounded(),
+            failing,
+        )
+        .expect_err("the failure must not have been cached");
+
+        assert!(
+            attempts.get() > after_first,
+            "a failed walk must be re-run, not remembered"
+        );
+    }
+
     /// The tests above cover `namespace_probe_error` as a pure function. These
     /// drive the real path — `run_probe`, a genuine exit status, the diagnostic
     /// mapping — so a refactor cannot stop feeding the status into it while
@@ -3275,10 +3486,11 @@ mod tests {
     /// that, since a real host answers well inside the budget either way.
     #[test]
     fn a_walk_that_never_returns_still_answers_at_the_budget() {
+        static GATE: PreflightGate = PreflightGate::new();
         let budget = Duration::from_millis(300);
 
         let started = Instant::now();
-        let error = supervise_preflight(budget, move || {
+        let error = supervise_preflight_with(&GATE, budget, move || {
             // Stands in for a spawn blocked on a stalled filesystem: no
             // deadline inside the walk is ever consulted.
             thread::sleep(Duration::from_secs(120));
@@ -3305,15 +3517,89 @@ mod tests {
     /// A walk that answers inside the budget must have its verdict passed
     /// through unchanged, in both directions — supervision must not swallow the
     /// result or turn a refusal into a timeout.
+    ///
+    /// Reusing one gate across both calls also pins the release: a slot held
+    /// past a completed walk would turn the second call into a refusal.
     #[test]
     fn a_walk_that_answers_is_reported_verbatim() {
+        static GATE: PreflightGate = PreflightGate::new();
         assert_eq!(
-            supervise_preflight(Duration::from_secs(5), || Ok(())),
+            supervise_preflight_with(&GATE, Duration::from_secs(5), || Ok(())),
             Ok(())
         );
         assert_eq!(
-            supervise_preflight(Duration::from_secs(5), || Err("slirp4netns missing".into())),
+            supervise_preflight_with(&GATE, Duration::from_secs(5), || Err(
+                "slirp4netns missing".into()
+            )),
             Err("slirp4netns missing".to_string())
+        );
+    }
+
+    /// Without the gate a wedged host would strand another thread on every
+    /// call, so pin that the second caller is refused rather than starting one.
+    #[test]
+    fn a_stranded_walk_refuses_the_next_caller_instead_of_stranding_another() {
+        static GATE: PreflightGate = PreflightGate::new();
+        let budget = Duration::from_millis(200);
+
+        supervise_preflight_with(&GATE, budget, || {
+            thread::sleep(Duration::from_secs(120));
+            Ok(())
+        })
+        .expect_err("the stranded walk must time out");
+
+        let error = supervise_preflight_with(&GATE, budget, || {
+            panic!("the gate must refuse before a second worker is started")
+        })
+        .expect_err("a host with a stranded probe cannot be confirmed");
+
+        assert!(
+            error.contains("did not return within"),
+            "the refusal must say a probe is still outstanding, got: {error}"
+        );
+    }
+
+    /// Both public entry points reach this probe in one process, so an
+    /// overlapping healthy walk must be waited for rather than refused —
+    /// otherwise host capability depends on call scheduling.
+    #[test]
+    fn an_overlapping_healthy_walk_is_waited_for_not_refused() {
+        static GATE: PreflightGate = PreflightGate::new();
+        let budget = Duration::from_secs(5);
+
+        let first = thread::spawn(move || {
+            supervise_preflight_with(&GATE, budget, || {
+                thread::sleep(Duration::from_millis(300));
+                Ok(())
+            })
+        });
+        // Long enough that the second caller arrives while the first still owns
+        // the slot.
+        thread::sleep(Duration::from_millis(50));
+        let second = supervise_preflight_with(&GATE, budget, || Ok(()));
+
+        assert_eq!(first.join().expect("first walk"), Ok(()));
+        assert_eq!(
+            second,
+            Ok(()),
+            "a caller overlapping a healthy walk must get the real answer"
+        );
+    }
+
+    /// A panicking walk must free the slot, or one bad call would refuse every
+    /// later caller for the life of the process.
+    #[test]
+    fn a_panicking_walk_releases_the_slot() {
+        static GATE: PreflightGate = PreflightGate::new();
+
+        let _ = supervise_preflight_with(&GATE, Duration::from_secs(5), || {
+            panic!("walk exploded");
+        });
+
+        assert_eq!(
+            supervise_preflight_with(&GATE, Duration::from_secs(5), || Ok(())),
+            Ok(()),
+            "the slot must survive a panicking walk"
         );
     }
 
@@ -3493,6 +3779,30 @@ mod tests {
             "stdout was not captured, got: {:?}",
             probe.stdout
         );
+    }
+
+    /// A wrapper that floods stderr is no more the tool we meant to interrogate
+    /// than one that floods stdout.
+    #[test]
+    fn an_oversized_stream_is_refused_on_either_side() {
+        for stream in ["1", "2"] {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                &format!(
+                    "echo ok; dd if=/dev/zero bs=1024 count={} >&{stream} 2>/dev/null",
+                    (probe_exec::MAX_PROBE_OUTPUT_BYTES / 1024) + 8
+                ),
+            ]);
+
+            let error = run_probe(command, "flooding-tool", ProbeBudget::unbounded())
+                .expect_err("a truncated stream must not be judged");
+
+            assert!(
+                error.contains("refusing to judge a truncated banner"),
+                "stream {stream} must be refused, got: {error}"
+            );
+        }
     }
 
     #[test]

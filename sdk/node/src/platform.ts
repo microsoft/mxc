@@ -86,9 +86,16 @@ function isWindowsSandboxAvailable(): boolean {
  * diagnostics for unavailable LXC or Bubblewrap backends, and — when
  * bubblewrap is available — `lxc-exec --available-backends` is invoked to
  * populate `bubblewrapNetwork`. macOS currently does not expose native probe
- * data. `uiCapabilities` is omitted outside Windows. The result is cached for
- * the lifetime of the SDK module — the underlying machine state is not
- * expected to change at runtime.
+ * data. `uiCapabilities` is omitted outside Windows.
+ *
+ * **Synchronous, and cached for the module's lifetime.** The first call blocks
+ * on the native probes above, which on Linux spawn subprocesses and can take
+ * seconds on a slow host; later calls return that same first answer.
+ *
+ * `bubblewrapNetwork` is the one field whose subject can change under a
+ * running process, so a cached `proxyEnforcement: 'supported'` can go stale.
+ * The runner re-probes at launch, so acting on a stale value costs a clear
+ * error rather than a silently weaker sandbox.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -210,7 +217,11 @@ let linuxProbeRunner: LinuxProbeRunner = defaultLinuxProbeRunner;
  * Worst case for the native `--available-backends` walk on Linux, whose probes
  * run **sequentially**: 5s `bwrap --version` (`BWRAP_VERSION_TIMEOUT`) + 3s
  * proxy dependency walk (`PRE_FLIGHT_BUDGET`) + 3s `lxc-ls --version` (LXC
- * `PROBE_TIMEOUT`). Keep in sync with those Rust constants.
+ * `PROBE_TIMEOUT`).
+ *
+ * TypeScript cannot import a Rust constant, so this restates their sum and
+ * `scripts/versioning/check-linux-probe-timeouts.js` fails the build when it
+ * stops matching.
  */
 const NATIVE_PROBE_WORST_CASE_MS = 5_000 + 3_000 + 3_000;
 
