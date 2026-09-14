@@ -243,7 +243,7 @@ fn spawn_wslc(
              request (SandboxRequest::set_experimental(true)) to use it",
         ));
     }
-    let config = request.experimental.wslc.clone().unwrap_or_default();
+    let config = request.development.wslc.clone().unwrap_or_default();
     let mut runner = wslc_common::WSLContainerRunner::new(&config);
     runner
         .spawn(request, logger, StdioMode::Pipes)

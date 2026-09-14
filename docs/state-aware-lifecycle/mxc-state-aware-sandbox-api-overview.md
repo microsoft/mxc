@@ -427,8 +427,7 @@ Reference §11 has the full guide. Operational checklist:
    routing and checked binding). Extend the neutral operation and binding helper,
    and add engine dispatch arms for both lifecycle and streaming paths.
 5. Add the backend's shape to the exact development contract and its runtime
-   adapter; keep the retained rolling oracle aligned and regenerate both
-   development artifact sets.
+   adapter, then regenerate the exact schema and TypeScript artifact.
 6. Document policy-honor matrix, idempotence, concurrency, and error mapping in
    `docs/<backend-or-feature>/<plan-name>.md` (e.g.,
    `docs/isolation-session/state-aware-plan.md`).

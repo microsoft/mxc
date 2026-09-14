@@ -28,7 +28,7 @@
 //!
 //! To stop that safety property from silently rotting into a coverage gap,
 //! [`policy_projection`] **exhaustively destructures** `ExecutionRequest` and
-//! `ExperimentalConfig`. Adding a field to either is a compile error until it is
+//! `DevelopmentConfig`. Adding a field to either is a compile error until it is
 //! classified as hashed or explicitly excluded with a reason.
 //!
 //! # What is excluded, and why
@@ -37,7 +37,7 @@
 //! |---|---|
 //! | `script_code` | The command line is *what runs*, not the policy under which it runs; it also routinely embeds credentials (`curl -H "Authorization: …"`). |
 //! | `env` | Environment variables are the classic secret carrier. |
-//! | `experimental.telemetry` | Does not affect enforcement. |
+//! | development test feature | Does not affect enforcement. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
@@ -73,7 +73,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::models::{
-    ExecutionRequest, ExperimentalConfig, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    DevelopmentConfig, ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
 };
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -198,7 +198,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         experimental_enabled,
-        experimental,
+        development,
         // --- deliberately excluded; see the module docs ---
         // The command line is what runs, not the policy it runs under, and it
         // routinely embeds credentials.
@@ -267,43 +267,21 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         "seatbelt".into(),
         serde_json::to_value(seatbelt).unwrap_or(Value::Null),
     );
-    root.insert("experimental".into(), experimental_projection(experimental));
-
-    Value::Object(root)
-}
-
-/// The enforcement-relevant, non-credential parts of the experimental block.
-///
-/// These matter: for `windows_sandbox` and `wslc` the experimental section
-/// carries the sandbox's **entire** filesystem / network / resource policy.
-/// Omitting it wholesale (the first cut of this module did) would have made two
-/// materially different policies hash identically on those backends.
-///
-/// `ExperimentalConfig` is exhaustively destructured for the same tripwire
-/// reason as [`policy_projection`].
-fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
-    let ExperimentalConfig {
+    let DevelopmentConfig {
         windows_sandbox,
         wslc,
-        // A placeholder feature with no enforcement effect.
         test: _excluded_test_feature,
-    } = experimental;
-
-    let mut out = Map::new();
-    out.insert(
-        "windows_sandbox".into(),
+    } = development;
+    root.insert(
+        "windowsSandbox".into(),
         serde_json::to_value(windows_sandbox).unwrap_or(Value::Null),
     );
-    out.insert(
+    root.insert(
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
     );
-    // IsolationSession has no domain-level experimental config. Keep an
-    // explicit null projection so the canonical shape remains deterministic;
-    // state-aware phase config (including appId) is projected separately.
-    out.insert("isolation_session".into(), Value::Null);
 
-    Value::Object(out)
+    Value::Object(root)
 }
 
 /// The enforcement-relevant, non-credential parts of the proxy configuration:
@@ -724,16 +702,16 @@ mod tests {
     }
 
     #[test]
-    fn experimental_backend_policy_changes_the_hash() {
-        // The experimental block carries the ENTIRE enforcement policy for
-        // windows_sandbox / wslc. Omitting it would make two
+    fn development_backend_policy_changes_the_hash() {
+        // Development backend configuration carries the enforcement policy
+        // for windows_sandbox / wslc. Omitting it would make two
         // materially different policies hash identically on those backends.
         let mut baseline = request();
         baseline.containment = ContainmentBackend::Wslc;
         let before = policy_hash(&baseline);
 
         let mut changed = baseline.clone();
-        changed.experimental.wslc = Some(crate::models::WslcConfig {
+        changed.development.wslc = Some(crate::models::WslcConfig {
             image: "python:3.12".to_string(),
             gpu: true,
             ..Default::default()
@@ -741,7 +719,7 @@ mod tests {
         assert_ne!(before, policy_hash(&changed));
 
         let mut more = changed.clone();
-        if let Some(cfg) = more.experimental.wslc.as_mut() {
+        if let Some(cfg) = more.development.wslc.as_mut() {
             cfg.memory_mb = Some(4096);
         }
         assert_ne!(policy_hash(&changed), policy_hash(&more));

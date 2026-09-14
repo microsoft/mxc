@@ -621,7 +621,7 @@ describes what actually ran, not what was requested.
 An allow-list is deliberate: a field added to the model later is excluded until
 someone opts it in, which fails safe rather than accidentally hashing a secret.
 To stop that from rotting into a silent coverage gap, the projection
-**exhaustively destructures** `ExecutionRequest` and `ExperimentalConfig` — adding
+**exhaustively destructures** `ExecutionRequest` and `DevelopmentConfig` — adding
 a field to either is a compile error until it is classified.
 
 Excluded, and why:

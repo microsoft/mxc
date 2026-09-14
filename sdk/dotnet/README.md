@@ -656,9 +656,9 @@ IsolationSession, Windows Sandbox, and WSLC on Windows; all three are
 experimental).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
-latest stable schema, and the backend-specific state-aware defaults. These
-constants are checked in CI against `schemas/schema-version.json`, alongside
-the Rust parser and TypeScript SDK constants.
+latest stable schema, and the backend-specific state-aware defaults. The Rust
+contract registry is authoritative; its generated JSON projection records the
+accepted exact versions and schema paths used by repository validation.
 
 ### State-aware lifecycle
 

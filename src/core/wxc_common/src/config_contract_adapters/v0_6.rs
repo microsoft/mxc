@@ -244,7 +244,9 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: None,
-        experimental: None,
+        test: None,
+        windows_sandbox: None,
+        wslc: None,
     }
 }
 
@@ -360,17 +362,6 @@ mod tests {
         "ui": {},
         "processContainer": {
             "ui": {}
-        }
-    }"#;
-
-    const APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
-        "process": {
-            "commandLine": "echo hello"
-        },
-        "appContainer": {
-            "leastPrivilege": true,
-            "capabilities": ["internetClient"]
         }
     }"#;
 
@@ -529,7 +520,9 @@ mod tests {
         assert!(wire.network.is_none());
         assert!(wire.ui.is_none());
         assert!(wire.seatbelt.is_none());
-        assert!(wire.experimental.is_none());
+        assert!(wire.test.is_none());
+        assert!(wire.windows_sandbox.is_none());
+        assert!(wire.wslc.is_none());
     }
 
     #[test]
@@ -855,99 +848,5 @@ mod tests {
                 serde_json::json!(process_container_ui_isolation)
             );
         }
-    }
-
-    #[test]
-    fn app_container_section_alias_maps_expected_wire_fields() {
-        let request: super::contract::Request =
-            serde_json::from_str(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
-        let process_container = wire
-            .process_container
-            .expect("appContainer should map to process_container");
-
-        assert_eq!(process_container.least_privilege, Some(true));
-        assert_eq!(
-            process_container.capabilities.unwrap().as_slice(),
-            &["internetClient"]
-        );
-        assert!(process_container.learning_mode.is_none());
-        assert!(process_container.capture_denials.is_none());
-        assert!(process_container.ui.is_none());
-    }
-
-    fn assert_matches_current_wire_deserialization(json: &str) {
-        let current: super::wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
-        let contract: super::contract::Request = serde_json::from_str(json).unwrap();
-        let adapted = super::into_wire(contract);
-
-        assert_eq!(
-            serde_json::to_value(adapted).unwrap(),
-            serde_json::to_value(current).unwrap()
-        );
-    }
-
-    #[test]
-    fn minimal_request_matches_current_wire_deserialization() {
-        let json = MINIMAL_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_process_container_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_PROCESS_CONTAINER_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_lxc_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_LXC_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn empty_optional_sections_match_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn proxy_variants_match_current_wire_deserialization() {
-        for case in PROXY_CASES {
-            let json = request_with_proxy(case.json);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn enum_variants_match_current_wire_deserialization() {
-        for case in CONTAINMENT_CASES {
-            let json = request_with_containment(case.input);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for default_policy in DEFAULT_NETWORK_POLICY_CASES {
-            let json = request_with_default_network_policy(default_policy);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
-            let json = request_with_network_enforcement_mode(enforcement_mode);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for clipboard in UI_CLIPBOARD_CASES {
-            let json = request_with_ui_clipboard(clipboard);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
-            let json = request_with_process_container_ui_isolation(isolation);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn app_container_section_alias_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON);
     }
 }

@@ -16,6 +16,17 @@ contract/backend migration rather than parser plumbing, and is documented
 separately below so reviewers can evaluate and revert the two concerns
 independently.
 
+## Phase 11d final disposition
+
+On 2026-09-14, Phase 11d retired the differential harness, rolling
+whole-request parser and policy builder, independent legacy payload extractor,
+rolling schema and TypeScript artifacts, and their drift/version-sync gates.
+The exact contract fixtures, adapter snapshots, semantic-normalization tests,
+SDK conformance tests, and backend dispatch observations now provide the
+replacement evidence. The migration counts and gate names below are retained
+as a historical record of the cutover, not as descriptions of the current
+architecture.
+
 ## Summary
 
 | Classification | Documents | Migration |
@@ -210,8 +221,8 @@ omissions:
   does not accept exec-only `runtimeConfig`; it is not a valid provision
   template.
 
-The retained rolling model remains a test/reference and compatibility
-representation, not an alternate production parser. Native Unix execution and
+The rolling model was retained at this point in the migration as a
+test/reference representation, not an alternate production parser. Native Unix execution and
 live lifecycle/enforcement evidence are distinct from local compile, unit,
 schema, and dry-run results; unsupported hosts and skipped cases must not be
 reported as successful E2E runs.

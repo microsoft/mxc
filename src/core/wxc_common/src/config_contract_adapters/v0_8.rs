@@ -406,7 +406,9 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: None,
-        experimental: None,
+        test: None,
+        windows_sandbox: None,
+        wslc: None,
     }
 }
 
@@ -962,7 +964,9 @@ mod tests {
         assert!(wire.network.is_none());
         assert!(wire.ui.is_none());
         assert!(wire.seatbelt.is_none());
-        assert!(wire.experimental.is_none());
+        assert!(wire.test.is_none());
+        assert!(wire.windows_sandbox.is_none());
+        assert!(wire.wslc.is_none());
     }
 
     #[test]
@@ -1807,181 +1811,5 @@ mod tests {
                 serde_json::json!(declared)
             );
         }
-    }
-
-    #[test]
-    fn legacy_and_directional_network_fields_map_together() {
-        // The 0.8 contract accepts both families structurally; the parser, not
-        // the contract, rejects mixing them.
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hello"},
-            "network": {
-                "defaultPolicy": "block",
-                "enforcementMode": "firewall",
-                "allowLocalNetwork": true,
-                "allowedHosts": ["allowed.example"],
-                "blockedHosts": ["blocked.example"],
-                "proxy": {"url": "http://proxy.example:8080"},
-                "egress": {"default": "deny"},
-                "ingress": {"default": "deny"}
-            }
-        }"#;
-
-        let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let network = super::into_wire(request)
-            .network
-            .expect("network should be populated");
-
-        assert!(matches!(
-            network.default_policy,
-            Some(super::wire::NetworkPolicy::Block)
-        ));
-        assert!(matches!(
-            network.enforcement_mode,
-            Some(super::wire::NetworkEnforcement::Firewall)
-        ));
-        assert_eq!(network.allow_local_network, Some(true));
-        assert!(network.proxy.is_some());
-        assert!(matches!(
-            network.egress.expect("egress").default,
-            Some(super::wire::NetworkAction::Deny)
-        ));
-        assert!(matches!(
-            network.ingress.expect("ingress").default,
-            Some(super::wire::NetworkAction::Deny)
-        ));
-    }
-
-    fn assert_matches_current_wire_deserialization(json: &str) {
-        let current: super::wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
-        let contract: super::contract::Request = serde_json::from_str(json).unwrap();
-        let adapted = super::into_wire(contract);
-
-        assert_eq!(
-            serde_json::to_value(adapted).unwrap(),
-            serde_json::to_value(current).unwrap()
-        );
-    }
-
-    #[test]
-    fn minimal_request_matches_current_wire_deserialization() {
-        let json = MINIMAL_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_process_container_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_PROCESS_CONTAINER_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_lxc_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_LXC_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_seatbelt_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_SEATBELT_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_directional_network_request_matches_current_wire_deserialization() {
-        let json = DIRECTIONAL_NETWORK_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn empty_directional_sections_request_matches_current_wire_deserialization() {
-        let json = EMPTY_DIRECTIONAL_SECTIONS_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn empty_optional_sections_match_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn empty_process_container_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON);
-    }
-
-    #[test]
-    fn empty_process_container_ui_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(
-            EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON,
-        );
-    }
-
-    #[test]
-    fn empty_seatbelt_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_SEATBELT_SECTION_REQUEST_JSON);
-    }
-
-    #[test]
-    fn proxy_variants_match_current_wire_deserialization() {
-        for case in PROXY_CASES {
-            let json = request_with_proxy(case.json);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn enum_variants_match_current_wire_deserialization() {
-        for case in CONTAINMENT_CASES {
-            let json = request_with_containment(case.input);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for default_policy in DEFAULT_NETWORK_POLICY_CASES {
-            let json = request_with_default_network_policy(default_policy);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
-            let json = request_with_network_enforcement_mode(enforcement_mode);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for clipboard in UI_CLIPBOARD_CASES {
-            let json = request_with_ui_clipboard(clipboard);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
-            let json = request_with_process_container_ui_isolation(isolation);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
-            let json = request_with_seatbelt_launch_method(launch_method);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn app_container_section_alias_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn macos_sandbox_section_alias_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn annotations_match_current_wire_deserialization() {
-        let json = r#"{
-                "$schema": "https://example.com/schema.json",
-                "_comment": "This is a comment",
-                "version": "0.8.0-alpha",
-                "process": {"commandLine": "echo hello"}
-            }"#;
-
-        assert_matches_current_wire_deserialization(json);
     }
 }

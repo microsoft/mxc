@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::common::{
-    adapt, assert_matches_current_wire_deserialization, request_with_containment, ContainmentCase,
-};
+use super::common::{adapt, request_with_containment, ContainmentCase};
 
 const MINIMAL_REQUEST_JSON: &str = r#"{
     "version": "0.10.0-alpha",
@@ -384,7 +382,9 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
     assert!(wire.telemetry.is_none());
-    assert!(wire.experimental.is_none());
+    assert!(wire.test.is_none());
+    assert!(wire.windows_sandbox.is_none());
+    assert!(wire.wslc.is_none());
 }
 
 #[test]
@@ -985,126 +985,6 @@ fn process_container_additions_map_expected_wire_fields() {
     assert_eq!(capture.retain_etl, Some(true));
 }
 
-#[test]
-fn minimal_request_matches_current_wire_deserialization() {
-    let json = MINIMAL_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
-}
-
-#[test]
-fn process_container_request_matches_current_wire_deserialization() {
-    let json = PROCESS_CONTAINER_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
-}
-
-#[test]
-fn lxc_request_matches_current_wire_deserialization() {
-    let json = LXC_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
-}
-
-#[test]
-fn capture_denials_mode_variants_match_current_wire_deserialization() {
-    for case in CAPTURE_DENIALS_MODE_CASES {
-        let json = request_with_capture_denials_mode(case);
-        assert_matches_current_wire_deserialization(&json);
-    }
-}
-
-#[test]
-fn process_container_additions_match_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(PROCESS_CONTAINER_ADDITIONS_REQUEST_JSON);
-}
-
-#[test]
-fn seatbelt_request_matches_current_wire_deserialization() {
-    let json = SEATBELT_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
-}
-
-#[test]
-fn empty_optional_sections_match_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON);
-}
-
-#[test]
-fn empty_process_container_section_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON);
-}
-
-#[test]
-fn empty_process_container_ui_section_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON);
-}
-
-#[test]
-fn empty_seatbelt_section_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(EMPTY_SEATBELT_SECTION_REQUEST_JSON);
-}
-
-#[test]
-fn proxy_variants_match_current_wire_deserialization() {
-    for case in PROXY_CASES {
-        let json = request_with_proxy(case.json);
-        assert_matches_current_wire_deserialization(&json);
-    }
-}
-
-#[test]
-fn enum_variants_match_current_wire_deserialization() {
-    for case in STABLE_CONTAINMENT_CASES {
-        let json = request_with_containment(case.input);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for default_policy in DEFAULT_NETWORK_POLICY_CASES {
-        let json = request_with_default_network_policy(default_policy);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
-        let json = request_with_network_enforcement_mode(enforcement_mode);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for clipboard in UI_CLIPBOARD_CASES {
-        let json = request_with_ui_clipboard(clipboard);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
-        let json = request_with_process_container_ui_isolation(isolation);
-        assert_matches_current_wire_deserialization(&json);
-    }
-
-    for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
-        let json = request_with_seatbelt_launch_method(launch_method);
-        assert_matches_current_wire_deserialization(&json);
-    }
-}
-
-#[test]
-fn app_container_section_alias_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON);
-}
-
-#[test]
-fn macos_sandbox_section_alias_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON);
-}
-
-#[test]
-fn annotations_match_current_wire_deserialization() {
-    let json = r#"{
-            "$schema": "https://example.com/schema.json",
-            "_comment": "This is a comment",
-            "version": "0.10.0-alpha",
-            "process": {"commandLine": "echo hello"}
-        }"#;
-
-    assert_matches_current_wire_deserialization(json);
-}
-
 const DIRECTIONAL_NETWORK_REQUEST_JSON: &str = r#"{
     "version": "0.10.0-alpha",
     "containment": "processcontainer",
@@ -1237,72 +1117,6 @@ fn directional_network_request_maps_expected_wire_fields() {
     assert!(network.default_policy.is_none());
     assert!(network.enforcement_mode.is_none());
     assert!(network.proxy.is_none());
-}
-
-#[test]
-fn directional_network_request_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(DIRECTIONAL_NETWORK_REQUEST_JSON);
-}
-
-#[test]
-fn every_network_action_maps_to_the_expected_wire_value() {
-    for declared in ["allow", "deny"] {
-        let expected = declared;
-        let json = format!(
-            r#"{{
-                "version": "0.10.0-alpha",
-                "process": {{"commandLine": "echo hello"}},
-                "network": {{
-                    "egress": {{"default": "{declared}"}},
-                    "ingress": {{"default": "{declared}", "hostLoopback": "{declared}"}}
-                }}
-            }}"#
-        );
-
-        let network = adapt(&json).network.expect("network should be populated");
-        let egress_default = network.egress.expect("egress").default;
-        assert_eq!(
-            serde_json::to_value(egress_default).unwrap(),
-            serde_json::json!(expected)
-        );
-        let ingress = network.ingress.expect("ingress");
-        assert_eq!(
-            serde_json::to_value(ingress.default).unwrap(),
-            serde_json::json!(expected)
-        );
-        assert_eq!(
-            serde_json::to_value(ingress.host_loopback).unwrap(),
-            serde_json::json!(expected)
-        );
-
-        assert_matches_current_wire_deserialization(&json);
-    }
-}
-
-#[test]
-fn every_network_protocol_maps_to_the_expected_wire_value() {
-    for declared in ["tcp", "udp", "icmp", "any"] {
-        let expected = declared;
-        let json = format!(
-            r#"{{
-                "version": "0.10.0-alpha",
-                "process": {{"commandLine": "echo hello"}},
-                "network": {{
-                    "egress": {{"allow": [{{"ports": [{{"protocol": "{declared}"}}]}}]}}
-                }}
-            }}"#
-        );
-
-        let network = adapt(&json).network.expect("network should be populated");
-        let allow = network.egress.expect("egress").allow.expect("allow");
-        let ports = allow[0].ports.as_ref().expect("ports");
-        assert_eq!(
-            serde_json::to_value(ports[0].protocol).unwrap(),
-            serde_json::json!(expected)
-        );
-
-        assert_matches_current_wire_deserialization(&json);
-    }
 }
 
 #[test]

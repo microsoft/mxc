@@ -212,7 +212,7 @@ See the [SDK README](sdk/node/README.md) for full API documentation.
 
 ## Schema Versions
 
-Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
+Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). Exact lifecycle metadata is generated from the Rust registry into [`schemas/contract-registry.generated.json`](schemas/contract-registry.generated.json).
 
 Pick the latest stable schema for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
 

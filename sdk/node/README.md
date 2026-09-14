@@ -67,7 +67,7 @@ Pick `0.9.0-alpha` for new code using stable backends. Experimental backends
 and state-aware lifecycle require `0.10.0-alpha`; Seatbelt requires
 `0.7.0-alpha` or later.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`) and state-aware lifecycle are defined by the registered exact `0.10.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` parser remains only for differential characterization. `--experimental` is still required to activate experimental backends.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`) and state-aware lifecycle are defined by the registered exact `0.10.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version. `--experimental` is still required to activate experimental backends.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 

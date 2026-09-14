@@ -1,40 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Dedicated, well-typed wire model — the single source of truth for the MXC
-//! config shape. The JSON Schema (`schemas/dev/mxc-config.schema.<dev>.json`) is
-//! **generated** from these types via `mxc_schema_gen`; CI fails if the
-//! committed schema drifts (see `scripts/versioning/check-schema-codegen.js`).
+//! Neutral internal wire model used by exact-contract adapters.
 //!
-//! These types describe the config *contract* precisely:
-//!
-//! * real `enum`s for closed value sets (`Containment`, `NetworkPolicy`, …)
-//!   instead of `Option<String>`,
-//! * `#[serde(rename_all = "camelCase")]` so field names match the wire without
-//!   per-field `#[serde(rename)]` noise,
-//! * `#[serde(deny_unknown_fields)]` on the **stable** surface so the generated
-//!   schema is closed (`additionalProperties: false`); the `experimental` block
-//!   is intentionally left permissive (in-flux features),
-//! * `///` doc-comments that schemars turns into schema `description`s.
-//!
-//! These types are the parser's actual deserialization target: `serde_json`
-//! deserializes JSON into them, then `config_parser` maps them to the domain
-//! `ExecutionRequest` / state-aware request. The `JsonSchema` derive is gated
-//! behind the `schema-gen` feature so normal builds don't carry `schemars`; the
-//! schema generator (`mxc_schema_gen`) enables it.
-//!
-//! Cross-field constraints (single-backend-section, phase-scoping) are NOT
-//! expressed in the generated schema; they are enforced by the parser, which is
-//! the trust boundary. The schema is an editor/CI convenience, never the gate.
+//! JSON requests are never deserialized into these types directly. Each exact
+//! registered contract validates the request first, then its adapter maps into
+//! this shared representation for semantic normalization.
 
 use serde::{Deserialize, Serialize};
 
 /// Rolling compatibility model retained as a test oracle while production
 /// requests use registered exact contracts. It includes historical fields that
 /// exact `0.9.0-alpha` rejects; authors should use the exact development schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schema-gen", schemars(title = "MXC Configuration"))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -107,13 +85,18 @@ pub struct MxcConfig {
     /// Telemetry configuration.
     pub telemetry: Option<Telemetry>,
 
-    /// Experimental features. Only honored when `--experimental` is passed.
-    pub experimental: Option<Experimental>,
+    /// Placeholder development feature.
+    pub test: Option<TestFeature>,
+
+    /// Windows Sandbox backend configuration.
+    pub windows_sandbox: Option<WindowsSandbox>,
+
+    /// WSL container backend configuration.
+    pub wslc: Option<Wslc>,
 }
 
 /// State-aware lifecycle phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
     Provision,
@@ -125,7 +108,6 @@ pub enum Phase {
 
 /// Containment backend (abstract intent or concrete backend).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Containment {
     /// OS-native process sandbox (resolved per host).
@@ -155,8 +137,7 @@ pub enum Containment {
 }
 
 /// Process execution settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Process {
     /// Command line (or script) to execute.
@@ -190,8 +171,7 @@ pub struct Process {
 }
 
 /// Container lifecycle settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lifecycle {
     /// Destroy the container when the process exits (default true).
@@ -201,8 +181,7 @@ pub struct Lifecycle {
 }
 
 /// ProcessContainer-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainer {
     /// Enforce least-privilege mode.
@@ -235,8 +214,7 @@ pub struct ProcessContainer {
 }
 
 /// ProcessContainer-specific network configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainerNetwork {
     /// Installed package family name or AppContainer profile allowed to host
@@ -249,8 +227,7 @@ pub struct ProcessContainerNetwork {
 /// the complete compatible PSEC plus V2 Learning Mode API set. Requests that
 /// native capture cannot represent use guarded WPR with a compatible legacy
 /// SBOX or AppContainer containment tier.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaptureDenials {
     /// How each ungranted access check is handled while it is recorded. Both
@@ -283,8 +260,7 @@ pub struct CaptureDenials {
 }
 
 /// How `captureDenials` handles each ungranted access check while recording it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CaptureDenialsMode {
     /// `block` — the access stays **denied** and the denial is recorded.
@@ -297,8 +273,7 @@ pub enum CaptureDenialsMode {
 }
 
 /// BaseProcessContainer UI isolation settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BaseProcessUi {
     /// UI isolation level.
@@ -312,8 +287,7 @@ pub struct BaseProcessUi {
 }
 
 /// Desktop UI isolation level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiIsolation {
     Desktop,
@@ -335,8 +309,7 @@ impl UiIsolation {
 }
 
 /// LXC container settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lxc {
     /// Distribution image (e.g. `alpine`).
@@ -346,8 +319,7 @@ pub struct Lxc {
 }
 
 /// Filesystem access policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Filesystem {
     /// Paths the process can read and write.
@@ -359,8 +331,7 @@ pub struct Filesystem {
 }
 
 /// AppContainer DACL-mutation fallback policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Fallback {
     /// Allow the runner to mutate DACLs as a fallback.
@@ -368,8 +339,7 @@ pub struct Fallback {
 }
 
 /// Network access policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
     /// Default outbound policy when no host rule matches.
@@ -391,8 +361,7 @@ pub struct Network {
 }
 
 /// Outbound network policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkEgress {
     /// Action used when no explicit rule matches. Defaults to `deny`.
@@ -404,8 +373,7 @@ pub struct NetworkEgress {
 }
 
 /// Inbound and host-loopback network policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkIngress {
     /// Default action for LAN/private-network inbound traffic.
@@ -415,8 +383,7 @@ pub struct NetworkIngress {
 }
 
 /// Allow or deny network action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkAction {
     Allow,
@@ -424,21 +391,17 @@ pub enum NetworkAction {
 }
 
 /// Outbound network rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkRule {
     /// Destination CIDRs. Omission matches both IP families.
-    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
     pub to: Option<Vec<NetworkPeer>>,
     /// Destination protocols and ports. Omission matches all.
-    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
     pub ports: Option<Vec<NetworkPort>>,
 }
 
 /// CIDR network peer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkPeer {
     /// IPv4 or IPv6 CIDR.
@@ -448,23 +411,19 @@ pub struct NetworkPeer {
 }
 
 /// Protocol and destination-port selector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkPort {
     /// Transport protocol. Defaults to `any`.
     pub protocol: Option<NetworkProtocol>,
     /// Destination port. Omission matches every port.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
     pub port: Option<u16>,
     /// Inclusive end of a destination-port range. Requires `port`.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
     pub end_port: Option<u16>,
 }
 
 /// Transport protocol selector.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkProtocol {
     Tcp,
@@ -474,8 +433,7 @@ pub enum NetworkProtocol {
 }
 
 /// Runtime values supplied alongside, but separate from, sandbox policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// HTTP/S loopback proxy URL.
@@ -483,8 +441,7 @@ pub struct RuntimeConfig {
 }
 
 /// Default network policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPolicy {
     Allow,
@@ -492,8 +449,7 @@ pub enum NetworkPolicy {
 }
 
 /// Network enforcement mechanism.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkEnforcement {
     /// Per-process capability-based filtering.
@@ -505,12 +461,10 @@ pub enum NetworkEnforcement {
 }
 
 /// Proxy configuration. Exactly one variant applies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Proxy {
     /// External localhost proxy port.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
     pub localhost: Option<u16>,
     /// Have wxc launch its own built-in test proxy.
     pub builtin_test_server: Option<bool>,
@@ -519,8 +473,7 @@ pub struct Proxy {
 }
 
 /// Cross-platform UI isolation policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ui {
     /// Disable all UI access (default true).
@@ -532,8 +485,7 @@ pub struct Ui {
 }
 
 /// Clipboard access level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ClipboardPolicy {
     None,
@@ -543,8 +495,7 @@ pub enum ClipboardPolicy {
 }
 
 /// macOS Seatbelt backend configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seatbelt {
     /// Replace the generated profile entirely (advanced/testing escape hatch).
@@ -562,8 +513,7 @@ pub struct Seatbelt {
 }
 
 /// Seatbelt inner-process launch method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LaunchMethod {
     /// sandbox_init() + exec (default). Works for third-party GUI apps.
@@ -573,32 +523,8 @@ pub enum LaunchMethod {
     Open,
 }
 
-/// Experimental features (only honored with `--experimental`). This block is
-/// intentionally **permissive** (no `deny_unknown_fields`): experimental
-/// backends are in flux, so the schema documents the known shapes for editor
-/// help without rejecting in-progress fields. The strict, closed contract is
-/// the stable (top-level) surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-pub struct Experimental {
-    // Keep every direct field optional: state-aware parsing temporarily
-    // substitutes `{}` while validating cross-cutting fields from source text.
-    /// Placeholder feature for testing experimental infrastructure.
-    pub test: Option<TestFeature>,
-    /// Windows Sandbox backend config.
-    pub windows_sandbox: Option<WindowsSandbox>,
-    /// WSL container backend config.
-    pub wslc: Option<Wslc>,
-    /// IsolationSession backend config (Windows).
-    pub isolation_session: Option<IsolationSession>,
-    /// Seatbelt backend config (pre-promotion alias).
-    #[serde(alias = "macos_sandbox")]
-    pub seatbelt: Option<Seatbelt>,
-}
-
 /// Telemetry configuration (`telemetry`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Telemetry {
     /// Explicit telemetry opt-in for this invocation. `true` = opt in (still
@@ -609,8 +535,7 @@ pub struct Telemetry {
 }
 
 /// Placeholder experimental feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestFeature {
     /// Message to log when the feature is applied.
@@ -618,8 +543,7 @@ pub struct TestFeature {
 }
 
 /// Windows Sandbox backend config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowsSandbox {
     /// Idle timeout before teardown (ms).
@@ -631,8 +555,7 @@ pub struct WindowsSandbox {
 }
 
 /// WSL container backend config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Wslc {
     /// OS inside the WSL container.
@@ -653,46 +576,15 @@ pub struct Wslc {
     /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
     /// for UDP port mappings.
     pub port_mappings: Option<Vec<PortMapping>>,
-    /// State-aware provision-phase configuration
-    /// (`experimental.wslc.provision`). Carries the container-creation knobs
-    /// for the state-aware lifecycle; the flat sibling fields above remain the
-    /// one-shot surface. Absent on one-shot configs and non-provision phases.
-    pub provision: Option<WslcProvisionPhase>,
 }
 
-/// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested
-/// under `experimental.wslc.provision`. Carries only what the amortized daemon
-/// session honors: the container image (or a local tarball to import).
-///
-/// Filesystem mounts and network mode derive from the top-level `policy`
-/// section (readwrite / readonly paths, network), not from here. The
-/// one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`
-/// / `portMappings`) are deliberately absent: the daemon shares a single session
-/// across sandboxes and does not apply per-sandbox sizing. start / exec / stop /
-/// deprovision carry no backend-specific config (the exec command flows through
-/// the top-level `process` section), so they have no phase struct.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct WslcProvisionPhase {
-    /// Container image reference (e.g. `alpine:latest`). Defaults to
-    /// `alpine:latest` when omitted.
-    pub image: Option<String>,
-    /// Path to a local image tarball to import instead of pulling.
-    pub image_tar_path: Option<String>,
-}
-
-/// A single host → container port forward. Reachable only under the permissive
-/// `experimental` surface, so unknown fields are tolerated (forward-compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+/// A single host → container port forward.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortMapping {
     /// Host (Windows) port.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
     pub windows_port: u16,
     /// Container port.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
     pub container_port: u16,
     /// Transport protocol for the mapping. Only `tcp` is currently supported.
     pub protocol: Option<TransportProtocol>,
@@ -700,103 +592,8 @@ pub struct PortMapping {
 
 /// Port-forward transport protocol. Only `tcp` is currently supported by the
 /// vendored WSLC SDK runtime; `udp` is rejected at parse time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportProtocol {
     Tcp,
 }
-
-/// IsolationSession backend config. Carries only the per-phase state-aware
-/// nesting for the phases that take config (`provision`). The one-shot surface
-/// takes no backend configuration at all. `start`, `stop`, `deprovision`, and
-/// `exec` take no per-phase config payload: `start`, `stop` and `deprovision`
-/// are invoked with only the top-level `phase` and `sandboxId`, and `exec`
-/// additionally carries the top-level `process` block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationSession {
-    /// State-aware provision-phase configuration.
-    pub provision: Option<IsolationSessionProvisionPhase>,
-}
-
-/// Provision-phase IsolationSession configuration (state-aware lifecycle).
-///
-/// The only phase that takes a per-phase payload, so it is its own type rather
-/// than a shared one: a shared type would advertise its fields on every phase
-/// in the generated schema. The domain configs and the SDK types are already
-/// split per phase; this keeps the wire model aligned with them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationSessionProvisionPhase {
-    /// Optional identifier for the calling application.
-    ///
-    /// **A packaged application must supply its Package Family Name in the
-    /// form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`).
-    /// An unpackaged application may pass any string. Carried inside the `sandboxId`
-    /// so later lifecycle phases can recover it without the caller re-supplying it.
-    pub app_id: Option<String>,
-}
-
-/// JSON Schema generation from the wire model, gated behind `schema-gen` so
-/// production builds don't carry `schemars`. The single public entry point is
-/// re-exported below as `generate_config_schema_json`.
-#[cfg(feature = "schema-gen")]
-mod schema_gen {
-    use super::MxcConfig;
-    use schemars::JsonSchema;
-
-    /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
-    /// version/filename (see `schemas/schema-version.json`).
-    const SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
-
-    /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
-    /// model. The schema is post-processed to (a) inject the canonical `$id`,
-    /// (b) replace schemars' Rust-specific integer `format` strings (`uint32`,
-    /// `int64`, …) — which JSON Schema draft-07 does not define — with standard
-    /// constraints (`minimum: 0` for unsigned), so the committed artifact validates
-    /// cleanly under standard tooling, and (c) emit the root metadata keys
-    /// (`$schema`, `$id`, `title`, `description`) first for readability. `title` and
-    /// `description` come from the `MxcConfig` schemars attribute / doc comment
-    /// respectively.
-    pub fn generate_config_schema_json() -> String {
-        let value = schema_value();
-        if let serde_json::Value::Object(map) = &value {
-            return mxc_schema_support::render_root_ordered(map);
-        }
-        serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
-    }
-
-    /// Build the post-processed schema as a `serde_json::Value`: run schemars,
-    /// normalize integer formats, and inject the canonical `$id`. Shared by the
-    /// JSON-schema renderer and the TypeScript emitter so both consume exactly the
-    /// same model.
-    fn schema_value() -> serde_json::Value {
-        schema_value_for::<MxcConfig>(SCHEMA_ID)
-    }
-
-    fn schema_value_for<T: JsonSchema>(schema_id: &str) -> serde_json::Value {
-        let schema = schemars::schema_for!(T);
-        let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
-        mxc_schema_support::prepare_schema(&mut value, schema_id);
-        value
-    }
-
-    /// Emit the SDK's wire TypeScript types directly from the same generated schema
-    /// model — no third-party generator. The output is a drift oracle
-    /// (`sdk/node/src/generated/wire.ts`): the SDK's hand-written public types are
-    /// asserted to conform to it by a unit test, and a CI gate regenerates and
-    /// diffs the committed file. Deterministic: `serde_json`'s default `Map` is a
-    /// `BTreeMap`, so definitions and object properties are emitted in stable
-    /// (alphabetical) order.
-    pub fn generate_sdk_types_ts() -> String {
-        let value = schema_value();
-        mxc_schema_support::emit_ts(&value)
-    }
-}
-
-#[cfg(feature = "schema-gen")]
-pub use schema_gen::{generate_config_schema_json, generate_sdk_types_ts};

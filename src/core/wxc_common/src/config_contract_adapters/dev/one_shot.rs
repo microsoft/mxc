@@ -235,7 +235,6 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
         port_mappings,
     } = value;
     wire::Wslc {
-        provision: None,
         target_os: target_os.into_option(),
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
@@ -249,25 +248,6 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
                 .map(convert_wslc_port_mapping)
                 .collect()
         }),
-    }
-}
-
-fn convert_development_fields(
-    test: contract::OptionalField<contract::TestFeature>,
-    windows_sandbox: contract::OptionalField<contract::OneShotWindowsSandbox>,
-    wslc: contract::OptionalField<contract::OneShotWslc>,
-) -> Option<wire::Experimental> {
-    let value = wire::Experimental {
-        test: test.into_option().map(convert_test),
-        windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
-        wslc: wslc.into_option().map(convert_wslc),
-        isolation_session: None,
-        seatbelt: None,
-    };
-    if value.test.is_none() && value.windows_sandbox.is_none() && value.wslc.is_none() {
-        None
-    } else {
-        Some(value)
     }
 }
 
@@ -314,7 +294,9 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        experimental: convert_development_fields(test, windows_sandbox, wslc),
+        test: test.into_option().map(convert_test),
+        windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
+        wslc: wslc.into_option().map(convert_wslc),
     }
 }
 

@@ -250,16 +250,6 @@ pub(super) fn select_network_format(
     select_compatible_network_format(version, network, has_process_container_network)
 }
 
-/// Retained rolling-parser characterization oracle, never used by production builders.
-#[cfg(test)]
-pub(super) fn select_rolling_network_format(
-    version: &str,
-    network: Option<&NetworkSection>,
-    has_process_container_network: bool,
-) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
-    select_compatible_network_format(version, network, has_process_container_network)
-}
-
 fn select_compatible_network_format(
     version: &str,
     network: Option<&NetworkSection>,
@@ -397,18 +387,6 @@ pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
         ProxySpec::Localhost(port) => json!({ "localhost": port }),
         ProxySpec::Url(url) => json!({ "url": url }),
     }
-}
-
-/// True when the network section carries any host allow/deny rules.
-#[cfg(test)]
-pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
-    let non_empty = |key: &str| {
-        network
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
 }
 
 #[cfg(test)]

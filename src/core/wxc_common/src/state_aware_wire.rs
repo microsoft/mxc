@@ -28,8 +28,14 @@ impl StateAwareInput {
         if common.containment.is_some() {
             contradictory.push("containment");
         }
-        if common.experimental.is_some() {
-            contradictory.push("experimental");
+        if common.test.is_some() {
+            contradictory.push("test");
+        }
+        if common.windows_sandbox.is_some() {
+            contradictory.push("windowsSandbox");
+        }
+        if common.wslc.is_some() {
+            contradictory.push("wslc");
         }
         if common.container_id.is_some() {
             contradictory.push("containerId");

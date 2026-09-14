@@ -10,7 +10,13 @@ fn writes_schema_to_bare_filename() {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let output = Command::new(env!("CARGO_BIN_EXE_mxc_schema_gen"))
         .current_dir(directory.path())
-        .args(["schema", "--legacy-wire", "--out", "schema.json"])
+        .args([
+            "schema",
+            "--version",
+            "0.10.0-alpha",
+            "--out",
+            "schema.json",
+        ])
         .output()
         .expect("run schema generator");
 
@@ -23,6 +29,17 @@ fn writes_schema_to_bare_filename() {
     let schema =
         fs::read_to_string(directory.path().join("schema.json")).expect("read generated schema");
     assert!(schema.contains("\"$schema\""), "{schema}");
+}
+
+#[test]
+fn legacy_wire_generation_is_rejected() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mxc_schema_gen"))
+        .args(["schema", "--legacy-wire"])
+        .output()
+        .expect("run schema generator");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--legacy-wire'"));
 }
 
 #[test]

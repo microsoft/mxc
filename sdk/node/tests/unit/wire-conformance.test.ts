@@ -1,304 +1,188 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Wire-type conformance oracle.
-//
-// The generated module `../../src/generated/wire.ts` is emitted from the Rust
-// wire model (`wxc_common::wire`) by the `mxc_schema_gen types` Rust TypeScript
-// emitter. It is the single source of truth for the wire shape.
-//
-// This file asserts — at COMPILE TIME — that the hand-written public SDK types
-// in `../../src/types.ts` still conform to that generated shape. If the Rust
-// wire model changes (a field renamed/removed, an enum value added/dropped, a
-// type narrowed) the regenerated `wire.ts` shifts and these assertions stop
-// compiling, so `npm run build:test-unit` fails. The runtime body is a no-op;
-// the test exists so `tsc` type-checks the assertions below.
-//
-// Direction & null-handling rationale:
-//  * Generated fields are uniformly `field?: T | null` (optional AND nullable),
-//    so they are strictly more permissive than the SDK's `field?: T`. Therefore
-//    `PublicType extends GeneratedType` ("public is assignable to wire") holds
-//    cleanly and catches enum/type NARROWING in the wire model.
-//  * `OnlyInPublic` additionally catches a public field whose wire counterpart
-//    was renamed or removed (width subtyping alone would not), and is asserted
-//    to equal a documented, explicit set of SDK-only fields — so a NEW
-//    divergence (not on the allow-list) fails the build. This is applied at the
-//    ROOT (`ContainerConfig` ↔ `MXCConfiguration`) as well as the leaves, so a
-//    top-level rename/removal cannot slip past (review finding F1, codex pass).
-//  * `OnlyInWire` covers the OPPOSITE direction: because every generated wire
-//    field is optional, `Public extends Wire` stays true when the SDK forgets a
-//    newly added wire field, so a wire-only ADDITION needs its own check. Each
-//    object asserts its wire-only key set equals an explicit allow-list (mostly
-//    `never`), so a new wire field the SDK does not expose fails the build until
-//    it is surfaced or documented (review finding F1, gpt-5.5 pass).
-//  * Assignability is one-way and so does NOT catch a wire ENUM WIDENING (a new
-//    value added in the wire model). Enum-backed domains the SDK exposes are
-//    therefore additionally checked with the bidirectional `Equivalent` — both
-//    the standalone enum types and the enum-typed object fields (review finding
-//    F2, codex pass).
-//
-// One emitter artifact is normalized away: `StripIndex<T>` drops the
-// `[k: string]: unknown` index signatures the emitter writes on the OPEN
-// (experimental) objects; without this, structural assignment to those
-// interfaces misbehaves.
+// Exact one-shot wire conformance oracle. The generated v0.10 module comes
+// from the authoritative Rust contract; these assertions keep the handwritten
+// SDK surface aligned with that contract while documenting SDK-only
+// compatibility conveniences.
 
 import { test } from 'node:test';
 
 import type {
-  ProcessConfig,
-  LifecycleConfig,
+  BaseProcessUiConfig,
+  ClipboardPolicy,
+  ContainerConfig,
+  ContainmentBackend,
+  ContainmentType,
   FilesystemConfig,
+  LifecycleConfig,
+  LxcConfig,
+  NetworkAction,
   NetworkConfig,
   NetworkEgressConfig,
   NetworkIngressConfig,
   NetworkPeerConfig,
   NetworkPortConfig,
+  NetworkProtocol,
   NetworkRuleConfig,
-  RuntimeConfig,
-  UiConfig,
+  PortMapping,
+  ProcessConfig,
   ProcessContainerConfig,
-  BaseProcessUiConfig,
-  WslcConfig,
-  PortMapping as PublicPortMapping,
-  LxcConfig,
+  RuntimeConfig,
   SeatbeltConfig,
   TelemetryConfig,
-  ContainerConfig,
-  ClipboardPolicy as PublicClipboardPolicy,
-  ContainmentType,
-  ContainmentBackend,
+  UiConfig,
+  WslcConfig,
 } from '../../src/types.js';
 
 import type {
-  Process as WireProcess,
-  Lifecycle as WireLifecycle,
   Filesystem as WireFilesystem,
+  Lifecycle as WireLifecycle,
+  Lxc as WireLxc,
   Network as WireNetwork,
+  NetworkAction as WireNetworkAction,
   NetworkEgress as WireNetworkEgress,
   NetworkIngress as WireNetworkIngress,
   NetworkPeer as WireNetworkPeer,
   NetworkPort as WireNetworkPort,
+  NetworkProtocol as WireNetworkProtocol,
   NetworkRule as WireNetworkRule,
-  RuntimeConfig as WireRuntimeConfig,
-  Ui as WireUi,
-  ProcessContainer as WireProcessContainer,
-  BaseProcessUi as WireBaseProcessUi,
-  Wslc as WireWslc,
+  OneShotContainment as WireContainment,
+  OneShotRequest as WireRequest,
+  OneShotWslc as WireWslc,
   PortMapping as WirePortMapping,
-  Lxc as WireLxc,
+  Process as WireProcess,
+  ProcessContainer as WireProcessContainer,
+  ProcessContainerUi as WireProcessContainerUi,
+  ProcessContainerUiIsolation as WireUiIsolation,
+  RuntimeConfig as WireRuntimeConfig,
   Seatbelt as WireSeatbelt,
   Telemetry as WireTelemetry,
-  MXCConfiguration as WireMxcConfig,
-  ClipboardPolicy as WireClipboardPolicy,
-  Containment as WireContainment,
-  NetworkPolicy as WireNetworkPolicy,
-  NetworkEnforcement as WireNetworkEnforcement,
-  NetworkAction as WireNetworkAction,
-  NetworkProtocol as WireNetworkProtocol,
-  UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
-} from '../../src/generated/wire.js';
+  Ui as WireUi,
+  UiClipboard as WireClipboard,
+} from '../../src/generated/v0_10_0_alpha/wire.js';
 
 import type {
   AssertTrue,
-  StripIndex,
   Assignable,
+  Equivalent,
   OnlyInPublic,
   OnlyInWire,
-  Equivalent,
 } from './conformance-helpers.js';
 
-// --- enum / union conformance ---------------------------------------------
-
-// Clipboard policy must be value-for-value identical to the wire enum.
-type _Clipboard = AssertTrue<Equivalent<PublicClipboardPolicy, WireClipboardPolicy>>;
-
-// The SDK splits containment into abstract intents + concrete backends; their
-// union must cover exactly the wire `Containment` enum.
+type _Clipboard = AssertTrue<Equivalent<ClipboardPolicy, WireClipboard>>;
 type _Containment = AssertTrue<
-  Equivalent<ContainmentType | ContainmentBackend, WireContainment>
+  Equivalent<
+    ContainmentType | ContainmentBackend,
+    Exclude<WireContainment, 'appcontainer' | 'macos_sandbox'>
+  >
 >;
-
-// Enum-backed OBJECT FIELDS (review finding F2). Assignability alone is one-way
-// and would let a wire ENUM WIDENING (a new value) slip past, so each enum-typed
-// field the SDK exposes inline is checked for exact equivalence with its wire
-// enum. `NonNullable` strips the generated `| null` so only the value set is
-// compared. A new wire enum value now fails the build until the SDK adds it.
-type _NetDefaultPolicy = AssertTrue<
-  Equivalent<NonNullable<NetworkConfig['defaultPolicy']>, WireNetworkPolicy>
->;
-type _NetEnforcement = AssertTrue<
-  Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
->;
-type _NetworkEgressDefault = AssertTrue<
-  Equivalent<NonNullable<NetworkEgressConfig['default']>, WireNetworkAction>
->;
-type _NetworkIngressDefault = AssertTrue<
-  Equivalent<NonNullable<NetworkIngressConfig['default']>, WireNetworkAction>
->;
-type _NetworkIngressHostLoopback = AssertTrue<
-  Equivalent<NonNullable<NetworkIngressConfig['hostLoopback']>, WireNetworkAction>
->;
-type _NetworkPortProtocol = AssertTrue<
-  Equivalent<NonNullable<NetworkPortConfig['protocol']>, WireNetworkProtocol>
->;
-type _BaseProcessUiIsolation = AssertTrue<
+type _NetworkAction = AssertTrue<Equivalent<NetworkAction, WireNetworkAction>>;
+type _NetworkProtocol = AssertTrue<Equivalent<NetworkProtocol, WireNetworkProtocol>>;
+type _UiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
 type _PortProtocol = AssertTrue<
-  Equivalent<NonNullable<PublicPortMapping['protocol']>, WireTransportProtocol>
+  Equivalent<NonNullable<PortMapping['protocol']>, WireTransportProtocol>
 >;
 
-// --- object-interface value conformance -----------------------------------
-// Public is assignable to the (more permissive) wire type. Catches enum/type
-// narrowing and incompatible field types.
-
-type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
-type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
-type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
-type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
-type _NetworkEgressVals = AssertTrue<Assignable<NetworkEgressConfig, WireNetworkEgress>>;
-type _NetworkIngressVals = AssertTrue<Assignable<NetworkIngressConfig, WireNetworkIngress>>;
-type _NetworkPeerVals = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
-type _NetworkPortVals = AssertTrue<Assignable<NetworkPortConfig, WireNetworkPort>>;
-type _NetworkRuleVals = AssertTrue<Assignable<NetworkRuleConfig, WireNetworkRule>>;
-type _RuntimeConfigVals = AssertTrue<Assignable<RuntimeConfig, WireRuntimeConfig>>;
-type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
-type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
-type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
-type _WslcVals = AssertTrue<Assignable<WslcConfig, WireWslc>>;
-type _PortMappingVals = AssertTrue<Assignable<PublicPortMapping, WirePortMapping>>;
-type _SeatbeltVals = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
-type _TelemetryVals = AssertTrue<Assignable<TelemetryConfig, WireTelemetry>>;
-type _LxcVals = AssertTrue<Assignable<StripIndex<LxcConfig>, WireLxc>>;
-
-// --- key conformance (rename / removal detection) -------------------------
-// Every public field must either exist on the wire type or be on the EXPLICIT
-// SDK-only allow-list below. Each list is asserted to equal exactly the
-// divergence set, so a NEW field missing from the wire model fails the build
-// (the SDK author must either add it to the wire model or extend this list with
-// a justification).
-//
-// These divergences are the oracle doing its job: each listed field is exposed
-// by the SDK but is NOT part of the wire contract (the parser's actual target,
-// which uses `deny_unknown_fields`).
-
+type _ProcessValues = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
+type _LifecycleValues = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
+type _FilesystemValues = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
+type _NetworkValues = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkEgressValues = AssertTrue<Assignable<NetworkEgressConfig, WireNetworkEgress>>;
+type _NetworkIngressValues = AssertTrue<Assignable<NetworkIngressConfig, WireNetworkIngress>>;
+type _NetworkPeerValues = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
+type _NetworkPortValues = AssertTrue<Assignable<NetworkPortConfig, WireNetworkPort>>;
+type _NetworkRuleValues = AssertTrue<Assignable<NetworkRuleConfig, WireNetworkRule>>;
+type _RuntimeValues = AssertTrue<Assignable<RuntimeConfig, WireRuntimeConfig>>;
+type _UiValues = AssertTrue<Assignable<UiConfig, WireUi>>;
+type _ProcessContainerValues = AssertTrue<
+  Assignable<ProcessContainerConfig, WireProcessContainer>
+>;
+type _ProcessContainerUiValues = AssertTrue<
+  Assignable<BaseProcessUiConfig, WireProcessContainerUi>
+>;
+type _WslcValues = AssertTrue<Assignable<WslcConfig, WireWslc>>;
+type _PortMappingValues = AssertTrue<Assignable<PortMapping, WirePortMapping>>;
+type _SeatbeltValues = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
+type _TelemetryValues = AssertTrue<Assignable<TelemetryConfig, WireTelemetry>>;
 type _ProcessKeys = AssertTrue<Equivalent<OnlyInPublic<ProcessConfig, WireProcess>, never>>;
 type _LifecycleKeys = AssertTrue<Equivalent<OnlyInPublic<LifecycleConfig, WireLifecycle>, never>>;
-type _UiKeys = AssertTrue<Equivalent<OnlyInPublic<UiConfig, WireUi>, never>>;
-type _BaseProcessUiKeys = AssertTrue<Equivalent<OnlyInPublic<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
-type _WslcKeys = AssertTrue<Equivalent<OnlyInPublic<WslcConfig, WireWslc>, never>>;
-type _PortMappingKeys = AssertTrue<Equivalent<OnlyInPublic<PublicPortMapping, WirePortMapping>, never>>;
-type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeatbelt>, never>>;
-type _TelemetryKeys = AssertTrue<Equivalent<OnlyInPublic<TelemetryConfig, WireTelemetry>, never>>;
-
-// `FilesystemConfig.clearPolicyOnExit` is an SDK-side convenience flag mapped
-// into `lifecycle.preservePolicy`; it is not a wire `filesystem` field.
-type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, WireFilesystem>, 'clearPolicyOnExit'>>;
-
-// `NetworkConfig.removeRulesOnExit` is deprecated (use `lifecycle.preservePolicy`)
-// and not a wire `network` field.
-type _NetworkKeys = AssertTrue<
-  Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>
+type _FilesystemKeys = AssertTrue<
+  Equivalent<OnlyInPublic<FilesystemConfig, WireFilesystem>, 'clearPolicyOnExit'>
 >;
-
-// `ProcessContainerConfig.name` is the deprecated AppContainer profile name
-// (superseded by top-level `containerId`); not a wire `processContainer` field.
-type _ProcessContainerKeys = AssertTrue<Equivalent<OnlyInPublic<ProcessContainerConfig, WireProcessContainer>, 'name'>>;
-
-// `LxcConfig` carries SDK-only `containerName` and `destroyOnExit` (the latter
-// duplicated by `lifecycle.destroyOnExit`); neither is a wire `lxc` field.
-type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'containerName' | 'destroyOnExit'>>;
-
-// --- ROOT conformance (review finding F1) ---------------------------------
-// Without these, a top-level wire field rename/removal regenerates wire.ts but
-// no assertion notices, so the leaf-only checks above are not enough. The public
-// root `ContainerConfig` is checked the same way as the leaves:
-//  * value-shape: assignable to the generated `MXCConfiguration`, and
-//  * key-drift: `appContainer` is the deprecated serde alias, while
-//    `test`/`windowsSandbox`/`wslc` are the exact-contract permanent
-//    development locations that the retained rolling oracle still nests under
-//    `experimental`. A NEW root divergence fails the build.
-type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
-type _RootKeys = AssertTrue<
+type _NetworkKeys = AssertTrue<
   Equivalent<
-    OnlyInPublic<ContainerConfig, WireMxcConfig>,
-    'appContainer' | 'test' | 'windowsSandbox' | 'wslc'
+    OnlyInPublic<NetworkConfig, WireNetwork>,
+    | 'enforcementMode'
+    | 'defaultPolicy'
+    | 'allowLocalNetwork'
+    | 'allowedHosts'
+    | 'blockedHosts'
+    | 'proxy'
+    | 'removeRulesOnExit'
   >
 >;
+type _ProcessContainerKeys = AssertTrue<
+  Equivalent<OnlyInPublic<ProcessContainerConfig, WireProcessContainer>, 'name'>
+>;
+type _LxcKeys = AssertTrue<
+  Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'containerName' | 'destroyOnExit'>
+>;
+type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireRequest>, never>>;
 
-// --- reverse key conformance: wire-only fields (review finding F1, gpt-5.5) --
-// Catch a NEW optional wire field the SDK forgot to expose. Each list is the
-// EXACT set of wire keys the public type intentionally omits; `never` means the
-// SDK mirrors the wire object completely. A new wire field not on the relevant
-// list fails the build until the SDK either exposes it or documents it here.
-
-type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
-type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
-type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
 type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
-type _NetworkEgressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkEgressConfig, WireNetworkEgress>, never>>;
-type _NetworkIngressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkIngressConfig, WireNetworkIngress>, never>>;
-type _NetworkPeerWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPeerConfig, WireNetworkPeer>, never>>;
-type _NetworkPortWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPortConfig, WireNetworkPort>, never>>;
-type _NetworkRuleWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkRuleConfig, WireNetworkRule>, never>>;
-type _RuntimeConfigWireKeys = AssertTrue<Equivalent<OnlyInWire<RuntimeConfig, WireRuntimeConfig>, never>>;
-type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
-type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
-// `wslc.provision` is the state-aware-only nested provision-phase config; the
-// one-shot public `WslcConfig` intentionally omits it (state-aware config is
-// surfaced through `state-aware-types.ts`, not the one-shot policy surface).
-type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, 'provision'>>;
-type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
-type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
-
+type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, never>>;
 type _ProcessContainerWireKeys = AssertTrue<
   Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
 >;
-
-// `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot
-// `SeatbeltConfig` does not expose today.
 type _SeatbeltWireKeys = AssertTrue<
   Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'guiAccess' | 'launchMethod'>
 >;
-type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
-
-// Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
-// (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`),
-// `fallback` (AppContainer DACL-mutation policy not surfaced through the
-// one-shot policy API), and the obsolete rolling-only `experimental` wrapper.
-// Any OTHER new root wire field fails.
 type _RootWireKeys = AssertTrue<
-  Equivalent<
-    OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback' | 'experimental'
-  >
+  Equivalent<OnlyInWire<ContainerConfig, WireRequest>, '$schema' | '_comment' | 'fallback' | 'macos_sandbox'>
 >;
 
-// Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
-  _Clipboard, _Containment,
-  _NetDefaultPolicy, _NetEnforcement,
-  _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
-  _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,
-  _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
-  _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
-  _NetworkRuleVals, _RuntimeConfigVals,
-  _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
-  _SeatbeltVals, _LxcVals,
-  _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
-  _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _PortMappingKeys,
-  _SeatbeltKeys, _LxcKeys,
-  _RootVals, _RootKeys,
-  _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
-  _NetworkEgressWireKeys, _NetworkIngressWireKeys, _NetworkPeerWireKeys,
-  _NetworkPortWireKeys, _NetworkRuleWireKeys, _RuntimeConfigWireKeys,
-  _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _PortMappingWireKeys,
-  _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
+  _Clipboard,
+  _Containment,
+  _NetworkAction,
+  _NetworkProtocol,
+  _UiIsolation,
+  _PortProtocol,
+  _ProcessValues,
+  _LifecycleValues,
+  _FilesystemValues,
+  _NetworkValues,
+  _NetworkEgressValues,
+  _NetworkIngressValues,
+  _NetworkPeerValues,
+  _NetworkPortValues,
+  _NetworkRuleValues,
+  _RuntimeValues,
+  _UiValues,
+  _ProcessContainerValues,
+  _ProcessContainerUiValues,
+  _WslcValues,
+  _PortMappingValues,
+  _SeatbeltValues,
+  _TelemetryValues,
+  _ProcessKeys,
+  _LifecycleKeys,
+  _FilesystemKeys,
+  _NetworkKeys,
+  _ProcessContainerKeys,
+  _LxcKeys,
+  _RootKeys,
+  _NetworkWireKeys,
+  _WslcWireKeys,
+  _ProcessContainerWireKeys,
+  _SeatbeltWireKeys,
+  _RootWireKeys,
 ];
 
-test('public SDK wire types conform to the generated wire schema (compile-time)', () => {
-  // Intentionally empty: the guarantee is enforced by the type aliases above at
-  // `tsc` time. If they fail to compile, `npm run build:test-unit` fails before
-  // this test ever runs.
+test('public SDK one-shot types conform to the exact development contract', () => {
+  // Compile-time assertions above carry the guarantee.
 });

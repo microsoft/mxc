@@ -218,6 +218,8 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        experimental: None,
+        test: None,
+        windows_sandbox: None,
+        wslc: None,
     }
 }

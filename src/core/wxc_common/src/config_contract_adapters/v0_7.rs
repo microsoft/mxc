@@ -274,7 +274,9 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        experimental: None,
+        test: None,
+        windows_sandbox: None,
+        wslc: None,
     }
 }
 
@@ -464,22 +466,6 @@ mod tests {
         }
     }"#;
 
-    const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
-        "version": "0.7.0-alpha",
-        "containment": "seatbelt",
-        "process": {
-            "commandLine": "echo hello"
-        },
-        "macos_sandbox": {
-            "profileOverride": "custom-profile.sb",
-            "guiAccess": true,
-            "launchMethod": "open",
-            "nestedPty": true,
-            "keychainAccess": true,
-            "extraMachLookups": ["com.example.service"]
-        }
-    }"#;
-
     struct ProxyCase {
         json: &'static str,
         localhost: Option<u16>,
@@ -665,7 +651,9 @@ mod tests {
         assert!(wire.network.is_none());
         assert!(wire.ui.is_none());
         assert!(wire.seatbelt.is_none());
-        assert!(wire.experimental.is_none());
+        assert!(wire.test.is_none());
+        assert!(wire.windows_sandbox.is_none());
+        assert!(wire.wslc.is_none());
     }
 
     #[test]
@@ -1219,149 +1207,5 @@ mod tests {
         assert!(process_container.learning_mode.is_none());
         assert!(process_container.capture_denials.is_none());
         assert!(process_container.ui.is_none());
-    }
-
-    #[test]
-    fn macos_sandbox_section_alias_maps_expected_wire_fields() {
-        let request: super::contract::Request =
-            serde_json::from_str(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
-        let seatbelt = wire.seatbelt.expect("macos_sandbox should map to seatbelt");
-
-        assert_eq!(
-            seatbelt.profile_override.as_deref(),
-            Some("custom-profile.sb")
-        );
-        assert_eq!(seatbelt.gui_access, Some(true));
-        assert!(matches!(
-            seatbelt.launch_method,
-            Some(super::wire::LaunchMethod::Open)
-        ));
-        assert_eq!(seatbelt.nested_pty, Some(true));
-        assert_eq!(seatbelt.keychain_access, Some(true));
-        assert_eq!(
-            seatbelt.extra_mach_lookups.unwrap().as_slice(),
-            &["com.example.service"]
-        );
-    }
-
-    fn assert_matches_current_wire_deserialization(json: &str) {
-        let current: super::wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
-        let contract: super::contract::Request = serde_json::from_str(json).unwrap();
-        let adapted = super::into_wire(contract);
-
-        assert_eq!(
-            serde_json::to_value(adapted).unwrap(),
-            serde_json::to_value(current).unwrap()
-        );
-    }
-
-    #[test]
-    fn minimal_request_matches_current_wire_deserialization() {
-        let json = MINIMAL_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_process_container_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_PROCESS_CONTAINER_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_lxc_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_LXC_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn complete_seatbelt_request_matches_current_wire_deserialization() {
-        let json = COMPLETE_SEATBELT_REQUEST_JSON;
-        assert_matches_current_wire_deserialization(json);
-    }
-
-    #[test]
-    fn empty_optional_sections_match_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn empty_process_container_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON);
-    }
-
-    #[test]
-    fn empty_process_container_ui_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(
-            EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON,
-        );
-    }
-
-    #[test]
-    fn empty_seatbelt_section_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(EMPTY_SEATBELT_SECTION_REQUEST_JSON);
-    }
-
-    #[test]
-    fn proxy_variants_match_current_wire_deserialization() {
-        for case in PROXY_CASES {
-            let json = request_with_proxy(case.json);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn enum_variants_match_current_wire_deserialization() {
-        for case in CONTAINMENT_CASES {
-            let json = request_with_containment(case.input);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for default_policy in DEFAULT_NETWORK_POLICY_CASES {
-            let json = request_with_default_network_policy(default_policy);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
-            let json = request_with_network_enforcement_mode(enforcement_mode);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for clipboard in UI_CLIPBOARD_CASES {
-            let json = request_with_ui_clipboard(clipboard);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
-            let json = request_with_process_container_ui_isolation(isolation);
-            assert_matches_current_wire_deserialization(&json);
-        }
-
-        for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
-            let json = request_with_seatbelt_launch_method(launch_method);
-            assert_matches_current_wire_deserialization(&json);
-        }
-    }
-
-    #[test]
-    fn app_container_section_alias_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn macos_sandbox_section_alias_matches_current_wire_deserialization() {
-        assert_matches_current_wire_deserialization(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON);
-    }
-
-    #[test]
-    fn annotations_match_current_wire_deserialization() {
-        let json = r#"{
-                "$schema": "https://example.com/schema.json",
-                "_comment": "This is a comment",
-                "version": "0.7.0-alpha",
-                "process": {"commandLine": "echo hello"}
-            }"#;
-
-        assert_matches_current_wire_deserialization(json);
     }
 }

@@ -41,7 +41,7 @@ pub mod ui_policy;
 pub mod validator;
 
 // Dedicated well-typed wire model. It is the parser's deserialization target;
-// the JSON Schema is generated from it under the `schema-gen` feature.
+// exact-contract adapters map into it after structural validation.
 pub mod wire;
 
 // Adapters that map between specific JSON contracts and the 'wire' model.

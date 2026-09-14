@@ -71,7 +71,7 @@ Bubblewrap,
 
 No `BubblewrapConfig` struct needed for now — the runner uses only the shared
 `ContainerPolicy` fields on `ExecutionRequest` (filesystem paths, network policy, env, etc.).
-A backend-specific config can be added later under `ExperimentalConfig` if needed.
+A backend-specific config can be added later under `DevelopmentConfig` if needed.
 
 ### 3. Config Parser Changes
 
@@ -79,9 +79,9 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 
 - Add a `Bubblewrap` variant to the wire `Containment` enum (or rely on the
   abstract `process` intent resolving to `Bubblewrap` on Linux)
-- Add any backend-specific fields to the wire model (under `experimental` while
-  experimental), then regenerate the applicable rolling and exact schemas with
-  `mxc_schema_gen schema`
+- Add backend-specific fields at their permanent location in the exact
+  development contract, map them through the neutral adapter model, and
+  regenerate the exact schema and TypeScript artifact
 - Map the new `containment` value in `map_wire_containment`
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)
@@ -339,7 +339,7 @@ policy gap is a design decision, not an implementation challenge.
 - `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
 - `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
 - `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
+- `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `DevelopmentConfig` and `ExecutionRequest`
 - `src/core/wxc_common/src/wire.rs` — add the `Bubblewrap` containment variant (and any backend fields), then regenerate the schema
 - `src/core/wxc_common/src/config_parser.rs` — map the new containment value in `map_wire_containment`
 

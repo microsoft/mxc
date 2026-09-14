@@ -445,34 +445,6 @@ mod tests {
         );
     }
 
-    // ====== Wire-model / backend config parity ======
-
-    // Retained rolling schema/type oracles still use wire::IsolationSession.
-    // These tests characterize their configuration compatibility independently
-    // of the exact adapter. Production dispatch uses checked typed binding, not
-    // this deserialization path; common recording-backend tests cover delivery.
-
-    #[test]
-    fn wire_model_nests_config_only_for_phases_that_take_one() {
-        // Field-by-field construction is deliberate: adding a per-phase field
-        // to the wire struct breaks this test's compilation, forcing a
-        // decision about whether the backend honors it.
-        let wire = wxc_common::wire::IsolationSession { provision: None };
-        let value = serde_json::to_value(&wire).unwrap();
-        let mut keys: Vec<&str> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["provision"],
-            "wire model nests a per-phase config for a phase the backend takes none for"
-        );
-    }
-
     #[test]
     fn phases_without_a_config_reject_a_payload() {
         type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
@@ -500,27 +472,6 @@ mod tests {
         assert!(
             serde_json::from_value::<ExecConfig>(payload).is_err(),
             "exec accepted a config payload"
-        );
-    }
-
-    #[test]
-    fn phases_with_a_config_accept_the_wire_payload() {
-        type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
-
-        // Derive the payload from the wire type instead of a JSON literal: the
-        // wire model is only the schema source on this path, so a serde rename
-        // on either side would go unnoticed. The config type is
-        // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
-        // does not error — it silently drops the value.
-        let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
-            app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
-        };
-        let provision: ProvisionConfig =
-            serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
-        assert_eq!(
-            provision.app_id.as_deref(),
-            Some("PFN:Contoso.App_8wekyb3d8bbwe"),
-            "provision dropped the wire appId (serde rename drift?)"
         );
     }
 

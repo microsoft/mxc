@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::common::{adapt, assert_clean_common, assert_common_matches_legacy};
+use super::common::{adapt, assert_clean_common};
 use crate::state_aware_operation::StateAwareOperation;
 use crate::wire;
 
@@ -32,7 +32,6 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
                 }
             );
             assert_clean_common(&common);
-            assert_common_matches_legacy(&source, &common);
             let process = common.process.unwrap();
             assert_eq!(process.command_line.as_deref(), Some("echo hello"));
             assert_eq!(process.cwd.as_deref(), Some("/work"));

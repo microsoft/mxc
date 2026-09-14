@@ -64,14 +64,11 @@ reasons:
   `0.10.0-alpha`. The exact lifecycle registry is the Rust
   `mxc_config_contract::registry::CONTRACTS` table.
   `mxc_schema_gen registry` emits its machine-readable
-  `schemas/contract-registry.generated.json` artifact. The compatibility constants in
-  `schemas/schema-version.json`
-  do not authorize other versions within their minimum/maximum range.
+  `schemas/contract-registry.generated.json` artifact.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
-  step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
-  constants in step — but the two axes are not tied to each other.
+  step, but the two axes are not tied to each other.
 - **Host capability** is resolved by runtime negotiation, not by a version string.
   The schema `version` does not select the Windows backend:
   ProcessContainer resolves to BaseContainer or AppContainer purely by host
@@ -91,7 +88,6 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
 │   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.9.0-dev.json    (rolling differential oracle)
     └── mxc-config.schema.0.10.0-alpha.json (exact closed development contract)
 ```
 
@@ -99,28 +95,20 @@ Retired stable schema files are **kept as immutable historical artifacts** — t
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development schemas coexist for production parsing and differential
-characterization:
-
-- `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It is retained as a migration oracle for
-  differential parser and SDK-conformance tests.
-- `mxc-config.schema.0.10.0-alpha.json` is generated from the exact
+The development schema is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
   state-aware roots, including recursively closed development-only structures,
   and is the authoritative contract for declared `0.10.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
-contract registered for the declared version. The rolling parser and builder
-remain only to characterize intentional migration differences and detect
-unplanned drift. Corpus validation likewise selects the exact registered schema
-from each document's `version`.
+contract registered for the declared version. Corpus validation selects schema
+paths from `schemas/contract-registry.generated.json`.
 
-Both files are generated development artifacts. Published v0.9 is the immutable
+Published v0.9 is the immutable
 projection under `schemas/stable/`, with an independently frozen Rust contract,
 adapter, fixtures, and normalized schema digest.
-See [Schema Code Generation](schema-codegen.md) for their regeneration commands
-and independent drift gates.
+See [Schema Code Generation](schema-codegen.md) for regeneration commands and
+drift gates.
 
 ### Typed state-aware dispatch
 
@@ -148,13 +136,10 @@ the same backend meaning need not survive. WSLC uses runtime-owned
 default. Top-level telemetry and network/UI presence flags remain in common
 normalization. Source-aware errors remain at exact structural deserialization.
 
-Independent test-only rolling observations retain legacy payload extraction for
-differential coverage, including intentional exact-stricter rejections such as
-`appId: null`. They are not production request types or dispatch inputs.
-Recording backends cover binding, configuration delivery, validation order,
-dry-run behavior, and both exec topologies without requiring live sandboxes.
-This migration changes no registered JSON contract or generated schema/type
-artifact.
+Exact request fixtures and adapter/runtime snapshots cover accepted field
+presence, typed backend payloads, validation order, dry-run behavior, and both
+exec topologies without requiring live sandboxes. No independent legacy
+payload extractor or rolling request parser remains.
 
 ### IsolationSession directional networking
 
@@ -177,9 +162,8 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The affected development schema and TypeScript oracles are regenerated from
-their Rust sources. Published v0.6/v0.7/v0.8 contracts are unchanged, and the
-test-only rolling reference remains available for characterization.
+The affected development schema and TypeScript oracle are regenerated from
+their Rust source. Published v0.6 through v0.9 contracts remain unchanged.
 
 ### Trust boundary vs schema defaults
 
@@ -267,41 +251,31 @@ Add the field at its permanent location in the applicable closed request type
 under `src/core/mxc_config_contract/src/dev/`, including the backend and phase
 roots that admit it.
 
-**In `wire.rs` (the rolling differential oracle and shared normalized
-representation):**
+**In the neutral adapter representation:**
 ```rust
 pub struct MxcConfig {
     // ... stable fields ...
-    pub experimental: Option<Experimental>,
-}
-
-// The `experimental` block is intentionally permissive (no deny_unknown_fields)
-// so in-flux feature shapes stay forward-compatible.
-pub struct Experimental {
-    pub compartments: Option<Compartments>,
     pub gpu_isolation: Option<GpuIsolation>,
-    // ... add new experimental features here ...
 }
 ```
 
-While the differential oracle remains, edit both the rolling `wire.rs` model
-and the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
+This type is constructed only by exact adapters. It is not a JSON
+deserialization target or a schema source.
+
+Edit the authoritative closed mutable contract under
+`src/core/mxc_config_contract/src/dev/`, then regenerate its exact artifacts:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.10.0-alpha --out sdk/node/src/generated/v0_10_0_alpha/wire.ts
 ```
 
-Also regenerate their TypeScript oracles with the corresponding
-`mxc_schema_gen types` commands. Do not hand-edit generated artifacts.
+Do not hand-edit generated artifacts.
 
 Publishing an exact development contract is a two-stage review boundary.
-Phase 11a adds the tooling without changing lifecycle state:
-
 ```text
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- publish \
-  --version 0.9.0-alpha --next-dev 0.10.0-alpha --dry-run
+  --version 0.10.0-alpha --next-dev 0.11.0-alpha --dry-run
 ```
 
 After the selected contract roots, adapters, builders, fixtures, and
@@ -316,7 +290,7 @@ regenerate `schemas/contract-registry.generated.json`.
 
 **In `models.rs`:**
 ```rust
-pub struct ExperimentalConfig {
+pub struct DevelopmentConfig {
     pub compartments: Option<CompartmentsConfig>,
     pub gpu_isolation: Option<GpuIsolationConfig>,
 }
@@ -324,14 +298,13 @@ pub struct ExperimentalConfig {
 pub struct ExecutionRequest {
     // ... stable fields ...
     pub experimental_enabled: bool,  // set by --experimental flag
-    pub experimental: ExperimentalConfig,
+    pub development: DevelopmentConfig,
 }
 ```
 
 **In the version-specific adapter and `config_parser.rs`:** map the exact
-contract field into the shared wire representation, then map the wire
-`Experimental` field to the domain `ExperimentalConfig` inside
-`convert_wire_config`.
+contract field into its permanent neutral wire field, then map that field to
+the domain `DevelopmentConfig` inside `convert_wire_config`.
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
@@ -340,10 +313,10 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 
     // Experimental features only applied when flag is set
     if request.experimental_enabled {
-        if let Some(ref compartments) = request.experimental.compartments {
+        if let Some(ref compartments) = request.development.compartments {
             self.apply_compartments(compartments, logger);
         }
-        if let Some(ref gpu) = request.experimental.gpu_isolation {
+        if let Some(ref gpu) = request.development.gpu_isolation {
             self.apply_gpu_isolation(gpu, logger);
         }
     }
@@ -405,8 +378,8 @@ across trust-boundary parsing, common normalization, and backend execution:
   generated exact TypeScript wire types.
 - **Normalized wire model** (`wxc_common::wire::MxcConfig`) — the common
   representation produced by version-specific adapters and consumed by shared
-  semantic normalization. It also remains the source of the rolling schema and
-  TypeScript differential oracles, but is not a production parse target.
+  semantic normalization. It is serialization-only and is not a request
+  deserialization target or artifact source.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
   validated, defaults-applied, invariant-rich model the backends consume:
   abstract containment resolved to a concrete backend, `process.commandLine`
@@ -425,17 +398,16 @@ shared semantic validation and maps it to the runtime model.
 - **Parse, don't validate.** The domain type makes illegal states
   unrepresentable (required fields non-`Option`, enums resolved, containment
   always concrete), so a backend never re-checks "is this set / known?".
-- **The wire model stays a pure schema/DTO source.** Being exactly the JSON shape
-  is what makes schemars-from-types and SDK TS codegen clean — and it is what the
-  per-field stability attributes (stable/experimental/deprecated, for the
-  stable-vs-dev schema views and the promotion guard) hang on. A merged type would
-  entangle schema-generation concerns with runtime fields.
+- **The adapter model stays a neutral DTO.** Exact contracts own JSON shape and
+  codegen, while the neutral model lets all versions share semantic
+  normalization without coupling the domain model to version-specific aliases
+  or optionality.
 - **Decoupled evolution.** The wire format can change (rename, alias, or
   restructure development-only fields) without touching backend code, and
   vice-versa; the blast radius of either is bounded by the parser.
-- **Backends don't couple to JSON quirks** — camelCase renames, deprecated-spelling
-  serde aliases, the temporary rolling compatibility representation,
-  `$schema`/`_comment` passthrough — none leak into runner code.
+- **Backends don't couple to JSON quirks** — camelCase renames,
+  deprecated-spelling aliases, and `$schema`/`_comment` passthrough do not leak
+  into runner code.
 
 ### Costs (cons)
 

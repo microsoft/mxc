@@ -114,23 +114,21 @@ Adding a feature may touch these files:
 | File | What to change |
 |------|----------------|
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
-| `src/core/wxc_common/src/wire.rs` | Mirror the field in the rolling differential model while that characterization oracle remains |
+| `src/core/wxc_common/src/wire.rs` | Add only the neutral adapter field needed by shared semantic normalization |
 | `src/core/mxc_engine/src/policy/exact/v0_10.rs` | If the Rust SDK exposes the field, update the production exact development builder |
-| `schemas/dev/mxc-config.schema.0.9.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
 | `schemas/dev/mxc-config.schema.0.10.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
-| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
+| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `DevelopmentConfig` |
 | `src/core/wxc_common/src/config_parser.rs` | Map the new wire field to the domain struct in `convert_wire_config` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
-## Step 1: Add the field to the exact contract and rolling oracle
+## Step 1: Add the field to the exact contract
 
 Add the feature at its intended permanent top-level or backend-section
 location in the authoritative closed request types under
 `src/core/mxc_config_contract/src/dev/`. Do not create or extend an
-`experimental` JSON object. The retained rolling model is only a temporary
-differential/runtime compatibility representation; add the minimum adapter
-bridge needed while it remains.
+`experimental` JSON object. Add only the neutral adapter/runtime representation
+needed after the exact contract has validated the request.
 
 ```rust
 /// GPU device isolation (experimental).
@@ -151,21 +149,18 @@ The `///` doc comments become schema `description`s and `#[schemars(...)]`
 attributes become constraints. Then regenerate the committed schema:
 
 ```
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.10.0-alpha --out sdk/node/src/generated/v0_10_0_alpha/wire.ts
 ```
 
-The rolling and exact codegen gates fail if any committed artifact drifts, so
-all applicable regeneration steps are mandatory.
+The exact contract codegen gate fails if either committed artifact drifts, so
+both regeneration steps are mandatory.
 
 ## Step 2: Add the model struct
 
-In `src/core/wxc_common/src/models.rs`, an internal `ExperimentalConfig` may
-still carry gated runtime settings while the rolling compatibility layer
-exists. Add the runtime model there when appropriate; this internal name does
-not define the JSON location:
+In `src/core/wxc_common/src/models.rs`, an internal `DevelopmentConfig` may
+carry gated runtime settings. Add the runtime model there when appropriate;
+this internal name does not define the JSON location:
 
 ```rust
 /// GPU isolation settings (experimental).
@@ -177,16 +172,16 @@ pub struct GpuIsolationConfig {
 }
 ```
 
-Add it to the existing `ExperimentalConfig`:
+Add it to the existing `DevelopmentConfig`:
 
 ```rust
-pub struct ExperimentalConfig {
+pub struct DevelopmentConfig {
     pub compartments: Option<CompartmentsConfig>,
     pub gpu_isolation: Option<GpuIsolationConfig>,   // ← add this
 }
 ```
 
-## Step 3: Map the wire field to the domain model
+## Step 3: Map the exact field to the domain model
 
 Production parsing first deserializes JSON into the exact registered request
 contract. The version-specific adapter then converts that closed type into the
@@ -208,11 +203,10 @@ becomes a compile error rather than a silent runtime drop.
 
 Add tests to verify:
 - `gpuIsolation` is accepted by the exact request root and maps through its
-  adapter to `ExecutionRequest.experimental`
+  adapter to `ExecutionRequest.development`
 - Missing optional fields use defaults
 - Unknown fields under the exact feature object are rejected
-- The rolling parser's permissive behavior remains characterized separately
-  while that differential oracle exists
+- Exact acceptance and rejection fixtures cover the complete request shape
 
 ## Step 4: Implement the feature in the runner
 
@@ -226,7 +220,7 @@ The full flow is:
 main.rs: cli.experimental → request.experimental_enabled = true
 main.rs: runner.run(&request, &mut logger)
   → runner checks request.experimental_enabled
-    → reads request.experimental.gpu_isolation
+    → reads request.development.gpu_isolation
       → applies the feature
 ```
 
@@ -239,12 +233,12 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 
     if request.experimental_enabled {
         // existing experimental feature
-        if let Some(ref compartments) = request.experimental.compartments {
+        if let Some(ref compartments) = request.development.compartments {
             self.apply_compartments(compartments, logger)?;
         }
 
         // new experimental feature
-        if let Some(ref gpu) = request.experimental.gpu_isolation {
+        if let Some(ref gpu) = request.development.gpu_isolation {
             self.apply_gpu_isolation(gpu, logger)?;
         }
     }

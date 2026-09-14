@@ -293,20 +293,6 @@ pub struct WslcProvisionConfig {
     pub image_tar_path: Option<String>,
 }
 
-#[cfg(test)]
-impl From<crate::wire::WslcProvisionPhase> for WslcProvisionConfig {
-    fn from(config: crate::wire::WslcProvisionPhase) -> Self {
-        let crate::wire::WslcProvisionPhase {
-            image,
-            image_tar_path,
-        } = config;
-        Self {
-            image,
-            image_tar_path,
-        }
-    }
-}
-
 /// Configuration specific to the LXC container backend.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -966,10 +952,10 @@ impl TestFeatureConfig {
     }
 }
 
-/// Container for all experimental feature configs.
+/// Runtime configuration for development-only features and backends.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ExperimentalConfig {
+pub struct DevelopmentConfig {
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeatureConfig>,
     /// Windows Sandbox backend (experimental).
@@ -1049,7 +1035,7 @@ pub struct ExecutionRequest {
     /// this means "not-for-production testing scaffolding".
     pub testing_features_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
-    pub experimental: ExperimentalConfig,
+    pub development: DevelopmentConfig,
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
@@ -1273,73 +1259,6 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wslc_provision_config_from_wire_preserves_requested_fields() {
-        let cases = [
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: None,
-                    image_tar_path: None,
-                },
-                None,
-                None,
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: Some(String::new()),
-                    image_tar_path: None,
-                },
-                Some(""),
-                None,
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: None,
-                    image_tar_path: Some(String::new()),
-                },
-                None,
-                Some(""),
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: Some(String::new()),
-                    image_tar_path: Some(String::new()),
-                },
-                Some(""),
-                Some(""),
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: Some("custom/image:tag".to_string()),
-                    image_tar_path: None,
-                },
-                Some("custom/image:tag"),
-                None,
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: None,
-                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
-                },
-                None,
-                Some("C:\\images\\custom.tar"),
-            ),
-            (
-                crate::wire::WslcProvisionPhase {
-                    image: Some("custom/image:tag".to_string()),
-                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
-                },
-                Some("custom/image:tag"),
-                Some("C:\\images\\custom.tar"),
-            ),
-        ];
-        for (wire, expected_image, expected_tar_path) in cases {
-            let config = WslcProvisionConfig::from(wire);
-            assert_eq!(config.image.as_deref(), expected_image);
-            assert_eq!(config.image_tar_path.as_deref(), expected_tar_path);
-        }
-    }
 
     #[test]
     fn wslc_provision_config_deserializes_intermediate_dispatch_payloads() {

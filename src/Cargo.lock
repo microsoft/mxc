@@ -1594,7 +1594,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "wxc_common",
 ]
 
 [[package]]
@@ -3224,10 +3223,8 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
- "mxc_schema_support",
  "mxc_telemetry",
  "nanvix_common",
- "schemars",
  "semver",
  "serde",
  "serde_json",

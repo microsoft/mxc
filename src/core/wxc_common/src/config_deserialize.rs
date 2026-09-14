@@ -38,34 +38,6 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
 
-/// Whether a single (not-yet-lower-cased) JSON object key is secret-bearing,
-/// per [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
-/// (substring match) — an ASCII-case-insensitive equivalent of
-/// [`is_secret_path_field`] for callers that only need the yes/no decision and
-/// would otherwise allocate a lower-cased copy of `field` just to ask it.
-#[cfg(test)]
-pub(crate) fn is_secret_path_field_ci(field: &str) -> bool {
-    SECRET_PATH_SEGMENTS
-        .iter()
-        .any(|segment| field.eq_ignore_ascii_case(segment))
-        || SECRET_PATH_MARKERS
-            .iter()
-            .any(|marker| contains_ignore_ascii_case(field, marker))
-}
-
-/// ASCII-case-insensitive `str::contains`, without allocating a lower-cased
-/// copy of `haystack`. `needle` is always one of the ASCII lower-case
-/// constants above.
-#[cfg(test)]
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
-    needle.is_empty()
-        || (needle.len() <= haystack.len()
-            && haystack
-                .windows(needle.len())
-                .any(|window| window.eq_ignore_ascii_case(needle)))
-}
-
 /// Whether a single lower-cased JSON object key is secret-bearing, per
 /// [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
 /// (substring match). Shared by error-path redaction (this module) and raw
@@ -84,11 +56,6 @@ pub(crate) fn is_secret_path_field(field: &str) -> bool {
 pub(crate) struct ConfigDeserializeError {
     path: Option<String>,
     source: serde_json::Error,
-    /// Whole-file `(line, column)` that overrides the location baked into
-    /// `source` when the error was produced from a sub-slice of a larger
-    /// request (e.g. a state-aware `experimental.<backend>.<phase>` fragment).
-    /// `None` leaves `source`'s own location untouched.
-    location_override: Option<(usize, usize)>,
 }
 
 impl ConfigDeserializeError {
@@ -103,43 +70,7 @@ impl ConfigDeserializeError {
         Self {
             path,
             source: error.into_inner(),
-            location_override: None,
         }
-    }
-
-    /// Override the source location rendered by `Display` with whole-file
-    /// coordinates. Used when translating a fragment-local serde location back
-    /// to its position in the complete request text.
-    #[cfg(test)]
-    pub(crate) fn with_source_location(mut self, line: usize, column: usize) -> Self {
-        self.location_override = Some((line, column));
-        self
-    }
-
-    /// The `(line, column)` serde recorded for this error, or `None` when serde
-    /// could not attribute a position (it reports line 0 in that case).
-    #[cfg(test)]
-    pub(crate) fn source_line_column(&self) -> Option<(usize, usize)> {
-        let line = self.source.line();
-        (line > 0).then(|| (line, self.source.column()))
-    }
-
-    /// Whether serde classified this failure as malformed JSON syntax.
-    #[cfg(test)]
-    pub(crate) fn is_syntax_error(&self) -> bool {
-        matches!(self.source.classify(), Category::Syntax | Category::Eof)
-    }
-
-    /// Prefix a path produced while deserializing a JSON subtree with its path
-    /// in the complete request.
-    #[cfg(test)]
-    pub(crate) fn with_prefix(mut self, prefix: &str) -> Self {
-        self.path = Some(match self.path.take() {
-            None => prefix.to_string(),
-            Some(path) if path.starts_with('[') => format!("{prefix}{path}"),
-            Some(path) => format!("{prefix}.{path}"),
-        });
-        self
     }
 
     fn path_contains_secret(&self) -> bool {
@@ -160,13 +91,6 @@ impl fmt::Display for ConfigDeserializeError {
             redact_secret_value(&self.source)
         } else {
             self.source.to_string()
-        };
-        // Remap the source's baked-in `line/column` to whole-file coordinates
-        // before escaping so all downstream guarantees (control-char escaping,
-        // secret redaction, syntax-vs-data branch) still hold unchanged.
-        let source = match self.location_override {
-            Some((line, column)) => rewrite_trailing_location(&source, line, column),
-            None => source,
         };
         let source = escape_control_characters(&source);
         match self.source.classify() {
@@ -197,119 +121,6 @@ fn redact_secret_value(source: &serde_json::Error) -> String {
     "invalid secret value".to_string()
 }
 
-/// Replace a trailing serde-style ` at line <N> column <M>` suffix in a rendered
-/// error message with the supplied whole-file `line`/`column`. serde_json emits
-/// this stable suffix on positioned errors; if it is absent (unpositioned
-/// message), the location is appended so the caller still gets coordinates.
-fn rewrite_trailing_location(rendered: &str, line: usize, column: usize) -> String {
-    let replacement = format!(" at line {line} column {column}");
-    if let Some(index) = rendered.rfind(" at line ") {
-        if is_location_suffix(&rendered[index..]) {
-            return format!("{}{}", &rendered[..index], replacement);
-        }
-    }
-    format!("{rendered}{replacement}")
-}
-
-/// True when `suffix` is exactly ` at line <digits> column <digits>` with no
-/// trailing text — serde_json's positioned-error suffix shape.
-fn is_location_suffix(suffix: &str) -> bool {
-    let Some(rest) = suffix.strip_prefix(" at line ") else {
-        return false;
-    };
-    let (line_digits, rest) = split_leading_digits(rest);
-    if line_digits.is_empty() {
-        return false;
-    }
-    let Some(rest) = rest.strip_prefix(" column ") else {
-        return false;
-    };
-    let (column_digits, rest) = split_leading_digits(rest);
-    !column_digits.is_empty() && rest.is_empty()
-}
-
-fn split_leading_digits(text: &str) -> (&str, &str) {
-    let end = text
-        .find(|character: char| !character.is_ascii_digit())
-        .unwrap_or(text.len());
-    text.split_at(end)
-}
-
-/// 1-based `(line, column)` (serde_json semantics) → byte offset within `text`.
-///
-/// Column arithmetic assumes ASCII configs (bytes == columns); the parser only
-/// ever hands us JSON, which is ASCII outside string literals, and offsets are
-/// only used to translate error positions. Returns `None` when the position is
-/// out of range so callers can fall back gracefully.
-#[cfg(test)]
-fn byte_offset_of_line_col(text: &str, line: usize, column: usize) -> Option<usize> {
-    if line == 0 || column == 0 {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    let mut current_line = 1usize;
-    let mut line_start = 0usize;
-    let mut index = 0usize;
-    while current_line < line && index < bytes.len() {
-        if bytes[index] == b'\n' {
-            current_line += 1;
-            line_start = index + 1;
-        }
-        index += 1;
-    }
-    if current_line < line {
-        return None;
-    }
-    let offset = line_start + (column - 1);
-    (offset <= text.len()).then_some(offset)
-}
-
-/// Byte offset within `text` → 1-based `(line, column)` (serde_json semantics).
-///
-/// Line counting is byte-exact; column arithmetic assumes ASCII (see
-/// [`byte_offset_of_line_col`]). Operates on bytes to avoid slicing panics on a
-/// non-char-boundary offset.
-#[cfg(test)]
-fn line_col_of_byte_offset(text: &str, offset: usize) -> (usize, usize) {
-    let bytes = text.as_bytes();
-    let end = offset.min(bytes.len());
-    let mut line = 1usize;
-    let mut last_newline: Option<usize> = None;
-    for (index, byte) in bytes.iter().enumerate().take(end) {
-        if *byte == b'\n' {
-            line += 1;
-            last_newline = Some(index);
-        }
-    }
-    let column = match last_newline {
-        Some(index) => end - index,
-        None => end + 1,
-    };
-    (line, column)
-}
-
-/// Translate a `ConfigDeserializeError` produced by deserializing `fragment`
-/// (which begins at byte `fragment_offset` within `source_text`) so its
-/// rendered location reports whole-file coordinates instead of fragment-local
-/// ones. Any step that cannot be resolved returns `err` unchanged.
-#[cfg(test)]
-pub(crate) fn remap_error_to_source(
-    err: ConfigDeserializeError,
-    fragment: &str,
-    fragment_offset: usize,
-    source_text: &str,
-) -> ConfigDeserializeError {
-    let Some((line, column)) = err.source_line_column() else {
-        return err;
-    };
-    let Some(local_offset) = byte_offset_of_line_col(fragment, line, column) else {
-        return err;
-    };
-    let global_offset = fragment_offset + local_offset;
-    let (global_line, global_column) = line_col_of_byte_offset(source_text, global_offset);
-    err.with_source_location(global_line, global_column)
-}
-
 fn escape_control_characters(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -325,23 +136,11 @@ fn escape_control_characters(value: &str) -> String {
 }
 
 /// Escape control and invisible-format characters in free-form, user-controlled
-/// text before it reaches a diagnostic sink. Shared with the manual
-/// (non-serde) semantic validators so every user-derived diagnostic honors the
-/// same "no raw control/format bytes in diagnostics" guarantee.
+/// text before it reaches a diagnostic sink.
 pub(crate) fn escape_diagnostic_text(value: &str) -> String {
     escape_control_characters(value)
 }
 
-/// Invisible Unicode formatting characters (general category `Cf`) and the
-/// line/paragraph separators (`Zl`/`Zp`) that `char::is_control()` does **not**
-/// cover. Escaping these is a deliberate security control, not incidental
-/// hardening: escaping bidirectional overrides/isolates (U+202A–U+202E,
-/// U+2066–U+2069, category `Cf`) defends against "Trojan Source"
-/// (CVE-2021-42574) visual-spoofing of diagnostics, escaping the line/paragraph
-/// separators (U+2028/U+2029) prevents forging hard line breaks that some
-/// terminals/log viewers honor, and escaping zero-width / joiner / interlinear
-/// characters (also `Cf`) prevents concealing or forging log and error-envelope
-/// content rendered in a terminal or editor.
 fn is_diagnostic_format_character(character: char) -> bool {
     matches!(
         get_general_category(character),
@@ -373,11 +172,7 @@ where
     let value = deserialize_with_path(&mut deserializer)?;
     deserializer
         .end()
-        .map_err(|source| ConfigDeserializeError {
-            path: None,
-            source,
-            location_override: None,
-        })?;
+        .map_err(|source| ConfigDeserializeError { path: None, source })?;
     Ok(value)
 }
 
@@ -385,14 +180,6 @@ where
 pub(crate) fn from_value<T>(value: Value) -> Result<T, ConfigDeserializeError>
 where
     T: DeserializeOwned,
-{
-    deserialize_with_path(value)
-}
-
-#[cfg(test)]
-pub(crate) fn from_value_ref<'de, T>(value: &'de Value) -> Result<T, ConfigDeserializeError>
-where
-    T: Deserialize<'de>,
 {
     deserialize_with_path(value)
 }
@@ -496,44 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn subtree_paths_can_be_prefixed_with_their_request_location() {
-        let value = serde_json::json!({"count": "many"});
-        let error = from_value_ref::<Inner>(&value)
-            .unwrap_err()
-            .with_prefix("experimental.example.start");
-
-        assert_eq!(
-            error.path.as_deref(),
-            Some("experimental.example.start.count")
-        );
-        assert!(error
-            .to_string()
-            .contains("experimental.example.start.count"));
-    }
-
-    #[test]
-    fn root_level_errors_have_no_policy_path_or_rust_type_name() {
-        let error = from_str::<crate::wire::MxcConfig>(r#""not an object""#).unwrap_err();
-        assert_eq!(error.path.as_deref(), None);
-        let message = error.to_string();
-        assert!(message.contains("expected a configuration object"));
-        assert!(!message.contains("MxcConfig"));
-    }
-
-    #[test]
-    fn array_subtree_paths_are_prefixed_without_an_extra_dot() {
-        let value = serde_json::json!([{"count": "many"}]);
-        let error = from_value_ref::<Vec<Inner>>(&value)
-            .unwrap_err()
-            .with_prefix("experimental.example.start");
-
-        assert_eq!(
-            error.path.as_deref(),
-            Some("experimental.example.start[0].count")
-        );
-    }
-
-    #[test]
     fn from_value_reports_the_typed_error_path() {
         let value = serde_json::json!({"inner": {"count": "many"}});
         let error = from_value::<Outer>(value).unwrap_err();
@@ -610,7 +359,6 @@ mod tests {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
                 source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
-                location_override: None,
             };
 
             assert!(
@@ -625,7 +373,6 @@ mod tests {
         let error = ConfigDeserializeError {
             path: Some("monkey".to_string()),
             source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
-            location_override: None,
         };
 
         assert!(!error.to_string().contains("invalid secret value"));
@@ -647,7 +394,6 @@ mod tests {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
                 source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
-                location_override: None,
             };
             assert!(
                 error.to_string().contains("invalid secret value"),
@@ -660,7 +406,6 @@ mod tests {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
                 source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
-                location_override: None,
             };
             assert!(
                 !error.to_string().contains("invalid secret value"),
@@ -686,123 +431,5 @@ mod tests {
     fn leaves_plain_text_unchanged() {
         let plain = "plain diagnostic text 123";
         assert_eq!(escape_diagnostic_text(plain), plain);
-    }
-
-    #[test]
-    fn byte_offset_and_line_col_round_trip() {
-        let text = "line one\nline two\nline three\n";
-        // Walk every byte offset and confirm the offset -> (line,col) -> offset
-        // round-trip is stable.
-        for offset in 0..=text.len() {
-            let (line, column) = line_col_of_byte_offset(text, offset);
-            assert_eq!(
-                byte_offset_of_line_col(text, line, column),
-                Some(offset),
-                "round trip failed at offset {offset} -> ({line},{column})"
-            );
-        }
-    }
-
-    #[test]
-    fn line_col_of_byte_offset_hand_computed_cases() {
-        let text = "abc\ndefgh\nij";
-        // Offset 0 is line 1 column 1.
-        assert_eq!(line_col_of_byte_offset(text, 0), (1, 1));
-        // Offset 2 ('c') is line 1 column 3.
-        assert_eq!(line_col_of_byte_offset(text, 2), (1, 3));
-        // Offset 4 (start of "defgh") is line 2 column 1.
-        assert_eq!(line_col_of_byte_offset(text, 4), (2, 1));
-        // Offset 7 ('g') is line 2 column 4.
-        assert_eq!(line_col_of_byte_offset(text, 7), (2, 4));
-        // Offset 10 (start of "ij") is line 3 column 1.
-        assert_eq!(line_col_of_byte_offset(text, 10), (3, 1));
-    }
-
-    #[test]
-    fn byte_offset_of_line_col_hand_computed_and_out_of_range() {
-        let text = "abc\ndefgh\nij";
-        // Line 2 column 1 is the byte after the first newline.
-        assert_eq!(byte_offset_of_line_col(text, 2, 1), Some(4));
-        // Line 3 column 2 -> 'j'.
-        assert_eq!(byte_offset_of_line_col(text, 3, 2), Some(11));
-        // A line beyond the text has no offset.
-        assert_eq!(byte_offset_of_line_col(text, 9, 1), None);
-        // serde reports 0 for unknown positions; reject those.
-        assert_eq!(byte_offset_of_line_col(text, 0, 1), None);
-        assert_eq!(byte_offset_of_line_col(text, 1, 0), None);
-    }
-
-    #[test]
-    fn rewrite_trailing_location_replaces_existing_suffix() {
-        let rendered = "missing field `configuration_id` at line 2 column 5";
-        let rewritten = rewrite_trailing_location(rendered, 7, 11);
-        assert_eq!(
-            rewritten,
-            "missing field `configuration_id` at line 7 column 11"
-        );
-    }
-
-    #[test]
-    fn rewrite_trailing_location_appends_when_absent() {
-        let rendered = "some message without a position";
-        let rewritten = rewrite_trailing_location(rendered, 3, 4);
-        assert_eq!(
-            rewritten,
-            "some message without a position at line 3 column 4"
-        );
-    }
-
-    #[test]
-    fn serde_json_positioned_error_display_contract_is_pinned() {
-        // `rewrite_trailing_location` recognizes and replaces serde_json's
-        // rendered ` at line <N> column <M>` suffix. Pin that upstream Display
-        // contract so a format change is caught here rather than silently
-        // producing duplicated coordinates in diagnostics.
-        let err = serde_json::from_str::<i32>("\n  \"x\"").unwrap_err();
-        assert!(err.line() > 0, "expected a positioned error");
-        let rendered = err.to_string();
-        let suffix = format!(" at line {} column {}", err.line(), err.column());
-        assert!(
-            rendered.ends_with(&suffix),
-            "serde_json positioned-error suffix drifted: {rendered:?}"
-        );
-        assert!(
-            is_location_suffix(&suffix),
-            "positioned-error suffix no longer matches the recognized shape: {suffix:?}"
-        );
-
-        // And the rewrite must replace, not append, so coordinates never double.
-        let rewritten = rewrite_trailing_location(&rendered, 9, 3);
-        assert!(rewritten.ends_with(" at line 9 column 3"));
-        assert_eq!(
-            rewritten.matches(" at line ").count(),
-            1,
-            "coordinates were duplicated instead of replaced: {rewritten:?}"
-        );
-    }
-
-    #[test]
-    fn remap_error_translates_fragment_local_location_to_whole_file() {
-        // A fragment that starts several lines into the whole file. The typed
-        // error inside it must be reported at its whole-file line/column.
-        let source_text = "line1\nline2\nline3\n{\n  \"count\": \"many\"\n}\n";
-        let fragment = "{\n  \"count\": \"many\"\n}";
-        let fragment_offset = source_text.find(fragment).unwrap();
-
-        let err = from_str::<Inner>(fragment).unwrap_err();
-        // Fragment-local location: line 2 of the fragment.
-        assert_eq!(err.source_line_column().map(|(l, _)| l), Some(2));
-
-        let remapped = remap_error_to_source(err, fragment, fragment_offset, source_text);
-        let message = remapped.to_string();
-        // The offending field sits on whole-file line 5.
-        assert!(
-            message.contains("line 5"),
-            "expected whole-file line 5, got: {message}"
-        );
-        assert!(
-            !message.contains("line 2"),
-            "still fragment-local: {message}"
-        );
     }
 }

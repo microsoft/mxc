@@ -1509,7 +1509,7 @@ impl AppContainerScriptRunner {
         use crate::network_manager::NetworkManager;
 
         if request.experimental_enabled {
-            if let Some(ref test) = request.experimental.test {
+            if let Some(ref test) = request.development.test {
                 logger.log_line(&format!(
                     "Experimental feature 'test' applied: {}",
                     test.message

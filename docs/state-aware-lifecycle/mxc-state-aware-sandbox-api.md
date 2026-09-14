@@ -1113,11 +1113,11 @@ closed root.
 The exact contract is the JSON trust boundary. Its recursively closed request
 types enforce required declarations, phase-inappropriate fields,
 duplicate/unknown fields, rejected nulls, and recursively unknown
-`experimental` fields. Structural failures surface as `malformed_request`
+development fields. Structural failures surface as `malformed_request`
 before backend binding or policy validation. Exact adapters convert backend
 payloads directly to runtime configurations, while common fields reuse
-`wire::MxcConfig` conversion in `config_parser.rs`. The rolling parser is
-retained only in tests as a differential migration oracle.
+the neutral `wire::MxcConfig` conversion in `config_parser.rs`. JSON is never
+deserialized directly into that internal representation.
 
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
@@ -1171,9 +1171,9 @@ structurally representable fields. They enforce semantic values, cross-field
 invariants, backend identity, and policy capabilities; those representable
 refusals surface as `policy_validation`.
 
-Rolling structural checks and independent legacy payload extraction survive
-only in test support, using a separate legacy observation type. They share
-common conversion but do not force legacy-only inputs into production operations.
+Exact fixtures, adapter snapshots, and recording backends cover structural
+checks, payload presence, common conversion, and dispatch without a second
+legacy parser or payload extractor.
 
 Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
@@ -1846,10 +1846,9 @@ capability mismatches automatically (§9.4).
 
 The state-aware wire format expects `<backendSection>.<phase>` blocks for backends
 that declare per-phase configs. Add the new shape to the exact development
-contract and its direct runtime adapter. Keep the retained rolling wire oracle
-aligned while it remains in use, and regenerate both development artifact sets.
-Preserve configuration presence through normalization and binding; leave
-defaults and semantic checks in the backend.
+contract and its direct runtime adapter, then regenerate the exact development
+schema and TypeScript artifact. Preserve configuration presence through
+normalization and binding; leave defaults and semantic checks in the backend.
 
 ### 11.6 Document the backend
 

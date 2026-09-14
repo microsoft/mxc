@@ -3,13 +3,8 @@
 
 //! TypeScript emitter for the SDK wire types.
 //!
-//! Walks the generated JSON Schema as a `serde_json::Value` — built from the
-//! `MxcConfig` wire model, the same value that
-//! [`crate::render_root_ordered`] renders to JSON text — and emits
-//! the SDK's wire TypeScript types, with no third-party generator.
-//! The result is `sdk/node/src/generated/wire.ts`, a drift oracle that the SDK's
-//! hand-written public types are asserted to conform to (and that a CI gate
-//! regenerates + diffs).
+//! Walks an exact contract's generated JSON Schema as a `serde_json::Value`
+//! and emits versioned SDK wire types without a third-party generator.
 //!
 //! Only the JSON Schema constructs the MXC schema actually uses are handled:
 //! enums (`oneOf` of single-value `enum`s, or a direct `enum` array), closed and
@@ -20,34 +15,13 @@
 
 use serde_json::Value;
 
-const LEGACY_BANNER: &str = "\
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-/* eslint-disable */
-/**
- * GENERATED FILE — DO NOT EDIT BY HAND.
- *
- * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
- * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
- * API: it is never
- * exported from the SDK. The conformance test asserts the hand-written public
- * types in `../types.ts` still match these. CI gate:
- * `scripts/versioning/check-sdk-types-codegen.js`.
- *
- * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
- */
-";
-
 /// Root interface name (mirrors the json-schema-to-typescript convention of
 /// deriving it from the schema `title`, "MXC Configuration").
 const ROOT_NAME: &str = "MXCConfiguration";
 
-/// Emit the full `wire.ts` content for the given schema root value.
-pub(crate) fn emit_ts(schema: &Value) -> String {
-    emit_ts_with_banner(schema, LEGACY_BANNER)
+#[cfg(test)]
+fn emit_ts(schema: &Value) -> String {
+    emit_ts_with_banner(schema, "")
 }
 
 pub(crate) fn emit_contract_ts(schema: &Value, version: &str) -> String {
@@ -328,7 +302,7 @@ fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value
     }
 
     // Open objects (no `additionalProperties: false`) carry an index signature,
-    // matching how the permissive experimental block is modeled.
+    // matching how intentionally open extension objects are modeled.
     if is_open_object(obj) {
         out.push_str("  [k: string]: unknown;\n");
     }

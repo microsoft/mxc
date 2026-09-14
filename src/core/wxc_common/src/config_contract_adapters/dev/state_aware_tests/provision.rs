@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::common::{adapt, assert_clean_common, assert_common_matches_legacy, legacy_source};
-use crate::config_parser::legacy_payload_reference::extract;
-use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use super::common::{adapt, assert_clean_common};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -37,7 +35,6 @@ fn isolation_session_configuration_presence_matches_explicit_values() {
         let json = source("isolation_session", fields);
         let (common, operation) = adapt(&json);
         assert_clean_common(&common);
-        assert_common_matches_legacy(&json, &common);
         assert!(common.filesystem.is_none());
         assert!(common.process.is_none());
         let network = common.network.unwrap();
@@ -64,15 +61,6 @@ fn isolation_session_configuration_presence_matches_explicit_values() {
             config.as_ref().map(|config| config.app_id.as_deref()),
             expected
         );
-        assert_eq!(
-            config,
-            extract::<IsolationSessionProvisionConfig>(
-                &legacy_source(&json),
-                "isolation_session",
-                "provision",
-            )
-            .unwrap()
-        );
     }
 }
 
@@ -97,7 +85,6 @@ fn isolation_session_unrestricted_network_forms_map_without_loss() {
         let json = request(&fields);
         let (common, operation) = adapt(&json);
         assert_clean_common(&common);
-        assert_common_matches_legacy(&json, &common);
         assert!(common.network.is_some(), "{json}");
         let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) =
             operation
@@ -173,7 +160,6 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
         let json = source("wslc", fields);
         let (common, operation) = adapt(&json);
         assert_clean_common(&common);
-        assert_common_matches_legacy(&json, &common);
         assert!(common.network.is_none());
         let StateAwareOperation::Provision(StateAwareProvision::Wslc(config)) = operation else {
             panic!("wrong operation");
@@ -182,33 +168,6 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
             .as_ref()
             .map(|config| (config.image.as_deref(), config.image_tar_path.as_deref()));
         assert_eq!(observed, expected);
-        let legacy =
-            extract::<wire::WslcProvisionPhase>(&legacy_source(&json), "wslc", "provision")
-                .unwrap();
-        assert_eq!(
-            observed,
-            legacy
-                .as_ref()
-                .map(|config| (config.image.as_deref(), config.image_tar_path.as_deref()))
-        );
-    }
-}
-
-#[test]
-fn rolling_wslc_conversion_has_independent_expected_fields() {
-    for (image, image_tar_path) in [
-        (None, None),
-        (Some(""), None),
-        (None, Some("archive.tar")),
-        (Some("image"), Some("archive.tar")),
-    ] {
-        let wire = wire::WslcProvisionPhase {
-            image: image.map(str::to_owned),
-            image_tar_path: image_tar_path.map(str::to_owned),
-        };
-        let runtime = WslcProvisionConfig::from(wire);
-        assert_eq!(runtime.image.as_deref(), image);
-        assert_eq!(runtime.image_tar_path.as_deref(), image_tar_path);
     }
 }
 
@@ -224,7 +183,6 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             let json = source(backend, fields);
             let (common, operation) = adapt(&json);
             assert_clean_common(&common);
-            assert_common_matches_legacy(&json, &common);
             assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
             assert_eq!(operation.phase().as_str(), "provision");
             assert!(operation.sandbox_id().is_none());
@@ -242,7 +200,6 @@ fn provision_common_fields_are_independent_of_backend_payload() {
     for backend in ["windows_sandbox", "wslc"] {
         let json = source(backend, r#","filesystem":{}"#);
         let (common, _) = adapt(&json);
-        assert_common_matches_legacy(&json, &common);
         let filesystem = common.filesystem.unwrap();
         assert!(filesystem.readonly_paths.is_none());
         assert!(filesystem.readwrite_paths.is_none());
@@ -253,7 +210,6 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             r#","filesystem":{"readonlyPaths":["/read"],"readwritePaths":["/write"],"deniedPaths":["/deny"]}"#,
         );
         let (common, _) = adapt(&json);
-        assert_common_matches_legacy(&json, &common);
         let filesystem = common.filesystem.unwrap();
         assert_eq!(filesystem.readonly_paths.unwrap(), ["/read"]);
         assert_eq!(filesystem.readwrite_paths.unwrap(), ["/write"]);
@@ -268,7 +224,7 @@ fn provision_common_fields_are_independent_of_backend_payload() {
 }
 
 #[test]
-fn exact_rejections_do_not_inherit_legacy_null_or_unknown_field_acceptance() {
+fn exact_contract_rejects_null_wrong_type_duplicate_and_unknown_payload_fields() {
     for (backend, field) in [
         ("isolation_session", "appId"),
         ("wslc", "image"),
@@ -280,23 +236,6 @@ fn exact_rejections_do_not_inherit_legacy_null_or_unknown_field_acceptance() {
             );
             let json = source(backend, &fields);
             assert!(contract::parse_request(&json).is_err(), "{json}");
-            if invalid == "null" {
-                if backend == "isolation_session" {
-                    assert_eq!(
-                        extract::<IsolationSessionProvisionConfig>(&json, backend, "provision")
-                            .unwrap()
-                            .unwrap()
-                            .app_id,
-                        None
-                    );
-                } else {
-                    let legacy = extract::<wire::WslcProvisionPhase>(&json, backend, "provision")
-                        .unwrap()
-                        .unwrap();
-                    assert_eq!(legacy.image, None);
-                    assert_eq!(legacy.image_tar_path, None);
-                }
-            }
         }
         for payload in [
             format!(r#"{{"{field}":"a","{field}":"b"}}"#),
@@ -307,23 +246,6 @@ fn exact_rejections_do_not_inherit_legacy_null_or_unknown_field_acceptance() {
                 &format!(r#","experimental":{{"{backend}":{{"provision":{payload}}}}}"#),
             );
             assert!(contract::parse_request(&json).is_err(), "{json}");
-            if payload.contains("unknown") {
-                if backend == "isolation_session" {
-                    assert_eq!(
-                        extract::<IsolationSessionProvisionConfig>(&json, backend, "provision")
-                            .unwrap()
-                            .unwrap()
-                            .app_id,
-                        None,
-                    );
-                } else {
-                    let legacy = extract::<wire::WslcProvisionPhase>(&json, backend, "provision")
-                        .unwrap()
-                        .unwrap();
-                    assert!(legacy.image.is_none());
-                    assert!(legacy.image_tar_path.is_none());
-                }
-            }
         }
     }
     for fields in [

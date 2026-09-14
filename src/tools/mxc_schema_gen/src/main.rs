@@ -47,11 +47,8 @@ enum Command {
 #[derive(Debug, Args)]
 struct GenerateArgs {
     /// Exact registered contract version.
-    #[arg(long, conflicts_with = "legacy_wire")]
-    version: Option<String>,
-    /// Generate from the rolling legacy wire model.
-    #[arg(long, conflicts_with = "version")]
-    legacy_wire: bool,
+    #[arg(long)]
+    version: String,
     /// Output path. Omit to write the artifact to standard output.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -73,21 +70,9 @@ struct PublishArgs {
     dry_run: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Target {
-    LegacyWire,
-    Contract(ContractVersion),
-}
-
-fn target(args: &GenerateArgs) -> Result<Target, String> {
-    match (&args.version, args.legacy_wire) {
-        (Some(version), false) => ContractVersion::parse_exact(version)
-            .map(Target::Contract)
-            .ok_or_else(|| format!("unsupported exact contract version: {version}")),
-        (None, true) => Ok(Target::LegacyWire),
-        (None, false) => Err("one of --version <exact> or --legacy-wire is required".to_string()),
-        _ => unreachable!("clap rejects conflicting target options"),
-    }
+fn target(args: &GenerateArgs) -> Result<ContractVersion, String> {
+    ContractVersion::parse_exact(&args.version)
+        .ok_or_else(|| format!("unsupported exact contract version: {}", args.version))
 }
 
 fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
@@ -135,36 +120,23 @@ fn publication_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     Ok((schema, descriptor))
 }
 
-fn schema_content(target: Target) -> Result<String, String> {
-    match target {
-        Target::LegacyWire => Ok(format!(
-            "{}\n",
-            wxc_common::wire::generate_config_schema_json()
-        )),
-        Target::Contract(version) => {
-            let (schema, _) = development_schema(version)?;
-            let root = schema
-                .as_object()
-                .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
-            Ok(format!(
-                "{}\n",
-                mxc_schema_support::render_root_ordered(root)
-            ))
-        }
-    }
+fn schema_content(version: ContractVersion) -> Result<String, String> {
+    let (schema, _) = development_schema(version)?;
+    let root = schema
+        .as_object()
+        .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
+    Ok(format!(
+        "{}\n",
+        mxc_schema_support::render_root_ordered(root)
+    ))
 }
 
-fn types_content(target: Target) -> Result<String, String> {
-    match target {
-        Target::LegacyWire => Ok(wxc_common::wire::generate_sdk_types_ts()),
-        Target::Contract(version) => {
-            let (schema, _) = development_schema(version)?;
-            Ok(mxc_schema_support::emit_contract_ts(
-                &schema,
-                version.as_str(),
-            ))
-        }
-    }
+fn types_content(version: ContractVersion) -> Result<String, String> {
+    let (schema, _) = development_schema(version)?;
+    Ok(mxc_schema_support::emit_contract_ts(
+        &schema,
+        version.as_str(),
+    ))
 }
 
 fn write_artifact(content: &str, path: Option<&Path>, label: &str) -> Result<(), String> {

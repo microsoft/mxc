@@ -202,7 +202,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 26 | **Add backend-specific `BubblewrapConfig`** | No per-backend config block today (every other backend has one). Needed for seccomp, cgroups, custom binds. `schemas/dev/mxc-config.schema.0.9.0-dev.json` — Bwrap has no entry at `lxc:` / `wslc:` equivalent. | M |
+| 26 | **Add backend-specific `BubblewrapConfig`** | No per-backend config block today (every other backend has one). Needed for seccomp, cgroups, custom binds. `schemas/dev/mxc-config.schema.0.10.0-alpha.json` — Bwrap has no entry at `lxc:` / `wslc:` equivalent. | M |
 
 > **More context for item #26.** Table-stakes infrastructure for seccomp (#27), cgroups (#28), and promote-to-stable (#29). Same shape as `LxcConfig` expansion: schema entry, `RawBubblewrap` in `config_parser.rs`, validated `BubblewrapConfig` in `models.rs`, plumbing through `bwrap_command.rs`, SDK type — ~10-15 file PR.
 

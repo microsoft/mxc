@@ -18,21 +18,9 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use crate::configs::process_container;
 use crate::configs::ProcessContainer;
-#[cfg(test)]
-use crate::configs::{CaptureDenials, CaptureDenialsMode};
-#[cfg(test)]
-use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, TelemetryConfig};
-#[cfg(test)]
-use wxc_common::mxc_error::MxcError;
 
-#[cfg(all(test, target_os = "linux"))]
-use network::has_host_rules;
-#[cfg(test)]
-use network::{proxy_to_wire, select_rolling_network_format, NetworkFormat};
 pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
     NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
@@ -450,19 +438,6 @@ pub enum ClipboardPolicy {
     All,
 }
 
-impl ClipboardPolicy {
-    /// Wire-format value accepted by the config parser.
-    #[cfg(test)]
-    fn wire(self) -> &'static str {
-        match self {
-            ClipboardPolicy::None => "none",
-            ClipboardPolicy::Read => "read",
-            ClipboardPolicy::Write => "write",
-            ClipboardPolicy::All => "all",
-        }
-    }
-}
-
 /// Filesystem section of a [`SandboxPolicy`].
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -578,40 +553,6 @@ impl Default for WslcSection {
             storage_path: None,
             port_mappings: Vec::new(),
         }
-    }
-}
-
-impl WslcSection {
-    /// The wire-format top-level `wslc` object. Optional fields are omitted
-    /// rather than sent as `null` so the parser applies its own defaults.
-    #[cfg(test)]
-    fn wire(&self) -> serde_json::Value {
-        use serde_json::json;
-        let mut wslc = json!({ "image": self.image, "gpu": self.gpu });
-        if let Some(tar) = &self.image_tar_path {
-            wslc["imageTarPath"] = json!(tar);
-        }
-        if let Some(cpu) = self.cpu_count {
-            wslc["cpuCount"] = json!(cpu);
-        }
-        if let Some(memory) = self.memory_mb {
-            wslc["memoryMb"] = json!(memory);
-        }
-        if let Some(storage) = &self.storage_path {
-            wslc["storagePath"] = json!(storage);
-        }
-        if !self.port_mappings.is_empty() {
-            wslc["portMappings"] = json!(self
-                .port_mappings
-                .iter()
-                .map(|(windows_port, container_port)| json!({
-                    "windowsPort": windows_port,
-                    "containerPort": container_port,
-                    "protocol": "tcp",
-                }))
-                .collect::<Vec<_>>());
-        }
-        wslc
     }
 }
 
@@ -871,392 +812,23 @@ pub fn build_request_with_containment(
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 #[cfg(test)]
-pub(crate) fn build_wire_config(
-    policy: &SandboxPolicy,
-    containment: &Containment,
-    script: &str,
-    container_name: Option<&str>,
-) -> Result<serde_json::Value, MxcError> {
-    build_wire_config_with_network_format(policy, containment, script, container_name)
-        .map(|(config, _)| config)
-}
-
-#[cfg(test)]
-fn build_wire_config_with_network_format(
-    policy: &SandboxPolicy,
-    containment: &Containment,
-    script: &str,
-    container_name: Option<&str>,
-) -> Result<(serde_json::Value, NetworkFormat), MxcError> {
-    use serde_json::json;
-
-    if script.is_empty() {
-        return Err(MxcError::malformed_request("script parameter is required"));
-    }
-
-    let container_id = container_name
-        .map(str::to_string)
-        .unwrap_or_else(wxc_common::id::mint_random_token);
-
-    let fs = policy.filesystem.clone().unwrap_or_default();
-    let clear_policy = fs.clear_policy_on_exit.unwrap_or(true);
-
-    let mut config = json!({
-        "version": policy.version,
-        "containerId": container_id,
-        "lifecycle": { "destroyOnExit": true, "preservePolicy": !clear_policy },
-        "process": { "commandLine": script, "timeout": policy.timeout_ms.unwrap_or(0) },
-        "filesystem": {
-            "readwritePaths": fs.readwrite_paths,
-            "readonlyPaths": fs.readonly_paths,
-            "deniedPaths": fs.denied_paths,
-        },
-    });
-    // `ui` is emitted only when the caller actually supplied one.
-    //
-    // The parser records presence as `ContainerPolicy::ui_specified`, and
-    // backends that cannot honor a UI posture refuse the section on presence
-    // rather than by value — a `UiPolicy` whose fields all sit at their
-    // defaults is full lockdown, so an explicit lockdown and an absent block
-    // are indistinguishable once the values are read. Emitting a synthesized
-    // `ui` unconditionally would therefore make every request built through
-    // this path look like it asked for a UI posture, and those backends would
-    // refuse requests whose caller never mentioned `ui` at all.
-    if let Some(ui) = policy.ui.as_ref() {
-        config["ui"] = json!({
-            "disable": !ui.allow_windows,
-            "clipboard": ui.clipboard.wire(),
-            "injection": ui.allow_input_injection,
-        });
-    }
-
-    // Mirror the SDK's host-rule validation: Unix backends accept host lists
-    // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
-    // skips this gate so the config parser can reject its (unenforceable)
-    // per-host filtering with a precise message instead of the generic
-    // require-`allowOutbound` error here.
-    // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
-    // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
-    // anyway to stay consistent with the SDK rather than diverging — keeping the
-    // two ports reconciled matters more than being stricter here.
-    let accepts_host_rules_without_outbound = match containment {
-        Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
-        Containment::ProcessContainer(_) => false,
-        Containment::Wslc(_) => true,
-        Containment::IsolationSession => false,
-    };
-
-    let has_process_container_network = match containment {
-        Containment::ProcessContainer(process_container) => process_container
-            .network
-            .as_ref()
-            .and_then(|network| network.allowed_proxy_peer.as_deref())
-            .is_some_and(|peer| !peer.trim().is_empty()),
-        _ => false,
-    };
-    let network_format = select_rolling_network_format(
-        &policy.version,
-        policy.network.as_ref(),
-        has_process_container_network,
-    )?;
-
-    if let Some(net) = &policy.network {
-        if matches!(net.proxy, Some(ProxySpec::BuiltinTestServer)) {
-            return Err(MxcError::malformed_request(
-                "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
-            ));
-        }
-        if !accepts_host_rules_without_outbound
-            && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
-            && !net.allow_outbound
-        {
-            return Err(MxcError::malformed_request(
-                "allowedHosts/blockedHosts require allowOutbound to be true",
-            ));
-        }
-    }
-
-    match network_format {
-        NetworkFormat::Directional => {
-            if let Some(net) = &policy.network {
-                if net.egress.is_some() || net.ingress.is_some() {
-                    let mut network = serde_json::Map::new();
-                    if let Some(egress) = &net.egress {
-                        network.insert(
-                            "egress".to_string(),
-                            serde_json::to_value(egress).map_err(|error| {
-                                MxcError::malformed_request(format!(
-                                    "failed to serialize network.egress: {error}"
-                                ))
-                            })?,
-                        );
-                    }
-                    if let Some(ingress) = &net.ingress {
-                        network.insert(
-                            "ingress".to_string(),
-                            serde_json::to_value(ingress).map_err(|error| {
-                                MxcError::malformed_request(format!(
-                                    "failed to serialize network.ingress: {error}"
-                                ))
-                            })?,
-                        );
-                    }
-                    config["network"] = serde_json::Value::Object(network);
-                }
-                if let Some(runtime_config) = &net.runtime_config {
-                    config["runtimeConfig"] =
-                        serde_json::to_value(runtime_config).map_err(|error| {
-                            MxcError::malformed_request(format!(
-                                "failed to serialize runtimeConfig: {error}"
-                            ))
-                        })?;
-                }
-            }
-        }
-        NetworkFormat::Legacy => {
-            if let Some(net) = &policy.network {
-                let mut network = json!({
-                    "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
-                    "allowLocalNetwork": net.allow_local_network,
-                    "allowedHosts": net.allowed_hosts,
-                    "blockedHosts": net.blocked_hosts,
-                });
-                if let Some(proxy) = &net.proxy {
-                    network["proxy"] = proxy_to_wire(proxy);
-                }
-                config["network"] = network;
-            } else {
-                config["network"] = json!({ "defaultPolicy": "block" });
-            }
-        }
-    }
-
-    match containment {
-        Containment::Process => {
-            apply_host_process_backend(&mut config, policy, network_format, &container_id)?
-        }
-        Containment::ProcessContainer(process_container) => process_container::apply(
-            &mut config,
-            policy,
-            process_container,
-            network_format,
-            "processcontainer",
-        )?,
-        Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
-        Containment::IsolationSession => {
-            config["containment"] = serde_json::json!("isolation_session");
-        }
-    }
-    Ok((config, network_format))
-}
-
-/// Apply backend-specific fields, resolving the abstract `Process` intent the
-/// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
-/// ProcessContainer on Windows — which itself resolves to BaseContainer or
-/// AppContainer at runtime by host capability).
-#[cfg(test)]
-fn apply_host_process_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    network_format: NetworkFormat,
-    container_id: &str,
-) -> Result<(), MxcError> {
-    use serde_json::json;
-
-    // Resolve the abstract Process intent per host.
-    config["containment"] = json!("process");
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = (policy, network_format, container_id);
-        apply_linux_network_policy(config);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (policy, network_format, container_id);
-        config["containment"] = json!("seatbelt");
-        if config.get("seatbelt").is_none() {
-            config["seatbelt"] = json!({});
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let _ = container_id;
-        process_container::apply(
-            config,
-            policy,
-            &ProcessContainer::default(),
-            network_format,
-            "process",
-        )?;
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (policy, network_format, container_id);
-    }
-
-    Ok(())
-}
-
-/// Apply the WSL Container backend fields — the Rust port of the SDK's
-/// `buildWslcContainerConfig`. WSLC derives its networking mode (`None` /
-/// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
-/// its settings live under top-level `wslc` while the backend remains
-/// experimental.
-#[cfg(test)]
-fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
-    use serde_json::json;
-    config["containment"] = json!("wslc");
-    config["experimental"] = json!({ "wslc": wslc.wire() });
-}
-
-/// Promote network enforcement to `firewall` when host rules are present and
-/// no cooperative proxy is configured — the Linux counterpart of the SDK's
-/// `applyLinuxNetworkPolicy`.
-#[cfg(all(test, target_os = "linux"))]
-fn apply_linux_network_policy(config: &mut serde_json::Value) {
-    use serde_json::json;
-    let Some(network) = config.get_mut("network") else {
-        return;
-    };
-    let has_proxy = network.get("proxy").is_some();
-    if has_host_rules(network) && !has_proxy {
-        network["enforcementMode"] = json!("firewall");
-    }
-}
-
-#[cfg(test)]
 mod tests {
     const TEST_COMMAND: &str = "echo hello";
-
-    #[test]
-    fn exact_contract_bridge_is_available_to_policy_builders() {
-        let request: mxc_config_contract::published::v0_7_0_alpha::Request = serde_json::from_str(
-            r#"{
-                    "version": "0.7.0-alpha",
-                    "process": {"commandLine": "echo hello"}
-                }"#,
-        )
-        .unwrap();
-        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-
-        let execution = wxc_common::config_parser::load_one_shot_request_from_contract(
-            wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(request)),
-            &mut logger,
-        )
-        .unwrap();
-
-        assert_eq!(execution.schema_version, "0.7.0-alpha");
-        assert_eq!(execution.script_code, "echo hello");
-    }
-
-    fn assert_exact_builder_matches_wire_round_trip(
-        policy: &SandboxPolicy,
-        containment: &Containment,
-    ) {
-        let exact =
-            build_request_with_containment(policy, containment, TEST_COMMAND, Some("builder-test"))
-                .unwrap();
-        let config =
-            super::build_wire_config(policy, containment, TEST_COMMAND, Some("builder-test"))
-                .unwrap();
-        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut value = serde_json::to_value(&config).unwrap();
-        if policy.version == "0.10.0-alpha" {
-            let root = value.as_object_mut().unwrap();
-            if let Some(serde_json::Value::Object(mut experimental)) = root.remove("experimental") {
-                for (legacy, field) in [
-                    ("test", "test"),
-                    ("windows_sandbox", "windowsSandbox"),
-                    ("wslc", "wslc"),
-                ] {
-                    if let Some(value) = experimental.remove(legacy) {
-                        root.insert(field.to_string(), value);
-                    }
-                }
-            }
-        }
-        let json = serde_json::to_string(&value).unwrap();
-        let round_trip = match wxc_common::config_parser::load_mxc_request_from_json(
-            &json,
-            &mut logger,
-        )
-        .unwrap()
-        {
-            wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
-            wxc_common::state_aware_request::MxcRequest::StateAware(_) => {
-                panic!("typed one-shot policy produced a state-aware request")
-            }
-        };
-
-        assert_eq!(
-            serde_json::to_value(&exact.inner).unwrap(),
-            serde_json::to_value(&round_trip).unwrap(),
-            "{}",
-            policy.version
-        );
-
-        let exact_policy = &exact.inner.policy;
-        let round_trip_policy = &round_trip.policy;
-        assert_eq!(
-            exact_policy.network_specified, round_trip_policy.network_specified,
-            "{}: network presence",
-            policy.version
-        );
-        assert_eq!(
-            exact_policy.network_mode_specified, round_trip_policy.network_mode_specified,
-            "{}: network mode presence",
-            policy.version
-        );
-        assert_eq!(
-            exact_policy.runtime_network_proxy_specified,
-            round_trip_policy.runtime_network_proxy_specified,
-            "{}: runtime proxy presence",
-            policy.version
-        );
-        assert_eq!(
-            exact_policy.ui_specified, round_trip_policy.ui_specified,
-            "{}: UI presence",
-            policy.version
-        );
-        assert_eq!(
-            exact_policy.network_proxy.builtin_test_server,
-            round_trip_policy.network_proxy.builtin_test_server,
-            "{}: built-in proxy",
-            policy.version
-        );
-        match (
-            exact_policy.network_proxy.address.as_ref(),
-            round_trip_policy.network_proxy.address.as_ref(),
-        ) {
-            (Some(exact), Some(round_trip)) => {
-                assert_eq!(exact.address, round_trip.address, "{}", policy.version);
-                assert_eq!(exact.port, round_trip.port, "{}", policy.version);
-                assert_eq!(
-                    exact.original_url, round_trip.original_url,
-                    "{}",
-                    policy.version
-                );
-            }
-            (None, None) => {}
-            (exact, round_trip) => panic!(
-                "{}: proxy address mismatch: exact={exact:?}, round-trip={round_trip:?}",
-                policy.version
-            ),
-        }
-    }
 
     fn host_process_versions() -> &'static [&'static str] {
         #[cfg(target_os = "macos")]
         {
-            &["0.7.0-alpha", "0.8.0-alpha", "0.10.0-alpha"]
+            &["0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha", "0.10.0-alpha"]
         }
         #[cfg(not(target_os = "macos"))]
         {
-            &["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.10.0-alpha"]
+            &[
+                "0.6.0-alpha",
+                "0.7.0-alpha",
+                "0.8.0-alpha",
+                "0.9.0-alpha",
+                "0.10.0-alpha",
+            ]
         }
     }
 
@@ -1310,153 +882,6 @@ mod tests {
         assert!(runtime_only.inner.policy.runtime_network_proxy_specified);
     }
 
-    #[test]
-    fn exact_policy_builder_matches_the_wire_round_trip_for_every_host_supported_version() {
-        for version in host_process_versions() {
-            let policy = SandboxPolicy {
-                version: (*version).to_string(),
-                filesystem: Some(super::FilesystemSection {
-                    readwrite_paths: vec!["C:\\work".to_string()],
-                    readonly_paths: vec!["C:\\tools".to_string()],
-                    denied_paths: vec!["C:\\secrets".to_string()],
-                    clear_policy_on_exit: Some(false),
-                }),
-                network: Some(if *version == "0.10.0-alpha" {
-                    NetworkSection {
-                        egress: Some(NetworkEgressSection {
-                            default: Some(NetworkAction::Allow),
-                            ..Default::default()
-                        }),
-                        ingress: Some(NetworkIngressSection {
-                            default: Some(NetworkAction::Allow),
-                            host_loopback: Some(NetworkAction::Allow),
-                        }),
-                        ..Default::default()
-                    }
-                } else {
-                    NetworkSection {
-                        allow_outbound: true,
-                        allow_local_network: true,
-                        ..Default::default()
-                    }
-                }),
-                ui: Some(super::UiSection {
-                    allow_windows: true,
-                    clipboard: super::ClipboardPolicy::Read,
-                    allow_input_injection: false,
-                }),
-                timeout_ms: Some(5000),
-            };
-            assert_exact_builder_matches_wire_round_trip(&policy, &Containment::Process);
-        }
-    }
-
-    #[test]
-    fn exact_directional_policy_builder_matches_the_wire_oracle() {
-        for version in ["0.8.0-alpha", "0.10.0-alpha"] {
-            let policy = SandboxPolicy {
-                version: version.to_string(),
-                filesystem: None,
-                network: Some(NetworkSection {
-                    egress: Some(NetworkEgressSection {
-                        default: Some(NetworkAction::Deny),
-                        allow: Some(vec![NetworkRuleSection {
-                            to: Some(vec![NetworkPeerSection {
-                                cidr: "10.0.0.0/8".to_string(),
-                                except: Some(vec!["10.1.0.0/16".to_string()]),
-                            }]),
-                            ports: Some(vec![NetworkPortSection {
-                                protocol: Some(NetworkProtocol::Tcp),
-                                port: Some(8000),
-                                end_port: Some(8010),
-                            }]),
-                        }]),
-                        deny: Some(vec![NetworkRuleSection {
-                            to: Some(vec![NetworkPeerSection::new("192.0.2.0/24")]),
-                            ports: Some(vec![NetworkPortSection {
-                                protocol: Some(NetworkProtocol::Udp),
-                                port: Some(53),
-                                end_port: None,
-                            }]),
-                        }]),
-                    }),
-                    ingress: Some(NetworkIngressSection {
-                        default: Some(NetworkAction::Deny),
-                        host_loopback: Some(NetworkAction::Allow),
-                    }),
-                    ..Default::default()
-                }),
-                ui: None,
-                timeout_ms: None,
-            };
-            assert_exact_builder_matches_wire_round_trip(
-                &policy,
-                &Containment::ProcessContainer(ProcessContainer::default()),
-            );
-
-            let proxy_policy = SandboxPolicy {
-                version: version.to_string(),
-                filesystem: None,
-                network: Some(NetworkSection {
-                    egress: Some(NetworkEgressSection {
-                        default: Some(NetworkAction::Deny),
-                        ..Default::default()
-                    }),
-                    ingress: Some(NetworkIngressSection {
-                        default: Some(NetworkAction::Allow),
-                        host_loopback: Some(NetworkAction::Deny),
-                    }),
-                    runtime_config: Some(RuntimeConfigSection {
-                        network_proxy: Some("http://127.0.0.1:8080".to_string()),
-                    }),
-                    ..Default::default()
-                }),
-                ui: None,
-                timeout_ms: None,
-            };
-            let proxy_containment = Containment::ProcessContainer(ProcessContainer {
-                network: Some(crate::configs::ProcessContainerNetwork {
-                    allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-                }),
-                ..ProcessContainer::default()
-            });
-
-            assert_exact_builder_matches_wire_round_trip(&proxy_policy, &proxy_containment);
-        }
-    }
-
-    #[test]
-    fn exact_wslc_builder_matches_the_wire_oracle_with_all_options() {
-        let policy = SandboxPolicy {
-            version: "0.10.0-alpha".to_string(),
-            filesystem: None,
-            network: Some(NetworkSection {
-                egress: Some(NetworkEgressSection {
-                    default: Some(NetworkAction::Allow),
-                    ..Default::default()
-                }),
-                ingress: Some(NetworkIngressSection {
-                    default: Some(NetworkAction::Allow),
-                    host_loopback: Some(NetworkAction::Allow),
-                }),
-                ..Default::default()
-            }),
-            ui: None,
-            timeout_ms: Some(12_345),
-        };
-        let containment = Containment::Wslc(WslcSection {
-            image: "python:3.12".to_string(),
-            image_tar_path: Some("C:\\images\\python.tar".to_string()),
-            cpu_count: Some(2),
-            memory_mb: Some(2048),
-            gpu: true,
-            storage_path: Some("C:\\wslc-store".to_string()),
-            port_mappings: vec![(8080, 80)],
-        });
-
-        assert_exact_builder_matches_wire_round_trip(&policy, &containment);
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn exact_v0_6_policy_builder_rejects_seatbelt_host_process() {
@@ -1478,8 +903,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_policy_builder_rejects_development_containment_before_v0_9() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+    fn exact_policy_builder_rejects_development_containment_before_v0_10() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
             let policy = SandboxPolicy {
                 version: version.to_string(),
                 filesystem: None,
@@ -1538,42 +963,6 @@ mod tests {
     // Policies are built from JSON rather than a literal so the "caller said
     // nothing about ui" case is expressed the way a real caller expresses it.
     #[test]
-    fn wire_config_omits_ui_when_the_caller_supplied_none() {
-        let policy: super::SandboxPolicy =
-            serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
-        assert!(policy.ui.is_none(), "precondition: no ui supplied");
-
-        let config =
-            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
-                .expect("minimal policy builds a wire config");
-
-        assert!(
-            config.get("ui").is_none(),
-            "wire config synthesized a `ui` block for a caller that supplied none: {config}"
-        );
-    }
-
-    #[test]
-    fn wire_config_emits_ui_when_the_caller_supplied_one() {
-        // An explicitly-supplied lockdown `ui` — value-identical to the old
-        // synthesized block, which is exactly why presence is what matters.
-        let policy: super::SandboxPolicy =
-            serde_json::from_str(r#"{ "version": "0.7.0-alpha", "ui": {} }"#)
-                .expect("policy with ui parses");
-        assert!(policy.ui.is_some(), "precondition: ui supplied");
-
-        let config =
-            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
-                .expect("policy with ui builds a wire config");
-
-        assert!(
-            config.get("ui").is_some(),
-            "wire config dropped a `ui` block the caller supplied: {config}"
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
     fn powershell_policy_grants_system_drive_root() {
         use super::powershell_policy;
         use std::fs;
@@ -1622,12 +1011,10 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
-        NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection, SandboxPolicy,
+        build_request, NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+        ProxySpec, RuntimeConfigSection, SandboxPolicy,
     };
-    use wxc_common::wire;
-
+    use crate::configs::{CaptureDenials, CaptureDenialsMode};
     fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
             version: "0.7.0-alpha".to_string(),
@@ -2056,39 +1443,6 @@ mod tests {
         assert!(request.inner.policy.capture_denials.is_none());
     }
 
-    // The emitted `processContainer.captureDenials` object is Windows-gated, so
-    // pin its shape against the wire type it has to satisfy — `deny_unknown_fields`
-    // there turns a misspelled key or mode into a failure here rather than on a
-    // Windows host.
-    #[test]
-    fn emitted_capture_denials_json_matches_the_wire_contract() {
-        for (mode, expected) in [
-            (CaptureDenialsMode::Block, wire::CaptureDenialsMode::Block),
-            (CaptureDenialsMode::Allow, wire::CaptureDenialsMode::Allow),
-        ] {
-            let emitted = serde_json::json!({
-                "mode": mode.wire(),
-                "outputPath": Some("/tmp/denials.json"),
-                "retainEtl": true,
-            });
-            let parsed: wire::CaptureDenials =
-                serde_json::from_value(emitted).expect("emitted object satisfies the wire type");
-
-            assert_eq!(parsed.mode, Some(expected));
-            assert_eq!(parsed.output_path.as_deref(), Some("/tmp/denials.json"));
-            assert_eq!(parsed.retain_etl, Some(true));
-        }
-
-        let omitted = serde_json::json!({
-            "mode": CaptureDenialsMode::Block.wire(),
-            "retainEtl": false,
-        });
-        let parsed: wire::CaptureDenials =
-            serde_json::from_value(omitted).expect("omitted outputPath satisfies the wire type");
-        assert!(parsed.output_path.is_none());
-        assert_eq!(parsed.retain_etl, Some(false));
-    }
-
     // `captureDenials` and `network.proxy` are independent: capture records
     // ungranted access checks, while the proxy is a cooperative egress route.
     // The shared parser owns the wire contract and its `captureDenials` branch
@@ -2112,7 +1466,7 @@ mod tests {
             },
         });
 
-        let mut logger = super::Logger::new(super::Mode::Buffer);
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
         let json = serde_json::to_string(&config).unwrap();
         let request =
             match wxc_common::config_parser::load_mxc_request_from_json(&json, &mut logger)
@@ -2233,7 +1587,7 @@ mod tests {
         assert_eq!(request.inner.containment, ContainmentBackend::Wslc);
         let config = request
             .inner
-            .experimental
+            .development
             .wslc
             .as_ref()
             .expect("wslc config");
@@ -2261,7 +1615,7 @@ mod tests {
         .expect("build_request_with_containment");
         let config = request
             .inner
-            .experimental
+            .development
             .wslc
             .as_ref()
             .expect("wslc config");
@@ -2385,17 +1739,6 @@ mod tests {
         );
     }
 
-    /// The canonical unrestricted-network acknowledgment the IsolationSession
-    /// backend requires: outbound allowed, local network allowed, no host
-    /// rules, no proxy.
-    fn isolation_session_network() -> NetworkSection {
-        NetworkSection {
-            allow_outbound: true,
-            allow_local_network: true,
-            ..Default::default()
-        }
-    }
-
     fn isolation_session_directional_network() -> NetworkSection {
         NetworkSection {
             egress: Some(NetworkEgressSection {
@@ -2408,41 +1751,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn isolation_session_names_the_backend_and_carries_no_section() {
-        // The one-shot surface takes no backend configuration at all, so the
-        // wire config must name the backend and add nothing else — unlike
-        // WSLc, which also writes a top-level `wslc` block.
-        let policy = development_policy();
-        let config =
-            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
-                .expect("build_wire_config");
-        assert_eq!(config["containment"], "isolation_session");
-        assert!(
-            config.get("experimental").is_none(),
-            "IsolationSession takes no backend configuration, got: {config}"
-        );
-    }
-
-    #[test]
-    fn isolation_session_rejects_the_removed_legacy_acknowledgment() {
-        let policy = development_policy_with_network(isolation_session_network());
-        let legacy =
-            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
-                .expect("the test-only rolling builder retains legacy characterization");
-        assert_eq!(legacy["network"]["defaultPolicy"], "allow");
-        let error = build_request_with_containment(
-            &policy,
-            &Containment::IsolationSession,
-            TEST_COMMAND,
-            None,
-        )
-        .expect_err("legacy network values cannot acknowledge v0.9 networking");
-        assert!(error
-            .message
-            .contains("schema 0.10.0-alpha no longer accepts legacy"));
     }
 
     #[test]

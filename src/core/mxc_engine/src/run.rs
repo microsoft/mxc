@@ -214,7 +214,7 @@ fn resolve_runner_inner_windows(
                 }
                 let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
                 let wslc_config = request
-                    .experimental
+                    .development
                     .wslc
                     .as_ref()
                     .cloned()
@@ -269,7 +269,7 @@ fn resolve_runner_inner_windows(
                     "Windows Sandbox is an experimental feature. Use --experimental flag.",
                 ));
             }
-            if let Some(ws) = &request.experimental.windows_sandbox {
+            if let Some(ws) = &request.development.windows_sandbox {
                 let default = wxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
@@ -440,13 +440,13 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
-    use wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
+    use wxc_common::models::{DevelopmentConfig, WindowsSandboxConfig};
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {
             containment: ContainmentBackend::WindowsSandbox,
             experimental_enabled: true,
-            experimental: ExperimentalConfig {
+            development: DevelopmentConfig {
                 windows_sandbox: config,
                 ..Default::default()
             },
