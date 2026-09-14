@@ -4,13 +4,13 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import {
-  inProcessUnsupportedReason,
-  serializeNativeRunRequest,
-} from '../../src/native-request.js';
+  bindingRequestUnsupportedReason,
+  prepareBindingSandboxRequest,
+} from '../../src/bindings/request.js';
 
-describe('native run request adapter', () => {
-  it('serializes the existing policy and invocation shape', () => {
-    const json = serializeNativeRunRequest({
+describe('mxc_ffi binding request', () => {
+  it('builds the same typed request shape as the .NET binding', () => {
+    const request = prepareBindingSandboxRequest({
       script: 'echo hello',
       policy: {
         version: '0.9.0-alpha',
@@ -25,7 +25,7 @@ describe('native run request adapter', () => {
       experimental: true,
     });
 
-    assert.deepStrictEqual(JSON.parse(json), {
+    assert.deepStrictEqual(request, {
       policy: {
         version: '0.9.0-alpha',
         filesystem: { readonlyPaths: ['C:\\input'] },
@@ -45,25 +45,41 @@ describe('native run request adapter', () => {
   });
 
   it('preserves explicit false and empty collections', () => {
-    const request = JSON.parse(serializeNativeRunRequest({
+    const request = prepareBindingSandboxRequest({
       script: 'echo hello',
       policy: {
         version: '0.9.0-alpha',
         network: { allowOutbound: false, allowedHosts: [] },
       },
-    }));
+    });
 
-    assert.strictEqual(request.policy.network.allowOutbound, false);
-    assert.deepStrictEqual(request.policy.network.allowedHosts, []);
+    assert.strictEqual(request.policy.network!.allowOutbound, false);
+    assert.deepStrictEqual(request.policy.network!.allowedHosts, []);
     assert.strictEqual(request.experimental, false);
   });
 
-  it('identifies policies that require the executor path', () => {
-    assert.match(inProcessUnsupportedReason({
+  it('moves ProcessContainer-specific policy onto tagged containment', () => {
+    const request = prepareBindingSandboxRequest({
+      script: 'echo hello',
+      policy: {
+        version: '0.9.0-alpha',
+        processContainer: { network: { allowedProxyPeer: 'proxy' } },
+      },
+    });
+
+    assert.deepStrictEqual(request.containment, {
+      type: 'processContainer',
+      network: { allowedProxyPeer: 'proxy' },
+    });
+    assert.strictEqual('processContainer' in request.policy, false);
+  });
+
+  it('identifies testing-only policy that requires the executor path', () => {
+    assert.strictEqual(bindingRequestUnsupportedReason({
       version: '0.9.0-alpha',
       processContainer: { network: { allowedProxyPeer: 'proxy' } },
-    })!, /processContainer/);
-    assert.match(inProcessUnsupportedReason({
+    }), null);
+    assert.match(bindingRequestUnsupportedReason({
       version: '0.9.0-alpha',
       network: { proxy: { builtinTestServer: true } },
     })!, /testing-feature/);
