@@ -408,9 +408,8 @@ uses directional fields on a pre-0.8 schema is refused at deserialization —
 the declared version selects a closed contract with no directional fields, so
 the error names the unknown field at `network.egress`. Callers that build an
 `ExecutionRequest` programmatically skip the parser and hit the backend's own
-twin of this check, which reports
-`network.egress, network.ingress, runtimeConfig, and processContainer.network
-require schema version 0.8 or later`.
+twin of this check, which reports `Bubblewrap: network.egress/network.ingress
+require schema 0.8.0-alpha or later.`
 
 A config carrying *any* legacy field takes the legacy path described above and
 is byte-identical to what it was before directional support existed. This
