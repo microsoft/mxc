@@ -118,6 +118,26 @@ Versioned config JSON still carries its schema version because JSON has no
 named compile-time type. That does not imply a `version` member on the SDK
 structures.
 
+### Presence semantics
+
+Any field for which omission means "no opinion" must preserve that state
+separately from an explicit value. In particular, optional booleans are
+tri-state: unset, `false`, or `true`. Treating unset as `false` would discard
+caller intent and could change behavior when defaults evolve.
+
+Each SDK expresses the same semantics idiomatically:
+
+- Rust uses `Option<bool>`.
+- C# uses `bool?`.
+- TypeScript uses an optional `boolean` property and distinguishes property
+  absence from an explicit `false`.
+- The C ABI uses an explicit presence field plus the Boolean value; it must not
+  reserve a Boolean value as an unset sentinel.
+
+The same rule applies to optional numbers, enums, strings, and collections
+whenever absence is semantically different from an explicit zero, empty value,
+or empty collection.
+
 ### Request shape
 
 `SandboxRequestV1` is an SDK request, not a copy of the executor's
