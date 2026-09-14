@@ -76,6 +76,10 @@ flowchart TB
     JJ --> JP --> SR
     SR --> ER --> DD
     DD --> OO[Strongly typed output or handle]
+    classDef new fill:#0f5132,color:#fff
+    classDef same fill:#343a40,color:#fff
+    class RR,CC,NN,KF,FF,OO new
+    class SR,ER,DD,JJ,JP same
 ```
 
 The normal SDK path is linear and typed. Each language supplies its idiomatic
@@ -87,22 +91,84 @@ JSON remains useful for config files, the executor, and callers that begin with
 JSON. That path parses JSON once into the versioned typed representation before
 joining the same SDK/engine path.
 
-## Versioned request types
+## Versioned request type
 
-Rust, C#, and Node expose equivalent, idiomatic request and policy types for a
-contract generation, such as `SandboxRequestV1` and `SandboxPolicyV1`.
+Rust, C#, and Node expose one equivalent, idiomatic `SandboxRequestV1` contract.
+Supporting section and backend types are part of that request generation; there
+is no separate versioned policy contract.
 
 - Compatible changes append optional fields to V1.
 - Removing a field or changing its meaning requires a new V2 type.
 - Presence is preserved where omission differs from an explicit default.
   Optional booleans and similar values must represent unset, true, and false.
-- Host-controlled execution options remain outside the sandbox policy.
+- Host-controlled invocation options remain outside `SandboxRequestV1`.
 - Testing-only CLI authorization, including `--allow-testing-features`, remains
   unavailable through the in-process SDKs.
 
 For the first implementation, update the Rust, C#, and Node types together and
 gate their parity in CI. Generating the language projections from one source of
 truth is a follow-up; V1 does not add another interface-definition language.
+
+### Request shape
+
+`SandboxRequestV1` is an SDK request, not a copy of the executor's
+`ContainerConfig`. Its shape is deliberately easy to represent as Rust structs
+and enums, C# records, TypeScript interfaces and discriminated unions, and a
+tagged C ABI representation.
+
+```typescript
+interface SandboxRequestV1 {
+  version: string;
+  command: string;
+  workingDirectory?: string;
+  environment?: Record<string, string>;
+  timeoutMs?: number;
+
+  filesystem?: FilesystemV1;
+  network?: NetworkV1;
+  ui?: UiV1;
+  telemetry?: TelemetryV1;
+
+  containment?: ContainmentV1;
+}
+
+type ContainmentV1 =
+  // Portable intents resolved by the engine.
+  | { type: "process" }
+  | { type: "vm" }
+  | { type: "microvm" }
+
+  // Concrete backend overrides. Their config contains only settings unique to
+  // that backend; shared filesystem, network, and UI policy stays top-level.
+  | { type: "processContainer"; config?: ProcessContainerOptionsV1 }
+  | { type: "windowsSandbox"; config?: WindowsSandboxOptionsV1 }
+  | { type: "bubblewrap" }
+  | { type: "lxc"; config?: LxcOptionsV1 }
+  | { type: "seatbelt"; config?: SeatbeltOptionsV1 }
+  | { type: "wslc"; config?: WslcOptionsV1 }
+  | { type: "hyperlight"; config?: HyperlightOptionsV1 }
+  | { type: "isolationSession"; config?: IsolationSessionOptionsV1 };
+```
+
+The default containment is `{ type: "process" }`. It preserves the current
+portable Node behavior: callers ask for process isolation and the engine
+resolves it to ProcessContainer on Windows, Bubblewrap on Linux, and Seatbelt
+on macOS. The `vm` and `microvm` variants likewise express portable intent
+without selecting an implementation. A caller may instead choose a concrete
+backend when it needs that implementation or one of its unique settings.
+
+Shared intent does not move into backend configuration. Filesystem grants,
+network restrictions, UI restrictions, timeout, environment, and command stay
+at the request's top level and have the same meaning in every language.
+Backend-specific configuration contains only capabilities that cannot be
+expressed portably, such as ProcessContainer capabilities or a WSLC image.
+Backend validation must reject a shared field it cannot honor rather than
+ignore it.
+
+Using a tagged containment union also prevents disconnected combinations that
+a giant config permits. For example, a WSLC image can appear only on the
+`wslc` variant, not beside `{ type: "process" }`, while the common network
+section remains reusable for either choice.
 
 ## Proposed API shape
 
@@ -185,7 +251,7 @@ request back to JSON internally.
 
 | Scope | Decision |
 | --- | --- |
-| Add | Equivalent versioned request types in Rust, C#, Node, and `mxc_ffi`; a Koffi-based Node adapter. |
+| Add | Equivalent `SandboxRequestV1` types in Rust, C#, Node, and `mxc_ffi`; a Koffi-based Node adapter. |
 | Change | C# and Node one-shot run/spawn use the typed `mxc_ffi` request boundary. |
 | Keep | Existing parser, schemas, `SandboxRequest`, `ExecutionRequest`, engine validation, backends, outputs, and streaming handles. |
 | Avoid | JSON as the primary SDK or FFI input; binding-only `RequestSpec` JSON; a second Node-native implementation beside `mxc_ffi`. |
@@ -193,7 +259,7 @@ request back to JSON internally.
 
 ## Migration
 
-1. Define the V1 Rust request/policy contract and its normalization into
+1. Define the Rust `SandboxRequestV1` contract and its normalization into
    `SandboxRequest`.
 2. Add the equivalent typed V1 C representation and direct conversion in
    `mxc_ffi`.
