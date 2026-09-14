@@ -72,7 +72,10 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::models::{ExecutionRequest, ExperimentalConfig};
+use crate::models::{
+    ExecutionRequest, ExperimentalConfig, IsolationSessionProvisionConfig, WslcProvisionConfig,
+};
+use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
 /// Algorithm tag prefixed to the hex digest, so the algorithm can change
 /// without breaking a consumer that only does equality comparison.
@@ -91,28 +94,76 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
 }
 
 /// Compute a state-aware policy identity from the backend resolved from the
-/// lifecycle request and its phase-specific configuration.
+/// lifecycle request and its typed operation.
+///
+/// Only allow-listed provision fields enter the hash. An absent config remains
+/// JSON `null`, a present config with no fields remains `{}`, and explicit empty
+/// strings remain distinct, preserving identities for exact accepted requests.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
     backend: &str,
-    phase: &str,
-    phase_config: Option<&Value>,
+    operation: &StateAwareOperation,
 ) -> String {
     let mut projection = policy_projection(request);
     if let Value::Object(root) = &mut projection {
         root.insert("containment".into(), Value::String(backend.to_string()));
-        let mut config = phase_config.cloned().unwrap_or(Value::Null);
-        strip_keys(&mut config, &["user", "upn"]);
         root.insert(
             "stateAware".into(),
             serde_json::json!({
                 "backend": backend,
-                "phase": phase,
-                "config": config,
+                "phase": operation.phase().as_str(),
+                "config": state_aware_config_projection(operation),
             }),
         );
     }
     hash_canonical_json(&canonical_json(&projection))
+}
+
+/// Exhaustive matching forces new operation/config fields to be classified
+/// explicitly instead of accidentally hashing a newly added secret.
+fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
+    match operation {
+        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
+            IsolationSessionProvisionConfig { app_id },
+        ))) => {
+            let mut config = Map::new();
+            if let Some(app_id) = app_id {
+                config.insert("appId".into(), Value::String(app_id.clone()));
+            }
+            Value::Object(config)
+        }
+        StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
+            image,
+            image_tar_path,
+        }))) => {
+            let mut config = Map::new();
+            if let Some(image) = image {
+                config.insert("image".into(), Value::String(image.clone()));
+            }
+            if let Some(image_tar_path) = image_tar_path {
+                config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+            Value::Object(config)
+        }
+        StateAwareOperation::Provision(
+            StateAwareProvision::IsolationSession(None)
+            | StateAwareProvision::WindowsSandbox
+            | StateAwareProvision::Wslc(None),
+        ) => Value::Null,
+        // Sandbox IDs are not policy and can contain account identities.
+        StateAwareOperation::Start {
+            sandbox_id: _excluded_sandbox_id,
+        }
+        | StateAwareOperation::Exec {
+            sandbox_id: _excluded_sandbox_id,
+        }
+        | StateAwareOperation::Stop {
+            sandbox_id: _excluded_sandbox_id,
+        }
+        | StateAwareOperation::Deprovision {
+            sandbox_id: _excluded_sandbox_id,
+        } => Value::Null,
+    }
 }
 
 fn hash_canonical_json(canonical: &str) -> String {
@@ -253,34 +304,6 @@ fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
     out.insert("isolation_session".into(), Value::Null);
 
     Value::Object(out)
-}
-
-/// Recursively remove every object entry whose key is secret-bearing or listed
-/// explicitly.
-///
-/// Used to excise credential-bearing sub-objects from an otherwise
-/// blanket-serialized section, so the section's enforcement-relevant fields can
-/// still be hashed.
-fn strip_keys(value: &mut Value, keys: &[&str]) {
-    match value {
-        Value::Object(map) => {
-            map.retain(|key, _| {
-                !crate::config_deserialize::is_secret_path_field_ci(key)
-                    && !keys
-                        .iter()
-                        .any(|explicit| key.eq_ignore_ascii_case(explicit))
-            });
-            for child in map.values_mut() {
-                strip_keys(child, keys);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                strip_keys(item, keys);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// The enforcement-relevant, non-credential parts of the proxy configuration:
@@ -724,33 +747,247 @@ mod tests {
         assert_ne!(policy_hash(&changed), policy_hash(&more));
     }
 
-    #[test]
-    fn strip_keys_removes_nested_credential_objects() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(r#"{"a":{"user":{"wamToken":"x"},"keep":1},"b":[{"user":2}]}"#)
-                .expect("valid JSON");
-        strip_keys(&mut value, &["user"]);
-        assert_eq!(canonical_json(&value), r#"{"a":{"keep":1},"b":[{}]}"#);
+    fn parse_state_aware(json: &str) -> crate::state_aware_request::ParsedStateAwareRequest {
+        let mut logger = crate::logger::Logger::new(crate::logger::Mode::Buffer);
+        let parsed = crate::config_parser::load_mxc_request_from_json(json, &mut logger)
+            .expect("accepted exact state-aware request");
+        let crate::state_aware_request::MxcRequest::StateAware(parsed) = parsed else {
+            panic!("expected state-aware request");
+        };
+        parsed
+    }
+
+    fn parsed_state_aware_hash(json: &str, backend: &str) -> String {
+        let parsed = parse_state_aware(json);
+        state_aware_policy_hash(parsed.request(), backend, parsed.operation())
+    }
+
+    fn provision_json(backend: &str, extra_fields: &str) -> String {
+        let network = if backend == "isolation_session" {
+            r#","network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"{backend}"{network}{extra_fields}}}"#
+        )
+    }
+
+    // Preserve the historical stateAware envelope independently of the typed
+    // projection. Each caller supplies explicit expected phase/config values,
+    // never values read back from the operation under test.
+    fn expected_state_aware_hash(
+        request: &ExecutionRequest,
+        backend: &str,
+        phase: &str,
+        config: Value,
+    ) -> String {
+        let mut expected = policy_projection(request);
+        expected["containment"] = serde_json::json!(backend);
+        expected["stateAware"] = serde_json::json!({
+            "backend": backend,
+            "phase": phase,
+            "config": config,
+        });
+        hash_canonical_json(&canonical_json(&expected))
     }
 
     #[test]
-    fn state_aware_hash_ignores_case_insensitive_secret_fields() {
-        let request = request();
-        let first = serde_json::json!({
-            "clientSecret": "one",
-            "apiKey": "two",
-            "safeSetting": "same"
-        });
-        let second = serde_json::json!({
-            "CLIENTSECRET": "different",
-            "APIKEY": "different",
-            "safeSetting": "same"
-        });
+    fn state_aware_provision_hash_preserves_exact_config_shape() {
+        let mut hashes = std::collections::HashSet::new();
+        for (backend, payload, expected_config) in [
+            ("isolation_session", None, Value::Null),
+            ("isolation_session", Some("{}"), serde_json::json!({})),
+            (
+                "isolation_session",
+                Some(r#"{"appId":""}"#),
+                serde_json::json!({"appId": ""}),
+            ),
+            (
+                "isolation_session",
+                Some(r#"{"appId":"Contoso.App"}"#),
+                serde_json::json!({"appId": "Contoso.App"}),
+            ),
+            ("windows_sandbox", None, Value::Null),
+            ("wslc", None, Value::Null),
+            ("wslc", Some("{}"), serde_json::json!({})),
+            (
+                "wslc",
+                Some(r#"{"image":""}"#),
+                serde_json::json!({"image": ""}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"imageTarPath":""}"#),
+                serde_json::json!({"imageTarPath": ""}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"image":"","imageTarPath":""}"#),
+                serde_json::json!({"image": "", "imageTarPath": ""}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"image":"alpine:latest"}"#),
+                serde_json::json!({"image": "alpine:latest"}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"imageTarPath":"C:\\images\\custom.tar"}"#),
+                serde_json::json!({"imageTarPath": "C:\\images\\custom.tar"}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"image":"alpine:latest","imageTarPath":"C:\\images\\custom.tar"}"#),
+                serde_json::json!({
+                    "image": "alpine:latest",
+                    "imageTarPath": "C:\\images\\custom.tar",
+                }),
+            ),
+        ] {
+            let experimental = payload
+                .map(|payload| {
+                    format!(r#","experimental":{{"{backend}":{{"provision":{payload}}}}}"#)
+                })
+                .unwrap_or_default();
+            let json = provision_json(backend, &experimental);
+            let parsed = parse_state_aware(&json);
+            assert_eq!(
+                state_aware_config_projection(parsed.operation()),
+                expected_config,
+                "{json}"
+            );
+            let hash = state_aware_policy_hash(parsed.request(), backend, parsed.operation());
+            assert_eq!(
+                hash,
+                expected_state_aware_hash(parsed.request(), backend, "provision", expected_config),
+                "{json}"
+            );
+            assert!(
+                hashes.insert(hash),
+                "absent, empty and supplied provision fields must stay distinct: {json}"
+            );
+        }
+    }
 
+    #[test]
+    fn state_aware_hash_uses_each_operations_phase() {
+        let request = request();
+        let mut hashes = std::collections::HashSet::new();
+        for (operation, expected_phase) in [
+            (
+                StateAwareOperation::Provision(StateAwareProvision::WindowsSandbox),
+                "provision",
+            ),
+            (
+                StateAwareOperation::Start {
+                    sandbox_id: "wsb:deadbeef".into(),
+                },
+                "start",
+            ),
+            (
+                StateAwareOperation::Exec {
+                    sandbox_id: "wsb:deadbeef".into(),
+                },
+                "exec",
+            ),
+            (
+                StateAwareOperation::Stop {
+                    sandbox_id: "wsb:deadbeef".into(),
+                },
+                "stop",
+            ),
+            (
+                StateAwareOperation::Deprovision {
+                    sandbox_id: "wsb:deadbeef".into(),
+                },
+                "deprovision",
+            ),
+        ] {
+            let hash = state_aware_policy_hash(&request, "windows_sandbox", &operation);
+            assert_eq!(
+                hash,
+                expected_state_aware_hash(&request, "windows_sandbox", expected_phase, Value::Null)
+            );
+            assert!(hashes.insert(hash), "phase must affect the policy hash");
+        }
+    }
+
+    #[test]
+    fn state_aware_hash_ignores_empty_wrappers_through_public_parser() {
+        for backend in ["isolation_session", "windows_sandbox", "wslc"] {
+            let baseline = parsed_state_aware_hash(&provision_json(backend, ""), backend);
+            for extra_fields in [
+                r#","experimental":{}"#.to_string(),
+                r#","telemetry":{}"#.to_string(),
+                r#","_comment":{"user":{"CLIENTSECRET":"ignored"},"UPN":"alice@example.test"}"#
+                    .to_string(),
+            ] {
+                assert_eq!(
+                    baseline,
+                    parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
+                    "{backend}: {extra_fields}"
+                );
+            }
+            if backend != "windows_sandbox" {
+                let extra_fields = format!(r#","experimental":{{"{backend}":{{}}}}"#);
+                assert_eq!(
+                    baseline,
+                    parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
+                    "{backend}: an empty backend wrapper is not a provision config"
+                );
+            }
+        }
+
+        for phase in ["start", "exec", "stop", "deprovision"] {
+            let process = if phase == "exec" {
+                r#","process":{"commandLine":"echo hello"}"#
+            } else {
+                ""
+            };
+            let source = |extra_fields: &str| {
+                format!(
+                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
+                )
+            };
+            assert_eq!(
+                parsed_state_aware_hash(&source(""), "windows_sandbox"),
+                parsed_state_aware_hash(&source(r#","experimental":{}"#), "windows_sandbox"),
+                "{phase}: an empty experimental wrapper is not a phase config"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_hash_excludes_credentials_and_unverified_ids() {
+        let baseline = parse_state_aware(
+            r#"{
+                "version":"0.9.0-alpha",
+                "phase":"exec",
+                "sandboxId":"wslc:0123456789abcdef0123456789abcdef",
+                "process":{"commandLine":"echo hello"},
+                "network":{"proxy":{"url":"http://localhost:8080"}}
+            }"#,
+        );
+        let mut changed = parse_state_aware(
+            r#"{
+                "version":"0.9.0-alpha",
+                "phase":"exec",
+                "sandboxId":"wslc:alice@example.test",
+                "process":{
+                    "commandLine":"echo synthetic-command-secret",
+                    "env":["API_KEY=synthetic-environment-secret"]
+                },
+                "network":{"proxy":{"url":"http://alice:synthetic-password@localhost:8080"}},
+                "telemetry":{"enabled":true},
+                "_comment":{"user":{"wamToken":"synthetic-comment-secret"}}
+            }"#,
+        );
+        changed.set_dry_run(true);
         assert_eq!(
-            state_aware_policy_hash(&request, "isolation_session", "provision", Some(&first)),
-            state_aware_policy_hash(&request, "isolation_session", "provision", Some(&second)),
-            "secret-bearing permissive fields must not affect the policy identity"
+            state_aware_policy_hash(baseline.request(), "wslc", baseline.operation()),
+            state_aware_policy_hash(changed.request(), "wslc", changed.operation()),
+            "command, env, proxy userinfo, telemetry, comments, dry-run and unverified IDs are excluded"
         );
     }
 }

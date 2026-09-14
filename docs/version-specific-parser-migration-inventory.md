@@ -25,30 +25,144 @@ All migrated documents target the mutable exact development contract because eve
 
 Three versionless files under `tests/policy` are intentionally absent from this inventory: `request-directional-network.json`, `request-process-container.json`, and `request-wslc.json` are policy-builder inputs rather than complete request documents, and both parsers already reject them in the nine-document shared-rejection set.
 
-## Residual parser differences after migration
+## Post-migration disposition
 
-Version migration removes 118 of the 125 recorded divergences. Seven remain
-because the rolling and exact parsers intentionally enforce different
-boundaries:
+Version migration removed 118 of the 125 recorded divergences. The remaining
+seven now characterize only the test-scoped rolling parser; authoritative
+public loading rejects every document through its exact contract:
 
-- `isolation_session_configid_ignored.json` and
-  `isolation_session_one_shot_stray_config_ignored.json` exercise the rolling
-  parser's historical parse-and-ignore behavior for a one-shot experimental
-  IsolationSession object. The closed 0.9 contract rejects that object.
+- `isolation_session_configid_rejected.json` and
+  `isolation_session_one_shot_stray_config_rejected.json` retain the rolling
+  parser's historical parse-and-ignore behavior as a differential
+  characterization. The public one-shot surface now expects structural
+  rejection from the closed 0.9 contract.
 - Four IsolationSession provision rejection fixtures carry filesystem, UI, or
-  a non-canonical network posture. The rolling parser defers those policies to
-  backend validation; the request-specific 0.9 root rejects them structurally
-  or through its exact marker value.
+  a non-canonical network posture. Their E2E assertions now expect
+  `malformed_request` from the request-specific 0.9 root. Direct
+  `isolation_session_common::policy` tests preserve backend validation.
 - `wslc_state_aware_exec_rejected_filesystem.json` exercises immutable
-  post-provision policy validation. The rolling parser defers the filesystem
-  policy to normalization/backend validation; the 0.9 exec root excludes it.
+  post-provision policy. Its E2E assertion now expects structural rejection
+  from the 0.9 exec root, while `wslc_common::policy` retains direct backend
+  validation coverage.
 
-Rewriting these documents to make both parsers accept would remove the invalid
-policy each fixture exists to test. This inventory therefore records the seven
-exact-stricter results explicitly rather than weakening the exact contract or
-changing backend-test intent. The post-migration corpus result is 333
-equivalent accepts, 14 shared rejections, seven classified exact-stricter
-rejections, no exact-looser acceptance, and no accepted-model mismatch.
+The differential harness continues to record the seven exact-stricter results
+so later contract changes cannot accidentally weaken the exact boundary. It
+also compares every corpus document through the public loader and the exact
+parser oracle. The retained rolling characterization is platform-sensitive:
+Windows records 333 equivalent accepts and 14 shared rejections, while Linux
+records 332 equivalent accepts and 15 shared rejections. Both retain seven
+classified exact-stricter rejections, no exact-looser acceptance, and no
+accepted-model mismatch. Assertion failures list the shared-rejection files so
+future platform-specific movement is attributable rather than represented only
+by aggregate counts.
+
+## Validation
+
+The full-suite validation below ran on 2026-09-04 after exact dispatch became
+authoritative. The config-corpus count was refreshed on 2026-09-11 after the
+producer-migration rebase:
+
+- Rust formatting, workspace check, and workspace clippy completed without
+  warnings.
+- The Rust workspace passed 4,148 tests with 23 ignored.
+- The Node SDK passed its build and 304 tests, with 19 skipped.
+- The .NET SDK passed 118 tests, with 24 skipped.
+- The config validator examined 349 documents: 341 validated successfully and
+  eight were confirmed as intentionally invalid exemptions.
+- Schema-version, exact-contract codegen, SDK wire-type codegen, and package
+  version-sync gates passed.
+- The seven residual fixtures were exercised through the rebuilt
+  `wxc-exec.exe`; their public diagnostics matched the structural exact-contract
+  expectations retained by the E2E scripts.
+
+## Typed-payload acceptance
+
+The typed-payload migration replaces production raw state-aware payloads with
+typed operations and checked backend binding. The
+independent rolling request/extraction reference remains test-only; its
+accepted-value comparisons, explicit presence expectations, and classified
+exact-stricter rejections are retained. No registered contract, corpus request,
+or generated artifact changes in this phase.
+
+Local implementation evidence:
+
+| Gate | Result |
+| --- | --- |
+| Common parser, normalization, binding, and regression tests | 1,146 passed; the recording matrix covers all three backends and five phases, presence, validation order/failure, dry runs, and piped/relayed exec |
+| Removed production APIs | Seven compile-fail documentation tests passed, including five guards for parsed-request construction, raw/source fields, and reparsing |
+| CLI output and entry-point regressions | 62 passed |
+| Windows default | Engine 25, FFI 17, Rust SDK 11 passed |
+| Windows `isolation_session` only | Engine 25, FFI 18, Rust SDK 12 passed |
+| Windows `wslc` only | Engine 24, FFI 17, Rust SDK 11 passed |
+| Windows `isolation_session,wslc` | Engine 24, FFI 18, Rust SDK 12 passed |
+| Backend state-aware unit tests | IsolationSession 31, Windows Sandbox 52, WSLC 30 passed, including backend-owned defaulting and piped-exec refusals |
+| Format and lint | `cargo fmt --all -- --check`; affected packages' `cargo clippy --all-targets -- -D warnings` passed in all four separate Windows configurations and for all three backend crates |
+| Artifacts | `check-contract-codegen.js`, `check-schema-codegen.js`, and `check-sdk-types-codegen.js` passed unchanged |
+| Linux/macOS default | Common, engine, Rust SDK, and FFI cross-compiled with `--all-targets` for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`; only the pre-existing telemetry-consent dead-code warnings also observed before cutover remain |
+
+The engine/FFI commands select `--lib state_aware`; the Rust SDK command selects
+`--test state_aware`. Backend commands select `--lib state_aware`. Linux and
+macOS test targets were compiled, **not executed**: the Windows host has no
+macOS runtime, and the existing WSL distribution has no native Rust toolchain.
+
+Live lifecycle suites were rerun against a combined x64 release build with
+`isolation_session` and `wslc` on a host capable of all three Windows
+state-aware backends. No lifecycle suite skipped:
+
+- IsolationSession passed 62/62.
+- WSLC passed 57/57.
+- Windows Sandbox passed 9/10. Provision, start, repeated exec, PowerShell,
+  timeout recovery, stop, and deprovision passed. The Python workload failed
+  because the guest image had no Python installation on `PATH`, not because
+  state-aware dispatch failed. The guest also logged one 10-second stdio
+  bridge-drain timeout after an echo, but later execs remained healthy.
+
+The Windows runs provide successful provision-through-teardown evidence for
+all three state-aware backends. Native Unix test execution remains outstanding;
+cross-compilation is not counted as native execution evidence.
+
+## IsolationSession unrestricted-network implementation
+
+The implementation builds on typed state-aware payload dispatch.
+The new form uses the standard directional network shape with
+`egress.default`, `ingress.default`, and `ingress.hostLoopback` all explicitly
+set to `allow`. The canonical legacy allow pair remains accepted as a
+compatibility alternative.
+
+The implementation preserves validation boundaries, authored policy presence,
+legacy policy hashes, and published contracts. Node and C# expose pre-build
+directional authoring; Rust's existing state-aware JSON entry point accepts the
+new form. No Rust/C# one-shot backend support was added.
+
+Local evidence for the public integration:
+
+| Gate | Result |
+| --- | --- |
+| Common parser/adapter/identity tests | 1,165 passed; seven documentation tests passed |
+| IsolationSession backend unit tests | 194 passed |
+| CLI unit tests | 62 passed |
+| Contract/schema tests | All contract feature suites passed; schema emitter tests passed |
+| Rust feature matrix | Check, clippy, and engine/FFI/Rust SDK state-aware suites passed separately for default, isolation_session, wslc, and both |
+| Node SDK | 381 passed, 19 skipped; compile-time wire conformance included |
+| C# lifecycle/native-boundary tests | 51 passed in each of the four Windows feature configurations |
+| Native CLI | Dry runs covered one-shot/provision legacy and directional forms plus missing/empty/restrictive cases; no sandbox was created |
+| Generated schema | Twenty-six new-form acceptance/rejection cases passed through the existing AJV validator |
+| Artifacts/corpus | Exact/rolling/SDK codegen and schema-version gates passed; schema validation covered 349 configs, and the differential corpus covered 354 documents |
+| Linux/macOS | Default cross-target checks passed, with existing telemetry-consent warnings; native tests were not executed locally |
+
+The native CI build jobs now explicitly select the common/contract and
+engine/FFI/Rust SDK state-aware suites that dependency compilation alone did
+not execute. The existing macOS common-crate test selection is retained.
+The Azure Linux additions follow its existing native-x64 test restriction;
+the GitHub Linux matrix runs on its native x64 and ARM64 runners.
+New contract fixtures also put the network-posture matrix under the existing
+Rust fixture and generated-schema gates rather than relying only on a manual
+schema probe.
+
+**Acceptance limitations remain explicit:** native Unix CI execution is not
+established merely by adding those steps. No skipped suite, cross-target check,
+or dry run is counted as live execution. The inherited denied-path/debug-output
+issue is not attributed to this implementation.
 
 ## Documents
 
@@ -68,14 +182,14 @@ rejections, no exact-looser acceptance, and no accepted-model mismatch.
 | `tests/configs/isolation_session_concurrent_B.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_concurrent_C.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_concurrent_D.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_configid_ignored.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
+| `tests/configs/isolation_session_configid_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_exit42.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_hello.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_lifecycle_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected_hosts.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_network_rejected_no_local.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_one_shot_stray_config_ignored.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
+| `tests/configs/isolation_session_one_shot_stray_config_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_ui_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_powershell_interactive.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_deprovision.json` | state-aware deprovision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |

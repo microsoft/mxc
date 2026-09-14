@@ -145,6 +145,17 @@ jobs:
         displayName: Test plm
         condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
+      - script: |
+          set -euo pipefail
+          cargo test --locked --release --target $(triplet) -p wxc_common --lib
+          cargo test --locked --release --target $(triplet) -p wxc_common --doc
+          cargo test --locked --release --target $(triplet) -p mxc_config_contract --all-features
+          cargo test --locked --release --target $(triplet) -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --test state_aware
+        displayName: Test common contracts and state-aware SDK boundaries
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
+
       - task: EsrpCodeSigning@5
         displayName: Code Sign
         condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))

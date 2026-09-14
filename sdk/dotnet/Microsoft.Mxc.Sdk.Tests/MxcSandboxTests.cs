@@ -212,6 +212,9 @@ public class MxcSandboxTests
         Assert.Equal(
             BackendCapability.CaptureDenials,
             MxcSandbox.ParseBackendCapability("captureDenials"));
+        Assert.Equal(
+            BackendCapability.ProxyEnforcement,
+            MxcSandbox.ParseBackendCapability("proxyEnforcement"));
     }
 
     [Theory]
@@ -224,6 +227,55 @@ public class MxcSandboxTests
         Assert.Equal(
             BackendCapability.Unknown,
             MxcSandbox.ParseBackendCapability(wireName));
+    }
+
+    /// <summary>
+    /// The payload a Linux host emits when it has bubblewrap but cannot enforce
+    /// proxy-only egress. Dropping the warning would leave callers with an
+    /// absent capability and no way to learn why.
+    /// </summary>
+    [Fact]
+    public void Discovery_CarriesWarningsFromAnUnsupportedCapability()
+    {
+        const string json = """
+            [
+              {
+                "backend": "bubblewrap",
+                "warnings": ["Bubblewrap: network.proxy requires 'slirp4netns' on PATH"]
+              },
+              { "backend": "lxc" }
+            ]
+            """;
+
+        var backends = MxcSandbox.ParseAvailableBackends(json);
+
+        var bubblewrap = Assert.Single(
+            backends,
+            backend => backend.Backend == ContainmentBackend.Bubblewrap);
+        Assert.Empty(bubblewrap.Capabilities);
+        Assert.Equal(
+            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH",
+            Assert.Single(bubblewrap.Warnings));
+
+        // An entry the native side omitted `warnings` from must still project
+        // an empty collection rather than null.
+        var lxc = Assert.Single(backends, backend => backend.Backend == ContainmentBackend.Lxc);
+        Assert.Empty(lxc.Warnings);
+    }
+
+    [Fact]
+    public void Discovery_CarriesProxyEnforcementCapabilityWithoutWarnings()
+    {
+        const string json =
+            """[{ "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] }]""";
+
+        var bubblewrap = Assert.Single(MxcSandbox.ParseAvailableBackends(json));
+
+        Assert.Equal(ContainmentBackend.Bubblewrap, bubblewrap.Backend);
+        Assert.Equal(
+            BackendCapability.ProxyEnforcement,
+            Assert.Single(bubblewrap.Capabilities));
+        Assert.Empty(bubblewrap.Warnings);
     }
 
     [Fact]
@@ -582,6 +634,53 @@ public class MxcSandboxTests
             containment.GetProperty("portMappings")[0].GetProperty("windowsPort").GetInt32());
         Assert.Equal(80,
             containment.GetProperty("portMappings")[0].GetProperty("containerPort").GetInt32());
+    }
+
+    [Fact]
+    public void SandboxRequest_SerializesIsolationSessionContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Experimental = true,
+            Containment = new IsolationSessionContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        // The native side derives this spelling from a serde attribute while the
+        // managed side names it in an attribute of its own.
+        Assert.Equal("isolationSession", containment.GetProperty("type").GetString());
+
+        // The backend takes no configuration, so the discriminator is the whole
+        // object.
+        Assert.Single(containment.EnumerateObject());
+    }
+
+    [Fact]
+    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Containment = new IsolationSessionContainment(),
+        };
+
+        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+
+        // Both refusals name the backend. Which of the two fires depends on
+        // whether the native library was built with the backend.
+        Assert.Contains(
+            nameof(ContainmentBackend.IsolationSession),
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.True(
+            exception.Code is ErrorCode.MalformedRequest
+                or ErrorCode.UnsupportedContainment,
+            $"unexpected refusal: {exception.Code}: {exception.Message}");
     }
 
     [Fact]

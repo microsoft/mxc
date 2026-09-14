@@ -321,11 +321,16 @@ describe('parseNonExecResponse', () => {
 describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
-  // The unrestricted-network acknowledgment is a required member of
+  // The unrestricted-network posture is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
   // itself use this minimal valid value.
-  const ACK = { network: { defaultPolicy: 'allow', allowLocalNetwork: true } } as const;
+  const ACK = {
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  } as const;
 
   beforeEach(() => { activeFake = null; });
   afterEach(() => { _resetSpawnImpl(); activeFake = null; });
@@ -340,7 +345,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         appId: 'example.app.id',
       },
       testOptions(),
@@ -358,8 +366,8 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
-      defaultPolicy: 'allow',
-      allowLocalNetwork: true,
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
     });
     assert.ok(fake.captured.args?.includes('--experimental'));
   });

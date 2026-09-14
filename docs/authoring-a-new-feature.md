@@ -112,9 +112,9 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model while it remains the current parser input |
-| `src/core/mxc_config_contract/src/dev/` | Add the field to the closed exact mutable development contract |
-| `src/core/mxc_engine/src/policy/exact/v0_9.rs` | If the Rust SDK exposes the field, keep the test-only exact development builder in parity |
+| `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
+| `src/core/wxc_common/src/wire.rs` | Mirror the field in the rolling differential model while that characterization oracle remains |
+| `src/core/mxc_engine/src/policy/exact/v0_9.rs` | If the Rust SDK exposes the field, update the production exact development builder |
 | `schemas/dev/mxc-config.schema.0.9.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
 | `schemas/dev/mxc-config.schema.0.9.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
@@ -122,13 +122,14 @@ Adding a feature may touch these files:
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
-## Step 1: Add the field to the wire model (the schema source of truth)
+## Step 1: Add the field to the exact contract and rolling oracle
 
-Until exact dispatch is authoritative, add the feature to both the rolling
-Rust wire model (`src/core/wxc_common/src/wire.rs`) and the matching closed
-request types under `src/core/mxc_config_contract/src/dev/`. The rolling
-experimental struct remains permissive; the exact development contract and
-every nested experimental object are recursively closed.
+Add the feature to the authoritative closed request types under
+`src/core/mxc_config_contract/src/dev/`, then mirror it in the rolling Rust wire
+model (`src/core/wxc_common/src/wire.rs`) while differential characterization
+remains. The rolling experimental struct remains permissive; the exact
+development contract and every nested experimental object are recursively
+closed.
 
 ```rust
 // in wire.rs
@@ -191,10 +192,11 @@ pub struct ExperimentalConfig {
 
 ## Step 3: Map the wire field to the domain model
 
-The parser deserializes JSON directly into the wire model (`wire::MxcConfig`),
-so your `wire::GpuIsolation` from Step 1 is the parse target. In
-`config_parser.rs`, map it to the domain struct inside `convert_wire_config`
-where the `experimental` block is converted:
+Production parsing first deserializes JSON into the exact registered request
+contract. The version-specific adapter then converts that closed type into the
+shared `wire::MxcConfig` representation used by semantic normalization. Add the
+adapter mapping for your exact contract field, then map the corresponding wire
+field to the domain struct inside `convert_wire_config`:
 
 ```rust
 let experimental = if let Some(raw_exp) = cfg.experimental {
@@ -218,10 +220,12 @@ in any standalone mapping helper so that adding a wire field without mapping it
 becomes a compile error rather than a silent runtime drop.
 
 Add tests to verify:
-- `gpuIsolation` config parses correctly and maps to `ExecutionRequest.experimental`
+- `gpuIsolation` is accepted by the exact request root and maps through its
+  adapter to `ExecutionRequest.experimental`
 - Missing optional fields use defaults
-- Unknown fields under `experimental` are tolerated (forward compatibility — the
-  experimental surface is intentionally permissive)
+- Unknown fields under exact `experimental` objects are rejected
+- The rolling parser's permissive behavior remains characterized separately
+  while that differential oracle exists
 
 ## Step 4: Implement the feature in the runner
 
@@ -350,7 +354,7 @@ When your experimental feature is ready to ship:
 - [ ] Rolling and exact development contract types updated
 - [ ] Rolling and exact generated schemas and TypeScript oracles regenerated
 - [ ] Model struct added to `models.rs`
-- [ ] Parsing added to `config_parser.rs` with unit tests
+- [ ] Exact contract adapter and domain mapping added with unit tests
 - [ ] `--experimental` flag wired through (if not already)
 - [ ] Feature logic guarded behind `experimental_enabled` in the runner
 - [ ] Test config created and verified with and without `--experimental`

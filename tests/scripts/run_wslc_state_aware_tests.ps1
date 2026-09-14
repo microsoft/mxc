@@ -502,14 +502,17 @@ try {
         } | Out-Null
     }
 
-    # A7: exec rejects filesystem policy (immutable post-provision).
+    # A7: the exact exec root rejects immutable filesystem policy
+    # structurally. Direct WSLc policy tests retain the backend validation.
     if ($execedOk) {
-        Run-StateAwareTest "A: exec (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "A: exec (filesystem policy rejected structurally)" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_rejected_filesystem.json' -SandboxId $script:sandboxId
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -724,36 +727,33 @@ Run-StateAwareTest "D: provision (proxy at provision rejected)" {
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
-Run-StateAwareTest "D: start (filesystem policy rejected)" {
+# The exact start/stop contracts reject these policy sections before backend
+# dispatch. Direct backend unit tests cover validate_post_provision_policy.
+Run-StateAwareTest "D: start (filesystem rejected by exact contract)" {
     $req = @{ phase = 'start'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; filesystem = @{ readwritePaths = @('C:\mxc_wslc_sa_test\rw') } }
     $r = Invoke-StateAware -Request $req
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (request rejected structurally)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
 } | Out-Null
 
-# The cross-cutting wire parser + dispatcher must reject a post-provision proxy
-# just like the policy unit test does — proxy is an exec-only concern, fixed at
-# provision for the network mode. Cover both post-provision validators (start /
-# stop) that funnel through validate_post_provision_policy, exercising the real
-# base64 -> parser -> dispatch path rather than only the in-crate unit test.
-Run-StateAwareTest "D: start (network.proxy rejected post-provision)" {
+Run-StateAwareTest "D: start (network.proxy rejected by exact contract)" {
     $req = @{ phase = 'start'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
     $r = Invoke-StateAware -Request $req
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (request rejected structurally)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
 } | Out-Null
 
-Run-StateAwareTest "D: stop (network.proxy rejected post-provision)" {
+Run-StateAwareTest "D: stop (network.proxy rejected by exact contract)" {
     $req = @{ phase = 'stop'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
     $r = Invoke-StateAware -Request $req
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (request rejected structurally)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
 } | Out-Null
 
 # ---------------- Lifecycle E: restart cycle (stop -> start again) ----------------
