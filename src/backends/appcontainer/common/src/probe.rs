@@ -144,6 +144,7 @@ pub fn run_probe_with_guarded_capture_availability(
     use crate::base_container_runner::BaseContainerRunner;
 
     let base_container_usable = BaseContainerRunner::is_usable_for_request(request);
+    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
@@ -166,6 +167,7 @@ pub fn run_probe_with_guarded_capture_availability(
         request,
         probes,
         base_container_usable,
+        uses_native_capture,
         supports_deny_paths,
     )
 }
@@ -174,12 +176,14 @@ fn run_probe_with_capabilities(
     request: &ExecutionRequest,
     probes: ProbeFacts,
     base_container_usable: bool,
+    uses_native_capture: bool,
     supports_deny_paths: bool,
 ) -> ProbeOutput {
     match detect_request_tier(request, base_container_usable, supports_deny_paths) {
         Ok(decision)
             if request.policy.capture_denials.is_some()
-                && !base_container_usable
+                && (decision.tier != fallback_detector::IsolationTier::BaseContainer
+                    || !uses_native_capture)
                 && !probes.guarded_capture_available =>
         {
             ProbeOutput {
@@ -381,7 +385,7 @@ mod tests {
         let request = ExecutionRequest::default();
         let probes = test_probe_facts(false, false);
 
-        let selected = run_probe_with_capabilities(&request, probes, true, true);
+        let selected = run_probe_with_capabilities(&request, probes, true, false, true);
 
         assert_eq!(selected.tier, Some("base-container"));
         assert!(selected.error.is_none());
@@ -396,8 +400,13 @@ mod tests {
         };
         let request = request_with_policy(policy);
 
-        let output =
-            run_probe_with_capabilities(&request, test_probe_facts(false, true), false, false);
+        let output = run_probe_with_capabilities(
+            &request,
+            test_probe_facts(false, true),
+            false,
+            false,
+            false,
+        );
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
         assert!(!output.probes.native_capture_available);
@@ -416,6 +425,7 @@ mod tests {
             test_probe_facts(false, false),
             false,
             false,
+            false,
         );
 
         assert!(output.tier.is_none());
@@ -425,6 +435,49 @@ mod tests {
             output.error.as_deref(),
             Some("guarded WPR captureDenials fallback is unavailable")
         );
+    }
+
+    #[test]
+    fn capture_denials_requires_guarded_capture_on_legacy_base_container() {
+        let _guard = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+        let output = run_probe_with_capabilities(
+            &request_with_policy(policy),
+            test_probe_facts(false, false),
+            true,
+            false,
+            true,
+        );
+
+        assert!(output.tier.is_none());
+        assert!(output.needs_dacl_augmentation.is_none());
+        assert_eq!(
+            output.error.as_deref(),
+            Some("guarded WPR captureDenials fallback is unavailable")
+        );
+    }
+
+    #[test]
+    fn native_capture_does_not_require_guarded_capture_on_base_container() {
+        let _guard = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+        let output = run_probe_with_capabilities(
+            &request_with_policy(policy),
+            test_probe_facts(true, false),
+            true,
+            true,
+            true,
+        );
+
+        assert_eq!(output.tier, Some("base-container"));
+        assert!(!output.probes.guarded_capture_available);
+        assert!(output.error.is_none());
     }
 
     #[test]
