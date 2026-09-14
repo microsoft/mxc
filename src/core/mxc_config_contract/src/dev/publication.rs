@@ -1,20 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::OneShotExperimental;
+//! Stable-candidate projection used by contract publication tooling.
+
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
     Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
     Telemetry, Ui,
 };
-use crate::dev::Version;
+use super::Version;
 
 string_enum! {
-    /// Containment selections available in `0.9.0-alpha`.
+    /// Stable containment selections eligible for publication.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Containment, schema_name = "OneShotContainment" {
-        // Stable-candidate values.
         /// Select the host's native process-containment backend.
         Process => ["process"],
         /// Select the Windows ProcessContainer backend.
@@ -25,76 +25,10 @@ string_enum! {
         Bubblewrap => ["bubblewrap"],
         /// Select the macOS Seatbelt backend.
         Seatbelt => ["seatbelt", "macos_sandbox"],
-
-        // Development-only values.
-        /// Select the host's VM-class containment backend.
-        Vm => ["vm"],
-        /// Select the Windows Sandbox backend.
-        WindowsSandbox => ["windows_sandbox"],
-        /// Select the NanVix micro-VM backend.
-        Microvm => ["microvm"],
-        /// Select the Hyperlight micro-VM backend.
-        Hyperlight => ["hyperlight"],
-        /// Select the WSL container backend.
-        Wslc => ["wslc"],
-        /// Select the Windows IsolationSession backend.
-        IsolationSession => ["isolation_session"],
     }
 }
 
-/// All development one-shot containments.
-pub const ALL_ONE_SHOT_CONTAINMENTS: &[Containment] = &[
-    Containment::Process,
-    Containment::ProcessContainer,
-    Containment::Lxc,
-    Containment::Bubblewrap,
-    Containment::Seatbelt,
-    Containment::Vm,
-    Containment::WindowsSandbox,
-    Containment::Microvm,
-    Containment::Hyperlight,
-    Containment::Wslc,
-    Containment::IsolationSession,
-];
-
-/// One-shot containments copied into a published contract.
-pub const STABLE_CANDIDATE_CONTAINMENTS: &[Containment] = &[
-    Containment::Process,
-    Containment::ProcessContainer,
-    Containment::Lxc,
-    Containment::Bubblewrap,
-    Containment::Seatbelt,
-];
-
-/// One-shot containments retained only by the mutable development contract.
-pub const DEVELOPMENT_ONLY_CONTAINMENTS: &[Containment] = &[
-    Containment::Vm,
-    Containment::WindowsSandbox,
-    Containment::Microvm,
-    Containment::Hyperlight,
-    Containment::Wslc,
-    Containment::IsolationSession,
-];
-
-#[cfg(test)]
-mod publication_tests {
-    use super::*;
-
-    #[test]
-    fn containment_partition_is_complete_and_disjoint() {
-        for containment in ALL_ONE_SHOT_CONTAINMENTS {
-            let memberships = usize::from(STABLE_CANDIDATE_CONTAINMENTS.contains(containment))
-                + usize::from(DEVELOPMENT_ONLY_CONTAINMENTS.contains(containment));
-            assert_eq!(memberships, 1, "{containment:?}");
-        }
-        assert_eq!(
-            STABLE_CANDIDATE_CONTAINMENTS.len() + DEVELOPMENT_ONLY_CONTAINMENTS.len(),
-            ALL_ONE_SHOT_CONTAINMENTS.len()
-        );
-    }
-}
-
-/// A complete one-shot `0.9.0-alpha` configuration request.
+/// Stable-candidate one-shot request copied into a published contract.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
@@ -132,7 +66,6 @@ pub struct Request {
     #[serde(default)]
     pub ui: OptionalField<Ui>,
     /// Optional ProcessContainer settings.
-    /// The legacy `appContainer` spelling is accepted as an alias.
     #[serde(alias = "appContainer", default)]
     pub process_container: OptionalField<ProcessContainer>,
     /// Optional LXC distribution settings.
@@ -147,7 +80,4 @@ pub struct Request {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional experimental settings.
-    #[serde(default)]
-    pub experimental: OptionalField<OneShotExperimental>,
 }

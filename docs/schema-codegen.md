@@ -47,9 +47,26 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.9.0-alpha --out sdk/node/src/generated/v0_9_0_alpha/wire.ts
 ```
 
-`mxc_schema_gen versions --json` emits registry-driven lifecycle and artifact
-metadata. Published version generation deliberately returns an explicit
-unsupported error; it never falls back to another model.
+`mxc_config_contract::registry::CONTRACTS` is the lifecycle and freeze source
+of truth. It includes the schema, Rust contract, adapter, builder, and fixture
+paths, plus the recorded SHA-256 digest for each published schema.
+`mxc_schema_gen registry` deterministically generates the machine-readable
+`schemas/contract-registry.generated.json` artifact from that Rust table;
+`versions --json` exposes the same compiled metadata directly.
+
+Before changing lifecycle state, preview publication with:
+
+```text
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- publish --version 0.9.0-alpha --next-dev 0.10.0-alpha --dry-run
+```
+
+The same command without `--dry-run` writes the narrowed stable-candidate
+schema and reports its normalized SHA-256 digest. Publication intentionally
+excludes experimental and state-aware roots. In the same change, fork the
+contract module, adapter, builder, and fixtures; advance the development
+sources and consumers; then author the new lifecycle state and digest in the
+Rust `ContractVersion`/`CONTRACTS` registry. Finally run
+`mxc_schema_gen registry` to refresh the generated JSON artifact.
 
 Both Rust model crates gate Schemars behind `schema-gen`, so normal builds do
 not carry it. The exact `OptionalField<T>` schema is transparent and
@@ -119,6 +136,11 @@ request root as well as runtime support:
   `mxc_schema_gen versions --json`, regenerates both exact artifacts, validates
   valid and invalid fixtures for every concrete root with AJV, and checks a
   malformed exec request produces focused `if`/`then` diagnostics.
+- **`check-contract-freeze.js`** — regenerates the JSON lifecycle artifact
+  from the Rust registry,
+  verifies every registered source/fixture path, checks published schema
+  SHA-256 values, and rejects removal or identity changes to contracts that
+  were already published at the merge base.
 - **`validate-configs.js`** — validates the `tests/examples` + `tests/configs`
   corpus against the rolling schema until that corpus migrates to exact
   contracts.

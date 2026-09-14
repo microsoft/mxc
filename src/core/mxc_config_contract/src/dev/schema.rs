@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 
 use super::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
+    StableCandidateRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
+    WslcProvisionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -188,6 +189,47 @@ pub fn development_schema() -> Value {
     })
 }
 
+/// Generates the narrowed one-shot schema that publication freezes.
+pub fn publication_schema() -> Value {
+    let mut generator = SchemaGenerator::default();
+    let root = subschema::<StableCandidateRequest>(&mut generator);
+    let mut definitions =
+        serde_json::to_value(generator.take_definitions()).expect("definitions serialize to JSON");
+    add_property_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "processContainer",
+        "appContainer",
+    );
+    exclude_duplicate_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "processContainer",
+        "appContainer",
+    );
+    add_property_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "seatbelt",
+        "macos_sandbox",
+    );
+    exclude_duplicate_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "seatbelt",
+        "macos_sandbox",
+    );
+
+    json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "MXC Configuration 0.9.0-alpha",
+        "description": "Immutable published MXC configuration contract.",
+        "$comment": "GENERATED FILE - DO NOT EDIT. Published contracts are immutable and verified by scripts/versioning/check-contract-freeze.js.",
+        "allOf": [root],
+        "definitions": definitions
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +334,40 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         assert_eq!(development_schema(), development_schema());
+        assert_eq!(publication_schema(), publication_schema());
+    }
+
+    #[test]
+    fn publication_schema_contains_only_the_stable_one_shot_surface() {
+        let schema = publication_schema();
+        let serialized = serde_json::to_string(&schema).unwrap();
+        let root = &schema["definitions"]["OneShotRequest"];
+
+        assert!(root["properties"].get("experimental").is_none());
+        assert!(root["properties"].get("phase").is_none());
+        assert!(root["properties"].get("sandboxId").is_none());
+        assert!(root["properties"].get("correlationVector").is_none());
+        for development_only in [
+            "vm",
+            "windows_sandbox",
+            "microvm",
+            "hyperlight",
+            "wslc",
+            "isolation_session",
+        ] {
+            assert!(!serialized.contains(&format!("\"{development_only}\"")));
+        }
+        for stable in [
+            "process",
+            "processcontainer",
+            "appcontainer",
+            "lxc",
+            "bubblewrap",
+            "seatbelt",
+            "macos_sandbox",
+        ] {
+            assert!(serialized.contains(&format!("\"{stable}\"")));
+        }
     }
 
     #[test]

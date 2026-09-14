@@ -13,7 +13,7 @@ pub enum ContractStatus {
 }
 
 impl ContractStatus {
-    /// Returns the stable lowercase spelling used by code-generation metadata.
+    /// Returns the stable lowercase spelling used by generated metadata.
     pub const fn as_str(self) -> &'static str {
         match self {
             ContractStatus::Published => "published",
@@ -22,7 +22,7 @@ impl ContractStatus {
     }
 }
 
-/// Lifecycle metadata for one registered configuration contract.
+/// Lifecycle and freeze metadata for one registered configuration contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContractDescriptor {
     version: ContractVersion,
@@ -30,6 +30,12 @@ pub struct ContractDescriptor {
     schema_id: &'static str,
     schema_path: &'static str,
     typescript_path: Option<&'static str>,
+    rust_module: &'static str,
+    contract_module_path: &'static str,
+    adapter_path: &'static str,
+    builder_path: &'static str,
+    fixture_path: &'static str,
+    schema_sha256: Option<&'static str>,
 }
 
 impl ContractDescriptor {
@@ -63,10 +69,42 @@ impl ContractDescriptor {
     pub const fn typescript_path(&self) -> Option<&'static str> {
         self.typescript_path
     }
+
+    /// Returns the Rust module identifier assigned to this version.
+    pub const fn rust_module(&self) -> &'static str {
+        self.rust_module
+    }
+
+    /// Returns the repository-relative contract module path.
+    pub const fn contract_module_path(&self) -> &'static str {
+        self.contract_module_path
+    }
+
+    /// Returns the repository-relative adapter path.
+    pub const fn adapter_path(&self) -> &'static str {
+        self.adapter_path
+    }
+
+    /// Returns the repository-relative policy-builder path.
+    pub const fn builder_path(&self) -> &'static str {
+        self.builder_path
+    }
+
+    /// Returns the repository-relative contract fixture path.
+    pub const fn fixture_path(&self) -> &'static str {
+        self.fixture_path
+    }
+
+    /// Returns the normalized SHA-256 digest for a published schema.
+    pub const fn schema_sha256(&self) -> Option<&'static str> {
+        self.schema_sha256
+    }
 }
 
-/// Metadata for every configuration contract currently registered by this
-/// crate.
+/// Metadata for every registered configuration contract.
+///
+/// This Rust table is the lifecycle source of truth. JSON registry output is
+/// generated from it for CI history comparisons and other non-Rust consumers.
 pub const CONTRACTS: &[ContractDescriptor] = &[
     ContractDescriptor {
         version: ContractVersion::V0_6_0Alpha,
@@ -75,6 +113,12 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.6.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.6.0-alpha.json",
         typescript_path: None,
+        rust_module: "v0_6_0_alpha",
+        contract_module_path: "src/core/mxc_config_contract/src/published/v0_6_0_alpha",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/v0_6.rs",
+        builder_path: "src/core/mxc_engine/src/policy/exact/v0_6.rs",
+        fixture_path: "src/core/mxc_config_contract/tests/v0_6_0_alpha",
+        schema_sha256: Some("e6b2ef7b7733f5151cc53a676d6ba48dadc7e9137f61aba50ebfaebbb8297dba"),
     },
     ContractDescriptor {
         version: ContractVersion::V0_7_0Alpha,
@@ -83,6 +127,12 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.7.0-alpha.json",
         typescript_path: None,
+        rust_module: "v0_7_0_alpha",
+        contract_module_path: "src/core/mxc_config_contract/src/published/v0_7_0_alpha",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/v0_7.rs",
+        builder_path: "src/core/mxc_engine/src/policy/exact/v0_7.rs",
+        fixture_path: "src/core/mxc_config_contract/tests/v0_7_0_alpha",
+        schema_sha256: Some("beae8c5785f0591ba295cb4984665d23d8f5a74ece5c392f279da8c26ecc8672"),
     },
     ContractDescriptor {
         version: ContractVersion::V0_8_0Alpha,
@@ -91,6 +141,12 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         typescript_path: None,
+        rust_module: "v0_8_0_alpha",
+        contract_module_path: "src/core/mxc_config_contract/src/published/v0_8_0_alpha",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/v0_8.rs",
+        builder_path: "src/core/mxc_engine/src/policy/exact/v0_8.rs",
+        fixture_path: "src/core/mxc_config_contract/tests/v0_8_0_alpha",
+        schema_sha256: Some("0bd1e20f117821edd6b232e6b0aebe4c44101ea7ce07415f141ae81567cc0391"),
     },
     ContractDescriptor {
         version: ContractVersion::V0_9_0Alpha,
@@ -99,6 +155,12 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
         schema_path: "schemas/dev/mxc-config.schema.0.9.0-alpha.json",
         typescript_path: Some("sdk/node/src/generated/v0_9_0_alpha/wire.ts"),
+        rust_module: "v0_9_0_alpha",
+        contract_module_path: "src/core/mxc_config_contract/src/dev",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/dev",
+        builder_path: "src/core/mxc_engine/src/policy/exact/v0_9.rs",
+        fixture_path: "src/core/mxc_config_contract/tests/v0_9_0_alpha",
+        schema_sha256: None,
     },
 ];
 
@@ -114,10 +176,10 @@ pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
 
 static SUPPORTED_VERSIONS: [ContractVersion; CONTRACTS.len()] = {
     let mut result = [ContractVersion::V0_6_0Alpha; CONTRACTS.len()];
-    let mut i = 0;
-    while i < CONTRACTS.len() {
-        result[i] = CONTRACTS[i].version();
-        i += 1;
+    let mut index = 0;
+    while index < CONTRACTS.len() {
+        result[index] = CONTRACTS[index].version();
+        index += 1;
     }
     result
 };
@@ -132,41 +194,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_supported_versions() {
-        let versions = supported_versions();
-        assert_eq!(versions.len(), 4);
-        assert!(versions.contains(&ContractVersion::V0_6_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_7_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_8_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_9_0Alpha));
-    }
-
-    #[test]
-    fn test_supported_versions_round_trip() {
-        for desc in CONTRACTS {
-            let version = desc.version();
-            let round_trip_desc = descriptor(version);
-            assert_eq!(desc.version(), round_trip_desc.version());
-            assert_eq!(desc.is_development(), round_trip_desc.is_development());
-            assert_eq!(desc.schema_id(), round_trip_desc.schema_id());
-            assert_eq!(desc.schema_path(), round_trip_desc.schema_path());
-            assert_eq!(desc.typescript_path(), round_trip_desc.typescript_path());
+    fn supported_versions_round_trip_through_registry() {
+        assert_eq!(supported_versions().len(), CONTRACTS.len());
+        for registered in CONTRACTS {
+            let version = registered.version();
+            assert_eq!(*registered, descriptor(version));
             assert_eq!(
-                version,
-                ContractVersion::parse_exact(version.as_str()).unwrap()
+                ContractVersion::parse_exact(version.as_str()),
+                Some(version)
             );
         }
     }
 
     #[test]
-    fn development_artifacts_use_exact_version_paths() {
-        let descriptor = descriptor(ContractVersion::V0_9_0Alpha);
+    fn published_contracts_have_complete_freeze_metadata() {
+        for contract in CONTRACTS
+            .iter()
+            .filter(|contract| contract.status() == ContractStatus::Published)
+        {
+            assert!(contract.typescript_path().is_none());
+            assert!(contract.schema_sha256().is_some());
+            assert!(!contract.contract_module_path().is_empty());
+            assert!(!contract.adapter_path().is_empty());
+            assert!(!contract.builder_path().is_empty());
+            assert!(!contract.fixture_path().is_empty());
+        }
+    }
 
-        assert_eq!(descriptor.status().as_str(), "development");
-        assert!(descriptor.schema_id().contains("0.9.0-alpha"));
-        assert!(descriptor.schema_path().contains("0.9.0-alpha"));
-        assert!(descriptor
-            .typescript_path()
-            .is_some_and(|path| path.contains("v0_9_0_alpha")));
+    #[test]
+    fn exactly_one_contract_is_in_development() {
+        let development = CONTRACTS
+            .iter()
+            .filter(|contract| contract.is_development())
+            .collect::<Vec<_>>();
+        assert_eq!(development.len(), 1);
+        assert_eq!(development[0].version(), ContractVersion::V0_9_0Alpha);
+        assert!(development[0].schema_sha256().is_none());
+        assert!(development[0].typescript_path().is_some());
     }
 }

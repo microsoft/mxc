@@ -60,7 +60,11 @@ reasons:
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
   The SDK enforces the same exact set, and state-aware requests require
-  `0.9.0-alpha`. The compatibility constants in `schemas/schema-version.json`
+  `0.9.0-alpha`. The exact lifecycle registry is the Rust
+  `mxc_config_contract::registry::CONTRACTS` table.
+  `mxc_schema_gen registry` emits its machine-readable
+  `schemas/contract-registry.generated.json` artifact. The compatibility constants in
+  `schemas/schema-version.json`
   do not authorize other versions within their minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
@@ -285,6 +289,22 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0
 
 Also regenerate their TypeScript oracles with the corresponding
 `mxc_schema_gen types` commands. Do not hand-edit generated artifacts.
+
+Publishing an exact development contract is a two-stage review boundary.
+Phase 11a adds the tooling without changing lifecycle state:
+
+```text
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- publish \
+  --version 0.9.0-alpha --next-dev 0.10.0-alpha --dry-run
+```
+
+After the contract, adapter, builder, fixtures, and development consumers have
+been prepared in the publication change, omit `--dry-run`. The command emits
+the stable-candidate one-shot schema only and reports its normalized SHA-256
+digest. Author the lifecycle transition and digest in the Rust
+`ContractVersion`/`CONTRACTS` registry, then regenerate
+`schemas/contract-registry.generated.json`. Experimental and state-aware request roots
+are never copied into the published contract.
 
 **In `models.rs`:**
 ```rust
