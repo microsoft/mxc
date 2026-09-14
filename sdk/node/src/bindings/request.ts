@@ -12,12 +12,21 @@ export interface BindingRunInput {
   experimental?: boolean;
 }
 
+/**
+ * Policy projection accepted by the current `mxc_ffi::RequestSpec`.
+ * Runtime network values move under `network`; backend-specific policy moves
+ * onto the tagged containment value instead of remaining on shared policy.
+ */
 export type BindingPolicy = Omit<SandboxPolicy, 'runtimeConfig' | 'processContainer'> & {
   network?: NonNullable<SandboxPolicy['network']> & {
     runtimeConfig?: SandboxPolicy['runtimeConfig'];
   };
 };
 
+/**
+ * Containment variants currently reachable from the one-shot Node API.
+ * This mirrors the tagged JSON contract consumed by `mxc_ffi::RequestSpec`.
+ */
 export type BindingContainment =
   | { type: 'process' }
   | {
