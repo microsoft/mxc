@@ -69,6 +69,8 @@ pub struct ProbeFacts {
     pub bfs_compiled_in: bool,
     /// Whether PSEC or SBOX can enforce `filesystem.deniedPaths` at Tier 1.
     pub base_container_supports_deny_paths: bool,
+    /// Whether PSEC 1.1 can enforce `filesystem.enumeratePaths` at Tier 1.
+    pub base_container_supports_enumerate_paths: bool,
     /// Whether BaseContainer can honor
     /// `network.ingress.hostLoopback = "allow"`.
     pub base_container_supports_ingress_host_loopback_allow: bool,
@@ -148,6 +150,7 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
         base_container_supports_deny_paths: BaseContainerRunner::supports_native_denied_paths(),
+        base_container_supports_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
         base_container_supports_ingress_host_loopback_allow:
             BaseContainerRunner::supports_ingress_host_loopback_allow(),
         isolation_session_available: false,
@@ -227,6 +230,10 @@ fn format_fallback_error(e: &FallbackError) -> String {
         FallbackError::SystemRootUnresolved { reason } => {
             format!("Could not resolve Windows system directory: {reason}")
         }
+        FallbackError::EnumeratePathsUnsupported => {
+            "filesystem.enumeratePaths requires BaseContainer PSEC 1.1 with fs_enumerate support"
+                .to_string()
+        }
     }
 }
 
@@ -279,6 +286,7 @@ mod tests {
             bfscfg_present: false,
             bfs_compiled_in: false,
             base_container_supports_deny_paths: false,
+            base_container_supports_enumerate_paths: false,
             base_container_supports_ingress_host_loopback_allow: false,
             isolation_session_available: false,
             hyperlight_available: false,
@@ -299,6 +307,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_enumerate_paths: false,
                 base_container_supports_ingress_host_loopback_allow: false,
                 isolation_session_available: true,
                 hyperlight_available: false,
@@ -317,6 +326,7 @@ mod tests {
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
         assert_eq!(v["probes"]["baseContainerSupportsDenyPaths"], false);
+        assert_eq!(v["probes"]["baseContainerSupportsEnumeratePaths"], false);
         assert_eq!(
             v["probes"]["baseContainerSupportsIngressHostLoopbackAllow"],
             false
@@ -347,6 +357,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_enumerate_paths: false,
                 base_container_supports_ingress_host_loopback_allow: false,
                 isolation_session_available: false,
                 hyperlight_available: false,
@@ -602,5 +613,16 @@ mod tests {
             detect_request_tier(&request, true, true).expect("BaseContainer should be selected");
 
         assert_eq!(decision.tier, IsolationTier::BaseContainer);
+    }
+
+    #[test]
+    fn request_detector_rejects_enumerate_paths_without_compatible_base_container() {
+        let mut request = ExecutionRequest::default();
+        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+
+        let error = detect_request_tier(&request, false, false)
+            .expect_err("enumeratePaths must not fall through to AppContainer");
+
+        assert!(matches!(error, FallbackError::EnumeratePathsUnsupported));
     }
 }

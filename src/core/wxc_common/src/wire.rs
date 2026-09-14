@@ -354,6 +354,8 @@ pub struct Filesystem {
     pub readwrite_paths: Option<Vec<String>>,
     /// Paths the process can read but not write.
     pub readonly_paths: Option<Vec<String>>,
+    /// Paths the process can query or enumerate without reading file contents.
+    pub enumerate_paths: Option<Vec<String>>,
     /// Paths explicitly denied (override broader allow rules).
     pub denied_paths: Option<Vec<String>>,
 }

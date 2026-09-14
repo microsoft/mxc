@@ -63,6 +63,9 @@ pub struct Filesystem {
     /// Optional paths granted read-only access.
     #[serde(default)]
     pub readonly_paths: OptionalField<Vec<String>>,
+    /// Optional paths that may be queried or enumerated without granting file-content reads.
+    #[serde(default)]
+    pub enumerate_paths: OptionalField<Vec<String>>,
     /// Optional paths denied access.
     #[serde(default)]
     pub denied_paths: OptionalField<Vec<String>>,

@@ -304,12 +304,16 @@ function buildMicroVmConfig(
     }
     if (policy.filesystem?.readwritePaths?.length ||
         policy.filesystem?.readonlyPaths?.length ||
+        policy.filesystem?.enumeratePaths?.length ||
         policy.filesystem?.deniedPaths?.length) {
         config.filesystem = {
             readwritePaths: policy.filesystem?.readwritePaths,
             readonlyPaths: policy.filesystem?.readonlyPaths,
             deniedPaths: policy.filesystem?.deniedPaths,
         };
+        if (policy.filesystem?.enumeratePaths?.length) {
+            config.filesystem.enumeratePaths = policy.filesystem.enumeratePaths;
+        }
     }
     config.containment = 'microvm';
     return config;
@@ -383,6 +387,9 @@ export function createConfigFromPolicy(
         readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
+    if (policy.filesystem?.enumeratePaths?.length) {
+        config.filesystem.enumeratePaths = [...policy.filesystem.enumeratePaths];
+    }
 
     // UI mapping (cross-platform)
     config.ui = {

@@ -34,7 +34,9 @@ pub(super) enum PsecContract {
 
 impl PsecContract {
     pub(super) fn for_request(request: &ExecutionRequest) -> Self {
-        if unrestricted_host_loopback_allowed(&request.policy) {
+        if unrestricted_host_loopback_allowed(&request.policy)
+            || !request.policy.enumerate_paths.is_empty()
+        {
             Self::V1_1
         } else {
             Self::V1_0
@@ -85,6 +87,7 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
     spec.fs_read_write = non_empty_paths(&request.policy.readwrite_paths);
     spec.fs_read_only = non_empty_paths(&request.policy.readonly_paths);
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
+    spec.fs_enumerate = non_empty_paths(&request.policy.enumerate_paths);
     spec.network_policy = Some(Box::new(build_psec_network_policy(
         &request.policy,
         contract,
@@ -217,7 +220,7 @@ fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {
     )
 }
 
-fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {
+pub(super) fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {
     policy
         .network_ingress
         .as_ref()

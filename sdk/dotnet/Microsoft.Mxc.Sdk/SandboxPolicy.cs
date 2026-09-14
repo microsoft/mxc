@@ -144,6 +144,10 @@ public sealed class FilesystemPolicy
     [JsonPropertyName("readonlyPaths")]
     public List<string> ReadonlyPaths { get; set; } = new();
 
+    /// <summary>Paths that may be enumerated without granting file-content reads.</summary>
+    [JsonPropertyName("enumeratePaths")]
+    public List<string>? EnumeratePaths { get; set; }
+
     /// <summary>Paths explicitly denied inside the sandbox.</summary>
     [JsonPropertyName("deniedPaths")]
     public List<string> DeniedPaths { get; set; } = new();

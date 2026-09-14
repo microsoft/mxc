@@ -143,6 +143,7 @@ that can be executed independently.
     "filesystem": {
         "readwritePaths": ["C:\\temp"],     // Read-write access
         "readonlyPaths": ["C:\\data"],      // Read-only access
+        "enumeratePaths": ["C:\\tools"],    // Query/list directory entries without reading files
         "deniedPaths": ["C:\\Windows"]      // Blocked paths
     },
 
@@ -296,6 +297,7 @@ The `filesystem` section defines path access policy shared across backends:
 |-------|------|---------|-------------|
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the

@@ -145,6 +145,10 @@ export interface Filesystem {
    */
   deniedPaths?: string[];
   /**
+   * Optional paths that may be queried or enumerated without granting file-content reads.
+   */
+  enumeratePaths?: string[];
+  /**
    * Optional paths granted read-only access.
    */
   readonlyPaths?: string[];

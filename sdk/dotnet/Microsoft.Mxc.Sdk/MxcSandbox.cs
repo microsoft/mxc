@@ -374,6 +374,7 @@ public static class MxcSandbox
         {
             "captureDenials" => BackendCapability.CaptureDenials,
             "filesystemDeniedPaths" => BackendCapability.FilesystemDeniedPaths,
+            "filesystemEnumeratePaths" => BackendCapability.FilesystemEnumeratePaths,
             "ingressHostLoopbackAllow" => BackendCapability.IngressHostLoopbackAllow,
             "proxyEnforcement" => BackendCapability.ProxyEnforcement,
             _ => BackendCapability.Unknown,

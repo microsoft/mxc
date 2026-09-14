@@ -71,6 +71,11 @@ struct MappedRoot {
 /// `deniedPaths` against them.
 fn plan_filesystem(request: &ExecutionRequest) -> Result<Vec<MappedFolder>, OneShotError> {
     let policy = &request.policy;
+    if !policy.enumerate_paths.is_empty() {
+        return Err(OneShotError::Policy(
+            "filesystem.enumeratePaths is not supported by the Windows Sandbox backend".to_string(),
+        ));
+    }
     let mut roots: Vec<MappedRoot> = Vec::new();
 
     for path in &policy.readwrite_paths {

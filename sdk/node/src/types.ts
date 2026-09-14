@@ -203,6 +203,8 @@ export interface FilesystemConfig {
   readwritePaths?: string[];
   /** Paths the script can read but not write */
   readonlyPaths?: string[];
+  /** Paths the script can enumerate without reading file contents */
+  enumeratePaths?: string[];
   /** Paths the script cannot access */
   deniedPaths?: string[];
   /** Automatically remove file access policy after execution (default: true) */
@@ -441,6 +443,8 @@ export type SandboxPolicy = {
       readwritePaths?: string[];
       /** Paths that are granted read-only access */
       readonlyPaths?: string[];
+      /** Paths that may be enumerated without granting file-content reads */
+      enumeratePaths?: string[];
       /** Paths that are explicitly denied all access */
       deniedPaths?: string[];
       /** Whether to clear the filesystem policy when the shell exits. (default: true) */

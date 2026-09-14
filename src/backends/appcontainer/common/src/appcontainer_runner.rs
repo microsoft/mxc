@@ -1731,6 +1731,12 @@ impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
+        if !request.policy.enumerate_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                "filesystem.enumeratePaths requires the BaseContainer PSEC 1.1 backend and \
+                 cannot be enforced by an AppContainer fallback",
+            ));
+        }
         if request
             .policy
             .network_ingress

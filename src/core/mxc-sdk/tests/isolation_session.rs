@@ -164,6 +164,7 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
     policy.filesystem = Some(FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
+        enumerate_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });

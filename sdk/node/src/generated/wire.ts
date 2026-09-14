@@ -117,6 +117,10 @@ export interface Filesystem {
    */
   deniedPaths?: string[] | null;
   /**
+   * Paths the process can query or enumerate without reading file contents.
+   */
+  enumeratePaths?: string[] | null;
+  /**
    * Paths the process can read but not write.
    */
   readonlyPaths?: string[] | null;

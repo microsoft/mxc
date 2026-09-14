@@ -232,6 +232,10 @@ pub enum FallbackError {
         /// Human-readable description of why resolution failed.
         reason: String,
     },
+
+    /// Enumeration-only access cannot be represented by AppContainer fallback tiers.
+    #[error("filesystem.enumeratePaths requires BaseContainer PSEC 1.1 with fs_enumerate support")]
+    EnumeratePathsUnsupported,
 }
 
 /// Decide which isolation tier to use for a run.
@@ -289,8 +293,15 @@ pub(crate) fn detect_with_base_container_capabilities(
     base_container_supports_deny_paths: bool,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
-    let has_fs_policy =
-        !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty() || denied;
+    let enumerate = !policy.enumerate_paths.is_empty();
+    let has_fs_policy = !policy.readwrite_paths.is_empty()
+        || !policy.readonly_paths.is_empty()
+        || enumerate
+        || denied;
+
+    if enumerate && !(prefer_base_container && base_container_usable) {
+        return Err(FallbackError::EnumeratePathsUnsupported);
+    }
 
     // Test-executor injection seam. An invalid value is silently ignored and
     // we proceed with the real probe chain.

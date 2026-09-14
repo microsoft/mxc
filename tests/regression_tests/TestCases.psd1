@@ -120,4 +120,12 @@
         HarnessArguments = "Default"
         Destructive = $false
     }
+    "1162" = @{
+        FriendlyName = "BaseContainer Filesystem Enumeration"
+        Script = "test_cases\Invoke-Issue1162-ProcessContainerFsEnumerate.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "PSEC fs_enumerate-capable host")
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
 }

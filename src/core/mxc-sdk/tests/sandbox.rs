@@ -22,6 +22,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
+            enumerate_paths: vec![],
             denied_paths: vec![],
             clear_policy_on_exit: None,
         }),
@@ -45,6 +46,7 @@ fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> S
         filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
             readonly_paths: vec![],
+            enumerate_paths: vec![],
             denied_paths: vec![],
             clear_policy_on_exit: None,
         }),

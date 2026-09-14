@@ -322,6 +322,13 @@
           },
           "type": "array"
         },
+        "enumeratePaths": {
+          "description": "Optional paths that may be queried or enumerated without granting file-content reads.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "readonlyPaths": {
           "description": "Optional paths granted read-only access.",
           "items": {

@@ -186,6 +186,15 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
             "selected containment requires schema version 0.9.0-alpha",
         ));
     }
+    if policy
+        .filesystem
+        .as_ref()
+        .is_some_and(|filesystem| !filesystem.enumerate_paths.is_empty())
+    {
+        return Err(error(
+            "filesystem.enumeratePaths requires schema version 0.9.0-alpha",
+        ));
+    }
     let process_container = selected_process_container(containment);
     let enforcement = legacy_enforcement(policy, containment, process_container.is_some());
     let network = match network_format {

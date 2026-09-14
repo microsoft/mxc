@@ -58,6 +58,7 @@ fn convert_filesystem(value: contract::Filesystem) -> wire::Filesystem {
     wire::Filesystem {
         readwrite_paths: readwrite_paths.into_option(),
         readonly_paths: readonly_paths.into_option(),
+        enumerate_paths: None,
         denied_paths: denied_paths.into_option(),
     }
 }

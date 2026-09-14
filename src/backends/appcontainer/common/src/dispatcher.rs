@@ -251,6 +251,12 @@ impl std::fmt::Display for DispatchError {
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
                  ({reason}). This indicates a corrupted or unsupported OS configuration."
             ),
+            DispatchError::Fallback(FallbackError::EnumeratePathsUnsupported) => write!(
+                f,
+                "filesystem.enumeratePaths requires the BaseContainer PSEC 1.1 backend with \
+                 fs_enumerate support; AppContainer fallback tiers cannot preserve \
+                 enumeration-only access."
+            ),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
             DispatchError::CaptureDenialsUnsupported { tier } => write!(

@@ -385,6 +385,13 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                     .map(|filesystem| filesystem.readonly_paths.clone())
                     .unwrap_or_default(),
             ),
+            enumerate_paths: contract::OptionalField::present(
+                policy
+                    .filesystem
+                    .as_ref()
+                    .map(|filesystem| filesystem.enumerate_paths.clone())
+                    .unwrap_or_default(),
+            ),
             denied_paths: contract::OptionalField::present(
                 policy
                     .filesystem

@@ -295,6 +295,11 @@ request.Containment = new ProcessContainerContainment
 };
 ```
 
+With schema `0.9.0-alpha`, `FilesystemPolicy.EnumeratePaths` requests
+directory-query and listing access without granting file-content reads. This is
+supported only by Windows BaseContainer hosts advertising PSEC 1.1
+`fs_enumerate`; unsupported hosts fail rather than broadening the policy.
+
 Capability names and backend combinations are validated by the native SDK.
 `LearningMode`, denial capture, and ProcessContainer directional networking
 require schema `0.8.0-alpha` or later.

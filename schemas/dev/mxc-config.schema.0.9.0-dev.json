@@ -276,6 +276,16 @@
             "null"
           ]
         },
+        "enumeratePaths": {
+          "description": "Paths the process can query or enumerate without reading file contents.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "readonlyPaths": {
           "description": "Paths the process can read but not write.",
           "items": {

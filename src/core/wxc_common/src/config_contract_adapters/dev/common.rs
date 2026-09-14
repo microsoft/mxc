@@ -33,11 +33,13 @@ pub(super) fn convert_filesystem(value: contract::Filesystem) -> wire::Filesyste
     let contract::Filesystem {
         readwrite_paths,
         readonly_paths,
+        enumerate_paths,
         denied_paths,
     } = value;
     wire::Filesystem {
         readwrite_paths: readwrite_paths.into_option(),
         readonly_paths: readonly_paths.into_option(),
+        enumerate_paths: enumerate_paths.into_option(),
         denied_paths: denied_paths.into_option(),
     }
 }

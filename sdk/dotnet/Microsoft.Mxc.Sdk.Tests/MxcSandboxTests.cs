@@ -209,6 +209,7 @@ public class MxcSandboxTests
     [Theory]
     [InlineData("captureDenials", BackendCapability.CaptureDenials)]
     [InlineData("filesystemDeniedPaths", BackendCapability.FilesystemDeniedPaths)]
+    [InlineData("filesystemEnumeratePaths", BackendCapability.FilesystemEnumeratePaths)]
     [InlineData("ingressHostLoopbackAllow", BackendCapability.IngressHostLoopbackAllow)]
     [InlineData("proxyEnforcement", BackendCapability.ProxyEnforcement)]
     public void Discovery_MapsEveryNativeCapability(
@@ -326,11 +327,31 @@ public class MxcSandboxTests
         Assert.Equal("0.7.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal(5000, root.GetProperty("timeoutMs").GetInt32());
         Assert.Equal("/tmp", root.GetProperty("filesystem").GetProperty("readwritePaths")[0].GetString());
+        Assert.False(root.GetProperty("filesystem").TryGetProperty("enumeratePaths", out _));
         Assert.Equal(8080,
             root.GetProperty("network").GetProperty("proxy").GetProperty("localhost").GetInt32());
         Assert.Equal("read", root.GetProperty("ui").GetProperty("clipboard").GetString());
         Assert.True(root.GetProperty("ui").GetProperty("allowWindows").GetBoolean());
         Assert.False(root.TryGetProperty("captureDenials", out _));
+    }
+
+    [Fact]
+    public void SandboxPolicy_SerializesEnumeratePaths()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.9.0-alpha",
+            Filesystem = new FilesystemPolicy
+            {
+                EnumeratePaths = [@"C:\input"],
+            },
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+
+        Assert.Equal(
+            @"C:\input",
+            doc.RootElement.GetProperty("filesystem").GetProperty("enumeratePaths")[0].GetString());
     }
 
     [Fact]
