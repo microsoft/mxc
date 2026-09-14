@@ -279,6 +279,7 @@ mod tests {
             bfscfg_present: false,
             bfs_compiled_in: false,
             base_container_supports_deny_paths: false,
+            base_container_supports_ingress_host_loopback_allow: false,
             isolation_session_available: false,
             hyperlight_available: false,
             ui_capabilities: all_ui_capabilities(),
@@ -593,6 +594,7 @@ mod tests {
 
     #[test]
     fn request_detector_keeps_supported_denied_paths_on_base_container() {
+        let _guard = crate::test_env::lock();
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".to_string()];
 
