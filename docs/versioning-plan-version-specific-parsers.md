@@ -6,9 +6,9 @@ PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941, #949, #966,
 rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5 reconstructed
 its exact Rust contract and advanced exact development to `0.9.0-alpha`.
 
-Phase 9.5 and both Phase 10 pull requests remain open. "Complete" below means
-implemented and locally verified, not merged. Native Unix execution remains
-the principal host-dependent acceptance gap.
+Phase 9.5, both Phase 10 pull requests, and Phase 11a remain open. "Complete"
+below means implemented and locally verified, not merged. Native Unix
+execution remains the principal host-dependent acceptance gap.
 
 | Scope | PR | Current or merged tip |
 | --- | --- | --- |
@@ -21,14 +21,16 @@ the principal host-dependent acceptance gap.
 | Phase 9.5: typed state-aware dispatch | #1123 | `36786cae` |
 | Phase 10a: additive IsolationSession directional networking | #1133 | `a8556c61` |
 | Phases 10b-10d: directional-only v0.9 cutover | #1145 | `fe31abec` |
+| Phase 11a: publication/freeze tooling | #1150 | `6052b3a7` |
 
 Phase 8 merged on 2026-09-11 and Phase 9 merged on 2026-09-13. Phase 9.5 is
 published as a single commit in #1123 with successful Windows lifecycle
 acceptance recorded and native Unix execution still outstanding. Phase 10a is
 published as one commit in #1133, stacked on Phase 9.5. The atomic Phase
 10b-10d implementation is published as one commit in #1145, stacked on Phase
-10a. Phase 11a is the next unimplemented unit. The planned end state after
-Phases 10-11 publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
+10a. Phase 11a is published in #1150 and is being revised to support a
+Rust-authored publication profile. The planned end state after Phases 10-11
+publishes `0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 The phase descriptions retain the design and behavior at each intermediate
 boundary. In particular, references to rolling production authority in Phase 7
@@ -51,8 +53,19 @@ Original planning base: `origin/main` at
   contract publication path, with legacy Network fields removed, then advance
   development to `0.10.0-alpha`.
 - Keep `experimental` completely absent from published contracts.
-- Make the development contract's `experimental` structure recursively closed,
-  while allowing that entire unpublished contract to change freely.
+- Remove the `experimental` JSON block before publishing v0.9. Development-only
+  fields use their intended permanent top-level or backend-section locations;
+  execution remains gated by `--experimental` or the corresponding SDK
+  authorization until the feature graduates.
+- Allow a published contract to contain selected state-aware request roots and
+  backend provision shapes once those backends graduate. Publication eligibility
+  is declared per root/backend rather than inferred from one-shot versus
+  state-aware structure.
+- Define post-1.0 minor versions as backward-compatible extensions within a
+  major line, and reserve a major-version increment for breaking contract
+  changes.
+- Add tooling that classifies contract changes as compatible, breaking, or
+  requiring semantic review.
 - Preserve the existing source-aware Serde diagnostics, duplicate-field
   rejection, secret redaction, semantic validation, and backend behavior.
 - Keep adapters from versioned wire types into the runtime model outside the
@@ -71,6 +84,9 @@ Original planning base: `origin/main` at
   object-root hardening is out of scope for this work in every phase.
 - Publish `0.10.0-alpha` or advance development beyond it; `1.0.0` remains a
   later milestone.
+- Finalize which state-aware backends graduate into v0.9 in Phase 11a. The
+  tooling must support the choice, but the graduation decision follows the
+  permanent-field migration and backend acceptance evidence.
 
 ### Contract lifecycle and target state
 
@@ -83,11 +99,58 @@ the exact development contract to `0.9.0-alpha`.
 | After Phase 6.5 | `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha` | `0.9.0-alpha` |
 | End state after Phase 11 | `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha` | `0.10.0-alpha` |
 
-Published request types contain only the stable one-shot surface. They exclude
-`experimental`, `phase`, `sandboxId`, `correlationVector`, experimental
-containments, and the abstract `vm` intent while it resolves only to an
-experimental backend. The historical `0.5.0-alpha` schema remains unsupported;
-no runtime contract is added for it.
+Published request types contain only graduated fields and roots. They always
+exclude the `experimental` block and development-only containments. They may
+include one-shot roots, common state-aware phase roots (`start`, `exec`, `stop`,
+and `deprovision`), and selected backend-specific `provision` roots. A
+state-aware root is published only when every field reachable from it has a
+stable permanent location and the corresponding backend has graduated. The
+historical `0.5.0-alpha` schema remains unsupported; no runtime contract is
+added for it.
+
+#### Feature location, maturity, and execution authorization
+
+The contract model treats these as independent decisions:
+
+| Concern | Authority |
+| --- | --- |
+| JSON location and shape | Development or published exact contract |
+| Eligibility for publication | Rust-authored publication profile |
+| Runtime authorization | CLI `--experimental` or SDK opt-in |
+
+The development contract may expose a field in its intended permanent location
+while the feature still requires experimental authorization. Graduation then
+removes the authorization requirement and makes the field/root eligible for a
+published profile; it does not move the field again. Published contracts never
+contain fields that still require experimental authorization.
+
+The v0.9 pre-publication migration removes the `experimental` object entirely.
+For example, backend configuration currently under
+`experimental.wslc.provision` or
+`experimental.isolation_session.provision` moves to the permanent top-level
+backend section selected for that surface. Callers on the development line
+must update once for this migration, but later graduation does not require
+another policy rewrite.
+
+#### Compatibility after 1.0
+
+Exact dispatch remains the runtime mechanism after 1.0, but versions within one
+major line form a compatibility family:
+
+- `1.1`, `1.2`, and later 1.x contracts may add optional fields, enum values
+  whose handling is explicitly extensible, or new request roots without
+  changing the meaning of existing 1.x documents.
+- A document declaring 1.0 is still parsed through the frozen 1.0 contract and
+  cannot use a field introduced in 1.2.
+- SDK object models may span several compatible minor versions. Serialization
+  selects the oldest registered contract that can represent the requested
+  policy without loss, or rejects an explicitly requested older target.
+- Removing or renaming a field/root, making optional input required, narrowing
+  accepted values, or changing existing field meaning requires the next major
+  contract line.
+
+This compatibility policy must be implemented and enforced before 1.0 is
+published; it does not block the v0.9 publication.
 
 #### Freeze model
 
@@ -1549,12 +1612,29 @@ and opens v0.10 development:
 mxc_schema_gen publish --version 0.9.0-alpha --next-dev 0.10.0-alpha
 ```
 
-Publication copies only the development stable-candidate request;
-experimental and state-aware types never enter a published contract. Generate
-the lifecycle registry and version constants from the publication metadata.
+Publication copies only the graduated subset selected by a Rust-authored
+publication profile. The profile always excludes the `experimental` block and
+every field or backend that still requires experimental authorization. It may
+include the stable one-shot root plus selected state-aware provision roots and
+the common post-provision roots needed to operate those sandboxes. Generate
+machine-readable lifecycle metadata from the authoritative Rust registry.
 After publication, the registry marks v0.9 published and v0.10 development;
 the mutable `dev` module and its schema, fixtures, adapters, and TypeScript
 oracle all advance to `0.10.0-alpha`.
+
+Phase 11a adds the publication-profile mechanism but does not decide backend
+graduation. Its checked-in v0.9 profile remains conservative until the
+pre-publication `experimental`-block removal and backend acceptance work is
+complete. A profile selecting a state-aware backend must include:
+
+- that backend's `provision` root;
+- the shared `start`, `exec`, `stop`, and `deprovision` roots;
+- every stable field reachable from those roots; and
+- no empty compatibility placeholder for an omitted development-only field.
+
+The generated publication schema and frozen module must reject every
+unselected provision containment and every field that still requires
+experimental authorization.
 
 Publication is not a byte-for-byte copy of every stable-candidate type. A
 development one-shot `Containment` enum may carry both
@@ -1565,17 +1645,19 @@ development-only values (`vm`, `windows_sandbox`, `microvm`, `hyperlight`,
 only stable-candidate values and a frozen adapter mapping that narrower enum.
 The mutable `dev` contract keeps the full enum and advances.
 
-The published adapter is **forked**, not updated: freezing copies the current dev
-one-shot adapter into a versioned adapter, and the `dev` adapter continues to
-evolve. Phase 5B's split of the adapter tests into `stable_candidate.rs` and
-`experimental.rs` exists for this fork.
+The published adapters are **forked**, not updated: freezing copies the selected
+development one-shot and state-aware adapters into versioned adapters, and the
+`dev` adapters continue to evolve. Phase 5B's split of the one-shot adapter
+tests remains useful, but state-aware publication additionally requires
+per-phase adapter/runtime snapshots and backend dispatch observations.
 
 The same fork applies to the `mxc_engine::policy` contract builder introduced by
 the Phase 7 decision 3 resolution. Each supported version has its own builder
 mapping `SandboxPolicy` onto that version's root, so publication freezes a
 versioned builder beside the frozen adapter while `dev`'s builder advances.
-Publication is therefore a three-way fork — contract module, adapter, builder —
-and all three must be copied together.
+Publication is therefore a three-way fork — contract module, adapters, builders
+— and all selected surfaces must be copied together. The one-shot policy
+builder does not substitute for state-aware SDK/request construction coverage.
 
 Keep the stable-candidate set machine-readable inside the contract crate rather
 than in a comment or an external metadata file. Declare it beside the enum, for
@@ -1592,12 +1674,17 @@ declarative. Do not split the enum into a stable type wrapped by a
 development-only extension type: that degrades parse errors to "data did not
 match any variant" for every misspelled containment.
 
+Apply the same principle to request roots. The Rust publication profile names
+the one-shot inclusion and the selected state-aware provision backends. Common
+post-provision roots are derived from that selection rather than maintained as
+an independent list that can drift.
+
 Narrowing at publication has a recurring cost that must be planned for, not
-discovered: at every publication, each config using a development-only
-containment must be re-versioned to the new development version. A document
-declaring `0.9.0-alpha` with `containment: "windows_sandbox"` must move to
-`0.10.0-alpha` when v0.9 is published. Phase 8's migration is therefore not a
-one-off; a smaller version recurs at each publication.
+discovered: at every publication, each config using an unselected containment,
+root, or field must be re-versioned to the new development version. A document
+declaring `0.9.0-alpha` with a backend that does not graduate into v0.9 must move
+to `0.10.0-alpha`. Phase 8's migration is therefore not a one-off; a smaller
+version recurs at each publication.
 
 Add CI checks that published Rust modules, stable generated schemas, registry
 identities, and recorded digests cannot be deleted or changed incompatibly.
@@ -1608,6 +1695,22 @@ builder-versus-parser equivalence must remain unchanged. Published Rust source
 may be refactored only when those gates prove equivalent behavior. Reuse
 `scripts/versioning/lib/git-base.js` for base-ref handling.
 
+Add a separate contract-compatibility classifier. It compares a proposed
+contract with its predecessor in the same major line and reports:
+
+| Classification | Examples |
+| --- | --- |
+| Compatible | Add an optional field or new selected request root; relax a local value constraint |
+| Breaking | Remove/rename a field, alias, enum spelling, or root; make a field required; narrow a type/range/pattern |
+| Semantic review required | Change defaults, adapter mapping, presence semantics, backend validation, or execution behavior |
+
+The first implementation may be advisory for pre-1.0 contracts. Before 1.0,
+CI must require an explicit versioning decision for every breaking or semantic
+change and reject a breaking change that remains on the same major line. This
+classifier begins after the v0.9 publication/cleanup sequence, on the
+v0.10-to-v1.0 development line; Phase 11a records the generated artifacts and
+behavioral snapshots it will compare but does not implement the classifier.
+
 Replace `schemas/schema-version.json` and the regex-based version synchronization
 logic once all consumers use the generated registry.
 
@@ -1616,7 +1719,7 @@ current min/stable/dev constants as the exact-contract registry. Exact contracts
 are registered deliberately as their Rust modules are implemented; Phase 11
 replaces the old synchronization mechanism with generated registry metadata.
 
-#### Final cleanup exit criteria (Phases 11b-11c)
+#### Final cleanup exit criteria (Phase 11d)
 
 **Adopted 2026-09-05:** complete rolling-parser retirement includes test builds,
 not just production entry points. Phase 9 removes production authority;
@@ -1683,10 +1786,10 @@ Good tasks to delegate:
 
 ### Implementation PR plan
 
-**Adopted 2026-09-02; status updated 2026-09-13.** The work uses ten reviewable
-PRs rather than one PR per fine-grained work item or one very large PR per
-major phase. Each PR must build and test green on its own; later PRs may be
-stacked while review is in progress, but merge in the order below.
+**Adopted 2026-09-02; sequence revised 2026-09-14.** The work uses twelve
+reviewable PRs rather than one PR per fine-grained work item or one very large
+PR per major phase. Each PR must build and test green on its own; later PRs may
+be stacked while review is in progress, but merge in the order below.
 
 | Sequence / PR | Plan scope | Boundary | Status |
 | --- | --- | --- | --- |
@@ -1698,16 +1801,23 @@ stacked while review is in progress, but merge in the order below.
 | 6 / #1123 | Phase 9.5 | Replace `experimental_raw` with typed state-aware backend payloads | Implemented at `36786cae`; PR open |
 | 7 / #1133 | Phase 10a | Add the standard directional IsolationSession all-allow posture without removing legacy v0.9 input yet | Implemented at `a8556c61`; PR open |
 | 8 / #1145 | Phases 10b-10d | Perform the atomic v0.9 directional-only cutover, backend and SDK migration, corpus rewrite, gates, and documentation | Implemented at `fe31abec`; PR open |
-| 9 | Phase 11a | Add publication, freeze, digest, and generated-registry tooling before changing lifecycle state | Not started |
-| 10 | Phases 11b-11c | Publish v0.9, open v0.10 development, migrate development-only configs, and retire rolling artifacts, metadata, and test-only parser/builder oracles | Not started |
+| 9 / #1150 | Phase 11a | Add publication profiles, freeze, digest, and generated-registry tooling before changing lifecycle state | Implemented at `6052b3a7`; revision in progress |
+| 10 | Phase 11b | Remove the `experimental` block, move its fields to permanent locations, preserve execution authorization separately, and finalize which state-aware backends graduate into v0.9 | Not started |
+| 11 | Phase 11c | Freeze the selected one-shot/state-aware contract, publish v0.9, open v0.10 development, and migrate configs using unselected surfaces | Not started |
+| 12 | Phase 11d | Retire rolling artifacts, duplicated metadata, and test-only parser/builder/payload oracles after replacement evidence is complete | Not started |
 
 Phase 10's internal subphases are detailed in Appendix C. Phase 11a is
 deliberately additive so publication mechanics can be reviewed before they
-rewrite the contract lifecycle; the final publication and rolling-stack cleanup
-remain together so no intermediate tree has conflicting version authorities.
-That cleanup includes deleting the Phase 9.5 legacy payload reference and all
-remaining rolling parser/builder oracles after their exact-contract replacement
+rewrite the contract lifecycle. Phase 11b performs the one-time field-location
+migration before any v0.9 shape is frozen. Phase 11c changes lifecycle state
+only after the publication profile is final. Phase 11d then removes the
+remaining rolling stack, including the Phase 9.5 legacy payload reference and
+all rolling parser/builder oracles, after their exact-contract replacement
 coverage is established.
+
+Post-1.0 compatibility inference and the contract-change classifier begin on
+the v0.10-to-v1.0 development line. They are intentionally outside the v0.9
+publication critical path, but must be enforced before v1.0 publishes.
 Phase 7.5 is maintained on the dedicated plan branch rather than adding this
 planning document to an implementation PR.
 
@@ -3690,7 +3800,11 @@ though the override machinery itself is identical in both.
 
 | Decision | Adopted result |
 | --- | --- |
-| Published contract contents | Published contracts contain stable one-shot fields only; experimental and state-aware structures remain on the mutable development line |
+| Published contract contents | Published contracts contain only graduated fields and roots selected by a Rust-authored publication profile; selected state-aware backends are allowed, but fields requiring experimental authorization are not |
+| Experimental field placement | Remove the `experimental` block before v0.9 publication; development-only features use permanent top-level/backend-section locations while runtime authorization remains separate |
+| State-aware publication | Selecting a backend includes its provision root plus the shared start/exec/stop/deprovision roots; final v0.9 backend graduation is decided after field migration and acceptance evidence |
+| Post-1.0 compatibility | Minor versions within a major line are backward-compatible extensions; SDKs infer the oldest representable contract, and breaking changes require a new major line |
+| Compatibility tooling | CI classifies changes as compatible, breaking, or semantic-review-required; same-major breaking changes become prohibited before 1.0 |
 | Legacy v0.8 release | Treat tag `v0.8.0` and stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` as immutable; reconstruct Rust types without regenerating the released schema |
 | Version progression | Phase 6.5 moves exact development to `0.9.0-alpha`; Phase 11 publishes v0.9 and opens `0.10.0-alpha` development |
 | v0.9 Network surface | Remove legacy Network fields from every v0.9 one-shot and state-aware root before publication; published v0.6/v0.7/v0.8 contracts retain their immutable syntax |
@@ -3804,18 +3918,17 @@ is the intended consequence of the Phase 11 rule, recorded here as a choice.
 
 ### Appendix A: Experimental fields in published contracts
 
-> **Status: recorded discussion, not part of the plan of record.**
+> **Status: rejected alternative, retained as a decision record.**
 >
-> The plan of record excludes `experimental` from published contracts,
-> including the planned v0.9 publication. Do not implement the alternative in
-> this section until the requirement is ratified and the normative plan is
-> updated.
+> The plan of record excludes fields requiring experimental authorization from
+> every published contract. It also removes the `experimental` block from the
+> development contract and places development-only fields at their intended
+> permanent locations. Do not implement the alternative below.
 >
-> **Update, 2026-08-20.** The revised publication sequence brought this
-> forward, and it was decided against: stable `0.8.0-alpha` contains neither
-> experimental nor state-aware fields, answering decision 5 as "none" and
-> question 3 as "no". This section remains a recorded discussion for a future
-> publication. See the decision record in section 4.
+> **Update, 2026-09-14.** State-aware structure is no longer categorically
+> excluded from publication: graduated state-aware roots may publish. What
+> remains excluded is any field/backend that still requires experimental
+> authorization. See the normative Phase 11 section and decision table.
 
 A proposed requirement allows a published config contract (and therefore a
 stable schema artifact) to include explicitly selected experimental fields.
