@@ -1700,7 +1700,7 @@ fn convert_wire_config(
             }
 
             // WSLc cannot honor a blanket inbound-listen grant. The runner only
-            // wires explicit host->container port forwards (experimental.wslc
+            // wires explicit host->container port forwards (wslc
             // portMappings) into the WSL2 VM's NAT; it never consults
             // allowLocalNetwork. Reject `true` and point at portMappings.
             // (`false` is the default and a no-op.)
@@ -1708,7 +1708,7 @@ fn convert_wire_config(
                 let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
                            container runs in the NAT'd WSL2 VM and MXC does not honor a \
                            blanket inbound-listen grant; expose specific ports with \
-                           experimental.wslc.portMappings instead.";
+                           wslc.portMappings instead.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1877,15 +1877,11 @@ fn convert_wire_config(
                 let mut converted = Vec::with_capacity(mappings.len());
                 for (idx, m) in mappings.into_iter().enumerate() {
                     if m.windows_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
-                        );
+                        let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
                         return Err(WxcError::ConfigParse(msg));
                     }
                     if m.container_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
-                        );
+                        let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
                         return Err(WxcError::ConfigParse(msg));
                     }
                     // Only TCP is representable in the wire model
@@ -1909,7 +1905,7 @@ fn convert_wire_config(
                 for pm in &converted {
                     if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
                         let msg = format!(
-                            "experimental.wslc.portMappings: duplicate windowsPort {} \
+                            "wslc.portMappings: duplicate windowsPort {} \
                              for protocol '{}'",
                             pm.windows_port, pm.protocol
                         );
@@ -2715,14 +2711,64 @@ mod tests {
     }
 
     fn parse_both(json: &str) -> (ParserSnapshot, ParserSnapshot) {
+        let rolling_source = rolling_compatibility_source(json);
         let mut rolling_logger = test_logger();
-        let rolling_result = parse_mxc_request_json(json, &mut rolling_logger);
+        let rolling_result = parse_mxc_request_json(&rolling_source, &mut rolling_logger);
         let rolling = snapshot(rolling_result, &rolling_logger);
 
         let mut exact_logger = test_logger();
         let exact_result = parse_exact_mxc_request_json(json, &mut exact_logger);
         let exact = snapshot(exact_result, &exact_logger);
         (rolling, exact)
+    }
+
+    fn rolling_compatibility_source(json: &str) -> String {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return json.to_string();
+        };
+        let Some(root) = value.as_object_mut() else {
+            return json.to_string();
+        };
+        if root.get("version").and_then(serde_json::Value::as_str) != Some("0.9.0-alpha") {
+            return json.to_string();
+        }
+
+        let mut experimental = serde_json::Map::new();
+        let mut changed = false;
+        if root.get("phase").is_none() {
+            for (field, legacy) in [
+                ("test", "test"),
+                ("windowsSandbox", "windows_sandbox"),
+                ("wslc", "wslc"),
+            ] {
+                if let Some(value) = root.remove(field) {
+                    experimental.insert(legacy.to_string(), value);
+                    changed = true;
+                }
+            }
+        } else if root.get("phase").and_then(serde_json::Value::as_str) == Some("provision") {
+            let field = match root.get("containment").and_then(serde_json::Value::as_str) {
+                Some("isolation_session") => Some(("isolationSession", "isolation_session")),
+                Some("wslc") => Some(("wslc", "wslc")),
+                _ => None,
+            };
+            if let Some((field, legacy)) = field {
+                if let Some(value) = root.remove(field) {
+                    experimental.insert(legacy.to_string(), value);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return json.to_string();
+        }
+        if !experimental.is_empty() {
+            root.insert(
+                "experimental".to_string(),
+                serde_json::Value::Object(experimental),
+            );
+        }
+        serde_json::to_string(&value).unwrap()
     }
 
     #[test]
@@ -2886,8 +2932,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
+                    path: Some("experimental"),
+                    message_fragment: "unknown field `experimental`",
                 },
             ),
             (
@@ -2896,8 +2942,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::OneShot,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
+                    path: Some("experimental"),
+                    message_fragment: "unknown field `experimental`",
                 },
             ),
             (
@@ -3268,17 +3314,17 @@ mod tests {
                     return Some(CorpusDivergenceKind::DevelopmentContractTightening);
                 }
             }
-            // The one-shot IsolationSession section is closed. The rolling
-            // parser stores unknown members there and lets the backend decide;
-            // the exact contract refuses them outright. Matching on the
-            // section's own path keeps this specific to that surface.
+            // The removed one-shot experimental wrapper remains accepted by
+            // the rolling oracle. Exact v0.9 rejects it before inspecting its
+            // former IsolationSession members.
             let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
                 && exact.category == ErrorCategory::TypedStructure
-                && exact
-                    .path
-                    .as_deref()
-                    .is_some_and(|path| path.starts_with("experimental.isolation_session"))
-                && exact.message.contains("unknown field");
+                && exact.path.as_deref() == Some("experimental")
+                && object
+                    .get("experimental")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|experimental| experimental.contains_key("isolation_session"))
+                && exact.message.contains("unknown field `experimental`");
             let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
                 && matches!(
                     exact.category,
@@ -3592,9 +3638,7 @@ mod tests {
                     "containment":"isolation_session",
                     "telemetry":{"enabled":false},
                     "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-                    "experimental":{
-                        "isolation_session":{"provision":{"appId":"Contoso.App"}}
-                    }
+                    "isolationSession":{"provision":{"appId":"Contoso.App"}}
                 }"#,
             ),
             (
@@ -3606,9 +3650,7 @@ mod tests {
                     "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
                     "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
                     "telemetry":{"enabled":true},
-                    "experimental":{
-                        "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
-                    }
+                    "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
                 }"#,
             ),
             (
@@ -3913,16 +3955,16 @@ mod tests {
                     "phase":"provision",
                     "containment":"isolation_session",
                     "_comment":null,
-                    "experimental":{"isolation_session":{"provision":{"appId":null}}}
+                    "isolationSession":{"provision":{"appId":null}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
                 rolling_diagnostic: None,
                 exact_diagnostic: DiagnosticExpectation {
                     route: ErrorRoute::StateAware,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session.provision.appId"),
+                    path: Some("isolationSession.provision.appId"),
                     line: Some(6),
-                    column: Some(82),
+                    column: Some(65),
                     message_contains: &["invalid type: null"],
                 },
                 rolling_logger: LoggerExpectation::default(),
@@ -3936,16 +3978,16 @@ mod tests {
                     "phase":"provision",
                     "containment":"isolation_session",
                     "_comment":null,
-                    "experimental":{"isolation_session":{"provision":{"futureField":true}}}
+                    "isolationSession":{"provision":{"futureField":true}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
                 rolling_diagnostic: None,
                 exact_diagnostic: DiagnosticExpectation {
                     route: ErrorRoute::StateAware,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session.provision.futureField"),
+                    path: Some("isolationSession.provision.futureField"),
                     line: Some(6),
-                    column: Some(83),
+                    column: Some(66),
                     message_contains: &["unknown field `futureField`"],
                 },
                 rolling_logger: LoggerExpectation::default(),
@@ -5081,11 +5123,9 @@ mod tests {
                 "containment": "isolation_session",
                 "telemetry": {{"enabled": {telemetry_enabled}}},
                 "network": {{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}},
-                "experimental": {{
-                    "isolation_session": {{
-                        "provision": {{
-                            "appId": "Contoso.App"
-                        }}
+                "isolationSession": {{
+                    "provision": {{
+                        "appId": "Contoso.App"
                     }}
                 }}
             }}"#
@@ -5197,7 +5237,7 @@ mod tests {
     }
 
     #[test]
-    fn public_preflight_duplicate_experimental_fields_follow_the_selected_request_kind() {
+    fn public_preflight_rejects_removed_experimental_field_by_request_kind() {
         for (fields, state_aware) in [
             (r#""process":{"commandLine":"echo hello"}"#, false),
             (
@@ -5212,15 +5252,11 @@ mod tests {
             (r#""phase":"stop","sandboxId":"wsb:abcd1234""#, true),
             (r#""phase":"deprovision","sandboxId":"wsb:abcd1234""#, true),
         ] {
-            let valid = format!(r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}}}}"#);
-            load_mxc_request_from_json(&valid, &mut test_logger()).unwrap();
-            let duplicate = format!(
-                r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}},"experimental":{{}}}}"#
-            );
+            let removed = format!(r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}}}}"#);
             let mut logger = test_logger();
-            let error = load_mxc_request_from_json(&duplicate, &mut logger).unwrap_err();
+            let error = load_mxc_request_from_json(&removed, &mut logger).unwrap_err();
             assert!(
-                error.message().contains("duplicate field `experimental`"),
+                error.message().contains("unknown field `experimental`"),
                 "{error:?}"
             );
             if state_aware {
@@ -5389,8 +5425,8 @@ mod tests {
                 "process.cwd",
             ),
             (
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","experimental":{"wslc":{"provision":{"image":42}}}}"#,
-                "experimental.wslc.provision.image",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","wslc":{"provision":{"image":42}}}"#,
+                "wslc.provision.image",
             ),
         ] {
             let value: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -5961,7 +5997,7 @@ mod tests {
                     ""
                 };
                 let json = format!(
-                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}},"experimental":{{}}{process}}}"#
+                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}}{process}}}"#
                 );
                 let encoded = base64_encode(json.as_bytes());
                 for parsed in [
@@ -7540,7 +7576,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let encoded = base64_encode(
-            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"seatbelt":{}}}"#,
+            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","seatbelt":{}}"#,
         );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
@@ -9900,15 +9936,12 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_experimental_seatbelt() {
-        // `experimental.seatbelt` moved to the stable section; the state-aware
-        // path must reject it with the migration message, not silently discard
-        // it.
+    fn state_aware_rejects_one_shot_seatbelt_section() {
         let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "experimental": {"seatbelt": {"guiAccess": true}}
+            "seatbelt": {"guiAccess": true}
         }"#;
         let err = match load_mxc(json) {
             Err(ParseError::StateAware(e)) => e.to_string(),
@@ -9918,12 +9951,12 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_experimental_macos_sandbox_alias() {
+    fn state_aware_rejects_one_shot_macos_sandbox_alias() {
         let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "experimental": {"macos_sandbox": {"guiAccess": true}}
+            "macos_sandbox": {"guiAccess": true}
         }"#;
         let err = match load_mxc(json) {
             Err(ParseError::StateAware(e)) => e.to_string(),

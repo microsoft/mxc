@@ -7,9 +7,7 @@ fn windows_sandbox_request(fields: &str) -> String {
     format!(
         r#"{{
             "version": "0.9.0-alpha",
-            "experimental": {{
-                "windows_sandbox": {{{fields}}}
-            }},
+            "windowsSandbox": {{{fields}}},
             "process": {{"commandLine": "echo"}}
         }}"#
     )
@@ -36,7 +34,7 @@ fn accepts_windows_sandbox_fields() {
 fn rejects_incorrect_windows_sandbox_spellings() {
     let wrong_outer_name = r#"{
         "version": "0.9.0-alpha",
-        "experimental": {"windowsSandbox": {}},
+        "windows_sandbox": {},
         "process": {"commandLine": "echo"}
     }"#;
 
@@ -93,26 +91,26 @@ fn rejects_duplicate_windows_sandbox_fields() {
     assert_invalid_cases(
         [
             (
-                "experimental.windows_sandbox",
+                "windowsSandbox",
                 version_and_process,
-                r#""experimental": {"windows_sandbox": {}, "windows_sandbox": {}}"#,
+                r#""windowsSandbox": {}, "windowsSandbox": {}"#,
             ),
             (
-                "experimental.windows_sandbox.idleTimeoutMs",
+                "windowsSandbox.idleTimeoutMs",
                 version_and_process,
-                r#""experimental": {"windows_sandbox": {"idleTimeoutMs": 1000, "idleTimeoutMs": 2000}}"#,
+                r#""windowsSandbox": {"idleTimeoutMs": 1000, "idleTimeoutMs": 2000}"#,
             ),
             (
-                "experimental.windows_sandbox.idleTimeout",
+                "windowsSandbox.idleTimeout",
                 version_and_process,
-                r#""experimental": {"windows_sandbox": {"idleTimeout": 1000, "idleTimeout": 2000}}"#,
+                r#""windowsSandbox": {"idleTimeout": 1000, "idleTimeout": 2000}"#,
             ),
             (
-                "experimental.windows_sandbox.daemonPipeName",
+                "windowsSandbox.daemonPipeName",
                 version_and_process,
-                r#""experimental": {"windows_sandbox": {"daemonPipeName": "pipe1", "daemonPipeName": "pipe2"}}"#,
+                r#""windowsSandbox": {"daemonPipeName": "pipe1", "daemonPipeName": "pipe2"}"#,
             ),
         ],
-        "duplicate experimental field",
+        "duplicate field",
     );
 }

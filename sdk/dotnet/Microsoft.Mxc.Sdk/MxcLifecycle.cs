@@ -671,15 +671,20 @@ public static class MxcLifecycle
         string key,
         JsonNode? value)
     {
-        if (envelope["experimental"] is not JsonObject experimental)
+        var sectionName = backend switch
         {
-            experimental = new JsonObject();
-            envelope["experimental"] = experimental;
-        }
-        if (experimental[backend] is not JsonObject backendConfig)
+            IsolationSessionContainment => "isolationSession",
+            WindowsSandboxContainment => "windowsSandbox",
+            WslcContainment => "wslc",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(backend),
+                backend,
+                "Unknown state-aware backend"),
+        };
+        if (envelope[sectionName] is not JsonObject backendConfig)
         {
             backendConfig = new JsonObject();
-            experimental[backend] = backendConfig;
+            envelope[sectionName] = backendConfig;
         }
         if (backendConfig[phase] is not JsonObject phaseConfig)
         {

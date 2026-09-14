@@ -3,7 +3,5 @@
   "process": {
     "commandLine": "echo experimental"
   },
-  "experimental": {
-    "test": {}
-  }
+  "test": {}
 }

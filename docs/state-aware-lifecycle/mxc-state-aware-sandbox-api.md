@@ -41,7 +41,7 @@ provision, start, exec, stop, deprovision. Each is a discrete call. Provision re
 opaque `SandboxId` string the caller persists and forwards to subsequent calls. The API
 surface ships stable from `0.6.0` — state-awareness is not itself gated by an
 `--experimental` flag. Per-stage configuration is typed per-backend per-phase under
-`experimental.<backend>.<phase>` while a backend's state-aware participation is
+`<backendSection>.<phase>` while a backend's state-aware participation is
 experimental, and migrates to top-level `<backend>.<phase>` when that backend's
 state-aware participation graduates (§13). Backends opt in by implementing a new
 `StatefulSandboxBackend` Rust trait. The existing `ScriptRunner` trait is unchanged. A
@@ -64,7 +64,7 @@ elaborates.
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
 | TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
-| JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. Exact registered roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
+| JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `<backendSection>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. Exact registered roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
 | Rust executor (§9) | Exact registered request contracts selected by version, phase, and provision containment; typed neutral operations; checked backend binding; and `StatefulSandboxBackend` dispatch. | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. Exact-root structural failures precede backend validation. | One-shot retains its existing response surface, while exact-contract failures use that surface's structural-error mapping. |
 | Plug-in surface (§11) | Implement `StatefulSandboxBackend` (in addition to or instead of `ScriptRunner`). Define typed per-(backend, phase) `*Config` interfaces. Declare the backend's `ID_PREFIX` and `BACKEND_KEY` consts on the trait impl. Document the cross-cutting policy honor matrix. | Ephemeral-only backends require no changes. The `ContainmentBackend` Rust enum is extended, not replaced. |
@@ -159,8 +159,9 @@ Each backend declares one of three participation modes:
   implementation) is the implementor's choice.
 
 Stages beyond these five (snapshot, suspend, attach, restore, etc.) are deferred (§14). A
-backend with native support can expose them privately under
-`experimental.<backend>.<custom-stage>` until they are universalised.
+backend with native support can expose them at a permanent backend-section path
+while keeping execution behind the experimental authorization until they are
+universalised.
 
 ## 5. Identifiers
 
@@ -619,7 +620,8 @@ interface OneShotRequest {
   lifecycle?: LifecycleConfig;
   processContainer?: ProcessContainerConfig;
   lxc?: LxcConfig;
-  experimental?: ExperimentalOneShotConfigs;     // existing one-shot shape per docs/schema.md
+  windowsSandbox?: WindowsSandboxConfig;          // gated until backend graduation
+  wslc?: WslcConfig;                              // gated until backend graduation
 }
 
 interface ProvisionStateAwareRequest {
@@ -629,7 +631,8 @@ interface ProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;                  // backend declares per-phase honor
   network?: NetworkConfig;                        // backend declares per-phase honor
   ui?: UiConfig;                                  // backend declares per-phase honor
-  experimental?: ExperimentalStateAwareConfigs;
+  isolationSession?: { provision?: { appId?: string } };
+  wslc?: { provision?: WslcProvisionConfig };
 }
 
 interface NonProvisionStateAwareRequest {
@@ -640,7 +643,6 @@ interface NonProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;                      // backend declares per-phase honor
   network?: NetworkConfig;                            // backend declares per-phase honor
   ui?: UiConfig;                                      // backend declares per-phase honor
-  experimental?: ExperimentalStateAwareConfigs;
 }
 
 type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequest;
@@ -657,7 +659,7 @@ Top-level fields shared by both branches:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `version` | string | Yes | Exact registered schema version; state-aware requests declare `0.9.0-alpha`. The SDK fills this field when the consumer Config omits it. |
-| `experimental` | object | No | Backend-specific config block. Shape depends on `phase` (§7.2). |
+| `isolationSession`, `windowsSandbox`, `wslc` | object | No | Permanent backend-specific sections. Provision subobjects are accepted only by the matching provision root. |
 
 Backend-routing fields:
 
@@ -685,16 +687,14 @@ declare which phases honor them, see §10.3):
 One-shot-only fields (`containerId`, `lifecycle`, `processContainer`, `lxc`) are not
 enumerated here; their definitions live in `docs/schema.md`.
 
-### 7.2 The `experimental` block
+### 7.2 Backend-specific sections
 
-`ExperimentalStateAwareConfigs` describes the wire-format shape of the `experimental`
-field on a state-aware request. It is a wire-only type — consumers do not construct
-it directly. The SDK builds this shape internally from the per-(backend, phase) Configs
-defined in §6.1, lifting backend-specific fields into the nested experimental block:
+Backend-specific fields use permanent top-level sections. The SDK builds these
+shapes internally from the per-(backend, phase) Configs defined in §6.1:
 
 ```typescript
-interface ExperimentalStateAwareConfigs {
-  isolation_session?: {
+interface StateAwareBackendSections {
+  isolationSession?: {
     provision?: { appId?: string };
     // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
@@ -705,19 +705,19 @@ interface ExperimentalStateAwareConfigs {
 
 | Layer | Wire shape | Constraint |
 |---|---|---|
-| Outer key | `StateAwareContainmentBackend` member | Must be a state-aware-capable backend |
+| Outer key | Permanent backend-section name | Must match the routed state-aware backend |
 | Inner key | A subset of `Phase` per backend's needs | Backends omit phases with no backend-specific config |
 | Innermost value | Backend-specific fields only (no cross-cutting, no `version`) | The SDK extracts these from the consumer's per-(backend, phase) Config |
 
 Compile-time enforcement of valid combinations lives on the SDK's per-(backend, phase)
-Configs (§6.1), not on this wire-shape type. Raw-JSON callers writing
-`ExperimentalStateAwareConfigs` directly are validated by the Rust parser and
-`validate_<phase>` hooks at runtime (§10.1).
+Configs (§6.1), not on this wire-shape type. Raw-JSON callers writing backend
+sections directly are validated by the Rust parser and `validate_<phase>` hooks
+at runtime (§10.1).
 
-For one-shot calls (phase absent), `experimental.<backend>` directly holds the backend's
-one-shot config object (e.g., `experimental.wslc?: WslcConfig`), as documented in
-`docs/schema.md`. The TypeScript types make this distinction structural:
-`OneShotRequest.experimental` and `StateAwareRequest.experimental` have different shapes.
+For one-shot calls (phase absent), the permanent backend section directly holds
+the backend's one-shot config object (for example `wslc?: WslcConfig`), as
+documented in `docs/schema.md`. For state-aware provision the same section
+contains its `provision` object.
 
 ### 7.3 Response convention
 
@@ -1007,7 +1007,7 @@ backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTI
 
 #### Mapping summary
 
-The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>` when
+The SDK auto-wraps backend-specific config under `<backendSection>.<phase>` when
 serialising state-aware calls — consumers write `appId` directly on the
 `IsolationSessionProvisionConfig`, the SDK builds the nested wire form. Cross-cutting
 fields (`filesystem` / `network` / `runtimeConfig` / `ui`) on a per-(backend, phase) Config map directly
@@ -1680,7 +1680,7 @@ The TypeScript Config carries `version` (which the SDK serialises to the top-lev
 wire `version` field) plus any cross-cutting fields the matrix marks as honored for
 that phase. IsolationSession's required all-allow posture is a top-level network
 policy. The Rust struct receives the `appId` from the wire's
-`experimental.isolation_session.provision` block through exact adaptation and checked
+`isolationSession.provision` block through exact adaptation and checked
 binding to `Self::ProvisionConfig` (§9.3), while the network policy remains on the
 execution request. The SDK is responsible for splitting
 the consumer Config into top-level wire fields (cross-cutting, `version`) and the
@@ -1844,7 +1844,7 @@ capability mismatches automatically (§9.4).
 
 ### 11.5 Add a config-parser case
 
-The state-aware wire format expects `experimental.<backend>.<phase>` blocks for backends
+The state-aware wire format expects `<backendSection>.<phase>` blocks for backends
 that declare per-phase configs. Add the new shape to the exact development
 contract and its direct runtime adapter. Keep the retained rolling wire oracle
 aligned while it remains in use, and regenerate both development artifact sets.
@@ -1952,7 +1952,7 @@ calls against experimental backends do today.
 
 ### 13.1 Wire-format placement rule
 
-Per-stage config for backend X stays under `experimental.<backend>.<phase>` while
+Per-stage config for backend X stays under `<backendSection>.<phase>` while
 backend X's state-aware participation is experimental. When backend X's state-aware
 participation graduates to stable, per-stage config migrates to top-level
 `<backend>.<phase>`.
@@ -1969,16 +1969,15 @@ A backend's ephemeral and state-aware paths graduate independently. The same bac
 can have a stable ephemeral path and an experimental state-aware path simultaneously,
 or vice versa — they are separate graduation events.
 
-**Backend's ephemeral path graduates; state-aware path stays experimental.** The
-backend's ephemeral one-shot config moves from `experimental.<backend>` to top-level
-`<backend>`, following the existing one-shot graduation pattern. Its state-aware
-per-stage configs stay under `experimental.<backend>.<phase>`.
+**Backend's ephemeral path graduates; state-aware path stays experimental.**
+The one-shot and state-aware fields remain at their permanent backend-section
+locations. Only the one-shot execution gate and publication-profile membership
+change.
 
-**Backend's state-aware path graduates.** Per-stage configs migrate from
-`experimental.<backend>.<phase>` to top-level `<backend>.<phase>`. The
-`experimental: true` SDK option is no longer required for that backend's state-aware
-calls (and the executor stops gating them behind `--experimental`). For example, a
-`provision` call against IsolationSession migrates from this shape:
+Backend-specific fields use their permanent top-level backend section while a
+backend remains experimental. Graduation removes the `experimental: true` SDK
+option and executor gate; it does not move the JSON fields. An
+IsolationSession provision request uses:
 
 ```json
 {
@@ -1989,32 +1988,7 @@ calls (and the executor stops gating them behind `--experimental`). For example,
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
-  "experimental": {
-    "isolation_session": {
-      "provision": {
-        "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
-      }
-    }
-  }
-}
-```
-
-to a shape like the following after the backend's state-aware path graduates.
-This is a hypothetical, non-runnable example: `<future-graduated-version>` is
-a placeholder for a future registered contract that defines this placement,
-not an existing published version. The policy vocabulary must also match that
-future contract.
-
-```json
-{
-  "version": "<future-graduated-version>",
-  "phase": "provision",
-  "containment": "isolation_session",
-  "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
-  },
-  "isolation_session": {
+  "isolationSession": {
     "provision": {
       "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
     }
@@ -2045,8 +2019,8 @@ path forward.
   returning a process id, no waiting for exit). Deferred to a later version with that
   dedicated function.
 - **Additional lifecycle stages** (snapshot, suspend, attach, restore). Backends with
-  native support can expose them privately under
-  `experimental.<backend>.<custom-stage>` until universalisation.
+  native support can expose them at a permanent backend-section path while
+  retaining the experimental execution gate until universalisation.
 - **Cross-machine `SandboxId` portability.** Ids are opaque, but their interpretation
   is backend-local in v1. A portable format with explicit scope tags is separate work.
 - **Container-wide timeouts enforced by MXC.** Tracking elapsed time across calls

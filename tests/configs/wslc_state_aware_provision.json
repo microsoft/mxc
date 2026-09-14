@@ -1,15 +1,15 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "provision",
-    "containment": "wslc",
-    "network": {
-        "egress": { "default": "deny" }
-    },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
-        }
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "provision": {
+      "image": "alpine:latest"
+    }
+  }
 }

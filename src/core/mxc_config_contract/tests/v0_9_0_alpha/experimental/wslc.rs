@@ -7,9 +7,7 @@ fn wslc_request(fields: &str) -> String {
     format!(
         r#"{{
             "version": "0.9.0-alpha",
-            "experimental": {{
-                "wslc": {{{fields}}}
-            }},
+            "wslc": {{{fields}}},
             "process": {{"commandLine": "echo"}}
         }}"#
     )

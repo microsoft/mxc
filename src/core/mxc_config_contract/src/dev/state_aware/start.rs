@@ -9,12 +9,6 @@ string_marker! {
     pub struct StartPhase => "start";
 }
 
-/// Experimental settings accepted by the `start` phase.
-#[derive(Debug, serde::Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StartExperimental {}
-
 /// A complete state-aware `start` request.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -36,8 +30,4 @@ pub struct StartRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-
-    /// Optional closed post-provision experimental settings.
-    #[serde(default)]
-    pub experimental: OptionalField<StartExperimental>,
 }

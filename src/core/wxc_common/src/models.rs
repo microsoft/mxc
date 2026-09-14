@@ -74,10 +74,10 @@ impl ContainmentBackend {
         match self {
             ContainmentBackend::ProcessContainer => Some("processContainer"),
             ContainmentBackend::Lxc => Some("lxc"),
-            ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
-            ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::WindowsSandbox => Some("windowsSandbox"),
+            ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
-            ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
+            ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
             | ContainmentBackend::MicroVm
@@ -257,7 +257,7 @@ impl Default for WindowsSandboxConfig {
 }
 
 /// State-aware provision-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.provision`. The one-shot
+/// Nested under `isolationSession.provision`. The one-shot
 /// surface takes no backend configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

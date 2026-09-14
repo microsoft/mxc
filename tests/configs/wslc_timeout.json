@@ -7,11 +7,11 @@
     "timeout": 5000
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

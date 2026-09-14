@@ -59,7 +59,6 @@ fn accepts_empty_exec_optional_objects() {
     for field in [
         r#""network": {}"#,
         r#""runtimeConfig": {}"#,
-        r#""experimental": {}"#,
         r#""telemetry": {}"#,
     ] {
         assert_valid(&request_with_additional_fields(field));

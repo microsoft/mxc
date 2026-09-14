@@ -608,10 +608,10 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.process!.commandLine, 'echo hello');
     });
 
-    it('should populate experimental.wslc with default image', () => {
+    it('should populate top-level wslc with default image', () => {
       const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
-      assert.ok(payload.experimental?.wslc);
-      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(payload.wslc);
+      assert.strictEqual(payload.wslc!.image, 'alpine:latest');
     });
 
     it('should not set processContainer or lxc config', () => {
@@ -1670,11 +1670,11 @@ describe('createConfigFromPolicy', () => {
   });
 
   describe('WSLC', () => {
-    it('should set containment to wslc and populate experimental.wslc', () => {
+    it('should set containment to wslc and populate top-level wslc', () => {
       const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       assert.strictEqual(config.containment, 'wslc');
-      assert.ok(config.experimental?.wslc);
-      assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(config.wslc);
+      assert.strictEqual(config.wslc!.image, 'alpine:latest');
     });
 
     it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
@@ -2270,7 +2270,10 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
           skipPlatformCheck: true,
         });
 
-        assert.strictEqual(decodeConfig(args).experimental, experimental);
+        assert.strictEqual(
+          (decodeConfig(args) as unknown as { experimental: unknown }).experimental,
+          experimental,
+        );
       });
     }
   });

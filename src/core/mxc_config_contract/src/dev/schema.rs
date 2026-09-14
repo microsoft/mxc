@@ -9,9 +9,11 @@ use serde_json::{json, Value};
 use super::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
     PublicationProfile, StableCandidateDeprovisionRequest, StableCandidateExecRequest,
-    StableCandidateOneShotRequest, StableCandidateStartRequest, StableCandidateStopRequest,
-    StableCandidateWindowsSandboxProvisionRequest, StartRequest, StateAwareBackend, StopRequest,
-    WindowsSandboxProvisionRequest, WslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
+    StableCandidateIsolationSessionProvisionRequest, StableCandidateOneShotRequest,
+    StableCandidateStartRequest, StableCandidateStopRequest,
+    StableCandidateWindowsSandboxProvisionRequest, StableCandidateWslcProvisionRequest,
+    StartRequest, StateAwareBackend, StopRequest, WindowsSandboxProvisionRequest,
+    WslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -231,16 +233,10 @@ pub fn publication_schema_for_profile(profile: PublicationProfile) -> Result<Val
                 subschema::<StableCandidateWindowsSandboxProvisionRequest>(&mut generator)
             }
             StateAwareBackend::IsolationSession => {
-                return Err(
-                    "IsolationSession cannot publish until appId moves from experimental.isolation_session.provision to its permanent field location"
-                        .to_string(),
-                );
+                subschema::<StableCandidateIsolationSessionProvisionRequest>(&mut generator)
             }
             StateAwareBackend::Wslc => {
-                return Err(
-                    "WSLC cannot publish until provision settings move from experimental.wslc.provision to their permanent field location"
-                        .to_string(),
-                );
+                subschema::<StableCandidateWslcProvisionRequest>(&mut generator)
             }
         };
         selected_backends.push((*backend, root));
@@ -418,6 +414,12 @@ mod tests {
     }
 
     #[test]
+    fn development_contract_has_no_experimental_json_member() {
+        let serialized = serde_json::to_string(&development_schema()).unwrap();
+        assert!(!serialized.contains("\"experimental\""));
+    }
+
+    #[test]
     fn current_publication_profile_contains_only_the_stable_one_shot_surface() {
         let schema = publication_schema().unwrap();
         let serialized = serde_json::to_string(&schema).unwrap();
@@ -485,16 +487,25 @@ mod tests {
     }
 
     #[test]
-    fn publication_profile_rejects_backends_with_unmigrated_experimental_fields() {
+    fn publication_profile_can_select_each_state_aware_backend_without_experimental_fields() {
+        const WINDOWS_SANDBOX: &[StateAwareBackend] = &[StateAwareBackend::WindowsSandbox];
         const ISOLATION_SESSION: &[StateAwareBackend] = &[StateAwareBackend::IsolationSession];
         const WSLC: &[StateAwareBackend] = &[StateAwareBackend::Wslc];
-        for (backends, message) in [(ISOLATION_SESSION, "appId"), (WSLC, "provision settings")] {
-            let error = publication_schema_for_profile(PublicationProfile {
+        for (backends, expected) in [
+            (WINDOWS_SANDBOX, "windows_sandbox"),
+            (ISOLATION_SESSION, "isolation_session"),
+            (WSLC, "wslc"),
+        ] {
+            let schema = publication_schema_for_profile(PublicationProfile {
                 one_shot: true,
                 state_aware_backends: backends,
             })
-            .unwrap_err();
-            assert!(error.contains(message), "{error}");
+            .unwrap();
+            let serialized = serde_json::to_string(&schema).unwrap();
+            assert!(serialized.contains(expected), "{expected}");
+            for definition in definitions(&schema).values() {
+                assert!(definition["properties"].get("experimental").is_none());
+            }
         }
     }
 

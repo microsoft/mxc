@@ -10,8 +10,9 @@ use super::stable::{
     Telemetry, Ui,
 };
 use super::{
-    DeprovisionPhase, ExecPhase, ProvisionPhase, StartPhase, StopPhase, Version,
-    WindowsSandboxContainment,
+    DeprovisionPhase, ExecPhase, IsolationSessionContainment, IsolationSessionNetwork,
+    ProvisionPhase, StartPhase, StateAwareIsolationSession, StateAwareWslc, StopPhase, Version,
+    WindowsSandboxContainment, WslcContainment,
 };
 
 /// A state-aware backend that may be selected by a publication profile.
@@ -153,6 +154,69 @@ pub struct WindowsSandboxProvisionRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable-candidate IsolationSession state-aware provision request.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema-gen",
+    schemars(rename = "IsolationSessionProvisionRequest")
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsolationSessionProvisionRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact provision phase marker.
+    pub phase: ProvisionPhase,
+    /// Exact IsolationSession containment marker.
+    pub containment: IsolationSessionContainment,
+    /// Required unrestricted network posture.
+    pub network: IsolationSessionNetwork,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+    /// Optional IsolationSession backend settings.
+    #[serde(default)]
+    pub isolation_session: OptionalField<StateAwareIsolationSession>,
+}
+
+/// Stable-candidate WSLC state-aware provision request.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "WslcProvisionRequest"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WslcProvisionRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact provision phase marker.
+    pub phase: ProvisionPhase,
+    /// Exact WSLC containment marker.
+    pub containment: WslcContainment,
+    /// Optional filesystem policy.
+    #[serde(default)]
+    pub filesystem: OptionalField<Filesystem>,
+    /// Optional network policy.
+    #[serde(default)]
+    pub network: OptionalField<Network>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+    /// Optional WSLC backend settings.
+    #[serde(default)]
+    pub wslc: OptionalField<StateAwareWslc>,
 }
 
 /// Stable state-aware start request shared by published backends.

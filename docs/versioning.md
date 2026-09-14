@@ -194,21 +194,24 @@ must set the field explicitly.
 
 ### Shipped vs Experimental
 
-Each experimental feature is a typed property under `experimental` — the same
-pattern as stable features (`filesystem`, `network`) under the top-level
-config. This gives editors full autocomplete and validation for experimental
-configs. Today, the `--experimental` flag is a global toggle that enables all
-experimental features; per-feature gating (e.g., `--experimental compartments`)
-is under consideration.
+Experimental features use their intended permanent top-level or backend-section
+location in the exact development contract. There is no `experimental` JSON
+object. This keeps policy and SDK shapes stable when a feature graduates while
+still giving editors full autocomplete and validation.
 
 **Rules:**
-- **Stable section** (top) — shipped, stable, supported. Always executed.
-- **Experimental section** — an object containing experimental features as
-  typed properties, only applied when the experimental flag is enabled (see
-  below). Each feature defines its own schema. As long as experimental code
-  doesn't break what is shipped, developers are free to iterate.
-- **Promotion:** When an experimental feature is ready to ship, move it from
-  `experimental` to the top-level section and bump the minor version.
+- **Permanent shape** — development fields are authored where they are intended
+  to remain: for example `wslc`, `windowsSandbox`, or
+  `isolationSession.provision`.
+- **Execution authorization** — `--experimental` or the SDK opt-in controls
+  whether an experimental backend/feature may execute; it does not change
+  parsing or field location.
+- **Publication eligibility** — the Rust publication profile includes only
+  graduated fields and roots. Published contracts never contain fields that
+  still require experimental authorization.
+- **Promotion** — remove the runtime authorization gate and add the existing
+  permanent field/root to a later publication profile. No JSON relocation is
+  required.
 
 ### Experimental Flag
 
@@ -222,13 +225,12 @@ lxc-exec config.json --experimental
 wxc-exec.exe --experimental config.json
 ```
 
-The parser **always** parses and preserves the `experimental` section regardless
-of the flag; parsing is flag-independent. The `--experimental` flag only sets
-`request.experimental_enabled`:
-- When set, the runners apply the parsed experimental features alongside the
-  stable features
-- When unset, `experimental_enabled` is false and the runners **ignore** the
-  parsed experimental section — no error, the features are just not applied
+Parsing is independent of the flag. The parser accepts fields defined by the
+selected exact development contract and sets `request.experimental_enabled`
+only from caller authorization:
+- When set, experimental backends/features may execute.
+- When unset, selecting an experimental backend fails explicitly before host
+  work. The policy document cannot authorize itself.
 
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
@@ -257,9 +259,9 @@ step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 **In the exact development contract (the production parse + schema source of
 truth):**
 
-Add the field to the applicable closed request type under
-`src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
-that admit it.
+Add the field at its permanent location in the applicable closed request type
+under `src/core/mxc_config_contract/src/dev/`, including the backend and phase
+roots that admit it.
 
 **In `wire.rs` (the rolling differential oracle and shared normalized
 representation):**
@@ -345,34 +347,14 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 ```
 
 **Promotion process:** When an experimental feature is ready to ship:
-1. Move the field from the wire `Experimental` struct to top-level `MxcConfig`
-   (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`), then
-   regenerate the schema with `mxc_schema_gen`
-2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Map the now-top-level wire field in `convert_wire_config`; add
-   `deny_unknown_fields` to the wire struct so the promoted stable surface is
-   closed
-4. Remove the `if request.experimental_enabled` guard
-5. Bump the minor version
-6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"<feature> has moved to the stable section"`.
-   This error should persist for at least one release cycle so users have
-   time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
-7. If the feature is a containment backend with a per-backend config
-   section, update the single-backend-section enforcement when it graduates
-   from experimental to top-level:
+1. Remove the `request.experimental_enabled` guard for that feature/backend.
+2. Add its existing permanent field/root to the Rust publication profile.
+3. Freeze its exact adapter, builder/SDK serialization, fixtures, and runtime
+   observations with the new published contract.
+4. Bump the appropriate contract version.
 
-   - In `wxc_common::config_parser`, rename the matching entry in
-     `present_backend_sections` (and update `validate_single_backend_section`)
-     from `experimental.<name>` to `<name>`.
-
-   The single-backend-section rule is a cross-field constraint enforced by the
-   parser (the trust boundary), **not** by the JSON schema — the generated
-   schema intentionally omits the old top-level `allOf` `if/then` clauses. So
-   there is no schema edit for this step; the parser change is sufficient.
-
-   The rule itself is unchanged: a backend section requires `containment` to be
+The field does not move during promotion. Old `experimental.<feature>`
+spellings are already rejected by the v0.9 exact contract.
    set, and the value must be either the concrete backend name or any abstract
    intent that resolves to it on at least one platform (for example,
    `processContainer` accepts both `processcontainer` and `process`).
@@ -444,12 +426,12 @@ shared semantic validation and maps it to the runtime model.
   per-field stability attributes (stable/experimental/deprecated, for the
   stable-vs-dev schema views and the promotion guard) hang on. A merged type would
   entangle schema-generation concerns with runtime fields.
-- **Decoupled evolution.** The wire format can change (rename, alias, restructure
-  `experimental`) without touching backend code, and vice-versa; the blast radius
-  of either is bounded by the parser.
+- **Decoupled evolution.** The wire format can change (rename, alias, or
+  restructure development-only fields) without touching backend code, and
+  vice-versa; the blast radius of either is bounded by the parser.
 - **Backends don't couple to JSON quirks** — camelCase renames, deprecated-spelling
-  serde aliases, the raw-`Value` experimental block, `$schema`/`_comment`
-  passthrough — none leak into runner code.
+  serde aliases, the temporary rolling compatibility representation,
+  `$schema`/`_comment` passthrough — none leak into runner code.
 
 ### Costs (cons)
 
@@ -603,11 +585,10 @@ development tool, not a production feature.
 all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
-**Migration after promotion:** When an experimental feature is promoted to the
-stable section (moved from `experimental.X` to top-level `X` in a stable
-schema), configs that still reference it under `experimental` will receive
-an error: "feature X has moved to the stable section." The parser will not
-silently fall back — explicit migration is required.
+**Migration after promotion:** Promotion removes the execution gate and adds
+the existing permanent field/root to a published profile. Callers update their
+declared contract version but do not relocate the field. The removed
+`experimental` wrapper is rejected by exact v0.9 and later contracts.
 
 ## Deprecation Aliases
 

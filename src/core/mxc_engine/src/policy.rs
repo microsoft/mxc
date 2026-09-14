@@ -582,7 +582,7 @@ impl Default for WslcSection {
 }
 
 impl WslcSection {
-    /// The wire-format `experimental.wslc` object. Optional fields are omitted
+    /// The wire-format top-level `wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
     #[cfg(test)]
     fn wire(&self) -> serde_json::Value {
@@ -1104,7 +1104,7 @@ fn apply_host_process_backend(
 /// Apply the WSL Container backend fields — the Rust port of the SDK's
 /// `buildWslcContainerConfig`. WSLC derives its networking mode (`None` /
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
-/// its settings live under `experimental.wslc` because the backend is
+/// its settings live under top-level `wslc` while the backend remains
 /// experimental.
 #[cfg(test)]
 fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
@@ -1164,7 +1164,22 @@ mod tests {
             super::build_wire_config(policy, containment, TEST_COMMAND, Some("builder-test"))
                 .unwrap();
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        let json = serde_json::to_string(&config).unwrap();
+        let mut value = serde_json::to_value(&config).unwrap();
+        if policy.version == "0.9.0-alpha" {
+            let root = value.as_object_mut().unwrap();
+            if let Some(serde_json::Value::Object(mut experimental)) = root.remove("experimental") {
+                for (legacy, field) in [
+                    ("test", "test"),
+                    ("windows_sandbox", "windowsSandbox"),
+                    ("wslc", "wslc"),
+                ] {
+                    if let Some(value) = experimental.remove(legacy) {
+                        root.insert(field.to_string(), value);
+                    }
+                }
+            }
+        }
+        let json = serde_json::to_string(&value).unwrap();
         let round_trip = match wxc_common::config_parser::load_mxc_request_from_json(
             &json,
             &mut logger,
@@ -2196,7 +2211,7 @@ mod tests {
     #[test]
     fn wslc_containment_maps_config_to_the_request() {
         // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
-        // `experimental.wslc` block: the wire config goes through the shared
+        // top-level `wslc` block: the wire config goes through the shared
         // parser, so the mapped request carries the WSLC settings verbatim.
         let wslc = WslcSection {
             image: "python:3.12".to_string(),
@@ -2399,7 +2414,7 @@ mod tests {
     fn isolation_session_names_the_backend_and_carries_no_section() {
         // The one-shot surface takes no backend configuration at all, so the
         // wire config must name the backend and add nothing else — unlike
-        // WSLc, which also writes an `experimental.wslc` block.
+        // WSLc, which also writes a top-level `wslc` block.
         let policy = development_policy();
         let config =
             super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)

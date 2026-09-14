@@ -3,12 +3,17 @@
   "phase": "provision",
   "containment": "isolation_session",
   "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
   },
-  "experimental": {
-    "isolation_session": {
-      "provision": { "appId": "" }
+  "isolationSession": {
+    "provision": {
+      "appId": ""
     }
   }
 }

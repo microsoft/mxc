@@ -218,7 +218,7 @@ string_enum! {
     }
 }
 
-mod experimental;
+mod development;
 mod network;
 /// The development `0.9.0-alpha` one-shot configuration contract.
 mod one_shot;
@@ -231,9 +231,8 @@ mod stable;
 /// The development `0.9.0-alpha` state-aware configuration contract.
 mod state_aware;
 
-pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
-    TransportProtocol,
+pub use development::{
+    OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature, TransportProtocol,
 };
 pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
@@ -247,11 +246,13 @@ pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use publication::{
     Containment as StableCandidateContainment,
     DeprovisionRequest as StableCandidateDeprovisionRequest,
-    ExecRequest as StableCandidateExecRequest, OneShotRequest as StableCandidateOneShotRequest,
-    PublicationProfile, StartRequest as StableCandidateStartRequest, StateAwareBackend,
+    ExecRequest as StableCandidateExecRequest,
+    IsolationSessionProvisionRequest as StableCandidateIsolationSessionProvisionRequest,
+    OneShotRequest as StableCandidateOneShotRequest, PublicationProfile,
+    StartRequest as StableCandidateStartRequest, StateAwareBackend,
     StopRequest as StableCandidateStopRequest,
     WindowsSandboxProvisionRequest as StableCandidateWindowsSandboxProvisionRequest,
-    V0_9_0_ALPHA_PUBLICATION_PROFILE,
+    WslcProvisionRequest as StableCandidateWslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
 };
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
@@ -264,20 +265,15 @@ pub use stable::{
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};
-pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
-pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
+pub use state_aware::{DeprovisionPhase, DeprovisionRequest};
+pub use state_aware::{ExecPhase, ExecRequest};
 pub use state_aware::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
-    StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
-pub use state_aware::{StartExperimental, StartPhase, StartRequest};
-pub use state_aware::{
-    StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionExperimental, WslcProvisionRequest,
-};
-pub use state_aware::{StopExperimental, StopPhase, StopRequest};
-pub use state_aware::{
-    WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,
-};
+pub use state_aware::{StartPhase, StartRequest};
+pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
+pub use state_aware::{StopPhase, StopRequest};
+pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

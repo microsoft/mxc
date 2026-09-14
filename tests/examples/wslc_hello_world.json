@@ -6,11 +6,11 @@
     "commandLine": "echo 'Hello from WSL Container!' && uname -a"
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

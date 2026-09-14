@@ -67,12 +67,10 @@ fn accepts_provision_request_with_optional_fields() {
             "telemetry": {
                 "enabled": true
             },
-            "experimental": {
-                "wslc": {
-                    "provision": {
-                        "image": "alpine:latest",
-                        "imageTarPath": "C:\\images\\alpine.tar"
-                    }
+            "wslc": {
+                "provision": {
+                    "image": "alpine:latest",
+                    "imageTarPath": "C:\\images\\alpine.tar"
                 }
             }
         }"#,
@@ -84,10 +82,9 @@ fn accepts_empty_optional_objects() {
     for field in [
         r#""filesystem": {}"#,
         r#""network": {}"#,
-        r#""experimental": {}"#,
         r#""telemetry": {}"#,
-        r#""experimental": {"wslc": {}}"#,
-        r#""experimental": {"wslc": {"provision": {}}}"#,
+        r#""wslc": {}"#,
+        r#""wslc": {"provision": {}}"#,
     ] {
         assert_valid(&request_with_additional_fields(field));
     }
@@ -111,7 +108,7 @@ fn accepts_provision_string_values() {
         ("imageTarPath", r#""C:\\images\\alpine.tar""#),
     ] {
         assert_valid(&request_with_additional_fields(&format!(
-            r#""experimental": {{"wslc": {{"provision": {{"{field}": {value}}}}}}}"#
+            r#""wslc": {{"provision": {{"{field}": {value}}}}}"#
         )));
     }
 }

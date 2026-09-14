@@ -18,14 +18,37 @@ pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
     input.into_parts()
 }
 
+pub(super) fn legacy_source(source: &str) -> String {
+    let mut legacy_value: serde_json::Value = serde_json::from_str(source).unwrap();
+    let object = legacy_value.as_object_mut().unwrap();
+    let containment = object
+        .get("containment")
+        .and_then(serde_json::Value::as_str);
+    let backend_field = match containment {
+        Some("isolation_session") => Some(("isolationSession", "isolation_session")),
+        Some("wslc") => Some(("wslc", "wslc")),
+        _ => None,
+    };
+    if let Some((field, legacy_field)) = backend_field {
+        if let Some(value) = object.remove(field) {
+            object.insert(
+                "experimental".to_string(),
+                serde_json::json!({legacy_field: value}),
+            );
+        }
+    }
+    serde_json::to_string(&legacy_value).unwrap()
+}
+
 pub(super) fn assert_common_matches_legacy(source: &str, common: &wire::MxcConfig) {
     #[derive(serde::Deserialize)]
     struct Probe<'a> {
         #[serde(borrow, default)]
         experimental: Option<&'a RawValue>,
     }
-    let probe: Probe<'_> = serde_json::from_str(source).unwrap();
-    let mut legacy = parse_rolling_state_aware_wire_input(source, probe.experimental)
+    let legacy_source = legacy_source(source);
+    let probe: Probe<'_> = serde_json::from_str(&legacy_source).unwrap();
+    let mut legacy = parse_rolling_state_aware_wire_input(&legacy_source, probe.experimental)
         .unwrap()
         .config;
     // Routing and payload observations are asserted separately, not serialized.
@@ -90,7 +113,6 @@ pub(super) fn assert_no_config_phase(phase: &str) {
     ] {
         for fields in [
             "",
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","telemetry":{"enabled":false},"_comment":null"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":true}"#,

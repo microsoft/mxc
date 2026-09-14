@@ -1,19 +1,23 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "provision",
-    "containment": "wslc",
-    "filesystem": {
-        "readwritePaths": ["C:\\mxc_wslc_sa_test\\rw"],
-        "readonlyPaths": ["C:\\mxc_wslc_sa_test\\ro"]
-    },
-    "network": {
-        "egress": { "default": "deny" }
-    },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
-        }
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\mxc_wslc_sa_test\\rw"
+    ],
+    "readonlyPaths": [
+      "C:\\mxc_wslc_sa_test\\ro"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "provision": {
+      "image": "alpine:latest"
+    }
+  }
 }

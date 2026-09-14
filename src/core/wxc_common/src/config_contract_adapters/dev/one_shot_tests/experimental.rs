@@ -12,10 +12,8 @@ const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
     "telemetry": {
         "enabled": false
     },
-    "experimental": {
-        "test": {
-            "message": "test message"
-        }
+    "test": {
+        "message": "test message"
     }
 }"#;
 
@@ -25,12 +23,10 @@ const WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
     "process": {
         "commandLine": "echo hello"
     },
-    "experimental": {
-        "windows_sandbox": {
-            "idleTimeoutMs": 60000,
-            "idleTimeout": 30,
-            "daemonPipeName": "custom-sandbox-pipe"
-        }
+    "windowsSandbox": {
+        "idleTimeoutMs": 60000,
+        "idleTimeout": 30,
+        "daemonPipeName": "custom-sandbox-pipe"
     }
 }"#;
 
@@ -40,27 +36,25 @@ const WSLC_REQUEST_JSON: &str = r#"{
     "process": {
         "commandLine": "echo hello"
     },
-    "experimental": {
-        "wslc": {
-            "targetOs": "linux",
-            "image": "alpine:latest",
-            "imageTarPath": "C:\\images\\alpine.tar",
-            "cpuCount": 4,
-            "memoryMb": 4294967296,
-            "gpu": true,
-            "storagePath": "C:\\wslc",
-            "portMappings": [
-                {
-                    "windowsPort": 8080,
-                    "containerPort": 80
-                },
-                {
-                    "windowsPort": 8443,
-                    "containerPort": 443,
-                    "protocol": "tcp"
-                }
-            ]
-        }
+    "wslc": {
+        "targetOs": "linux",
+        "image": "alpine:latest",
+        "imageTarPath": "C:\\images\\alpine.tar",
+        "cpuCount": 4,
+        "memoryMb": 4294967296,
+        "gpu": true,
+        "storagePath": "C:\\wslc",
+        "portMappings": [
+            {
+                "windowsPort": 8080,
+                "containerPort": 80
+            },
+            {
+                "windowsPort": 8443,
+                "containerPort": 443,
+                "protocol": "tcp"
+            }
+        ]
     }
 }"#;
 
@@ -156,21 +150,6 @@ fn wslc_maps_expected_wire_fields() {
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.seatbelt.is_none());
     assert!(wire.telemetry.is_none());
-}
-
-#[test]
-fn windows_sandbox_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(WINDOWS_SANDBOX_REQUEST_JSON);
-}
-
-#[test]
-fn wslc_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(WSLC_REQUEST_JSON);
-}
-
-#[test]
-fn test_feature_and_telemetry_match_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON);
 }
 
 struct DevelopmentContainmentCase {

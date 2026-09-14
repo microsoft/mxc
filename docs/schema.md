@@ -237,18 +237,16 @@ that can be executed independently.
                                            // and a permitting administrative policy are also required
     },
 
-    "experimental": {                      // Experimental features (requires --experimental)
-        "wslc": {                          // WSL Container settings
-            "image": "alpine:latest",      // Container image name
-            "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
-            "cpuCount": 4,                 // CPU count for WSLC session
-            "memoryMb": 2048,              // Memory in MB for WSLC session
-            "gpu": false,                  // GPU passthrough
-            "storagePath": "C:\\wslc-storage",  // Image store path
-            "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
-                { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
-            ]
-        }
+    "wslc": {                              // WSL Container settings (requires --experimental)
+        "image": "alpine:latest",          // Container image name
+        "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
+        "cpuCount": 4,                     // CPU count for WSLC session
+        "memoryMb": 2048,                  // Memory in MB for WSLC session
+        "gpu": false,                      // GPU passthrough
+        "storagePath": "C:\\wslc-storage", // Image store path
+        "portMappings": [                  // Host<->container port forwarding. TCP only.
+            { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
+        ]
     }
 }
 ```
@@ -424,8 +422,8 @@ documented by the exact development schema:
     // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
     // level, exactly as in a one-shot request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
-    // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } } }
+    // under the backend's permanent top-level section, e.g.:
+    //   "isolationSession": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } }
 }
 ```
 
@@ -439,8 +437,8 @@ Phase / sandboxId / containment validation:
 | `stop`          | **Required** | Ignored if present |
 | `deprovision`   | **Required** | Ignored if present |
 
-State-aware-capable backends today: `isolation_session` and `windows_sandbox`
-(both Windows-only, both still experimental). The dispatcher rejects
+State-aware-capable backends today: `isolation_session`, `windows_sandbox`,
+and `wslc` (all Windows-only and still experimental). The dispatcher rejects
 state-aware envelopes for backends that have not opted in.
 
 Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).

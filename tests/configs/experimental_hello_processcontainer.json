@@ -5,12 +5,10 @@
   "process": {
     "commandLine": "cmd.exe /c echo experimental hello test"
   },
-  "experimental": {
-    "test": {
-      "message": "Test feature from process container experimental!"
-    }
-  },
   "ui": {
     "disable": false
+  },
+  "test": {
+    "message": "Test feature from process container experimental!"
   }
 }

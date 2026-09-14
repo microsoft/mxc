@@ -6,11 +6,11 @@
     "commandLine": "sh -c 'echo About to exit with code 42; exit 42'"
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

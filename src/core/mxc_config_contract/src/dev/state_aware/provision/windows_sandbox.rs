@@ -11,12 +11,6 @@ string_marker! {
     pub struct WindowsSandboxContainment => "windows_sandbox";
 }
 
-/// Experimental settings accepted by a Windows Sandbox provision request.
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WindowsSandboxExperimental {}
-
 /// A complete state-aware `provision` request for windows_sandbox
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -40,7 +34,4 @@ pub struct WindowsSandboxProvisionRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional closed experimental settings.
-    #[serde(default)]
-    pub experimental: OptionalField<WindowsSandboxExperimental>,
 }

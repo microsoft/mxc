@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::OneShotExperimental;
+use super::development::{OneShotWindowsSandbox, OneShotWslc, TestFeature};
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
@@ -147,7 +147,13 @@ pub struct Request {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional experimental settings.
+    /// Optional placeholder development feature.
     #[serde(default)]
-    pub experimental: OptionalField<OneShotExperimental>,
+    pub test: OptionalField<TestFeature>,
+    /// Optional one-shot Windows Sandbox settings.
+    #[serde(default)]
+    pub windows_sandbox: OptionalField<OneShotWindowsSandbox>,
+    /// Optional one-shot WSLC settings.
+    #[serde(default)]
+    pub wslc: OptionalField<OneShotWslc>,
 }

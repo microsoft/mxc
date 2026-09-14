@@ -16,7 +16,6 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
     ] {
         for extra in [
             "",
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","network":{}"#,
             r#","_comment":null"#,

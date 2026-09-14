@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::common::{adapt, assert_clean_common, assert_common_matches_legacy};
+use super::common::{adapt, assert_clean_common, assert_common_matches_legacy, legacy_source};
 use crate::config_parser::legacy_payload_reference::extract;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -23,18 +23,14 @@ fn source(backend: &str, fields: &str) -> String {
 fn isolation_session_configuration_presence_matches_explicit_values() {
     for (fields, expected) in [
         ("", None),
-        (r#","experimental":{}"#, None),
-        (r#","experimental":{"isolation_session":{}}"#, None),
+        (r#","isolationSession":{}"#, None),
+        (r#","isolationSession":{"provision":{}}"#, Some(None)),
         (
-            r#","experimental":{"isolation_session":{"provision":{}}}"#,
-            Some(None),
-        ),
-        (
-            r#","experimental":{"isolation_session":{"provision":{"appId":""}}}"#,
+            r#","isolationSession":{"provision":{"appId":""}}"#,
             Some(Some("")),
         ),
         (
-            r#","experimental":{"isolation_session":{"provision":{"appId":"example"}}}"#,
+            r#","isolationSession":{"provision":{"appId":"example"}}"#,
             Some(Some("example")),
         ),
     ] {
@@ -70,8 +66,12 @@ fn isolation_session_configuration_presence_matches_explicit_values() {
         );
         assert_eq!(
             config,
-            extract::<IsolationSessionProvisionConfig>(&json, "isolation_session", "provision")
-                .unwrap()
+            extract::<IsolationSessionProvisionConfig>(
+                &legacy_source(&json),
+                "isolation_session",
+                "provision",
+            )
+            .unwrap()
         );
     }
 }
@@ -89,7 +89,7 @@ fn isolation_session_unrestricted_network_forms_map_without_loss() {
         (format!(",{directional}"), None),
         (
             format!(
-                r#",{directional},"experimental":{{"isolation_session":{{"provision":{{"appId":"Contoso.App"}}}}}}"#
+                r#",{directional},"isolationSession":{{"provision":{{"appId":"Contoso.App"}}}}"#
             ),
             Some("Contoso.App"),
         ),
@@ -116,8 +116,7 @@ fn isolation_session_unrestricted_network_forms_map_without_loss() {
 fn isolation_session_provision_requires_a_complete_unrestricted_posture() {
     for fields in [
         "",
-        r#","experimental":{}"#,
-        r#","experimental":{"isolation_session":{"provision":{"appId":"Contoso.App"}}}"#,
+        r#","isolationSession":{"provision":{"appId":"Contoso.App"}}"#,
         r#","network":{}"#,
         r#","network":{"defaultPolicy":"block","allowLocalNetwork":true}"#,
         r#","network":{"egress":{"default":"allow"}}"#,
@@ -144,34 +143,30 @@ fn isolation_session_network_is_provision_only() {
 fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
     for (fields, expected) in [
         ("", None),
-        (r#","experimental":{}"#, None),
-        (r#","experimental":{"wslc":{}}"#, None),
+        (r#","wslc":{}"#, None),
+        (r#","wslc":{"provision":{}}"#, Some((None, None))),
         (
-            r#","experimental":{"wslc":{"provision":{}}}"#,
-            Some((None, None)),
-        ),
-        (
-            r#","experimental":{"wslc":{"provision":{"image":"image"}}}"#,
+            r#","wslc":{"provision":{"image":"image"}}"#,
             Some((Some("image"), None)),
         ),
         (
-            r#","experimental":{"wslc":{"provision":{"imageTarPath":"archive.tar"}}}"#,
+            r#","wslc":{"provision":{"imageTarPath":"archive.tar"}}"#,
             Some((None, Some("archive.tar"))),
         ),
         (
-            r#","experimental":{"wslc":{"provision":{"image":"image","imageTarPath":"archive.tar"}}}"#,
+            r#","wslc":{"provision":{"image":"image","imageTarPath":"archive.tar"}}"#,
             Some((Some("image"), Some("archive.tar"))),
         ),
         (
-            r#","experimental":{"wslc":{"provision":{"image":"","imageTarPath":""}}}"#,
+            r#","wslc":{"provision":{"image":"","imageTarPath":""}}"#,
             Some((Some(""), Some(""))),
         ),
         (
-            r#","experimental":{"wslc":{"provision":{"image":""}}}"#,
+            r#","wslc":{"provision":{"image":""}}"#,
             Some((Some(""), None)),
         ),
         (
-            r#","experimental":{"wslc":{"provision":{"imageTarPath":""}}}"#,
+            r#","wslc":{"provision":{"imageTarPath":""}}"#,
             Some((None, Some(""))),
         ),
     ] {
@@ -187,7 +182,9 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
             .as_ref()
             .map(|config| (config.image.as_deref(), config.image_tar_path.as_deref()));
         assert_eq!(observed, expected);
-        let legacy = extract::<wire::WslcProvisionPhase>(&json, "wslc", "provision").unwrap();
+        let legacy =
+            extract::<wire::WslcProvisionPhase>(&legacy_source(&json), "wslc", "provision")
+                .unwrap();
         assert_eq!(
             observed,
             legacy
@@ -221,7 +218,6 @@ fn provision_common_fields_are_independent_of_backend_payload() {
         for fields in [
             "",
             r#","_comment":null"#,
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false}"#,
         ] {
@@ -368,9 +364,7 @@ fn non_provision_phases_reject_backend_payloads_and_invalid_wrappers() {
 }
 
 #[test]
-fn empty_experimental_sequence_retains_existing_exact_contract_acceptance() {
-    // The existing empty contract structs deserialize [] as well as {}.
-    // This internal migration must not tighten that contract incidentally.
+fn removed_experimental_sequence_is_rejected() {
     for phase in ["start", "exec", "stop", "deprovision"] {
         let process = if phase == "exec" {
             r#","process":{"commandLine":"echo"}"#
@@ -380,9 +374,6 @@ fn empty_experimental_sequence_retains_existing_exact_contract_acceptance() {
         let json = format!(
             r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":[]}}"#
         );
-        let (common, operation) = adapt(&json);
-        assert_eq!(operation.phase().as_str(), phase);
-        assert_eq!(operation.sandbox_id(), Some("id"));
-        assert!(common.experimental.is_none());
+        assert!(contract::parse_request(&json).is_err(), "{json}");
     }
 }

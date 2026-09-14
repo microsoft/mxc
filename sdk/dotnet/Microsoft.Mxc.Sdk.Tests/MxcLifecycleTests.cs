@@ -322,12 +322,11 @@ public class MxcLifecycleTests
         Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         if (appId is null)
         {
-            Assert.False(root.TryGetProperty("experimental", out _));
+            Assert.False(root.TryGetProperty("isolationSession", out _));
         }
         else
         {
-            var provision = root.GetProperty("experimental")
-                .GetProperty("isolation_session")
+            var provision = root.GetProperty("isolationSession")
                 .GetProperty("provision");
             Assert.Equal(appId, provision.GetProperty("appId").GetString());
         }
@@ -632,8 +631,7 @@ public class MxcLifecycleTests
         Assert.Equal(
             "allow",
             root.GetProperty("network").GetProperty("ingress").GetProperty("hostLoopback").GetString());
-        var provision = root.GetProperty("experimental")
-            .GetProperty("wslc")
+        var provision = root.GetProperty("wslc")
             .GetProperty("provision");
         Assert.Equal("alpine:latest", provision.GetProperty("image").GetString());
         Assert.Equal(

@@ -78,10 +78,10 @@ author the new lifecycle state and digest in the Rust
 `ContractVersion`/`CONTRACTS` registry. Finally run `mxc_schema_gen registry`
 to refresh the generated JSON artifact.
 
-Phase 11a can project Windows Sandbox provision plus the common state-aware
-roots without an `experimental` member. Selecting IsolationSession or WSLC
-currently fails with an explicit migration error because their provision data
-still lives under `experimental`; publication must not silently omit it.
+Phase 11b moved the IsolationSession and WSLC provision data to permanent
+backend sections, so the profile can project any of the three state-aware
+backends without an `experimental` member. The checked-in v0.9 profile remains
+one-shot-only until a separate graduation decision selects a backend.
 
 Both Rust model crates gate Schemars behind `schema-gen`, so normal builds do
 not carry it. The exact `OptionalField<T>` schema is transparent and
@@ -101,7 +101,7 @@ dispatch:
 This structure evaluates only the relevant branch and gives substantially more
 focused editor diagnostics than a bare eight-branch `oneOf`. One-shot and exec
 require `process`; the other lifecycle roots do not. Every reachable object,
-including all experimental objects, has `additionalProperties: false`.
+including development-only backend sections, has `additionalProperties: false`.
 
 The exact schema is both the authoring contract and the runtime contract for
 `0.9.0-alpha`. Repository config validation chooses an exact schema from each
@@ -217,7 +217,7 @@ Comparing the generated schema against the prior hand-written one on lens (2):
   nested typos the old one silently accepted.
 - **The generated schema is more complete:** it documents surface the hand
   schema omitted — `processContainer.learningMode`,
-  `experimental.windows_sandbox.idleTimeout` (legacy alias),
+  `windowsSandbox.idleTimeout` (legacy compatibility setting),
   `experimental.seatbelt` (pre-promotion alias), and the per-phase
   `isolation_session.provision` nesting.
 

@@ -6,11 +6,11 @@
     "commandLine": "python3 -c \"import json, math, hashlib, platform; data = {'pi': round(math.pi, 6), 'e': round(math.e, 6), 'hash': hashlib.sha256(b'mxc-wslc').hexdigest()[:16], 'platform': platform.system()}; print(json.dumps(data, indent=2))\""
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "python:3.12-alpine"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "python:3.12-alpine"
   }
 }

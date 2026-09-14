@@ -276,7 +276,7 @@ fn resolve_runner_inner_windows(
                 {
                     let _ = writeln!(
                         logger,
-                        "warning: experimental.windows_sandbox.idleTimeoutMs and daemonPipeName \
+                        "warning: windowsSandbox.idleTimeoutMs and daemonPipeName \
                          are ignored by the one-shot backend; each invocation launches and tears \
                          down a fresh VM"
                     );

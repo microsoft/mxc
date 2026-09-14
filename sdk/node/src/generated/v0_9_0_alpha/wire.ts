@@ -32,12 +32,6 @@ export interface CaptureDenials {
 
 export type CaptureDenialsMode = "block" | "allow";
 
-/**
- * Experimental settings accepted by the `deprovision` phase.
- */
-export interface DeprovisionExperimental {
-}
-
 export type DeprovisionPhase = "deprovision";
 
 /**
@@ -52,10 +46,6 @@ export interface DeprovisionRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: DeprovisionExperimental;
   /**
    * Exact `deprovision` phase marker.
    */
@@ -74,12 +64,6 @@ export interface DeprovisionRequest {
   version: Version;
 }
 
-/**
- * Experimental settings accepted by the `exec` phase.
- */
-export interface ExecExperimental {
-}
-
 export type ExecPhase = "exec";
 
 /**
@@ -94,10 +78,6 @@ export interface ExecRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
-  /**
-   * Optional closed exec experimental settings.
-   */
-  experimental?: ExecExperimental;
   /**
    * Optional per-execution network settings.
    */
@@ -209,16 +189,6 @@ export interface IsolationSessionProvision {
 }
 
 /**
- * Experimental settings accepted by an IsolationSession provision request.
- */
-export interface IsolationSessionProvisionExperimental {
-  /**
-   * Optional IsolationSession backend settings.
-   */
-  isolation_session?: StateAwareIsolationSession;
-}
-
-/**
  * A complete state-aware `provision` request for IsolationSession.
  *
  * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.
@@ -237,9 +207,9 @@ export interface IsolationSessionProvisionRequest {
    */
   containment: IsolationSessionContainment;
   /**
-   * Optional closed experimental settings containing only `appId`.
+   * Optional IsolationSession backend settings.
    */
-  experimental?: IsolationSessionProvisionExperimental;
+  isolationSession?: StateAwareIsolationSession;
   /**
    * Required unrestricted network posture.
    */
@@ -389,24 +359,6 @@ export type NonEmptyString = string;
 export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
 
 /**
- * Experimental settings.
- */
-export interface OneShotExperimental {
-  /**
-   * Optional placeholder test feature.
-   */
-  test?: TestFeature;
-  /**
-   * Optional one-shot Windows Sandbox compatibility settings.
-   */
-  windows_sandbox?: OneShotWindowsSandbox;
-  /**
-   * Optional one-shot WSLC backend settings.
-   */
-  wslc?: OneShotWslc;
-}
-
-/**
  * A complete one-shot `0.9.0-alpha` configuration request.
  */
 export type OneShotRequest = {
@@ -430,10 +382,6 @@ export type OneShotRequest = {
    * Optional containment selection.
    */
   containment?: OneShotContainment;
-  /**
-   * Optional experimental settings.
-   */
-  experimental?: OneShotExperimental;
   /**
    * Optional fallback consent.
    */
@@ -479,6 +427,10 @@ export type OneShotRequest = {
    */
   telemetry?: Telemetry;
   /**
+   * Optional placeholder development feature.
+   */
+  test?: TestFeature;
+  /**
    * Optional cross-platform user-interface policy.
    */
   ui?: Ui;
@@ -486,6 +438,14 @@ export type OneShotRequest = {
    * The exact contract version marker.
    */
   version: Version;
+  /**
+   * Optional one-shot Windows Sandbox settings.
+   */
+  windowsSandbox?: OneShotWindowsSandbox;
+  /**
+   * Optional one-shot WSLC settings.
+   */
+  wslc?: OneShotWslc;
 } & ({ processContainer?: never } | { appContainer?: never }) & ({ seatbelt?: never } | { macos_sandbox?: never });
 
 /**
@@ -698,12 +658,6 @@ export interface Seatbelt {
   profileOverride?: string;
 }
 
-/**
- * Experimental settings accepted by the `start` phase.
- */
-export interface StartExperimental {
-}
-
 export type StartPhase = "start";
 
 /**
@@ -718,10 +672,6 @@ export interface StartRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: StartExperimental;
   /**
    * Exact `start` phase marker.
    */
@@ -741,7 +691,7 @@ export interface StartRequest {
 }
 
 /**
- * State-aware IsolationSession experimental settings.
+ * State-aware IsolationSession settings.
  */
 export interface StateAwareIsolationSession {
   /**
@@ -751,19 +701,13 @@ export interface StateAwareIsolationSession {
 }
 
 /**
- * State-aware WSLC experimental settings.
+ * State-aware WSLC settings.
  */
 export interface StateAwareWslc {
   /**
    * Optional provision-phase settings.
    */
   provision?: WslcProvision;
-}
-
-/**
- * Experimental settings accepted by the `stop` phase.
- */
-export interface StopExperimental {
 }
 
 export type StopPhase = "stop";
@@ -780,10 +724,6 @@ export interface StopRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: StopExperimental;
   /**
    * Exact `stop` phase marker.
    */
@@ -813,7 +753,7 @@ export interface Telemetry {
 }
 
 /**
- * Placeholder feature used to exercise experimental configuration plumbing.
+ * Placeholder development feature used to exercise authorization plumbing.
  */
 export interface TestFeature {
   /**
@@ -849,12 +789,6 @@ export type Version = "0.9.0-alpha";
 export type WindowsSandboxContainment = "windows_sandbox";
 
 /**
- * Experimental settings accepted by a Windows Sandbox provision request.
- */
-export interface WindowsSandboxExperimental {
-}
-
-/**
  * A complete state-aware `provision` request for windows_sandbox
  */
 export interface WindowsSandboxProvisionRequest {
@@ -870,10 +804,6 @@ export interface WindowsSandboxProvisionRequest {
    * Exact `windows_sandbox` containment marker.
    */
   containment: WindowsSandboxContainment;
-  /**
-   * Optional closed experimental settings.
-   */
-  experimental?: WindowsSandboxExperimental;
   /**
    * Optional filesystem policy.
    */
@@ -909,16 +839,6 @@ export interface WslcProvision {
 }
 
 /**
- * Experimental settings accepted by a WSLC provision request.
- */
-export interface WslcProvisionExperimental {
-  /**
-   * Optional WSLC backend settings.
-   */
-  wslc?: StateAwareWslc;
-}
-
-/**
  * A complete state-aware `provision` request for wslc
  */
 export interface WslcProvisionRequest {
@@ -934,10 +854,6 @@ export interface WslcProvisionRequest {
    * Exact `wslc` containment marker.
    */
   containment: WslcContainment;
-  /**
-   * Optional closed experimental settings.
-   */
-  experimental?: WslcProvisionExperimental;
   /**
    * Optional filesystem policy fixed at provision time.
    */
@@ -958,6 +874,10 @@ export interface WslcProvisionRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional WSLC backend settings.
+   */
+  wslc?: StateAwareWslc;
 }
 
 /**

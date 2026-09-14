@@ -215,11 +215,17 @@ type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'contain
 // no assertion notices, so the leaf-only checks above are not enough. The public
 // root `ContainerConfig` is checked the same way as the leaves:
 //  * value-shape: assignable to the generated `MXCConfiguration`, and
-//  * key-drift: the only public-but-not-wire root key is `appContainer`, the
-//    deprecated serde alias the schema folds away (so it is absent from the
-//    generated root). A NEW root divergence fails the build.
+//  * key-drift: `appContainer` is the deprecated serde alias, while
+//    `test`/`windowsSandbox`/`wslc` are the exact-contract permanent
+//    development locations that the retained rolling oracle still nests under
+//    `experimental`. A NEW root divergence fails the build.
 type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
-type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConfig>, 'appContainer'>>;
+type _RootKeys = AssertTrue<
+  Equivalent<
+    OnlyInPublic<ContainerConfig, WireMxcConfig>,
+    'appContainer' | 'test' | 'windowsSandbox' | 'wslc'
+  >
+>;
 
 // --- reverse key conformance: wire-only fields (review finding F1, gpt-5.5) --
 // Catch a NEW optional wire field the SDK forgot to expose. Each list is the
@@ -259,12 +265,13 @@ type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, Wire
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
 // (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`),
-// and `fallback` (AppContainer DACL-mutation policy not surfaced through the
-// one-shot policy API). Any OTHER new root wire field fails.
+// `fallback` (AppContainer DACL-mutation policy not surfaced through the
+// one-shot policy API), and the obsolete rolling-only `experimental` wrapper.
+// Any OTHER new root wire field fails.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback'
+    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback' | 'experimental'
   >
 >;
 

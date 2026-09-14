@@ -166,7 +166,7 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
-  it('nests provision appId under experimental.isolation_session.provision', () => {
+  it('nests provision appId under isolationSession.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
@@ -174,10 +174,8 @@ describe('buildStateAwareEnvelope', () => {
       config: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: {
-        provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
-      },
+    assert.deepStrictEqual(wire.isolationSession, {
+      provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
     });
   });
 
@@ -191,12 +189,12 @@ describe('buildStateAwareEnvelope', () => {
       config: { appId: '' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: { provision: { appId: '' } },
+    assert.deepStrictEqual(wire.isolationSession, {
+      provision: { appId: '' },
     });
   });
 
-  it('omits the experimental block entirely when no appId is supplied', () => {
+  it('omits the isolationSession section when no appId is supplied', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
@@ -204,7 +202,7 @@ describe('buildStateAwareEnvelope', () => {
       config: {},
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.strictEqual(wire.experimental, undefined);
+    assert.strictEqual(wire.isolationSession, undefined);
   });
 
   it('never emits correlationVector on state-aware envelopes', () => {
@@ -362,9 +360,9 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
     // An unpackaged app may pass any string; it reaches the wire config verbatim.
-    const provisionConfig = (fake.captured.envelope?.experimental as {
-      isolation_session?: { provision?: { appId?: string } };
-    })?.isolation_session?.provision;
+    const provisionConfig = (fake.captured.envelope?.isolationSession as {
+      provision?: { appId?: string };
+    })?.provision;
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
@@ -670,7 +668,7 @@ describe('wslc state-aware lifecycle', () => {
     );
   });
 
-  it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
+  it('lifts filesystem + network and nests image under wslc.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -692,12 +690,12 @@ describe('wslc state-aware lifecycle', () => {
       ingress: { default: 'allow', hostLoopback: 'allow' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
+    assert.deepStrictEqual(wire.wslc, {
+      provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' },
     });
   });
 
-  it('omits the experimental block when provision carries no backend-specific field', () => {
+  it('omits the wslc section when provision carries no backend-specific field', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -709,7 +707,7 @@ describe('wslc state-aware lifecycle', () => {
         },
       },
     });
-    assert.strictEqual(env.experimental, undefined);
+    assert.strictEqual(env.wslc, undefined);
     assert.deepStrictEqual(env.network, {
       egress: { default: 'deny' },
       ingress: { default: 'deny', hostLoopback: 'deny' },

@@ -6,16 +6,23 @@
     "commandLine": "echo SHOULD_NOT_RUN"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\ddttest\\real"],
-    "deniedPaths": ["C:\\ddttest\\link\\ghost\\sub\\..\\secret"]
+    "readwritePaths": [
+      "C:\\ddttest\\real"
+    ],
+    "deniedPaths": [
+      "C:\\ddttest\\link\\ghost\\sub\\..\\secret"
+    ]
   },
   "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

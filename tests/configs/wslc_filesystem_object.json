@@ -6,16 +6,23 @@
     "commandLine": "if cat /mnt/c/objtest/data/secret.txt 2>/dev/null; then echo OBJECT_LEAK; else echo OBJECT_MASKED_OK; fi"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\objtest\\data"],
-    "deniedPaths": ["C:\\objtest\\data_link"]
+    "readwritePaths": [
+      "C:\\objtest\\data"
+    ],
+    "deniedPaths": [
+      "C:\\objtest\\data_link"
+    ]
   },
   "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

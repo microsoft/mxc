@@ -7,7 +7,7 @@ use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
 fn accepts_empty_test_object() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "experimental": {"test": {}},
+        "test": {},
         "process": {"commandLine": "echo"}
     }"#;
 
@@ -20,10 +20,8 @@ fn accepts_test_message_values() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "experimental": {{
-                    "test": {{
-                        "message": "{message}"
-                    }}
+                "test": {{
+                    "message": "{message}"
                 }},
                 "process": {{"commandLine": "echo"}}
             }}"#
@@ -39,10 +37,8 @@ fn rejects_non_string_test_message_values() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "experimental": {{
-                    "test": {{
-                        "message": {message}
-                    }}
+                "test": {{
+                    "message": {message}
                 }},
                 "process": {{"commandLine": "echo"}}
             }}"#
@@ -56,10 +52,8 @@ fn rejects_non_string_test_message_values() {
 fn rejects_unknown_test_field() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "experimental": {
-            "test": {
-                "unknownField": "value"
-            }
+        "test": {
+            "unknownField": "value"
         },
         "process": {"commandLine": "echo"}
     }"#;
@@ -73,18 +67,14 @@ fn rejects_duplicate_test_fields() {
 
     assert_invalid_cases(
         [
+            ("test", version_and_process, r#""test": {}, "test": {}"#),
             (
-                "experimental.test",
+                "test.message",
                 version_and_process,
-                r#""experimental": {"test": {}, "test": {}}"#,
-            ),
-            (
-                "experimental.test.message",
-                version_and_process,
-                r#""experimental": {"test": {"message": "First", "message": "Second"}}"#,
+                r#""test": {"message": "First", "message": "Second"}"#,
             ),
         ],
-        "duplicate experimental field",
+        "duplicate field",
     );
 }
 

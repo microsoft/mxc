@@ -71,11 +71,9 @@ const CASES: &[StateAwareCase] = &[
                 "egress": {"default": "allow"},
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.Sample_1234567890abc"
-                    }
+            "isolationSession": {
+                "provision": {
+                    "appId": "Contoso.Sample_1234567890abc"
                 }
             }
         }"#,
@@ -97,12 +95,10 @@ const CASES: &[StateAwareCase] = &[
                 "ingress": {"default": "deny", "hostLoopback": "deny"}
             },
             "telemetry": {"enabled": true},
-            "experimental": {
-                "wslc": {
-                    "provision": {
-                        "image": "ubuntu:24.04",
-                        "imageTarPath": "C:\\images\\ubuntu.tar"
-                    }
+            "wslc": {
+                "provision": {
+                    "image": "ubuntu:24.04",
+                    "imageTarPath": "C:\\images\\ubuntu.tar"
                 }
             }
         }"#,

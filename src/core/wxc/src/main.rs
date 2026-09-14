@@ -97,7 +97,7 @@ struct Cli {
 
     /// Optional WSLC storage path. When omitted the runner default is used
     /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
-    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// runtime configs set in `wslc.storagePath`, otherwise
     /// the runner will not find the pulled image. Requires `--setup-wslc`.
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,

@@ -4,20 +4,18 @@
 use crate::common::{assert_invalid, assert_valid};
 
 #[test]
-fn accepts_experimental_section() {
+fn accepts_development_field_at_permanent_location() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
-        "experimental": {
-            "test": {"message": "this is a message"}
-        }
+        "test": {"message": "this is a message"}
     }"#;
 
     assert_valid(json);
 }
 
 #[test]
-fn rejects_unknown_experimental_field() {
+fn rejects_removed_experimental_section() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},

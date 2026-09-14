@@ -22,8 +22,14 @@ export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
-// nested under `experimental.<backend>.<phase>`.
+// nested under that backend's permanent top-level section.
 export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', 'ui', 'process', 'telemetry'] as const;
+
+const BACKEND_CONFIG_FIELD: Record<StateAwareContainmentBackend, string> = {
+  isolation_session: 'isolationSession',
+  windows_sandbox: 'windowsSandbox',
+  wslc: 'wslc',
+};
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
@@ -94,7 +100,7 @@ export interface BuildEnvelopeArgs {
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
  * (filesystem, network, runtimeConfig, ui, process, telemetry) to envelope top-level; nests any
- * remaining backend-specific fields under `experimental.<backend>.<phase>`.
+ * remaining backend-specific fields under `<backendSection>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
   const {
@@ -105,7 +111,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
     config,
   } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
-  // Anything left becomes experimental.<backend>.<phase>.
+  // Anything left becomes <backendSection>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
@@ -199,7 +205,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
 
   if (Object.keys(backendSpecific).length > 0) {
-    envelope.experimental = { [backendKey]: { [phase]: backendSpecific } };
+    envelope[BACKEND_CONFIG_FIELD[backendKey]] = { [phase]: backendSpecific };
   }
 
   return envelope;

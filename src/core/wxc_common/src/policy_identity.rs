@@ -845,12 +845,17 @@ mod tests {
                 }),
             ),
         ] {
-            let experimental = payload
+            let backend_config = payload
                 .map(|payload| {
-                    format!(r#","experimental":{{"{backend}":{{"provision":{payload}}}}}"#)
+                    let field = if backend == "isolation_session" {
+                        "isolationSession"
+                    } else {
+                        backend
+                    };
+                    format!(r#","{field}":{{"provision":{payload}}}"#)
                 })
                 .unwrap_or_default();
-            let json = provision_json(backend, &experimental);
+            let json = provision_json(backend, &backend_config);
             let parsed = parse_state_aware(&json);
             assert_eq!(
                 state_aware_config_projection(parsed.operation()),
@@ -918,7 +923,6 @@ mod tests {
         for backend in ["isolation_session", "windows_sandbox", "wslc"] {
             let baseline = parsed_state_aware_hash(&provision_json(backend, ""), backend);
             for extra_fields in [
-                r#","experimental":{}"#.to_string(),
                 r#","telemetry":{}"#.to_string(),
                 r#","_comment":{"user":{"CLIENTSECRET":"ignored"},"UPN":"alice@example.test"}"#
                     .to_string(),
@@ -930,31 +934,18 @@ mod tests {
                 );
             }
             if backend != "windows_sandbox" {
-                let extra_fields = format!(r#","experimental":{{"{backend}":{{}}}}"#);
+                let field = if backend == "isolation_session" {
+                    "isolationSession"
+                } else {
+                    backend
+                };
+                let extra_fields = format!(r#","{field}":{{}}"#);
                 assert_eq!(
                     baseline,
                     parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
                     "{backend}: an empty backend wrapper is not a provision config"
                 );
             }
-        }
-
-        for phase in ["start", "exec", "stop", "deprovision"] {
-            let process = if phase == "exec" {
-                r#","process":{"commandLine":"echo hello"}"#
-            } else {
-                ""
-            };
-            let source = |extra_fields: &str| {
-                format!(
-                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
-                )
-            };
-            assert_eq!(
-                parsed_state_aware_hash(&source(""), "windows_sandbox"),
-                parsed_state_aware_hash(&source(r#","experimental":{}"#), "windows_sandbox"),
-                "{phase}: an empty experimental wrapper is not a phase config"
-            );
         }
     }
 

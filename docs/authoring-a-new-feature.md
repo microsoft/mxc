@@ -2,13 +2,14 @@
 
 > **Stable schemas are immutable once shipped.** Files in
 > `schemas/stable/` that are already published in a release must not be
-> edited. Add experimental work to `schemas/dev/` only, then carry it
-> into a *new* stable schema file at promotion time (per
+> edited. Add experimental work at its permanent field location in
+> `schemas/dev/` only, then carry that unchanged shape into a *new* stable
+> schema file at promotion time (per
 > [Promoting to Stable](#promoting-to-stable) below).
 >
 > **Stable schemas document only the non-experimental surface.**
-> Experimental backends, the `experimental.*` block, and any in-progress
-> shapes live solely in `schemas/dev/` — they must not be mirrored into
+> Experimental backends and any in-progress fields/roots live solely in
+> `schemas/dev/` — they must not be mirrored into
 > a stable file. Configs that need editor validation for experimental
 > fields should point `$schema` at the dev file. The `--experimental`
 > runtime gate is unchanged: it still controls execution regardless of
@@ -124,21 +125,14 @@ Adding a feature may touch these files:
 
 ## Step 1: Add the field to the exact contract and rolling oracle
 
-Add the feature to the authoritative closed request types under
-`src/core/mxc_config_contract/src/dev/`, then mirror it in the rolling Rust wire
-model (`src/core/wxc_common/src/wire.rs`) while differential characterization
-remains. The rolling experimental struct remains permissive; the exact
-development contract and every nested experimental object are recursively
-closed.
+Add the feature at its intended permanent top-level or backend-section
+location in the authoritative closed request types under
+`src/core/mxc_config_contract/src/dev/`. Do not create or extend an
+`experimental` JSON object. The retained rolling model is only a temporary
+differential/runtime compatibility representation; add the minimum adapter
+bridge needed while it remains.
 
 ```rust
-// in wire.rs
-pub struct Experimental {
-    pub compartments: Option<Compartments>,
-    pub gpu_isolation: Option<GpuIsolation>,            // ← add this
-    // ...
-}
-
 /// GPU device isolation (experimental).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -168,8 +162,10 @@ all applicable regeneration steps are mandatory.
 
 ## Step 2: Add the model struct
 
-In `src/core/wxc_common/src/models.rs`, `ExperimentalConfig` already exists with
-`compartments`. Add your `GpuIsolationConfig` struct and a field for it:
+In `src/core/wxc_common/src/models.rs`, an internal `ExperimentalConfig` may
+still carry gated runtime settings while the rolling compatibility layer
+exists. Add the runtime model there when appropriate; this internal name does
+not define the JSON location:
 
 ```rust
 /// GPU isolation settings (experimental).
@@ -199,20 +195,11 @@ adapter mapping for your exact contract field, then map the corresponding wire
 field to the domain struct inside `convert_wire_config`:
 
 ```rust
-let experimental = if let Some(raw_exp) = cfg.experimental {
-    // ... existing feature mappings ...
-    let gpu_isolation = raw_exp.gpu_isolation.map(|g| GpuIsolationConfig {
-        device_index: g.device_index.unwrap_or(0),
-        memory_limit_mb: g.memory_limit_mb.unwrap_or(0),
-        allow_cuda: g.allow_cuda.unwrap_or(false),
-    });
-    ExperimentalConfig {
-        // ... existing fields ...
-        gpu_isolation,
-    }
-} else {
-    ExperimentalConfig::default()
-};
+let gpu_isolation = cfg.gpu_isolation.map(|g| GpuIsolationConfig {
+    device_index: g.device_index.unwrap_or(0),
+    memory_limit_mb: g.memory_limit_mb.unwrap_or(0),
+    allow_cuda: g.allow_cuda.unwrap_or(false),
+});
 ```
 
 Prefer destructuring the wire struct (`let wire::GpuIsolation { device_index, .. }`)
@@ -223,7 +210,7 @@ Add tests to verify:
 - `gpuIsolation` is accepted by the exact request root and maps through its
   adapter to `ExecutionRequest.experimental`
 - Missing optional fields use defaults
-- Unknown fields under exact `experimental` objects are rejected
+- Unknown fields under the exact feature object are rejected
 - The rolling parser's permissive behavior remains characterized separately
   while that differential oracle exists
 
@@ -288,12 +275,10 @@ Create a test config that exercises your feature:
   "process": {
     "commandLine": "cmd.exe /c echo gpu isolation test"
   },
-  "experimental": {
-    "gpuIsolation": {
-      "deviceIndex": 0,
-      "memoryLimitMb": 1024,
-      "allowCuda": true
-    }
+  "gpuIsolation": {
+    "deviceIndex": 0,
+    "memoryLimitMb": 1024,
+    "allowCuda": true
   }
 }
 ```
@@ -304,15 +289,14 @@ Run it with and without the flag to verify:
 # With flag — experimental feature is active
 wxc-exec.exe tests/configs/experimental_gpu_isolation.json --experimental --debug
 
-# Without flag — experimental section silently ignored, normal execution
+# Without flag — the experimental feature/backend is rejected explicitly
 wxc-exec.exe tests/configs/experimental_gpu_isolation.json --debug
 ```
 
 Verify three things:
 1. **With `--experimental`:** debug output shows your feature was applied
    (e.g., "Applying GPU isolation: device 0, 1024MB limit")
-2. **Without `--experimental`:** no trace of your feature in the output,
-   process executes normally
+2. **Without `--experimental`:** the request fails before host work
 3. **Stable features unaffected:** filesystem, network, and other policies
    still work exactly as before in both modes
 
@@ -334,20 +318,10 @@ The SDK passes `--experimental` to the underlying binary when this is set.
 
 When your experimental feature is ready to ship:
 
-1. Move the field from `experimental` to the top-level stable-candidate surface
-   in both transitional Rust models, then regenerate all rolling and exact
-   artifacts with `mxc_schema_gen`
-2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Map the now-top-level wire field in `convert_wire_config` (and add
-   `deny_unknown_fields` to the wire struct so the promoted, stable surface is
-   closed)
-4. Remove the `if request.experimental_enabled` guard
-5. Bump the minor version
-6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"gpuIsolation has moved to the stable section"`.
-   This error should persist for at least one release cycle so users have
-   time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
+1. Remove the `request.experimental_enabled` guard.
+2. Add the existing permanent field/root to the Rust publication profile.
+3. Freeze the adapter, SDK serialization, fixtures, and runtime observations.
+4. Bump the appropriate contract version and regenerate exact artifacts.
 
 ## Checklist
 

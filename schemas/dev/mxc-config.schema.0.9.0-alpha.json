@@ -195,11 +195,6 @@
         }
       ]
     },
-    "DeprovisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `deprovision` phase.",
-      "type": "object"
-    },
     "DeprovisionPhase": {
       "enum": [
         "deprovision"
@@ -216,10 +211,6 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/DeprovisionExperimental",
-          "description": "Optional closed post-provision experimental settings."
         },
         "phase": {
           "$ref": "#/definitions/DeprovisionPhase",
@@ -245,11 +236,6 @@
       ],
       "type": "object"
     },
-    "ExecExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `exec` phase.",
-      "type": "object"
-    },
     "ExecPhase": {
       "enum": [
         "exec"
@@ -266,10 +252,6 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/ExecExperimental",
-          "description": "Optional closed exec experimental settings."
         },
         "network": {
           "$ref": "#/definitions/Network",
@@ -422,17 +404,6 @@
       },
       "type": "object"
     },
-    "IsolationSessionProvisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by an IsolationSession provision request.",
-      "properties": {
-        "isolation_session": {
-          "$ref": "#/definitions/StateAwareIsolationSession",
-          "description": "Optional IsolationSession backend settings."
-        }
-      },
-      "type": "object"
-    },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
       "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.",
@@ -448,9 +419,9 @@
           "$ref": "#/definitions/IsolationSessionContainment",
           "description": "Exact `isolation_session` containment marker."
         },
-        "experimental": {
-          "$ref": "#/definitions/IsolationSessionProvisionExperimental",
-          "description": "Optional closed experimental settings containing only `appId`."
+        "isolationSession": {
+          "$ref": "#/definitions/StateAwareIsolationSession",
+          "description": "Optional IsolationSession backend settings."
         },
         "network": {
           "$ref": "#/definitions/IsolationSessionNetwork",
@@ -800,25 +771,6 @@
         }
       ]
     },
-    "OneShotExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings.",
-      "properties": {
-        "test": {
-          "$ref": "#/definitions/TestFeature",
-          "description": "Optional placeholder test feature."
-        },
-        "windows_sandbox": {
-          "$ref": "#/definitions/OneShotWindowsSandbox",
-          "description": "Optional one-shot Windows Sandbox compatibility settings."
-        },
-        "wslc": {
-          "$ref": "#/definitions/OneShotWslc",
-          "description": "Optional one-shot WSLC backend settings."
-        }
-      },
-      "type": "object"
-    },
     "OneShotRequest": {
       "additionalProperties": false,
       "allOf": [
@@ -859,10 +811,6 @@
         "containment": {
           "$ref": "#/definitions/OneShotContainment",
           "description": "Optional containment selection."
-        },
-        "experimental": {
-          "$ref": "#/definitions/OneShotExperimental",
-          "description": "Optional experimental settings."
         },
         "fallback": {
           "$ref": "#/definitions/Fallback",
@@ -908,6 +856,10 @@
           "$ref": "#/definitions/Telemetry",
           "description": "Optional telemetry configuration."
         },
+        "test": {
+          "$ref": "#/definitions/TestFeature",
+          "description": "Optional placeholder development feature."
+        },
         "ui": {
           "$ref": "#/definitions/Ui",
           "description": "Optional cross-platform user-interface policy."
@@ -915,6 +867,14 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "The exact contract version marker."
+        },
+        "windowsSandbox": {
+          "$ref": "#/definitions/OneShotWindowsSandbox",
+          "description": "Optional one-shot Windows Sandbox settings."
+        },
+        "wslc": {
+          "$ref": "#/definitions/OneShotWslc",
+          "description": "Optional one-shot WSLC settings."
         }
       },
       "required": [
@@ -1209,11 +1169,6 @@
       },
       "type": "object"
     },
-    "StartExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `start` phase.",
-      "type": "object"
-    },
     "StartPhase": {
       "enum": [
         "start"
@@ -1230,10 +1185,6 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/StartExperimental",
-          "description": "Optional closed post-provision experimental settings."
         },
         "phase": {
           "$ref": "#/definitions/StartPhase",
@@ -1261,7 +1212,7 @@
     },
     "StateAwareIsolationSession": {
       "additionalProperties": false,
-      "description": "State-aware IsolationSession experimental settings.",
+      "description": "State-aware IsolationSession settings.",
       "properties": {
         "provision": {
           "$ref": "#/definitions/IsolationSessionProvision",
@@ -1272,18 +1223,13 @@
     },
     "StateAwareWslc": {
       "additionalProperties": false,
-      "description": "State-aware WSLC experimental settings.",
+      "description": "State-aware WSLC settings.",
       "properties": {
         "provision": {
           "$ref": "#/definitions/WslcProvision",
           "description": "Optional provision-phase settings."
         }
       },
-      "type": "object"
-    },
-    "StopExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `stop` phase.",
       "type": "object"
     },
     "StopPhase": {
@@ -1302,10 +1248,6 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/StopExperimental",
-          "description": "Optional closed post-provision experimental settings."
         },
         "phase": {
           "$ref": "#/definitions/StopPhase",
@@ -1344,7 +1286,7 @@
     },
     "TestFeature": {
       "additionalProperties": false,
-      "description": "Placeholder feature used to exercise experimental configuration plumbing.",
+      "description": "Placeholder development feature used to exercise authorization plumbing.",
       "properties": {
         "message": {
           "description": "The message for the test feature.",
@@ -1432,11 +1374,6 @@
       ],
       "type": "string"
     },
-    "WindowsSandboxExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by a Windows Sandbox provision request.",
-      "type": "object"
-    },
     "WindowsSandboxProvisionRequest": {
       "additionalProperties": false,
       "description": "A complete state-aware `provision` request for windows_sandbox",
@@ -1451,10 +1388,6 @@
         "containment": {
           "$ref": "#/definitions/WindowsSandboxContainment",
           "description": "Exact `windows_sandbox` containment marker."
-        },
-        "experimental": {
-          "$ref": "#/definitions/WindowsSandboxExperimental",
-          "description": "Optional closed experimental settings."
         },
         "filesystem": {
           "$ref": "#/definitions/Filesystem",
@@ -1501,17 +1434,6 @@
       },
       "type": "object"
     },
-    "WslcProvisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by a WSLC provision request.",
-      "properties": {
-        "wslc": {
-          "$ref": "#/definitions/StateAwareWslc",
-          "description": "Optional WSLC backend settings."
-        }
-      },
-      "type": "object"
-    },
     "WslcProvisionRequest": {
       "additionalProperties": false,
       "description": "A complete state-aware `provision` request for wslc",
@@ -1526,10 +1448,6 @@
         "containment": {
           "$ref": "#/definitions/WslcContainment",
           "description": "Exact `wslc` containment marker."
-        },
-        "experimental": {
-          "$ref": "#/definitions/WslcProvisionExperimental",
-          "description": "Optional closed experimental settings."
         },
         "filesystem": {
           "$ref": "#/definitions/Filesystem",
@@ -1550,6 +1468,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "wslc": {
+          "$ref": "#/definitions/StateAwareWslc",
+          "description": "Optional WSLC backend settings."
         }
       },
       "required": [

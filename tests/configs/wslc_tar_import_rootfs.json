@@ -6,12 +6,12 @@
     "commandLine": "echo 'Hello from tar-imported image!' && cat /etc/alpine-release"
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine-export:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "alpine-export:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }

@@ -6,11 +6,11 @@
     "commandLine": "echo 'stdout message' && echo 'stderr message' >&2 && echo 'another stdout'"
   },
   "network": {
-    "egress": { "default": "deny" }
-  },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
+    "egress": {
+      "default": "deny"
     }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

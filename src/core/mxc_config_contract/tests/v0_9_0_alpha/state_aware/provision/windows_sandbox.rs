@@ -69,11 +69,7 @@ fn accepts_provision_request_with_optional_fields() {
 
 #[test]
 fn accepts_empty_optional_objects() {
-    for field in [
-        r#""filesystem": {}"#,
-        r#""experimental": {}"#,
-        r#""telemetry": {}"#,
-    ] {
+    for field in [r#""filesystem": {}"#, r#""telemetry": {}"#] {
         assert_valid(&request_with_additional_fields(field));
     }
 }

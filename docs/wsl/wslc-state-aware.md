@@ -51,7 +51,7 @@ against different sandboxes are serialized — correct, just not concurrent. See
 | Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
 Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
-`experimental.wslc.provision`. Engine-side checked binding preserves an absent
+`wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend
 chooses its default. The separate rolling `wire::WslcProvisionPhase` survives

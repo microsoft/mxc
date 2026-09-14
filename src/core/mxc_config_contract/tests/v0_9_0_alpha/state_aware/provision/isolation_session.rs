@@ -83,11 +83,9 @@ fn accepts_provision_request_with_optional_fields() {
         "telemetry": {
             "enabled": true
         },
-        "experimental": {
-            "isolation_session": {
-                "provision": {
-                    "appId": "someAppId"
-                }
+        "isolationSession": {
+            "provision": {
+                "appId": "someAppId"
             }
         }
     }"#;
@@ -95,12 +93,11 @@ fn accepts_provision_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_provision_experimental_objects() {
+fn accepts_empty_provision_backend_objects() {
     for field in [
-        r#""experimental": {}"#,
         r#""telemetry": {}"#,
-        r#""experimental": {"isolation_session": {}}"#,
-        r#""experimental": {"isolation_session": {"provision": {}}}"#,
+        r#""isolationSession": {}"#,
+        r#""isolationSession": {"provision": {}}"#,
     ] {
         assert_valid(&request_with_additional_fields(field));
     }
@@ -475,10 +472,8 @@ fn rejects_forbidden_fields() {
 fn accepts_app_id_string_values() {
     for app_id in [r#""""#, r#""someAppId""#] {
         let field = format!(
-            r#""experimental": {{
-                "isolation_session": {{
-                    "provision": {{"appId": {app_id}}}
-                }}
+            r#""isolationSession": {{
+                "provision": {{"appId": {app_id}}}
             }}"#
         );
         assert_valid(&request_with_additional_fields(&field));
@@ -489,10 +484,8 @@ fn accepts_app_id_string_values() {
 fn rejects_non_string_app_id() {
     for app_id in ["123", "true", "false", "[]", "{}"] {
         let field = format!(
-            r#""experimental": {{
-                "isolation_session": {{
-                    "provision": {{"appId": {app_id}}}
-                }}
+            r#""isolationSession": {{
+                "provision": {{"appId": {app_id}}}
             }}"#
         );
         assert_invalid(&request_with_additional_fields(&field));

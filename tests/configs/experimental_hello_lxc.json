@@ -12,9 +12,7 @@
     "distribution": "alpine",
     "release": "3.23"
   },
-  "experimental": {
-    "test": {
-      "message": "Test feature from LXC experimental!"
-    }
+  "test": {
+    "message": "Test feature from LXC experimental!"
   }
 }

@@ -51,14 +51,14 @@ fn accepts_deprovision_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_deprovision_experimental_objects() {
+fn rejects_removed_deprovision_experimental_object() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {}
     }"#;
-    assert_valid(json);
+    assert_invalid(json);
 
     let json = r#"{
         "version": "0.9.0-alpha",

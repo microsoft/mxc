@@ -58,13 +58,11 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
             "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
              \"containment\":\"isolation_session\",\n  \
              \"_comment\":\"typed payload diagnostic\",\n  \
-             \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+             \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
         );
         let error = run_state_aware_json(&json, true, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
-        assert!(error
-            .message
-            .contains("experimental.isolation_session.provision"));
+        assert!(error.message.contains("isolationSession.provision"));
         assert!(error.message.contains("line "));
         assert!(error.message.contains("column "));
         assert!(error.operation.is_none());
@@ -81,9 +79,9 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-            "experimental": {"isolation_session": {"provision": {
+            "isolationSession": {"provision": {
                 "appId": app_id
-            }}},
+            }},
         })
         .to_string();
         let result = run_state_aware_json(&json, true, true).unwrap();
@@ -97,9 +95,9 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
         "phase": "provision",
         "containment": "isolation_session",
         "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-        "experimental": {"isolation_session": {"provision": {
+        "isolationSession": {"provision": {
             "appId": "x".repeat(257)
-        }}},
+        }},
     })
     .to_string();
     let error = run_state_aware_json(&json, true, true).unwrap_err();

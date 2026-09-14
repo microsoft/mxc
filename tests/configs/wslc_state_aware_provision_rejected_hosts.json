@@ -1,19 +1,28 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "provision",
-    "containment": "wslc",
-    "network": {
-        "egress": {
-          "default": "allow",
-          "allow": [{ "to": [{ "cidr": "192.0.2.0/24" }] }]
-        },
-        "ingress": { "default": "allow", "hostLoopback": "allow" }
-    },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "network": {
+    "egress": {
+      "default": "allow",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "192.0.2.0/24"
             }
+          ]
         }
+      ]
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
     }
+  },
+  "wslc": {
+    "provision": {
+      "image": "alpine:latest"
+    }
+  }
 }
