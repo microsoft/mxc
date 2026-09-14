@@ -55,12 +55,12 @@ export function prepareBindingSandboxRequest(
   }
 
   const { runtimeConfig, processContainer, ...sharedPolicy } = input.policy;
-  const policy: BindingPolicy = {
-    ...sharedPolicy,
-    network: runtimeConfig === undefined
-      ? sharedPolicy.network
-      : { ...sharedPolicy.network, runtimeConfig },
-  };
+  const policy: BindingPolicy = runtimeConfig === undefined
+    ? sharedPolicy
+    : {
+        ...sharedPolicy,
+        network: { ...sharedPolicy.network, runtimeConfig },
+      };
   const environment = Object.fromEntries(
     Object.entries(input.environment ?? {}).filter((entry): entry is [string, string] =>
       entry[1] !== undefined),
