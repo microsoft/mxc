@@ -181,12 +181,11 @@ cannot honor rather than ignore it.
 
 `RunOptionsV1` and `SpawnOptionsV1` may share the same execution fields
 initially but remain distinct named contracts so they can evolve independently.
-This policy/config/execution split is a decision proposed here; the meeting
-settled named versioned types and explicitly deferred fully formalizing that
-delineation.
-Language-local controls that do not cross the native boundary, such as a
-JavaScript `AbortSignal`, may remain idiomatic SDK parameters rather than being
-forced into the cross-language structure.
+The public run and spawn functions and their `SandboxRequestV1`,
+`RunOptionsV1`, and `SpawnOptionsV1` types must remain in lockstep across the
+Rust, C#, and Node SDKs. Any compatible addition updates all three SDK
+projections and the C ABI together, with CI parity checks preventing one
+surface from drifting out of sync.
 
 Using a tagged containment union also prevents disconnected combinations that
 a giant config permits. For example, a WSLC image can appear only on the
