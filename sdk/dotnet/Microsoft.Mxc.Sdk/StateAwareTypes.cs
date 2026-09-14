@@ -69,8 +69,17 @@ public sealed class StateAwareFilesystemPolicy
 /// <summary>Base class for backend-specific provision options.</summary>
 public abstract class StateAwareProvisionOptions
 {
-    /// <summary>Overrides the backend's default state-aware schema version.</summary>
+    /// <summary>
+    /// Optional explicit state-aware schema version. It must equal the
+    /// registered version for the selected backend.
+    /// </summary>
     public string? Version { get; set; }
+
+    /// <summary>
+    /// Optional per-phase telemetry request. Emission is still gated by the
+    /// MXC-owned user consent and administrative policy.
+    /// </summary>
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>IsolationSession provision options.</summary>
@@ -158,8 +167,17 @@ public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
 /// <summary>Options shared by start, stop, and deprovision phases.</summary>
 public class StateAwarePhaseOptions
 {
-    /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
+    /// <summary>
+    /// Optional explicit state-aware schema version. It must equal the
+    /// registered version inferred from the sandbox id.
+    /// </summary>
     public string? Version { get; set; }
+
+    /// <summary>
+    /// Optional per-phase telemetry request. Emission is still gated by the
+    /// MXC-owned user consent and administrative policy.
+    /// </summary>
+    public TelemetrySettings? Telemetry { get; set; }
 }
 
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
@@ -169,7 +187,18 @@ public class StateAwareExecOptions : StateAwarePhaseOptions
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>
+    /// <remarks>
+    /// <see langword="null"/> gives the child the backend's default
+    /// environment. A supplied list — including an empty one — is used
+    /// verbatim unless <see cref="InheritDefaultEnvironment"/> is set.
+    /// </remarks>
     public List<string>? Environment { get; set; }
+
+    /// <summary>
+    /// Layer <see cref="Environment"/> on top of the backend's default
+    /// environment rather than replacing it.
+    /// </summary>
+    public bool? InheritDefaultEnvironment { get; set; }
 
     /// <summary>Wall-clock timeout in milliseconds. Zero means no timeout.</summary>
     public uint? TimeoutMs { get; set; }

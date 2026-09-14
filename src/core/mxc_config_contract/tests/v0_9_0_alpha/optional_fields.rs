@@ -322,14 +322,14 @@ fn rejects_null_optional_fields() {
                 r#""experimental": {"test": {"message": null}}"#,
             ),
             (
-                "experimental.telemetry",
+                "telemetry",
                 version_and_process.as_str(),
-                r#""experimental": {"telemetry": null}"#,
+                r#""telemetry": null"#,
             ),
             (
-                "experimental.telemetry.enabled",
+                "telemetry.enabled",
                 version_and_process.as_str(),
-                r#""experimental": {"telemetry": {"enabled": null}}"#,
+                r#""telemetry": {"enabled": null}"#,
             ),
             (
                 "experimental.windows_sandbox",

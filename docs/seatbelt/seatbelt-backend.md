@@ -151,13 +151,22 @@ and standard tools work:
 
 | Access | Paths |
 |---|---|
-| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select` |
+| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select`, the active developer directory |
 | Read **+ write** | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` |
 | Read-data only | `/` itself — the loader can't resolve path lookups without it |
 
 The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
+
+The developer grant resolves from the `xcode-select` symlink, and only when root
+owns both the link and every directory above it, so an unprivileged process
+cannot point it elsewhere. `DEVELOPER_DIR` is ignored for the same reason. When
+the link selects
+`<Xcode.app>/Contents/Developer`, MXC grants read-only access to the enclosing
+app bundle because dispatched tools load sibling frameworks; otherwise only the
+selected directory is granted. Many `/usr/bin` tools (`python3`, `git`) are
+`xcrun` shims that need this access. `deniedPaths` still overrides the grant.
 
 SIP-protected paths stay unwritable no matter what you put in
 `readwritePaths` — the kernel enforces that independently of the profile.
@@ -181,7 +190,7 @@ This is the cross-backend
 
 | Field | Behavior |
 |---|---|
-| `egress.default` | `"deny"` → no outbound rule; baseline `(deny default)` blocks all IP sockets. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
+| `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
 | `egress.allow` / `egress.deny` | **Rejected** if non-empty — no CIDR/port/protocol primitive exists |
 | `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This is what permits `listen()` — `network-bind` alone is not enough. |
 | `ingress.hostLoopback` | Controls sandbox → host loopback. Must equal `ingress.default`. **Defaults to `"deny"`.** |
@@ -251,13 +260,13 @@ This distinction matters, and it's easy to get backwards.
 
 | Question | Enforced? |
 |---|---|
-| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced.** |
+| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
 | Will a client actually *speak to* the proxy? | Not enforced — cooperative. |
 | Is traffic transparently redirected into the proxy? | No. |
 
 **Egress confinement is real.** A proxy is only ever accepted alongside a deny
-egress default (proxy + `"allow"` is [rejected](#network)), so the profile
-always ends up as:
+egress default (proxy + `"allow"` is [rejected](#network)), so with the
+recommended `hostLoopback: "deny"` the profile ends up as:
 
 ```lisp
 (deny default)
@@ -267,6 +276,12 @@ always ends up as:
 That single port is the sandbox's entire outbound universe. The kernel enforces
 it. A client that opens raw sockets and ignores `HTTP_PROXY` **cannot** reach
 the internet or any other host-local service — it simply fails to connect.
+
+> ⚠️ **`ingress.hostLoopback: "allow"` widens outbound** to *every port on this
+> host*, not just the proxy port, and the confinement claim above no longer
+> holds. Keep `ingress: {"default": "deny", "hostLoopback": "deny"}` whenever
+> the proxy is meant to be the only way out. This won't prevent the proxy's 
+> TCP responses from reaching the sandbox.
 
 **Proxy usage is cooperative.** MXC injects `HTTP_PROXY` / `HTTPS_PROXY` /
 `ALL_PROXY` (and lowercase forms) and strips any caller-supplied proxy vars.
@@ -368,6 +383,17 @@ into untrusted code. This is unconditional.
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
 paths are. `PWD` is exported to the resolved directory.
+
+Both launch methods apply it: `exec` sets it on the child process, while `open`
+performs the `cd` and the `PWD` export inside the generated helper script,
+since Terminal would otherwise start the workload in its own directory. A
+relative `cwd` is resolved against the MXC process's directory on both paths.
+
+**Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
+out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's
+`os.getcwd`/`os.path.abspath`, and even `import` when `sys.path` contains `''`)
+fail with `Operation not permitted`. Grant the working directory in
+`readwritePaths` or `readonlyPaths`.
 
 ## Usage
 
@@ -484,6 +510,8 @@ Apple credentials.
 Run with `--debug` to print the generated profile — most surprises are obvious
 once you can see the rules that were emitted.
 
+`--log-file <path>` prints the generated profile to a file.
+
 ### Common symptoms
 
 | Symptom | Likely cause | Fix |
@@ -577,3 +605,10 @@ every invocation is a fresh process tree.
 **`sandbox_init` is deprecated in headers** (since 10.8) but still ships and is
 used by Apple's own apps and Chromium. It's the same framework behind the App
 Sandbox.
+
+## Tests
+
+`tests/scripts/run_seatbelt_all_tests.sh` runs the whole suite; the individual
+`run_seatbelt_<area>_test.sh` scripts can be run on their own. There is no skip
+path — a missing prerequisite fails, so a green run always means the assertions
+executed.

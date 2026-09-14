@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::super::{contract, exec_into_wire, wire};
+use super::common::assert_config_matches_rolling_state_aware_wire_input;
 
 const MINIMAL_REQUEST_JSON: &str = r#"{
     "version": "0.9.0-alpha",
@@ -18,7 +19,6 @@ const ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "version": "0.9.0-alpha",
     "phase": "exec",
     "sandboxId": "sandbox-id",
-    "correlationVector": "correlation-vector",
     "process": {
         "commandLine": "echo hello",
         "cwd": "/work",
@@ -35,11 +35,9 @@ const ALL_FIELDS_REQUEST_JSON: &str = r#"{
             "url": "http://127.0.0.1:8080"
         }
     },
-    "experimental": {
-        "telemetry": {
+    "telemetry": {
             "enabled": false
         }
-    }
 }"#;
 
 fn request_with_fields(fields: &str) -> String {
@@ -76,8 +74,6 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(process.cwd.is_none());
     assert!(process.env.is_none());
     assert!(process.timeout.is_none());
-
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.containment.is_none());
     assert!(wire.lifecycle.is_none());
@@ -108,10 +104,6 @@ fn request_with_all_fields_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Exec)));
     assert_eq!(wire.sandbox_id, Some("sandbox-id".to_string()));
-    assert_eq!(
-        wire.correlation_vector,
-        Some("correlation-vector".to_string())
-    );
 
     let process = wire.process.expect("process should be populated");
     assert_eq!(process.command_line.as_deref(), Some("echo hello"));
@@ -154,31 +146,20 @@ fn request_with_all_fields_maps_expected_wire_fields() {
     assert!(proxy.localhost.is_none());
     assert!(proxy.builtin_test_server.is_none());
     assert_eq!(proxy.url.as_deref(), Some("http://127.0.0.1:8080"));
-
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
-
-    assert!(experimental.test.is_none());
-    assert!(experimental.windows_sandbox.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.experimental.is_none());
 }
 
 #[test]
 fn empty_experimental_sections_map_to_present_empty_wire_sections() {
     let wire = adapt(&request_with_fields(r#""experimental": {}"#));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.experimental.is_some());
+    assert!(wire.telemetry.is_none());
 
-    let wire = adapt(&request_with_fields(r#""experimental": {"telemetry": {}}"#));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 }
 
@@ -200,7 +181,6 @@ fn empty_identifier_strings_map_expected_wire_fields() {
         "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "",
-        "correlationVector": "",
         "process": {
             "commandLine": "echo hello",
             "cwd": ""
@@ -209,7 +189,6 @@ fn empty_identifier_strings_map_expected_wire_fields() {
 
     let wire = adapt(json);
     assert_eq!(wire.sandbox_id.as_deref(), Some(""));
-    assert_eq!(wire.correlation_vector.as_deref(), Some(""));
     assert_eq!(
         wire.process
             .as_ref()
@@ -225,41 +204,33 @@ fn null_comment_maps_expected_wire_field() {
 }
 
 // Deserialization match tests
-pub(super) fn assert_matches_current_wire_deserialization(json: &str) {
-    let current: wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
+pub(super) fn assert_matches_rolling_state_aware_wire_input(json: &str) {
     let adapted = adapt(json);
-
-    assert_eq!(
-        serde_json::to_value(adapted).unwrap(),
-        serde_json::to_value(current).unwrap()
-    );
+    assert_config_matches_rolling_state_aware_wire_input(json, adapted);
 }
 
 #[test]
-fn minimal_request_matches_current_wire_deserialization() {
+fn minimal_request_matches_rolling_state_aware_wire_input() {
     let json = MINIMAL_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn request_with_all_fields_matches_current_wire_deserialization() {
+fn request_with_all_fields_matches_rolling_state_aware_wire_input() {
     let json = ALL_FIELDS_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
 fn empty_experimental_sections_match_current_wire_deserialization() {
-    for fields in [
-        r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
-    ] {
-        assert_matches_current_wire_deserialization(&request_with_fields(fields));
+    for fields in [r#""experimental": {}"#, r#""telemetry": {}"#] {
+        assert_matches_rolling_state_aware_wire_input(&request_with_fields(fields));
     }
 }
 
 #[test]
-fn empty_network_section_matches_current_wire_deserialization() {
-    assert_matches_current_wire_deserialization(&request_with_fields(r#""network": {}"#));
+fn empty_network_section_matches_rolling_state_aware_wire_input() {
+    assert_matches_rolling_state_aware_wire_input(&request_with_fields(r#""network": {}"#));
 }
 
 #[test]
@@ -268,12 +239,11 @@ fn empty_identifier_strings_match_current_wire_deserialization() {
         "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "",
-        "correlationVector": "",
         "process": {
             "commandLine": "echo hello",
             "cwd": ""
         }
     }"#;
 
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }

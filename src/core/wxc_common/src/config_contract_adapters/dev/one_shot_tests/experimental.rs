@@ -9,12 +9,12 @@ const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
     "process": {
         "commandLine": "echo hello"
     },
+    "telemetry": {
+        "enabled": false
+    },
     "experimental": {
         "test": {
             "message": "test message"
-        },
-        "telemetry": {
-            "enabled": false
         }
     }
 }"#;
@@ -90,7 +90,7 @@ fn windows_sandbox_maps_expected_wire_fields() {
     assert!(experimental.wslc.is_none());
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.seatbelt.is_none());
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
 }
 
 #[test]
@@ -102,9 +102,7 @@ fn test_feature_and_telemetry_map_expected_wire_fields() {
     let test = experimental.test.expect("test should be populated");
     assert_eq!(test.message.as_deref(), Some("test message"));
 
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
 
     assert!(experimental.windows_sandbox.is_none());
@@ -157,7 +155,7 @@ fn wslc_maps_expected_wire_fields() {
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.seatbelt.is_none());
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
 }
 
 #[test]

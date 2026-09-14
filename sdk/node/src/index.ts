@@ -102,7 +102,9 @@ export {
 // Export state-aware lifecycle types
 export {
   Phase,
+  STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
+  StateAwareSchemaVersion,
   SandboxId,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
@@ -147,3 +149,23 @@ export {
   stopSandbox,
   deprovisionSandbox,
 } from './state-aware.js';
+
+// Export telemetry consent functions and types
+export {
+  TelemetryConfig,
+} from './types.js';
+
+export {
+  TelemetryConsentMessage,
+  TelemetryConsentResult,
+  TelemetryConsentState,
+  TelemetryConsentPrompt,
+  TelemetryConsentDecision,
+  TelemetryConsentOutcome,
+  TelemetryConsentPresenter,
+  TelemetryConsentQuery,
+  TelemetryPolicyState,
+  requestTelemetryConsent,
+  queryTelemetryConsentAsync,
+  withdrawTelemetryConsentAsync,
+} from './telemetry.js';

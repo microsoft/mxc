@@ -297,7 +297,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("provision", root.GetProperty("phase").GetString());
         Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
 
@@ -392,7 +392,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("windows_sandbox", root.GetProperty("containment").GetString());
         Assert.Equal(
             @"C:\input",
@@ -401,7 +401,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_WslcUsesV08AndNestsImageOptions()
+    public void BuildProvisionEnvelope_WslcUsesV09AndNestsImageOptions()
     {
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
@@ -419,7 +419,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
@@ -469,6 +469,7 @@ public class MxcLifecycleTests
                 {
                     WorkingDirectory = "/work",
                     Environment = new List<string> { "A=1", "B=two" },
+                    InheritDefaultEnvironment = true,
                     TimeoutMs = 1234,
                     Network = new WslcExecNetworkPolicy
                     {
@@ -479,11 +480,12 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
         Assert.Equal("B=two", process.GetProperty("env")[1].GetString());
+        Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.Equal(1234, process.GetProperty("timeout").GetInt32());
         var network = root.GetProperty("network");
         Assert.Equal(
@@ -491,6 +493,22 @@ public class MxcLifecycleTests
             network.GetProperty("proxy").GetProperty("url").GetString());
         Assert.False(network.TryGetProperty("defaultPolicy", out _));
         Assert.False(network.TryGetProperty("allowLocalNetwork", out _));
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RejectsUnregisteredVersionWithInheritedEnvironment()
+    {
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildExecEnvelope(
+                new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+                "echo hi",
+                new WslcExecOptions
+                {
+                    Version = "0.8.0-alpha",
+                    InheritDefaultEnvironment = true,
+                }));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -514,7 +532,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("start", root.GetProperty("phase").GetString());
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
@@ -522,7 +540,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void IdPhases_InferBackendVersionAndHonorOverrides()
+    public void IdPhases_InferBackendVersionAndAcceptRegisteredExplicitVersion()
     {
         var wslcStart = MxcLifecycle.BuildStartEnvelope(
             new SandboxId("wslc:0123456789abcdef0123456789abcdef"));
@@ -531,9 +549,20 @@ public class MxcLifecycleTests
             new SandboxId("iso:abc"),
             new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
 
-        Assert.Equal("0.8.0-alpha", wslcStart["version"]!.GetValue<string>());
-        Assert.Equal("0.6.0-alpha", wsbStop["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wsbStop["version"]!.GetValue<string>());
         Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void IdPhases_RejectUnregisteredVersionOverrides()
+    {
+        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -596,5 +625,136 @@ public class MxcLifecycleTests
         Assert.Equal(ErrorCode.BackendUnavailable, ex.Code);
         Assert.Contains("`isolation_session` feature", ex.Message);
 #endif
+    }
+
+    [Fact]
+    public void BuildStartEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
+    {
+        var options = new StateAwarePhaseOptions
+        {
+            Telemetry = new TelemetrySettings { Enabled = true },
+        };
+        var root = MxcLifecycle
+            .BuildStartEnvelope(new SandboxId("iso:abc"), options);
+
+        Assert.False(root.ContainsKey("correlationVector"));
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Equal(SchemaVersions.MaximumSupported, root["version"]?.GetValue<string>());
+        Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
+    {
+        var options = new StateAwareExecOptions
+        {
+            Telemetry = new TelemetrySettings { Enabled = true },
+        };
+        var root = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("iso:abc"),
+            "echo hi",
+            options);
+
+        Assert.False(root.ContainsKey("correlationVector"));
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Equal(SchemaVersions.MaximumSupported, root["version"]?.GetValue<string>());
+        Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void ExecOptions_RemainAssignableButAreRejectedByNonExecPhases()
+    {
+        Assert.True(
+            typeof(StateAwarePhaseOptions).IsAssignableFrom(
+                typeof(StateAwareExecOptions)));
+        Assert.True(
+            typeof(StateAwarePhaseOptions).IsAssignableFrom(
+                typeof(WslcExecOptions)));
+
+        var id = new SandboxId("iso:abc");
+        var options = new StateAwareExecOptions { WorkingDirectory = "C:\\" };
+
+        foreach (var build in new Action[]
+                 {
+                     () => _ = MxcLifecycle.BuildStartEnvelope(id, options),
+                     () => _ = MxcLifecycle.BuildStopEnvelope(id, options),
+                     () => _ = MxcLifecycle.BuildDeprovisionEnvelope(id, options),
+                 })
+        {
+            var ex = Assert.Throws<ArgumentException>(build);
+            Assert.Contains(nameof(StateAwarePhaseOptions), ex.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void BuildStartEnvelope_RejectsUnregisteredVersionWhenTelemetryIsPresent()
+    {
+        var options = new StateAwarePhaseOptions
+        {
+            Version = SchemaVersions.LatestStable,
+            Telemetry = new TelemetrySettings { Enabled = false },
+        };
+
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+    }
+
+    [Fact]
+    public void ExecInSandboxAsync_PreservesCancellationTokenAsThirdParameter()
+    {
+        static Task<RunResult> InvokeWithDefaultLiteral(SandboxId id, string command) =>
+            MxcLifecycle.ExecInSandboxAsync(id, command, default);
+
+        Assert.NotNull((Func<SandboxId, string, Task<RunResult>>)InvokeWithDefaultLiteral);
+    }
+
+    [Fact]
+    public async Task RunBlockingOperationAsync_CancellationCleansUpLateResult()
+    {
+        using var releaseOperation = new ManualResetEventSlim();
+        var operationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanedUp = new TaskCompletionSource<int>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+
+        var task = MxcLifecycle.RunBlockingOperationAsync(
+            () =>
+            {
+                operationStarted.SetResult();
+                releaseOperation.Wait();
+                return 42;
+            },
+            cleanedUp.SetResult,
+            cancellation.Token);
+
+        await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+
+        releaseOperation.Set();
+        Assert.Equal(42, await cleanedUp.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RunBlockingOperationAsync_PreCancelledTokenDoesNotStartOperation()
+    {
+        var started = false;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => MxcLifecycle.RunBlockingOperationAsync(
+                () =>
+                {
+                    started = true;
+                    return 42;
+                },
+                _ => { },
+                cancellation.Token));
+
+        Assert.False(started);
     }
 }

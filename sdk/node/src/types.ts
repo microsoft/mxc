@@ -15,8 +15,27 @@ export interface ProcessConfig {
   commandLine: string;
   /** Working directory for the process */
   cwd?: string;
-  /** Environment variables as KEY=VALUE strings */
+  /**
+   * Environment variables as KEY=VALUE strings.
+   *
+   * Omit this field to give the child the backend's default environment (on
+   * Windows, the user's profile block). Supply it -- including as an empty
+   * array -- and it is used **verbatim**: MXC adds nothing to it, so an
+   * environment missing what the platform requires will fail the launch.
+   * Set {@link ProcessConfig.inheritDefaultEnv} to layer these on the
+   * default environment instead of replacing it.
+   */
   env?: string[];
+  /**
+   * Start from the backend's default environment and layer {@link
+   * ProcessConfig.env} on top of it, rather than replacing it (default false).
+   *
+   * Use this when you want "the usual environment, plus these": on Windows the
+   * default is the user's profile block, which only the OS can produce, so it
+   * cannot be assembled by a caller. Note this is a different set from the
+   * calling process's `process.env`, which you can still pass explicitly.
+   */
+  inheritDefaultEnv?: boolean;
   /** Execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
 }
@@ -346,12 +365,15 @@ export interface PortMapping {
 }
 
 /**
- * Telemetry configuration for experimental TraceLogging ETW support.
+ * Telemetry configuration for TraceLogging ETW support.
  */
 export interface TelemetryConfig {
   /**
-   * Explicit telemetry override. `true` = force on, `false` = force off,
-   * `undefined` = off (default).
+   * Per-invocation telemetry opt-in.
+   *
+   * `true` requests telemetry for this invocation; emission is still gated by
+   * persisted user consent and administrative policy. `false` (or `undefined`)
+   * disables telemetry for this invocation.
    */
   enabled?: boolean;
 }
@@ -390,12 +412,12 @@ export interface ContainerConfig {
   network?: NetworkConfig;
   /** Runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
+  /** Telemetry configuration for TraceLogging ETW support */
+  telemetry?: TelemetryConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
-    /** WSLC SDK configuration for Linux containers from Windows */
+      /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
-    /** Telemetry configuration for experimental TraceLogging ETW support */
-    telemetry?: TelemetryConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;
@@ -454,6 +476,8 @@ export type SandboxPolicy = {
   };
   /** Schema 0.8 runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
   /** Schema 0.8 ProcessContainer-specific policy. */
   processContainer?: {
       /** ProcessContainer-specific networking settings. */

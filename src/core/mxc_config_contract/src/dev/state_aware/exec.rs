@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::dev::experimental::Telemetry;
-use crate::dev::{Network, Process};
-use crate::dev::{OptionalField, Version};
+use crate::dev::{Network, OptionalField, Process, Telemetry, Version};
 use serde::Deserialize;
 
 string_marker! {
@@ -15,11 +13,7 @@ string_marker! {
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExecExperimental {
-    /// Optional telemetry override.
-    #[serde(default)]
-    pub telemetry: OptionalField<Telemetry>,
-}
+pub struct ExecExperimental {}
 
 /// A complete state-aware `exec` request.
 #[derive(Debug, Deserialize)]
@@ -39,16 +33,16 @@ pub struct ExecRequest {
     /// Identifier of the sandbox to execute in.
     pub sandbox_id: String,
 
-    /// Optional correlation vector relayed from provision.
-    #[serde(default)]
-    pub correlation_vector: OptionalField<String>,
-
     /// Process to execute in the sandbox.
     pub process: Process,
 
     /// Optional per-execution network settings.
     #[serde(default)]
     pub network: OptionalField<Network>,
+
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
 
     /// Optional closed exec experimental settings.
     #[serde(default)]

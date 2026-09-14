@@ -115,7 +115,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment
@@ -514,7 +514,8 @@ public class MxcSandboxTests
             ContainerName = "test-container",
             WorkingDirectory = @"C:\work",
             Experimental = true,
-            Environment =
+            InheritDefaultEnvironment = true,
+            Environment = new()
             {
                 ["GREETING"] = "hello",
             },
@@ -528,7 +529,31 @@ public class MxcSandboxTests
         Assert.Equal("test-container", root.GetProperty("containerName").GetString());
         Assert.Equal(@"C:\work", root.GetProperty("workingDirectory").GetString());
         Assert.Equal("hello", root.GetProperty("environment").GetProperty("GREETING").GetString());
+        Assert.True(root.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.True(root.GetProperty("experimental").GetBoolean());
+    }
+
+    [Fact]
+    public void SandboxRequest_DistinguishesOmittedAndExplicitlyEmptyEnvironment()
+    {
+        var omitted = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi");
+        using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("environment", out _));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("inheritDefaultEnv", out _));
+
+        var explicitlyEmpty = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Environment = new(),
+        };
+        using var explicitlyEmptyDoc =
+            JsonDocument.Parse(MxcSandbox.SerializeRequest(explicitlyEmpty));
+        var environment = explicitlyEmptyDoc.RootElement.GetProperty("environment");
+        Assert.Equal(JsonValueKind.Object, environment.ValueKind);
+        Assert.Empty(environment.EnumerateObject());
     }
 
     [Fact]
@@ -612,6 +637,53 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxRequest_SerializesIsolationSessionContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Experimental = true,
+            Containment = new IsolationSessionContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        // The native side derives this spelling from a serde attribute while the
+        // managed side names it in an attribute of its own.
+        Assert.Equal("isolationSession", containment.GetProperty("type").GetString());
+
+        // The backend takes no configuration, so the discriminator is the whole
+        // object.
+        Assert.Single(containment.EnumerateObject());
+    }
+
+    [Fact]
+    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Containment = new IsolationSessionContainment(),
+        };
+
+        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+
+        // Both refusals name the backend. Which of the two fires depends on
+        // whether the native library was built with the backend.
+        Assert.Contains(
+            nameof(ContainmentBackend.IsolationSession),
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.True(
+            exception.Code is ErrorCode.MalformedRequest
+                or ErrorCode.UnsupportedContainment,
+            $"unexpected refusal: {exception.Code}: {exception.Message}");
+    }
+
+    [Fact]
     public void SandboxPolicy_SerializesDirectionalNetworking()
     {
         var policy = new SandboxPolicy
@@ -677,6 +749,78 @@ public class MxcSandboxTests
         using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
 
         Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SandboxPolicy_TelemetrySerializesCanonicalNestedShape(bool enabled)
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.9.0-alpha",
+            Telemetry = new TelemetrySettings { Enabled = enabled },
+        };
+
+        var json = MxcSandbox.SerializePolicy(policy);
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(enabled, root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
+
+        var roundTrip = JsonSerializer.Deserialize<SandboxPolicy>(json);
+        Assert.NotNull(roundTrip);
+        Assert.Equal(enabled, roundTrip.Telemetry?.Enabled);
+    }
+
+    [Fact]
+    public void SandboxPolicy_LeavesTelemetryVersionForNativeValidation()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.8.0-alpha",
+            Telemetry = new TelemetrySettings { Enabled = true },
+        };
+
+        using var policyDocument = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.Equal("0.8.0-alpha", policyDocument.RootElement.GetProperty("version").GetString());
+        Assert.True(policyDocument.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+
+        using var requestDocument = JsonDocument.Parse(
+            MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo hi")));
+        var requestPolicy = requestDocument.RootElement.GetProperty("policy");
+        Assert.Equal("0.8.0-alpha", requestPolicy.GetProperty("version").GetString());
+        Assert.True(requestPolicy.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void SandboxPolicy_OmittedTelemetrySerializesNoTelemetryField()
+    {
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var root = document.RootElement;
+        Assert.False(root.TryGetProperty("telemetry", out _));
+        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
+    }
+
+    [Fact]
+    public void SandboxPolicy_DefaultTelemetrySettingsSerializeDisabled()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.9.0-alpha",
+            Telemetry = new TelemetrySettings(),
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+
+        Assert.False(
+            document.RootElement
+                .GetProperty("telemetry")
+                .GetProperty("enabled")
+                .GetBoolean());
     }
 
     [Fact]
@@ -877,6 +1021,26 @@ public class MxcSandboxTests
                 .GetProperty("captureDenials")
                 .GetProperty("mode")
                 .GetString());
+    }
+
+    [Fact]
+    public void SerializeRequest_PreservesTelemetryInTheBindingPolicy()
+    {
+        var policy = CreateLegacyCaptureDenialsPolicy(
+            new CaptureDenialsPolicy(),
+            "0.9.0-alpha");
+        policy.Telemetry = new TelemetrySettings { Enabled = true };
+        var request = new SandboxRequest(policy, "echo hi");
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var root = doc.RootElement;
+
+        Assert.True(
+            root.GetProperty("policy")
+                .GetProperty("telemetry")
+                .GetProperty("enabled")
+                .GetBoolean());
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
     }
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(

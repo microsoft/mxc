@@ -253,8 +253,15 @@ function Format-VerdictSummary {
 function Test-Preflight {
     Section 'Pre-flight'
 
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem
-    Write-Host ("OS: {0} (build {1})" -f $os.Caption, $os.BuildNumber)
+    # Informational banner only — the load-bearing safety gate is the
+    # bfsCompiledIn check below. CIM is unavailable on some locked-down hosts,
+    # so don't let a cosmetic query abort the whole harness.
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        Write-Host ("OS: {0} (build {1})" -f $os.Caption, $os.BuildNumber)
+    } catch {
+        Write-Host ("OS: unknown (CIM unavailable: {0})" -f $_.Exception.Message.Trim())
+    }
 
     $bfsPath = Join-Path $env:SystemRoot 'System32\bfscfg.exe'
     $bfsPresent = Test-Path $bfsPath
@@ -1688,20 +1695,31 @@ finally {
         }
     }
 
-    # Structured JSON for programmatic consumption.
-    $summary = [pscustomobject]@{
-        timestamp   = (Get-Date).ToString('o')
-        host        = $env:COMPUTERNAME
-        os          = (Get-CimInstance Win32_OperatingSystem).Caption
-        osBuild     = (Get-CimInstance Win32_OperatingSystem).BuildNumber
-        total       = $pass + $fail + $skip + $warn
-        passed      = $pass
-        failed      = $fail
-        skipped     = $skip
-        warnings    = $warn
-        results     = $Script:Results
+    # Structured JSON for programmatic consumption. Guarded end to end: this
+    # runs in `finally`, so an unhandled throw here would skip the exit-code
+    # line at the bottom and hand the CI dispatcher a bogus result. CIM is
+    # unavailable on locked-down hosts.
+    try {
+        $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $osCaption = [string]$osInfo.Caption
+        $osBuild = [string]$osInfo.BuildNumber
+    } catch {
+        $osCaption = 'unknown'
+        $osBuild = 'unknown'
     }
     try {
+        $summary = [pscustomobject]@{
+            timestamp   = (Get-Date).ToString('o')
+            host        = $env:COMPUTERNAME
+            os          = $osCaption
+            osBuild     = $osBuild
+            total       = $pass + $fail + $skip + $warn
+            passed      = $pass
+            failed      = $fail
+            skipped     = $skip
+            warnings    = $warn
+            results     = $Script:Results
+        }
         ($summary | ConvertTo-Json -Depth 6) | Out-File -LiteralPath $ResultsJson -Encoding utf8 -Force
     } catch {
         Write-Host "warning: could not write JSON results: $_" -ForegroundColor Yellow

@@ -62,20 +62,30 @@ public sealed class MxcException : Exception
         Remediation = remediation;
     }
 
+    /// <summary>
+    /// Create an exception with the given code and message while preserving
+    /// the underlying cause for diagnosis.
+    /// </summary>
+    internal MxcException(ErrorCode code, string message, Exception innerException)
+        : base(message, innerException)
+    {
+        Code = code;
+    }
+
     /// <inheritdoc/>
     /// <remarks>
     /// Appends the operation and status when present, so a caller that only
-    /// logs the exception keeps the diagnosis rather than losing it.
+    /// logs the exception keeps the diagnosis rather than losing it. An
+    /// underlying cause is appended when present.
     /// </remarks>
     public override string ToString()
     {
-        if (Operation is null)
-        {
-            return $"{Code}: {Message}";
-        }
+        string detail = Operation is null
+            ? $"{Code}: {Message}"
+            : NativeCode is null
+                ? $"{Code}: {Message} [{Operation}]"
+                : $"{Code}: {Message} [{Operation} {NativeCode}]";
 
-        return NativeCode is null
-            ? $"{Code}: {Message} [{Operation}]"
-            : $"{Code}: {Message} [{Operation} {NativeCode}]";
+        return InnerException is null ? detail : $"{detail} ---> {InnerException}";
     }
 }

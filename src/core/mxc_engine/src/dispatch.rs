@@ -13,10 +13,10 @@
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
-//! (Linux), Seatbelt (macOS), and WSLC (Windows, experimental, behind the
-//! `wslc` feature). Every other backend — including the remaining experimental
-//! ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight) and LXC (no
-//! streaming path suitable for the library) — returns
+//! (Linux), Seatbelt (macOS), WSLC and IsolationSession (Windows, experimental,
+//! behind the `wslc` and `isolation_session` features). Every other backend —
+//! including the remaining experimental ones (Windows Sandbox, MicroVM,
+//! Hyperlight) and LXC (no streaming path suitable for the library) — returns
 //! [`MxcError::unsupported_containment`]; callers that need those must drive the
 //! standalone executor binaries (whose run-to-completion path will, in a later
 //! increment, also route through this engine).
@@ -65,11 +65,16 @@ pub fn spawn_runner(
             "dry_run is not supported for streaming spawns",
         ));
     }
+    // Anchor the run to its policy identity before any backend is engaged, so
+    // the streaming surface produces the same `mxc.PolicyHash` record as the
+    // run-to-completion one.
+    crate::run::log_policy_hash(request, logger);
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
+        ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -264,6 +269,52 @@ fn spawn_wslc(
     }
 }
 
+/// Spawn the IsolationSession backend. Experimental, so it refuses to run
+/// unless the request opted in — the library-side equivalent of the executor's
+/// `--experimental` flag.
+///
+/// Serves piped stdio. Goes through the backend's own launch rather than the
+/// `SandboxBackend` trait so a lifecycle failure keeps the API call and status
+/// the trait's `ScriptResponse` cannot carry; a refusal has no such detail, so
+/// it maps the same way every other backend's does.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+fn spawn_isolation_session(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use isolation_session_common::OneShotSpawnFailure;
+
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "IsolationSession is an experimental backend; enable experimental features on the \
+             request (SandboxRequest::set_experimental(true)) to use it",
+        ));
+    }
+    isolation_session_common::spawn_one_shot(request, logger).map_err(|e| match e {
+        OneShotSpawnFailure::Refused(resp) => map_spawn_error(resp),
+        OneShotSpawnFailure::Launch(err) => err,
+    })
+}
+
+#[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
+fn spawn_isolation_session(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    #[cfg(target_os = "windows")]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession is only available on Windows",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ensure_host_supported, map_spawn_error, spawn_runner};
@@ -326,7 +377,8 @@ mod tests {
         // `dry_run` ("validate, don't execute") has no process to stream, so the
         // streaming spawn rejects it. The public `SandboxRequest` can't set it,
         // so drive the dispatch directly with the internal model.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.dry_run = true;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
@@ -342,7 +394,8 @@ mod tests {
         // clear `UnsupportedContainment` rather than spawning. The public
         // `SandboxRequest` can't choose a backend, so drive dispatch with the
         // internal model.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Lxc;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
@@ -379,8 +432,7 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request");
-        request.set_script("echo hi");
+        let mut request = build_request(&policy, "echo hi", None).expect("build_request");
         request
             .inner
             .seatbelt
@@ -400,7 +452,8 @@ mod tests {
     fn streaming_rejects_wslc_off_windows() {
         // WSLC is a Windows-host backend; selecting it anywhere else must be a
         // clear `UnsupportedContainment` rather than a confusing spawn failure.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Wslc;
         request.set_experimental(true);
         let mut logger = Logger::new(Mode::Buffer);
@@ -417,7 +470,8 @@ mod tests {
     fn streaming_rejects_wslc_without_experimental() {
         // The experimental gate is fail-closed: selecting WSLC without opting
         // in must be rejected before any container is created.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Wslc;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {

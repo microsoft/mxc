@@ -60,11 +60,13 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
 | `0.8.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
-| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-dev.json) |
+| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-alpha.json) |
 
-Pick `0.8.0-alpha` for new code on any supported platform.
+Pick `0.8.0-alpha` for new code using stable backends. Experimental backends
+and state-aware lifecycle require `0.9.0-alpha`; Seatbelt requires
+`0.7.0-alpha` or later.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` parser remains only for differential characterization. `--experimental` is still required to activate experimental backends.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -223,16 +225,26 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.6.0-alpha',
+  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
   },
   timeoutMs: 30_000,
+}, {
+  inheritDefaultEnv: true,
+}, undefined, undefined, {
+  APP_MODE: 'development',
 });
 pty.onData((d) => process.stdout.write(d));
 pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 ```
+
+An explicitly supplied environment is used verbatim by default. Set
+`inheritDefaultEnv: true` to layer those entries on the backend default instead;
+on Windows process containers, that default is the user profile environment
+block. This option requires schema version `0.9.0-alpha` or later. The SDK never
+implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
@@ -272,16 +284,21 @@ console.log(result.stdout);
 
 `SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, `"microvm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
 
-| Backend | Intent | Platforms | Stable? | Guide |
-| --- | --- | --- | --- | --- |
-| `processcontainer` | `process` | Windows | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
-| `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
-| `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
-| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
-| `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
-| `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
-| `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
+| Backend | Intent | Platforms | Minimum schema | Stable? | Guide |
+| --- | --- | --- | --- | --- | --- |
+| `processcontainer` | `process` | Windows | `0.6.0-alpha` | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
+| `bubblewrap` | `process` | Linux | `0.6.0-alpha` | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
+| `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
+| `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
+| `windows_sandbox` | `vm` | Windows | `0.9.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
+| `microvm` | `microvm` | Windows | `0.9.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.9.0-alpha` | Experimental | No dedicated guide |
+| `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
+| `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
+
+The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
+where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
+and Linux. The abstract `vm` intent requires `0.9.0-alpha`.
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -343,7 +360,7 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests default to schema `0.8.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. All state-aware requests default to the exact development schema `0.9.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 
@@ -455,7 +472,9 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); state-aware and development-only requests require `0.9.0-alpha`. |
+| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; experimental backends require `0.9.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 
@@ -494,6 +513,11 @@ getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
+// Telemetry consent (Windows-only; see Telemetry Consent section below)
+queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, error? }>
+requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
+withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
+
 // Capability types
 UiCapabilitySupport, BubblewrapNetworkSupport
 
@@ -510,21 +534,93 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 
 ## Telemetry Consent
 
-Telemetry is off-by-default unless the caller opts in with top-level `telemetry.enabled: true` and the applicable Windows consent/policy gates permit collection.
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md)
+for the full design.
 
-Telemetry consent behavior follows
-[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md):
-the SDK stays UI-agnostic, renders the canonical resource verbatim through a
-host presenter, persists only explicit yes/no decisions, treats dismissal and
-failures as non-grants, and never lets policy or transport failures opt a user
-in.
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the
+[telemetry data inventory](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry.md#data-inventory).
+
+Telemetry is additionally off unless a one-shot `SandboxPolicy` or
+`ContainerConfig` using schema 0.9 or later includes
+`telemetry: { enabled: true }`, or a state-aware call passes
+`config.telemetry: { enabled: true }`. This switch does not require
+`options.experimental` and cannot bypass consent or administrative policy.
+
+The SDK does not ship a consent UI. It passes the canonical prompt to your
+presenter. Render its supplied fields verbatim and return a typed decision.
+Follow the
+[SDK presenter requirements](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, and withdrawal:
+
+```typescript
+import {
+  requestTelemetryConsent,
+  queryTelemetryConsentAsync,
+  withdrawTelemetryConsentAsync,
+} from '@microsoft/mxc-sdk';
+
+const outcome = await requestTelemetryConsent(
+  (prompt, signal) => showTelemetryConsentDialog({
+    title: prompt.title.text,
+    body: prompt.body.text,
+    affirmativeLabel: prompt.affirmativeLabel.text,
+    negativeLabel: prompt.negativeLabel.text,
+    learnMoreLabel: prompt.learnMoreLabel.text,
+    learnMoreUrl: prompt.learnMoreUrl,
+    signal,
+  }),
+  'en-US',
+);
+// showTelemetryConsentDialog returns 'yes', 'no', or 'dismissed' from the
+// user's action and dismisses pending UI if signal is aborted.
+
+const status = await queryTelemetryConsentAsync();
+await withdrawTelemetryConsentAsync();
+```
+
+If the API is never called, the presenter fails, or it returns `dismissed`,
+telemetry remains off. On non-Windows hosts requests and withdrawals return
+`notApplicable` without invoking the presenter.
+
+`queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
+`'granted'`. Its `error` field is present when the command fails or returns an
+invalid response. A valid native fail-closed response can return
+`'undetermined'` or a blocked policy without `error`; any accompanying native
+diagnostic is reported once through `console.warn`:
+
+```typescript
+const { effectiveState, storedState, needsPrompt, policy, error } =
+  await queryTelemetryConsentAsync();
+if (error) {
+  console.warn(`mxc: could not read telemetry consent: ${error}`);
+}
+```
 
 ### Administrative policy
 
-An IT administrator can still block MXC telemetry device-wide via MXC's own
-registry policy setting. See
-[`docs/telemetry/telemetry-administrative-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules.
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. The query result's `policy` field reports the
+result:
+
+```typescript
+const { policy } = await queryTelemetryConsentAsync();
+// 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable'
+if (policy === 'blocked') {
+  // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+`'allowed'` does not grant user consent, while `'blocked'` disables collection
+and the consent prompt. An unreadable or missing `policy` field reads back as
+`'blocked'`; non-Windows hosts return `'not-applicable'`. See
+[`docs/telemetry/telemetry-administrative-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-administrative-policy.md).
 
 ---
 

@@ -44,9 +44,6 @@ pub struct IsolationSessionProvisionExperimental {
     /// Optional IsolationSession backend settings.
     #[serde(rename = "isolation_session", default)]
     pub isolation_session: OptionalField<StateAwareIsolationSession>,
-    /// Optional telemetry override.
-    #[serde(default)]
-    pub telemetry: OptionalField<Telemetry>,
 }
 
 /// The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.
@@ -79,6 +76,9 @@ pub struct IsolationSessionProvisionRequest {
     pub containment: IsolationSessionContainment,
     /// Required unrestricted-network acknowledgment.
     pub network: IsolationSessionNetwork,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
     /// Optional closed experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<IsolationSessionProvisionExperimental>,

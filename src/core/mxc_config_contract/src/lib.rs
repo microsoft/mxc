@@ -11,10 +11,16 @@
 //! The version probe validates only the required `version` declaration. It does
 //! not validate the remainder of the selected configuration contract.
 //!
+//! Contract values may also be constructed by trusted typed producers such as
+//! the version-specific Rust policy builders. `OptionalField::present` marks an
+//! explicitly present member, while `Default` represents omission; constructed
+//! requests still pass through the version adapter and shared semantic
+//! validation.
+//!
 //! This crate must not depend on MXC runtime, execution-engine, or containment
-//! backend crates. It is not yet consumed by the production configuration
-//! parser; version-specific request types and parser dispatch will be added in
-//! later phases.
+//! backend crates. The production configuration parser uses the registry and
+//! exact request types for authoritative version-specific dispatch, including
+//! the development contract's narrow phase probe for trailing CLI commands.
 
 mod registry;
 mod version;

@@ -45,18 +45,15 @@ fn accepts_exec_request_with_optional_fields() {
         "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "test123456",
-        "correlationVector": "test-correlation-vector",
         "process": {"commandLine": "echo"},
         "network": {
             "proxy": {
                 "url": "http://proxy.example"
             }
         },
-        "experimental": {
-            "telemetry": {
+        "telemetry": {
                 "enabled": true
             }
-        }
     }"#;
     assert_valid(json);
 }
@@ -66,7 +63,7 @@ fn accepts_empty_exec_optional_objects() {
     for field in [
         r#""network": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
     ] {
         assert_valid(&request_with_additional_fields(field));
     }
@@ -81,10 +78,8 @@ fn accepts_exec_telemetry_enabled_values() {
                 "phase": "exec",
                 "sandboxId": "test123456",
                 "process": {{"commandLine": "echo"}},
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }}
             }}"#
         );
@@ -246,10 +241,8 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
                 "phase": "exec",
                 "sandboxId": "test123456",
                 "process": {{"commandLine": "echo"}},
-                "experimental": {{
-                    "telemetry": {{
-                        "enabled": {enabled}
-                    }}
+                "telemetry": {{
+                    "enabled": {enabled}
                 }}
             }}"#
         );
@@ -264,8 +257,8 @@ fn rejects_null_optional_fields() {
         r#""correlationVector": null"#,
         r#""network": null"#,
         r#""experimental": null"#,
-        r#""experimental": {"telemetry": null}"#,
-        r#""experimental": {"telemetry": {"enabled": null}}"#,
+        r#""telemetry": null"#,
+        r#""telemetry": {"enabled": null}"#,
     ] {
         assert_invalid(&request_with_additional_fields(field));
     }
@@ -304,11 +297,9 @@ fn rejects_unknown_exec_experimental_telemetry_fields() {
         "phase": "exec",
         "sandboxId": "test123456",
         "process": {"commandLine": "echo"},
-        "experimental": {
-            "telemetry": {
+        "telemetry": {
                 "unknownField": "value"
             }
-        }
     }"#;
     assert_invalid(json);
 }
@@ -450,8 +441,7 @@ fn rejects_invalid_experimental_object_types() {
         let json = request_with_additional_fields(&format!(r#""experimental": {value}"#));
         assert_invalid(&json);
 
-        let json =
-            request_with_additional_fields(&format!(r#""experimental": {{"telemetry": {value}}}"#));
+        let json = request_with_additional_fields(&format!(r#""telemetry": {value}"#));
         assert_invalid(&json);
     }
 }

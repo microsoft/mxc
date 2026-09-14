@@ -25,8 +25,7 @@
 //!     ui: None,
 //!     timeout_ms: None,
 //! };
-//! let mut request = build_request(&policy, None)?;
-//! request.set_script("echo hi");
+//! let request = build_request(&policy, "echo hi", None)?;
 //! let output = run(request)?;
 //! match output.outcome {
 //!     WaitOutcome::Exited(code) => println!("exit={code}"),
@@ -49,16 +48,19 @@
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
+//! | IsolationSession | Windows | [`Containment::IsolationSession`] |
 //!
-//! WSLC is **experimental**: build with the crate's `wslc` feature, and call
+//! WSLC and IsolationSession are **experimental**: build with the crate's
+//! `wslc` / `isolation_session` feature, and call
 //! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
-//! on the request. Its container has no stdin (the WSLC SDK exposes no
+//! on the request. WSLC's container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
+//! IsolationSession is also reachable through the state-aware lifecycle below,
+//! which additionally serves an attached, pseudo-console exec.
 //!
 //! Backends with no [`Containment`] variant return an [`Error`] with
 //! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
-//! binaries for those. IsolationSession refuses the one-shot surface the same
-//! way, and is reached through the state-aware lifecycle below.
+//! binaries for those.
 //!
 //! # Diagnosing a failure
 //!
@@ -88,13 +90,13 @@
 //! };
 //!
 //! # let policy = SandboxPolicy {
-//! #     version: "0.7.0-alpha".to_string(),
+//! #     version: "0.9.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-//! request.set_script("python3 -c 'print(42)'").set_experimental(true);
+//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! request.set_experimental(true);
 //! let output = run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
@@ -129,9 +131,11 @@
 //!
 //! [`exec_attached`] is verified against IsolationSession only.
 //!
-//! Policy warnings — security warnings, and warnings such as a network rule
-//! that installs but cannot carry traffic — are available through
-//! [`Sandbox::warnings`] and [`Output::warnings`].
+//! Policy and operational warnings are available through [`Sandbox::warnings`]
+//! and [`Output::warnings`]. [`exec_attached`] has no returned handle, so it
+//! writes those warnings to the host stderr that the caller explicitly attached.
+//! These include security warnings, network rules that cannot carry traffic,
+//! and operational warnings such as unavailable telemetry routing.
 //!
 //! ## Relationship to `mxc_engine`
 //!
@@ -141,6 +145,8 @@
 //! handle in [`Sandbox`].
 
 mod sandbox;
+
+pub mod telemetry;
 
 pub use mxc_engine::configs;
 pub use mxc_engine::policy;

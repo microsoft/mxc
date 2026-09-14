@@ -1221,6 +1221,7 @@ function buildRawBackendConfig(
   var scenarioPolicy: any = scenario ? scenario.policy : {};
   var timeoutMs = timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0;
   var config: any = {
+    version: '0.9.0-alpha',
     containment: containment,
     process: {
       commandLine: script,

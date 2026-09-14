@@ -13,9 +13,10 @@ sandboxed process over ordinary pipes, with no pty. The state-aware
 ## Usage
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 
-// Describe what to restrict, turn it into a request, fill in the command.
+fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
     filesystem: None,
@@ -23,14 +24,14 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: Some(10_000),
 };
-let mut request = build_request(&policy, None)?;
-request.set_script("echo hello");
+let mut request = build_request(&policy, "echo hello", None)?;
+request.set_telemetry_opt_in(true);
 
-// Run to completion and capture the output.
 let output = run(request)?;
 assert_eq!(output.outcome, WaitOutcome::Exited(0));
 assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
-# Ok::<(), Box<dyn std::error::Error>>(())
+Ok(())
+}
 ```
 
 [`run`] is the run-to-completion convenience (spawn + `wait_with_output`); use
@@ -38,10 +39,14 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
 [`build_request`] resolves the host's default containment backend (see
-[Supported backends](#supported-backends)), builds the wire config, and runs it
-through the shared parser. The returned [`SandboxRequest`] has an empty command
-line — set the command with [`SandboxRequest::set_script`] (and any working
-directory / env) before spawning.
+[Supported backends](#supported-backends)), builds the rolling wire config, and
+runs it through the shared production parser. The command is supplied to
+[`build_request`], so the returned [`SandboxRequest`] is complete; optionally
+adjust its working directory or environment before spawning.
+
+Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
+called. Enabling that per-invocation switch still requires persisted user
+consent and a permitting administrative policy.
 
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
@@ -79,6 +84,7 @@ process_container.capture_denials = Some(CaptureDenials::default());
 let request = build_request_with_containment(
     &policy,
     &Containment::ProcessContainer(process_container),
+    "echo hello",
     None,
 )?;
 # Ok::<(), mxc_sdk::Error>(())
@@ -144,8 +150,8 @@ questions:
   decide whether `run` / `spawn_sandbox` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones this SDK cannot drive
-  one-shot — LXC, Windows Sandbox, and IsolationSession — each with its
-  effective isolation **tier**.
+  one-shot — LXC and Windows Sandbox — each with its effective isolation
+  **tier**.
 
 ```rust,no_run
 use mxc_sdk::{available_backends, platform_support, BackendCapability};
@@ -244,9 +250,11 @@ while it runs — persistent bidirectional stdio plus termination. No pty is
 allocated; the streams are ordinary pipes.
 
 ```rust,no_run
+use std::error::Error;
 use std::io::{Read, Write};
 use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
+fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
     filesystem: None,
@@ -254,9 +262,8 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: None,
 };
-let mut request = build_request(&policy, None)?;
-request.set_script("cat"); // echoes stdin until EOF
-
+// echoes stdin until EOF
+let request = build_request(&policy, "cat", None)?;
 let mut proc = spawn_sandbox(request)?;
 let mut stdin = proc.take_stdin().unwrap();
 let mut stdout = proc.take_stdout().unwrap();
@@ -268,7 +275,8 @@ stdout.read_to_string(&mut out)?; // "hello\n"
 
 let outcome = proc.wait()?;       // any untaken stream is drained and discarded
 assert_eq!(outcome, WaitOutcome::Exited(0));
-# Ok::<(), Box<dyn std::error::Error>>(())
+Ok(())
+}
 ```
 
 The handle is modelled on [`std::process::Child`]:
@@ -279,9 +287,11 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `warnings()` returns policy warnings detected while spawning the sandbox —
-  security warnings such as `permissiveLearningMode` weakening deny-by-default,
-  and warnings such as a network rule that installs but cannot carry traffic.
+- `warnings()` returns policy and operational warnings from the sandbox, such as
+  `permissiveLearningMode` weakening deny-by-default, a
+  network rule that installs but cannot carry traffic, telemetry being
+  unavailable/routed only to local ETW, or a cleanup step that failed after the
+  workload exited.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose
@@ -296,7 +306,7 @@ The handle is modelled on [`std::process::Child`]:
   `Exited(code)` or `TimedOut` if the timeout elapses (`Err` is reserved for an
   actual OS/wait failure).
 - `wait_with_output()` consumes the handle and returns an `Output` with the
-  `WaitOutcome`, policy security `warnings`, and captured `stdout`/`stderr` — it
+  `WaitOutcome`, policy/operational `warnings`, and captured `stdout`/`stderr` — it
   also includes structured `output_metadata` produced during backend teardown.
   The method
   drains both streams concurrently for you, the safe alternative to
@@ -309,9 +319,10 @@ The handle is modelled on [`std::process::Child`]:
   plain `kill()` would also take that descendant down). Returns `None` for
   non-streamed stdio.
 
-Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
-**Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
-backend the library supports.
+Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
+**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
+features, and with the request's experimental opt-in — **WSLC** and
+**IsolationSession**.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -332,7 +343,9 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 - `exec_attached(request_json, experimental)` runs the `exec` phase **attached
   to this process's stdio**, blocking until the workload exits and returning a
   `WaitOutcome`. See *Pty allocation* for the terminal requirement and what each
-  backend does with the streams.
+  backend does with the streams. Parser and telemetry-initialization warnings
+  are written to the attached host stderr because this API returns no process
+  handle with a `warnings()` channel.
 - `exec_sandbox(request_json, experimental)` runs the same `exec` phase as a
   **live streaming** `Sandbox` (the same handle `spawn_sandbox` returns), for a
   caller that drives the pipes itself. The child sees no TTY and this process's
@@ -350,12 +363,14 @@ The example needs this crate's `isolation_session` feature and a host running th
 OS-side service.
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
+fn main() -> Result<(), Box<dyn Error>> {
 // Provision. IsolationSession accepts only the canonical unrestricted-network
 // acknowledgment; an absent policy defaults to `block`, which it refuses.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session",
+    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
     false, // dry_run
     true,  // experimental
@@ -364,17 +379,20 @@ let provisioned = run_state_aware_json(
 
 // Start. The exec phase runs against a started session.
 run_state_aware_json(
-    r#"{"phase":"start","sandboxId":"..."}"#,
+    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
     false, // dry_run
     true,  // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = exec_attached(
-    r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+let _ = outcome;
+let _ = provisioned;
+Ok(())
+}
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
@@ -404,14 +422,18 @@ default):
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
+| Windows | IsolationSession                                | `Containment::IsolationSession`  |
 
 `Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 Constructing the listed variants is unaffected.
 
-`Containment::IsolationSession` names that backend, but no entry point taking a
-`Containment` serves it: `run` and `spawn_sandbox` both return
-[`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware
-lifecycle — `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+`Containment::IsolationSession` names the isolation-session backend, served by
+`run` and `spawn_sandbox` with piped stdio. It is experimental, so the request
+must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
+process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
+dropping the handle tears the session down synchronously rather than in the
+background. Reach its multi-call lifecycle through
+`run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
 Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
@@ -425,29 +447,107 @@ opt-in on two axes: build this crate with its **`wslc` feature**, and call
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
 memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
-go through the same parser the executor uses — so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at build time, not at spawn.
+go through the same production parser as the executor, so a rejected value
+(e.g. a port mapping with a zero or duplicated host port) fails at build time,
+not at spawn.
 
 ```rust,no_run
+use std::error::Error;
 use mxc_sdk::{
     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
 };
 
-# let policy = SandboxPolicy {
-#     version: "0.7.0-alpha".to_string(),
-#     filesystem: None, network: None, ui: None, timeout_ms: None,
-# };
+fn main() -> Result<(), Box<dyn Error>> {
+let policy = SandboxPolicy {
+    version: "0.9.0-alpha".to_string(),
+    filesystem: None, network: None, ui: None, timeout_ms: None,
+};
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-request.set_script("python3 -c 'print(42)'").set_experimental(true);
+let mut request = build_request_with_containment(
+    &policy,
+    &Containment::Wslc(wslc),
+    "python3 -c 'print(42)'",
+    None,
+)?;
+request.set_experimental(true);
 let output = run(request)?;
-# Ok::<(), mxc_sdk::Error>(())
+let _ = output;
+Ok(())
+}
 ```
 
 Two WSLC-specific limits follow from the SDK's surface: the container has no
 stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
 process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
 [`platform_support`] reports `"wslc"` only on a host that can actually run it.
+
+## Telemetry consent
+
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](../../../docs/telemetry/telemetry-consent-design.md)
+for the full design.
+
+The crate is UI-agnostic: it does not render a prompt. A host may call
+`request_consent()` or `request_consent_async()` and render every field of the
+canonical prompt supplied to its presenter callback verbatim. MXC persists a
+grant only from the typed decision returned by that callback. If the host
+never requests consent, telemetry remains off. See the normative
+[SDK presenter requirements](../../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, learn-more handling, status, and
+withdrawal.
+
+```rust,no_run
+use std::error::Error;
+use mxc_sdk::telemetry;
+
+fn main() -> Result<(), Box<dyn Error>> {
+let outcome = telemetry::request_consent(Some("en-US"), |prompt| {
+    assert_eq!(prompt.locale, "en-US");
+    Ok(telemetry::ConsentDecision::Yes)
+})?;
+
+let status = telemetry::get_consent_status();
+let withdrawal = telemetry::withdraw_consent()?;
+let _ = (outcome, status, withdrawal);
+Ok(())
+}
+```
+
+Off Windows `get_consent()` always returns `ConsentState::NotApplicable`,
+`needs_consent_prompt()` is always `false`, and consent requests return
+`ConsentActionResult::NotApplicable` — MXC neither collects nor offers consent
+for telemetry there, so a host can call these unconditionally without
+special-casing the platform.
+
+### Administrative policy
+
+An IT administrator can block MXC telemetry device-wide via MXC's own
+registry policy setting. `telemetry::get_policy()` reports the result:
+
+```rust,no_run
+use mxc_sdk::telemetry::{self, PolicyState};
+
+if telemetry::get_policy() == PolicyState::Blocked {
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+Two things worth designing around:
+
+- The policy is a **ceiling, never a grant**. `PolicyState::Allowed` does not
+  mean telemetry is on — the user must still consent. Only
+  `ConsentState::Granted` *and* a non-blocking policy result in collection.
+- When the policy blocks, `needs_consent_prompt()` is `false`, because asking
+  for permission an administrator has already refused is a meaningless
+  question. Word any UI as "telemetry is unavailable on this device" rather
+  than blaming the user's own choice.
+
+It never fails: any unreadable or unrecognized value reads back as
+`PolicyState::Blocked`. Off Windows it is always `PolicyState::NotApplicable`.
+`telemetry::is_blocked_by_policy()` is the convenience predicate. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## Pty allocation
 

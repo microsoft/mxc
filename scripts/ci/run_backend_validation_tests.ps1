@@ -31,6 +31,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
+$testScriptRoot = Join-Path $repoRoot 'tests\scripts'
 $binaryDirectoryPath = (Resolve-Path -LiteralPath $BinaryDirectory).Path
 $wxc = Join-Path $binaryDirectoryPath 'wxc-exec.exe'
 
@@ -84,6 +86,14 @@ function Invoke-TestScript {
 Assert-File -Path $wxc
 
 function Invoke-ProcessContainerTests {
+    # Returns the harness exit code rather than throwing, so a caller running
+    # more than one suite can report both results instead of stopping at the
+    # first failure. The suite talks to the operator through Write-Host (which
+    # Out-Null does not touch), so discarding the success stream keeps the
+    # return value a scalar even if a phase leaks a stray object.
+    [OutputType([int])]
+    param()
+
     # The existing harness expects separate debug and release layouts. CI
     # intentionally tests one release artifact, so stage it in both slots.
     $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
@@ -97,7 +107,7 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
-    $script = Join-Path $scriptRoot 'WinProcessContainer-Tests.ps1'
+    $script = Join-Path $testScriptRoot 'WinProcessContainer-Tests.ps1'
     # -KeepArtifacts stops the harness deleting its scratch tree on a clean
     # run, so a passing job still uploads its per-test logs and configs.
     # Skip build and Cargo phases because this job consumes a previously
@@ -120,28 +130,52 @@ function Invoke-ProcessContainerTests {
         -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
         -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
         -KeepArtifacts `
-        -Phases $phases
-    if ($LASTEXITCODE -ne 0) {
-        throw "Process Container tests failed with exit code $LASTEXITCODE."
-    }
+        -Phases $phases | Out-Null
+    return $LASTEXITCODE
+}
+
+function Invoke-T3WorkloadTests {
+    [OutputType([int])]
+    param()
+
+    $script = Join-Path $testScriptRoot 'T3-Workloads.ps1'
+    # -Wxc is required: the script's default points at a debug build that does
+    # not exist in a CI artifact. -KeepArtifacts preserves the per-workload
+    # logs and configs on a clean run so a passing job still uploads them.
+    # -GrantDriveRoot lets the pwsh/git workloads resolve their working
+    # directory's ancestor chain; it rewrites ACLs across the system drive,
+    # which is why the script leaves it off by default and only a disposable
+    # CI runner opts in. Temporary until pwsh 7.7 leaves preview.
+    $global:LASTEXITCODE = 0
+    & $script -Wxc $wxc -KeepArtifacts -GrantDriveRoot | Out-Null
+    return $LASTEXITCODE
 }
 
 Redirect-TempToRunnerTemp
 
 switch ($Backend) {
     'process-t1' {
-        Invoke-ProcessContainerTests
+        $primitives = Invoke-ProcessContainerTests
+        if ($primitives -ne 0) {
+            throw "Process Container tests failed with exit code $primitives."
+        }
     }
     'process-t3' {
-        Invoke-ProcessContainerTests
+        # Run both suites before reporting. Stopping at the first failure would
+        # hide the other suite's result, costing an extra nightly run to triage.
+        $primitives = Invoke-ProcessContainerTests
+        $workloads = Invoke-T3WorkloadTests
+        if ($primitives -ne 0 -or $workloads -ne 0) {
+            throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."
+        }
     }
     'isolation-session' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
             WxcExePath = $wxc
         }
     }
     'windows-sandbox' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
             BinDir = $binaryDirectoryPath
         }
     }
@@ -150,12 +184,12 @@ switch ($Backend) {
         if ($Architecture -ne 'x64') {
             throw 'The existing WSLC test harness is not architecture-portable yet.'
         }
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
             WxcExecPath = $wxc
         }
     }
     'microvm' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
             BinDir = $binaryDirectoryPath
         }
     }

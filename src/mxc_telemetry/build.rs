@@ -3,11 +3,22 @@
 
 //! Build script for `mxc_telemetry`.
 //!
-//! Generates `provider_def.rs` containing the `define_provider!` invocation.
-//! The `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable controls
-//! whether a `group_id(...)` option is included — internal Microsoft builds
-//! set this to the Microsoft telemetry group GUID so events route through the
-//! telemetry pipeline, while public/OSS builds omit it (plain ETW only).
+//! Generates `provider_def.rs` containing the `define_provider!` invocation
+//! plus the paired event-metadata constants (`MXC_EVENT_KEYWORD`,
+//! `MXC_PRIVACY_TAG`). The `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment
+//! variable is the single switch that drives all three together:
+//!
+//! - **Unset** (default: public/OSS/local dev builds) — no `group_id(...)`,
+//!   plain local ETW only; `MXC_EVENT_KEYWORD` is a provider-local bit and
+//!   `MXC_PRIVACY_TAG` is `0` (not telemetry-classified).
+//! - **Set** to the real Microsoft telemetry group GUID (internal builds
+//!   that deliberately opt into routing these events through UTC) —
+//!   `group_id(...)` is present and `MXC_EVENT_KEYWORD`/`MXC_PRIVACY_TAG`
+//!   become the Measures keyword and the Product-and-Service-Usage privacy
+//!   tag, matching WIL's conventions.
+//!
+//! Tying all three to one signal means a build can never end up
+//! telemetry-routed-but-untagged or tagged-but-not-routed.
 //!
 //! The provider GUID itself is **not** specified here. The `tracelogging`
 //! crate derives it deterministically from the provider name
@@ -40,7 +51,8 @@ fn main() {
         None
     };
 
-    let provider_def = generate_provider_def(group_guid.as_deref());
+    let mut provider_def = generate_provider_def(group_guid.as_deref());
+    provider_def.push_str(&generate_event_metadata_consts(group_guid.as_deref()));
 
     std::fs::write(out.join("provider_def.rs"), provider_def).unwrap();
 }

@@ -72,20 +72,9 @@ pub struct DeprovisionResult<M> {
     pub metadata: Option<M>,
 }
 
-/// Who will consume an exec's streams — the state-aware counterpart to
-/// [`StdioMode`](crate::sandbox_process::StdioMode).
+/// How an exec's streams are wired.
 ///
-/// This is deliberately **not** `StdioMode`. That enum offers `Inherit`,
-/// meaning the OS hands the child the executor's own stdin/stdout/stderr. No
-/// state-aware backend can do that: the workload runs inside an isolation
-/// session, inside a VM, or behind an SDK callback, so its streams always have
-/// to be materialised on this side of the boundary and copied across. For this
-/// contract `Inherit` is not merely ambiguous, it is unimplementable.
-///
-/// What a state-aware backend needs to know is who is on the other end, because
-/// that decides the **topology** of the streams it returns:
-///
-/// * [`Executor`](Self::Executor) — the calling process relays onto its own
+/// * [`Relayed`](Self::Relayed) — the calling process relays onto its own
 ///   stdio. The backend may allocate a pseudo-console inside the sandbox when
 ///   that process is on a TTY; a pseudo-console has a single output stream, so
 ///   stderr is then merged into stdout and [`ExecHandle::stderr`] is null, which
@@ -96,27 +85,26 @@ pub struct DeprovisionResult<M> {
 ///   reading stdin would block forever. Return a null [`ExecHandle::stdin`]. A
 ///   backend that relays internally, as IsolationSession does through its
 ///   pseudo-console, forwards this process's stdin itself.
-/// * [`Library`](Self::Library) — the caller drives the streams itself. The
+/// * [`Piped`](Self::Piped) — the caller drives the streams itself. The
 ///   backend must return separate raw stdout and stderr pipes, allocate no
 ///   pseudo-console, and leave the host's console untouched.
 ///
-/// These distinguish who consumes the streams, not whether the caller is
-/// in-process: a console application hosting an interactive sandboxed shell is
-/// in-process and wants `Executor`.
+/// Topology, not caller identity: a console application hosting an interactive
+/// sandboxed shell is in-process and wants `Relayed`.
 ///
 /// The value is **authoritative**. A backend that probes the host to shape stdio
-/// may consult that probe only under `Executor`, where the probing process is
+/// may consult that probe only under `Relayed`, where the probing process is
 /// the relay target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecConsumer {
+pub enum ExecStdio {
     /// The calling process relays the streams to its own stdio.
-    Executor,
+    Relayed,
     /// The caller drives the returned streams itself.
-    Library,
+    Piped,
 }
 
 /// The error a backend returns when it is asked to serve
-/// [`ExecConsumer::Library`] and cannot.
+/// [`ExecStdio::Piped`] and cannot.
 ///
 /// Must be raised **before running anything**: the workload is arbitrary and may
 /// not be idempotent, so a later refusal has already caused the side effects the
@@ -124,7 +112,7 @@ pub enum ExecConsumer {
 ///
 /// Shared so the refusal reads identically whichever backend raises it, and so
 /// the check cannot drift into a per-backend spelling.
-pub fn unsupported_library_exec(backend: &str) -> MxcError {
+pub fn unsupported_piped_exec(backend: &str) -> MxcError {
     MxcError::backend_error(format!(
         "the {backend} backend cannot return exec streams to the caller: it relays the sandbox's \
          output to this process's own stdout and stderr rather than handing back pipes. Run the \
@@ -141,15 +129,10 @@ pub fn unsupported_library_exec(backend: &str) -> MxcError {
 /// apart from "I could not find out what happened", which are different problems
 /// with different responses.
 ///
-/// # Which consumers can see `TimedOut`
+/// # Which topologies can observe `TimedOut`
 ///
-/// Only [`ExecConsumer::Library`]. The executor path has nowhere to put it:
-/// `ScriptResponse` carries an `exit_code` and no timeout field, so `wxc-exec`
-/// reports a timed-out workload as the exit code its killed process produced.
-/// A backend serving `ExecConsumer::Executor` therefore keeps returning
-/// [`Exited`](Self::Exited) exactly as before — giving the CLI a timeout channel
-/// is a change to its output contract, and belongs with that work rather than
-/// here.
+/// Only [`ExecStdio::Piped`]. A backend serving [`ExecStdio::Relayed`] reports
+/// [`Exited`](Self::Exited); the dispatcher rejects anything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecOutcome {
     /// The process exited with this code.
@@ -177,16 +160,16 @@ pub enum ExecOutcome {
 }
 
 /// Streaming exec handle. The dispatcher relays `stdout` / `stderr` to the
-/// executor's own streams, awaits exit via `waiter`, and calls `terminator` to
-/// tear the exec down.
+/// calling process's own streams, awaits exit via `waiter`, and calls
+/// `terminator` to tear the exec down.
 ///
 /// # Handle ownership
 ///
 /// Ownership of `stdout` and `stderr` stays with the underlying process object:
 /// consumers duplicate them and never close the originals.
 ///
-/// `stdin` is **not consumed by the executor relay**, which forwards no input.
-/// The streaming path hands it to an in-process caller, which duplicates it
+/// `stdin` is **not consumed by the relay**, which forwards no input. Under
+/// [`ExecStdio::Piped`] it goes to the caller, which duplicates it
 /// rather than taking it. A pipe reaches EOF only once *every* write handle is
 /// closed, so dropping that duplicate is not enough — `stdin_closer` closes the
 /// backend's own end. A backend that exposes `stdin` must supply one.
@@ -282,9 +265,7 @@ pub trait StatefulSandboxBackend {
 
     /// Required. Executes the workload and returns a streaming handle.
     ///
-    /// `consumer` carries the **caller's** intent and is authoritative — see
-    /// [`ExecConsumer`] for the full contract, including why this is not
-    /// [`StdioMode`](crate::sandbox_process::StdioMode) and what each variant
+    /// `stdio` is authoritative — see [`ExecStdio`] for what each variant
     /// implies for the topology of the returned streams.
     ///
     /// # Honored by one backend so far
@@ -293,24 +274,24 @@ pub trait StatefulSandboxBackend {
     /// through the streaming entry points. It is not yet a description of every
     /// backend's behaviour:
     ///
-    /// - **IsolationSession** honors both variants. Under `Library` it starts
+    /// - **IsolationSession** honors both variants. Under `Piped` it starts
     ///   the process without waiting, hands back its real pipe handles, a waiter
     ///   that blocks on exit and a terminator that kills, and does not touch the
-    ///   host console. Under `Executor` it relays internally and returns null
+    ///   host console. Under `Relayed` it relays internally and returns null
     ///   handles.
-    /// - **Windows Sandbox** and **WSLc** honor `Executor` only. They relay
-    ///   internally and return null handles; a `Library` request is refused
+    /// - **Windows Sandbox** and **WSLc** honor `Relayed` only. They relay
+    ///   internally and return null handles; a `Piped` request is refused
     ///   without running the workload.
     ///
     /// Reaching any of this from an in-process caller additionally requires the
     /// experimental opt-in, which the state-aware entry points expose as an
     /// `experimental` parameter.
     ///
-    /// # Backends that cannot serve `Library`
+    /// # Backends that cannot serve `Piped`
     ///
     /// A backend that relays the workload's output to the *host process's* own
-    /// stdio, rather than returning streams, must refuse [`ExecConsumer::Library`]
-    /// **before running anything** — see [`unsupported_library_exec`], which is
+    /// stdio, rather than returning streams, must refuse [`ExecStdio::Piped`]
+    /// **before running anything** — see [`unsupported_piped_exec`], which is
     /// the shared refusal. Returning a handle with no streams instead is a
     /// contract violation: by then the workload has run, so the refusal the
     /// caller eventually receives describes side effects that have already
@@ -320,7 +301,7 @@ pub trait StatefulSandboxBackend {
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
-        consumer: ExecConsumer,
+        stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -421,7 +402,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
-            _consumer: ExecConsumer,
+            _stdio: ExecStdio,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("StubBackend::exec not implemented"))
         }
@@ -507,7 +488,7 @@ mod tests {
                 "stub:abcd1234",
                 &ExecutionRequest::default(),
                 None,
-                ExecConsumer::Executor,
+                ExecStdio::Relayed,
             )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);

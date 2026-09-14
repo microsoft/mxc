@@ -6,6 +6,7 @@ import {
   FilesystemConfig,
   NetworkConfig,
   ProcessConfig,
+  TelemetryConfig,
 } from './types.js';
 
 /**
@@ -32,14 +33,25 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+/** The exact contract currently registered for state-aware requests. */
+export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+
+/** Exact contract versions accepted by state-aware config types. */
+export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;
+
+interface StateAwareConfig {
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
+  /** Optional telemetry request for this phase. */
+  telemetry?: TelemetryConfig;
+}
+
 // IsolationSession per-(backend, phase) Configs. Each declares only
 // the fields the SDK currently exposes at that phase — scoped to
 // what the backend honors per the policy honor matrix and currently
 // implements. TypeScript rejects passing fields outside this set.
 
-export interface IsolationSessionProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
-  version?: string;
+export interface IsolationSessionProvisionConfig extends StateAwareConfig {
   /**
    * Optional identifier for the calling application.
    *
@@ -73,26 +85,15 @@ export interface IsolationSessionProvisionConfig {
   network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
-export interface IsolationSessionStartConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type IsolationSessionStartConfig = StateAwareConfig;
 
-export interface IsolationSessionExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+export interface IsolationSessionExecConfig extends StateAwareConfig {
   process: ProcessConfig;
 }
 
-export interface IsolationSessionStopConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type IsolationSessionStopConfig = StateAwareConfig;
 
-export interface IsolationSessionDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type IsolationSessionDeprovisionConfig = StateAwareConfig;
 
 /**
  * IsolationSession's provision-phase metadata surfaced to the caller: the
@@ -112,9 +113,7 @@ export interface IsolationSessionProvisionMetadata {
 // (readwrite/readonly/denied HOST paths) is honored at provision and is
 // immutable thereafter.
 
-export interface WindowsSandboxProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
-  version?: string;
+export interface WindowsSandboxProvisionConfig extends StateAwareConfig {
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
@@ -126,26 +125,15 @@ export interface WindowsSandboxProvisionConfig {
   filesystem?: FilesystemConfig;
 }
 
-export interface WindowsSandboxStartConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WindowsSandboxStartConfig = StateAwareConfig;
 
-export interface WindowsSandboxExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+export interface WindowsSandboxExecConfig extends StateAwareConfig {
   process: ProcessConfig;
 }
 
-export interface WindowsSandboxStopConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WindowsSandboxStopConfig = StateAwareConfig;
 
-export interface WindowsSandboxDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WindowsSandboxDeprovisionConfig = StateAwareConfig;
 
 // WSLc per-(backend, phase) Configs. WSLc runs each sandbox as a warm
 // container behind a persistent host-side daemon (one amortized WSL session
@@ -153,9 +141,7 @@ export interface WindowsSandboxDeprovisionConfig {
 // provision and frozen for the sandbox's lifetime; a cooperative env-var proxy
 // may be injected per-exec.
 
-export interface WslcProvisionConfig {
-  /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
-  version?: string;
+export interface WslcProvisionConfig extends StateAwareConfig {
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
@@ -188,14 +174,9 @@ export interface WslcProvisionConfig {
   imageTarPath?: string;
 }
 
-export interface WslcStartConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WslcStartConfig = StateAwareConfig;
 
-export interface WslcExecConfig {
-  /** Schema version (semver). */
-  version?: string;
+export interface WslcExecConfig extends StateAwareConfig {
   process: ProcessConfig;
   /**
    * Per-exec network overrides. Only `proxy` is honored: it injects a
@@ -210,21 +191,15 @@ export interface WslcExecConfig {
   network?: NetworkConfig;
 }
 
-export interface WslcStopConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WslcStopConfig = StateAwareConfig;
 
-export interface WslcDeprovisionConfig {
-  /** Schema version (semver). */
-  version?: string;
-}
+export type WslcDeprovisionConfig = StateAwareConfig;
 
 /**
  * The five per-phase Config slots every state-aware backend must declare.
  * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
  * no implicit index signature, so a `Record<string, unknown>` base would
- * spuriously reject `{ version?: string }`-shaped configs.
+ * spuriously reject configs carrying an optional schema version.
  */
 type StateAwarePhaseConfigs = Record<Phase, object>;
 
@@ -380,16 +355,6 @@ export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = Met
 export interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
-  /**
-   * Correlation vector (MS-CV) seeded by the executor for this lifecycle when
-   * experimental telemetry is enabled. Relay it verbatim as
-   * {@link SandboxSpawnOptions.correlationVector} on every later phase so all
-   * phases of the lifecycle share a telemetry base prefix. The client relays it
-   * unchanged; the executor derives each phase's own vector from it (spinning a
-   * mutable base or reseeding a missing/malformed value). Absent when telemetry
-   * is not active.
-   */
-  correlationVector?: string;
 }
 
 export interface StartResult<C extends StateAwareContainmentBackend> {

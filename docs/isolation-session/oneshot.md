@@ -121,7 +121,7 @@ invocations, without changing the manager's interface. See
 
 ```json
 {
-    "version": "0.6.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "MyIsolationSessionRun",
     "containment": "isolation_session",
     "process": {
@@ -141,11 +141,10 @@ invocations, without changing the manager's interface. See
 ```
 
 The one-shot surface takes **no backend configuration at all** — there is no
-`experimental.isolation_session` field the one-shot path reads. Anything
-supplied there is just an unrecognised key in the deliberately permissive
-`experimental` block and is ignored (the run proceeds normally). Process options
-(`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
-matching the contract every other backend honors.
+`experimental.isolation_session` field in the exact one-shot contract. Anything
+supplied there is rejected at the structural boundary as `malformed_request`.
+Process options (`cwd`, `env`, `timeout`) read from the existing top-level
+`process` section, matching the contract every other backend honors.
 
 Run with: `wxc-exec.exe --experimental config.json`.
 
@@ -228,7 +227,7 @@ versions and stating that the bindings must be regenerated.
 - `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
   in-proc API exposes no session-lifetime knob, so the backend cannot vary
   teardown: the one-shot path always stops the session and removes the agent
-  user before returning. `destroyOnExit: true` (the default) is therefore
+  user. `destroyOnExit: true` (the default) is therefore
   accepted because it matches actual behavior; `false` is refused. There is no
   filesystem or network policy to preserve (both are rejected outright), so
   `preservePolicy: true` is refused as meaningless here.
@@ -253,13 +252,14 @@ the rationale for each disposition, and the error mapping live in
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.provision` | accepted, ignored — per-phase config is state-aware-only |
+| `experimental.isolation_session.provision` | rejected as `malformed_request` — the exact one-shot contract has no IsolationSession backend configuration |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
 typed policy error code: the envelope carries `error.code = "backend_error"` with
-the reason in the message, unlike the state-aware surface which emits
-`policy_validation`.
+the reason in the message. On the state-aware surface, structurally
+representable backend policy failures emit `policy_validation`; fields excluded
+by an exact phase root fail earlier as `malformed_request`.
 
 **Why every supplied `ui` is refused.** The `ui` section states intent about the
 contained code's relationship to the *user's* environment, and was modelled on a
@@ -292,7 +292,7 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is accepted and ignored |
+| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is rejected as an unknown field by the exact one-shot contract |
 | Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
@@ -356,7 +356,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
-| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
+| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user |
 
 ## Prerequisites
 
@@ -387,7 +387,7 @@ wxc-exec.exe --experimental hello.json
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "Hello",
   "containment": "isolation_session",
   "process": {

@@ -214,11 +214,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 // coverage loss this block exists to avoid. It is computed at the top of the
 // file rather than here because its `await` must precede the first `describe`
 // -- see the note there before moving it back.
-describe('IsolationSession state-aware policy validation', { skip: policyValidationSkipReason }, () => {
+describe('IsolationSession state-aware request validation', { skip: policyValidationSkipReason }, () => {
   // The TypeScript type makes `network` required (and pins its value) at
-  // provision, but a plain-JS caller can bypass that. These assert the backend
-  // itself refuses a missing or non-canonical network acknowledgment — the
-  // "respect or refuse" guarantee must not rest on the compile-time type alone.
+  // provision, but a plain-JS caller can bypass that. The exact contract must
+  // still reject missing or non-canonical acknowledgments before backend
+  // dispatch — the public boundary must not rely on the compile-time type.
   type UntypedProvision = (
     containment: 'isolation_session',
     config: unknown,
@@ -226,32 +226,32 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
   ) => Promise<unknown>;
   const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
 
-  it('backend refuses a provision that omits the network acknowledgment', async () => {
+  it('exact contract rejects a provision that omits the network acknowledgment', async () => {
     await assert.rejects(
       () => provisionUntyped('isolation_session', {}, { experimental: true }),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('backend refuses a provision with a non-canonical network (defaultPolicy=block)', async () => {
+  it('exact contract rejects a provision with a non-canonical network (defaultPolicy=block)', async () => {
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
         { network: { defaultPolicy: 'block' } },
         { experimental: true },
       ),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('backend refuses a provision whose network omits allowLocalNetwork', async () => {
+  it('exact contract rejects a provision whose network omits allowLocalNetwork', async () => {
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
         { network: { defaultPolicy: 'allow' } },
         { experimental: true },
       ),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
@@ -286,16 +286,13 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
     );
   });
 
-  // --- Runtime backend guard for UI policy --------------------------------
+  // --- Exact-contract guard for UI policy ---------------------------------
   // `ui` is absent from every IsolationSession per-phase Config, so a
   // TypeScript caller cannot pass it. It is a cross-cutting field though, so a
-  // plain-JS caller who supplies it still gets it lifted to the top level of
-  // the envelope. The backend must refuse: the isolation session is a separate
-  // OS session, which isolates the host's UI from the contained code but does
-  // not deny it UI capabilities (window creation, GDI and the session's own
-  // clipboard all work inside it), so a UI restriction cannot be honored.
-  // Validation runs before the OS service is touched, so nothing is
-  // provisioned and no cleanup is needed.
+  // plain-JS caller can still get it lifted to the top level of the envelope.
+  // The recursively closed exact contract rejects it before backend dispatch
+  // or OS access. Direct Rust tests retain the backend's presence-based
+  // `policy_validation` coverage.
   type UntypedStart = (
     sandboxId: string,
     config: unknown,
@@ -303,7 +300,7 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
   ) => Promise<unknown>;
   const startUntyped = startSandbox as unknown as UntypedStart;
 
-  it('backend refuses a provision that supplies a ui policy', async () => {
+  it('exact contract rejects a provision that supplies a ui policy', async () => {
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
@@ -313,14 +310,13 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
         },
         { experimental: true },
       ),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('backend refuses a lockdown-equivalent ui policy too (presence, not value)', async () => {
-    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
-    // indistinguishable by value from an absent one — presence drives the
-    // refusal, exactly as it does for the network acknowledgment.
+  it('exact contract rejects a lockdown-equivalent ui policy too', async () => {
+    // Structural rejection is presence-based, so even an empty object cannot
+    // bypass the closed request shape.
     await assert.rejects(
       () => provisionUntyped(
         'isolation_session',
@@ -330,31 +326,26 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
         },
         { experimental: true },
       ),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
-  it('backend refuses a ui policy on a post-provision phase', async () => {
-    // No provision needed: `validate_start` refuses the policy before the
-    // sandbox id is ever resolved against the OS service. The id must still be
-    // STRUCTURALLY valid, though -- decoding happens first, so a malformed id
-    // would short-circuit with `malformed_id` and never exercise the policy
-    // path this test is about.
+  it('exact contract rejects a ui policy on a post-provision phase', async () => {
+    // No provision is needed: exact deserialization rejects `ui` before the
+    // sandbox id is decoded or resolved against the OS service.
     await assert.rejects(
       () => startUntyped(
         wellFormedSandboxId('not-a-real-sandbox'),
         { ui: { disable: false, clipboard: 'all', injection: true } },
         { experimental: true },
       ),
-      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
 
   it('rejects a structurally invalid sandboxId with malformed_id', async () => {
-    // The companion to the test above: an id that does not decode fails on the
-    // id itself, before any policy check. Pinning both keeps the ordering
-    // honest -- if decoding ever moved after policy validation, one of the two
-    // would flip.
+    // With no unknown request fields, exact parsing succeeds and the invalid id
+    // reaches the sandbox-id decoder.
     await assert.rejects(
       () => startUntyped('iso:not-a-real-sandbox', {}, { experimental: true }),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',

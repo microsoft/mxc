@@ -4,7 +4,7 @@
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.9.0-dev.json`](../schemas/dev/mxc-config.schema.0.9.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](../schemas/dev/mxc-config.schema.0.9.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -16,7 +16,7 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -80,11 +80,18 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+Every complete request that carries a process requires a non-empty
+`process.commandLine`. The Windows native CLI may accept a template without
+that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
+replaces `process.commandLine` before schema and typed request validation. That
+entry-point transform does not make the unmodified template a complete request
+that can be executed independently.
+
 ### Full Schema
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -99,7 +106,8 @@ cannot mix both formats in one request.
                                            //  backend substitutes a granted directory rather
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
-        "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
+        "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
+        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 
@@ -199,6 +207,11 @@ cannot mix both formats in one request.
         "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
     },
 
+    "telemetry": {                         // Telemetry (Windows only)
+        "enabled": true                    // Request emission for this run; MXC-owned user consent
+                                           // and a permitting administrative policy are also required
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -210,9 +223,6 @@ cannot mix both formats in one request.
             "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
-        },
-        "telemetry": {                // Telemetry (Windows only)
-            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }
@@ -308,11 +318,15 @@ backend (via job-object UI restrictions plus the Win32k mitigation — see
 [`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
-whether it applies, rejects, or ignores the section. **IsolationSession refuses
-any supplied `ui` at every phase on both surfaces** — no `ui` posture is truthful
+whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
+refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
+omitted one without applying any UI restriction — so the section's default-deny
+reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)) —
-and accepts an omitted one without applying any UI restriction. The Windows
+[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
+while WSLc has no mechanism to enforce UI restrictions on a container (see
+[`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
+The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
 when `containment` is `processcontainer`.
@@ -360,21 +374,21 @@ a config that also carries an unrelated backend's section is **rejected** with a
 
 ### State-aware lifecycle envelope
 
-The dev schema additionally documents a multi-phase envelope shape for the
+The exact development schema documents a multi-phase envelope shape for the
 state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`). Where the one-shot config above is a self-contained
 `ExecutionRequest` to run once, a state-aware envelope identifies which
 phase is being driven against an existing provisioned sandbox.
 
-The envelope follows the same supported version range as one-shot requests:
-`>=0.6, <=0.9`. The example uses `0.6.0-alpha`, which is accepted throughout
-that range. The state-aware field shape is documented by the current dev
-schema:
+State-aware envelopes currently require the exact `0.9.0-alpha` development
+contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
+contracts contain only one-shot request roots. The state-aware field shape is
+documented by the exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json",
-    "version": "0.6.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+    "version": "0.9.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,

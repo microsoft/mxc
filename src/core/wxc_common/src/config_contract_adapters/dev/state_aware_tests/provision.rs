@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use super::super::{contract, provision_into_wire, wire};
+use super::common::assert_config_matches_rolling_state_aware_wire_input;
+use crate::models::IsolationSessionProvisionConfig;
 
 const MINIMAL_ISOLATION_SESSION_REQUEST_JSON: &str = r#"{
     "version": "0.9.0-alpha",
@@ -23,14 +25,14 @@ const ISOLATION_SESSION_ALL_FIELDS_REQUEST_JSON: &str = r#"{
         "allowLocalNetwork": true,
         "defaultPolicy": "allow"
     },
+    "telemetry": {
+        "enabled": false
+    },
     "experimental": {
         "isolation_session": {
             "provision": {
                 "appId": "someAppId"
             }
-        },
-        "telemetry": {
-            "enabled": false
         }
     }
 }"#;
@@ -52,11 +54,9 @@ const WINDOWS_SANDBOX_ALL_FIELDS_REQUEST_JSON: &str = r#"{
         "readwritePaths": ["C:\\Users\\User\\Documents"],
         "deniedPaths": ["C:\\Users\\User\\Music"]
     },
-    "experimental": {
-        "telemetry": {
+    "telemetry": {
             "enabled": false
         }
-    }
 }"#;
 
 const MINIMAL_WSLC_REQUEST_JSON: &str = r#"{
@@ -86,15 +86,15 @@ const WSLC_ALL_FIELDS_REQUEST_JSON: &str = r#"{
             "url": "http://example.com/proxy"
         }
     },
+    "telemetry": {
+        "enabled": false
+    },
     "experimental": {
         "wslc": {
             "provision": {
                 "image": "someImage",
                 "imageTarPath": "someImageTarPath"
             }
-        },
-        "telemetry": {
-            "enabled": false
         }
     }
 }"#;
@@ -171,7 +171,6 @@ fn minimal_isolation_session_request_maps_expected_wire_fields() {
     assert!(network.blocked_hosts.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -223,16 +222,14 @@ fn isolation_session_request_maps_expected_wire_fields() {
         .expect("provision should be present");
     assert_eq!(provision.app_id.as_deref(), Some("someAppId"));
 
-    let telemetry = experimental.telemetry.expect("telemetry should be present");
+    let telemetry = wire.telemetry.expect("telemetry should be present");
     assert_eq!(telemetry.enabled, Some(false));
-
     assert!(experimental.test.is_none());
     assert!(experimental.wslc.is_none());
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.seatbelt.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -260,7 +257,6 @@ fn minimal_windows_sandbox_request_maps_expected_wire_fields() {
     ));
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -309,20 +305,11 @@ fn windows_sandbox_request_maps_expected_wire_fields() {
         Some(vec!["C:\\Users\\User\\Music".to_string()])
     );
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
-
-    assert!(experimental.test.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.experimental.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -347,7 +334,6 @@ fn minimal_wslc_request_maps_expected_wire_fields() {
     assert!(matches!(wire.containment, Some(wire::Containment::Wslc)));
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -415,7 +401,6 @@ fn wslc_request_maps_expected_wire_fields() {
     );
 
     let experimental = wire.experimental.expect("experimental should be populated");
-
     let wslc = experimental.wslc.expect("wslc should be populated");
     let provision = wslc.provision.expect("provision should be populated");
     assert_eq!(provision.image.as_deref(), Some("someImage"));
@@ -432,18 +417,14 @@ fn wslc_request_maps_expected_wire_fields() {
     assert!(wslc.storage_path.is_none());
     assert!(wslc.port_mappings.is_none());
 
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
-
     assert!(experimental.test.is_none());
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.seatbelt.is_none());
 
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.process.is_none());
     assert!(wire.lifecycle.is_none());
@@ -460,16 +441,12 @@ fn empty_isolation_session_sections_map_to_present_empty_wire_sections() {
         r#""experimental": {}"#,
     ));
     let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
     assert!(experimental.isolation_session.is_none());
 
-    let wire = adapt(&isolation_session_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&isolation_session_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 
     let wire = adapt(&isolation_session_request_with_fields(
@@ -505,16 +482,12 @@ fn empty_windows_sandbox_sections_map_to_present_empty_wire_sections() {
     let wire = adapt(&windows_sandbox_request_with_fields(
         r#""experimental": {}"#,
     ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.experimental.is_some());
+    assert!(wire.telemetry.is_none());
 
-    let wire = adapt(&windows_sandbox_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&windows_sandbox_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 }
 
@@ -537,16 +510,12 @@ fn empty_wslc_sections_map_to_present_empty_wire_sections() {
 
     let wire = adapt(&wslc_request_with_fields(r#""experimental": {}"#));
     let experimental = wire.experimental.expect("experimental should be populated");
-    assert!(experimental.telemetry.is_none());
+    assert!(wire.telemetry.is_none());
     assert!(experimental.wslc.is_none());
 
-    let wire = adapt(&wslc_request_with_fields(
-        r#""experimental": {"telemetry": {}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let telemetry = experimental
-        .telemetry
-        .expect("telemetry should be populated");
+    let wire = adapt(&wslc_request_with_fields(r#""telemetry": {}"#));
+    assert!(wire.experimental.is_none());
+    let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 
     let wire = adapt(&wslc_request_with_fields(r#""experimental": {"wslc": {}}"#));
@@ -603,62 +572,139 @@ fn null_provision_comments_map_expected_wire_fields() {
     }
 }
 
-// Deserialization match tests
-pub(super) fn assert_matches_current_wire_deserialization(json: &str) {
-    let current: wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
-    let adapted = adapt(json);
+#[test]
+fn isolation_session_provision_config_matches_the_contract_for_valid_values() {
+    for json in [r#"{}"#, r#"{"appId":""}"#, r#"{"appId":"Contoso.App"}"#] {
+        let contract::IsolationSessionProvision { app_id } = serde_json::from_str(json).unwrap();
+        let backend: IsolationSessionProvisionConfig = serde_json::from_str(json).unwrap();
 
-    assert_eq!(
-        serde_json::to_value(adapted).unwrap(),
-        serde_json::to_value(current).unwrap()
+        assert_eq!(app_id.into_option(), backend.app_id, "{json}");
+    }
+}
+
+#[test]
+fn isolation_session_backend_accepts_known_shapes_stricter_contract_rejects() {
+    for json in [r#"{"appId":null}"#, r#"{"unknown":true}"#] {
+        assert!(
+            serde_json::from_str::<contract::IsolationSessionProvision>(json).is_err(),
+            "contract should reject {json}"
+        );
+        assert!(
+            serde_json::from_str::<IsolationSessionProvisionConfig>(json).is_ok(),
+            "backend config should retain its current compatibility for {json}"
+        );
+    }
+}
+
+#[test]
+fn wslc_provision_config_matches_the_contract_for_valid_values() {
+    for json in [
+        r#"{}"#,
+        r#"{"image":""}"#,
+        r#"{"imageTarPath":""}"#,
+        r#"{"image":"alpine:latest","imageTarPath":"C:\\images\\alpine.tar"}"#,
+    ] {
+        let contract::WslcProvision {
+            image,
+            image_tar_path,
+        } = serde_json::from_str(json).unwrap();
+        let backend: wire::WslcProvisionPhase = serde_json::from_str(json).unwrap();
+
+        assert_eq!(image.into_option(), backend.image, "{json}: image");
+        assert_eq!(
+            image_tar_path.into_option(),
+            backend.image_tar_path,
+            "{json}: imageTarPath"
+        );
+    }
+}
+
+#[test]
+fn wslc_backend_accepts_known_shapes_stricter_contract_rejects() {
+    for json in [r#"{"image":null}"#, r#"{"unknown":true}"#] {
+        assert!(
+            serde_json::from_str::<contract::WslcProvision>(json).is_err(),
+            "contract should reject {json}"
+        );
+        assert!(
+            serde_json::from_str::<wire::WslcProvisionPhase>(json).is_ok(),
+            "backend config should retain its current compatibility for {json}"
+        );
+    }
+}
+
+#[test]
+fn windows_sandbox_contract_has_no_backend_provision_payload() {
+    let json = r#"{
+        "version": "0.9.0-alpha",
+        "phase": "provision",
+        "containment": "windows_sandbox",
+        "experimental": {
+            "windows_sandbox": {
+                "provision": {}
+            }
+        }
+    }"#;
+
+    assert!(
+        serde_json::from_str::<contract::WindowsSandboxProvisionRequest>(json).is_err(),
+        "Windows Sandbox provision config is the unit type and has no payload"
     );
 }
 
+// Deserialization match tests
+pub(super) fn assert_matches_rolling_state_aware_wire_input(json: &str) {
+    let adapted = adapt(json);
+    assert_config_matches_rolling_state_aware_wire_input(json, adapted);
+}
+
 #[test]
-fn minimal_isolation_session_request_matches_current_wire_deserialization() {
+fn minimal_isolation_session_request_matches_rolling_state_aware_wire_input() {
     let json = MINIMAL_ISOLATION_SESSION_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn isolation_session_request_matches_current_wire_deserialization() {
+fn isolation_session_request_matches_rolling_state_aware_wire_input() {
     let json = ISOLATION_SESSION_ALL_FIELDS_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn minimal_windows_sandbox_request_matches_current_wire_deserialization() {
+fn minimal_windows_sandbox_request_matches_rolling_state_aware_wire_input() {
     let json = MINIMAL_WINDOWS_SANDBOX_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn windows_sandbox_request_matches_current_wire_deserialization() {
+fn windows_sandbox_request_matches_rolling_state_aware_wire_input() {
     let json = WINDOWS_SANDBOX_ALL_FIELDS_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn minimal_wslc_request_matches_current_wire_deserialization() {
+fn minimal_wslc_request_matches_rolling_state_aware_wire_input() {
     let json = MINIMAL_WSLC_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
-fn wslc_request_matches_current_wire_deserialization() {
+fn wslc_request_matches_rolling_state_aware_wire_input() {
     let json = WSLC_ALL_FIELDS_REQUEST_JSON;
-    assert_matches_current_wire_deserialization(json);
+    assert_matches_rolling_state_aware_wire_input(json);
 }
 
 #[test]
 fn empty_isolation_session_sections_match_current_wire_deserialization() {
     for fields in [
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"isolation_session": {}}"#,
         r#""experimental": {"isolation_session": {"provision": {}}}"#,
     ] {
-        assert_matches_current_wire_deserialization(&isolation_session_request_with_fields(fields));
+        assert_matches_rolling_state_aware_wire_input(&isolation_session_request_with_fields(
+            fields,
+        ));
     }
 }
 
@@ -667,9 +713,9 @@ fn empty_windows_sandbox_sections_match_current_wire_deserialization() {
     for fields in [
         r#""filesystem": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
     ] {
-        assert_matches_current_wire_deserialization(&windows_sandbox_request_with_fields(fields));
+        assert_matches_rolling_state_aware_wire_input(&windows_sandbox_request_with_fields(fields));
     }
 }
 
@@ -679,11 +725,11 @@ fn empty_wslc_sections_match_current_wire_deserialization() {
         r#""filesystem": {}"#,
         r#""network": {}"#,
         r#""experimental": {}"#,
-        r#""experimental": {"telemetry": {}}"#,
+        r#""telemetry": {}"#,
         r#""experimental": {"wslc": {}}"#,
         r#""experimental": {"wslc": {"provision": {}}}"#,
     ] {
-        assert_matches_current_wire_deserialization(&wslc_request_with_fields(fields));
+        assert_matches_rolling_state_aware_wire_input(&wslc_request_with_fields(fields));
     }
 }
 
@@ -692,10 +738,10 @@ fn empty_backend_strings_match_current_wire_deserialization() {
     let isolation_session = isolation_session_request_with_fields(
         r#""experimental": {"isolation_session": {"provision": {"appId": ""}}}"#,
     );
-    assert_matches_current_wire_deserialization(&isolation_session);
+    assert_matches_rolling_state_aware_wire_input(&isolation_session);
 
     let wslc = wslc_request_with_fields(
         r#""experimental": {"wslc": {"provision": {"image": "", "imageTarPath": ""}}}"#,
     );
-    assert_matches_current_wire_deserialization(&wslc);
+    assert_matches_rolling_state_aware_wire_input(&wslc);
 }

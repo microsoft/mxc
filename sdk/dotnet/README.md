@@ -72,11 +72,11 @@ or the configured output directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
-to the host's stderr, so inspecting `Warnings` is the only way to learn that
-containment was relaxed.
+to the host's stderr, so inspecting `Warnings` is the only way to see them.
 
-Streaming callers receive the same warnings immediately from
-`MxcSandboxProcess.Warnings`. They do not need to wait for the process to exit.
+Streaming callers read warnings from `MxcSandboxProcess.Warnings` without
+waiting for the process to exit. Cleanup failures are added during teardown,
+so read it again after `Wait`, `WaitAsync` or `Kill` to see them.
 
 ### Dependency injection and testing
 
@@ -129,8 +129,8 @@ foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
 `GetPlatformSupport()` reports whether this public SDK can launch a sandbox and
 the backends it can launch. `GetAvailableBackends()` is broader: it reports
 every backend the host can run, including lifecycle-only backends such as
-Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
-strongest tier the host can reach; policy can still select a weaker tier.
+Windows Sandbox. Its ProcessContainer `Tier` is the strongest tier the host can
+reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
 `BackendCapability.CaptureDenials` and `BackendCapability.ProxyEnforcement`.
 `Warnings` carries diagnostics for a capability the host cannot offer — but not
@@ -201,7 +201,8 @@ var request = new SandboxRequest(
 {
     ContainerName = "example",
     WorkingDirectory = @"C:\work",
-    Environment =
+    InheritDefaultEnvironment = true,
+    Environment = new()
     {
         ["GREETING"] = "hello",
     },
@@ -209,6 +210,12 @@ var request = new SandboxRequest(
 
 RunResult result = await MxcSandbox.RunAsync(request);
 ```
+
+By default, a non-null `Environment` dictionary replaces the child's
+environment, including when the dictionary is explicitly empty. Leave it null
+to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
+dictionary on the backend default instead; on Windows process containers, that
+default is the user profile environment block.
 
 `MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
 request through the co-versioned native FFI contract. The existing
@@ -292,7 +299,7 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.8.0-alpha",
+        Version = "0.9.0-alpha",
         Network = new NetworkPolicy { AllowOutbound = true },
     },
     "python3 -c 'print(42)'")
@@ -317,7 +324,42 @@ var request = new SandboxRequest(
 The image must already be cached unless `ImageTarPath` is supplied. The image
 store wins over the tar when both identify an already-cached image. WSLC is
 experimental, so `Experimental` is required; the native unit must also be built
-with WSLC support or execution returns `BackendUnavailable`.
+with WSLC support or execution returns `UnsupportedContainment`.
+
+#### Isolation session options
+
+`IsolationSessionContainment` selects the experimental IsolationSession backend,
+which runs the workload under an isolated agent user account. It carries no
+configuration of its own:
+
+```csharp
+var request = new SandboxRequest(
+    new SandboxPolicy
+    {
+        Version = "0.9.0-alpha",
+        Network = new NetworkPolicy
+        {
+            AllowOutbound = true,
+            AllowLocalNetwork = true,
+        },
+    },
+    "echo hello")
+{
+    Experimental = true,
+    Containment = new IsolationSessionContainment(),
+};
+```
+
+The network policy is not optional here. The backend cannot restrict the
+container's network, so it accepts only an explicit acknowledgment of that and
+refuses an absent policy, whose default is a deny it could not enforce. It also
+refuses filesystem paths and any `Ui`: supplying either is an error rather than
+a no-op, so the policy shown under Usage does not carry over to this backend.
+
+IsolationSession is experimental, so `Experimental` is required; the native unit
+must also be built with isolation-session support or execution returns
+`UnsupportedContainment`. It is refused from a single-threaded apartment, so a
+GUI caller must reach it from an MTA thread.
 
 ### Network proxy
 
@@ -525,23 +567,88 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 1. the user has explicitly granted MXC-owned consent, and
 2. the caller opts this invocation in via telemetry settings.
 
-Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
+Telemetry remains off by default unless the caller opts in with
+`SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }` and
+applicable Windows consent/policy gates permit collection.
 
-Any .NET consent surface should stay UI-agnostic, present the canonical
-resource verbatim through a host callback, persist only explicit yes/no
-decisions, treat dismissal and failures as non-grants, and follow the rules in
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
+
+`MxcTelemetry` is UI-agnostic: it passes the canonical prompt to your
+presenter and persists only the typed decision you return.
+`GetConsentStatus`, `NeedsConsentPrompt`, and `WithdrawConsent` provide the
+remaining maintenance operations. Dismissal and failures never grant consent.
+For presenter rules and consent semantics, see
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
+Per-invocation opt-in:
+- One-shot (`Run`/`Spawn`): set
+  `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }`.
+  An explicit policy version must be `0.9.0-alpha` or later.
+- State-aware phases: set each phase's
+  `Telemetry = new TelemetrySettings { Enabled = true }` independently.
+  `ProvisionResult` contains the sandbox identity used by later phases; no
+  telemetry context needs to be forwarded between phases.
+
+These switches do not bypass persisted consent or administrative policy.
+
+```csharp
+using Microsoft.Mxc.Sdk;
+
+var outcome = MxcTelemetry.RequestConsent(prompt =>
+{
+    return ShowTelemetryConsentDialog(
+        title: prompt.Title.Text,
+        body: prompt.Body.Text,
+        affirmativeLabel: prompt.AffirmativeLabel.Text,
+        negativeLabel: prompt.NegativeLabel.Text,
+        learnMoreLabel: prompt.LearnMoreLabel.Text,
+        learnMoreUrl: prompt.LearnMoreUrl);
+});
+// ShowTelemetryConsentDialog returns Yes, No, or Dismissed from the user's
+// action; closing or cancelling the dialog must return Dismissed.
+
+TelemetryConsentStatus status = MxcTelemetry.GetConsentStatus();
+MxcTelemetry.WithdrawConsent();
+```
+
+`RequestConsentAsync` accepts an asynchronous presenter. If consent is never
+requested, the presenter fails, or it returns `Dismissed`, telemetry remains
+off. On non-Windows hosts requests and withdrawals return `NotApplicable`
+without invoking a presenter.
+
+`RequestConsentAsync` cancellation is best-effort relative to persistence. It
+stops waiting for an unfinished presenter, but once a completed decision wins
+the race and native persistence begins, the persisted outcome is authoritative
+and is returned even if cancellation occurs concurrently. Cancellation does not
+cancel the host's presenter task.
+
 ### Administrative policy
 
-An IT administrator can still block MXC telemetry device-wide via MXC's own
-registry policy setting. See
-[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Policy and consent
-queries are not yet exposed by the .NET SDK; any eventual query must fail
-closed rather than upgrading an unreadable device state into collection.
+An administrator can block MXC telemetry device-wide through MXC's registry
+policy. `MxcTelemetry.GetPolicy()` reports the result:
+
+```csharp
+if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
+{
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+`Allowed` does not grant user consent, while `Blocked` disables collection and
+the consent prompt. Failures return a fail-closed state and never grant
+consent; non-Windows hosts return `NotApplicable`. When a read-only fallback
+hides a native or parsing failure, the SDK reports a bounded set of distinct
+failure signatures through `System.Diagnostics.Trace`. Each signature is
+reported once; if a listener rejects it, a future occurrence may try again.
+Reports include the exception type and HRESULT or native error code, but exclude
+exception messages and stack traces. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## Projects
 
@@ -551,9 +658,12 @@ closed rather than upgrading an unreadable device state into collection.
   interactive terminal inside an isolation session. Terminal behaviour has no
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
-- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The lifecycle and streaming
-  end-to-end tests need a capable host and skip, with a reason, unless
-  `MXC_E2E_HOST_PREPPED=1`.
+- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
+  need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
+  The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
+  reports that backend, which needs both a build with
+  `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
+  `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
 
 Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
@@ -577,9 +687,10 @@ other Windows RID for a multi-RID package.
 Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`Spawn` → `MxcSandboxProcess`), and the **state-aware lifecycle**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
-ProcessContainer, Linux Bubblewrap, macOS Seatbelt for run/stream; the
-state-aware lifecycle supports IsolationSession, Windows Sandbox, and WSLC on
-Windows; all three are experimental).
+ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
+IsolationSession and WSLC for run/stream; the state-aware lifecycle supports
+IsolationSession, Windows Sandbox, and WSLC on Windows; all three are
+experimental).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
@@ -667,11 +778,12 @@ var wslc = new WslcProvisionOptions
 };
 ```
 
-IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
-defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
-override the inferred version. State-aware exec options expose working
-directory, `KEY=VALUE` environment entries, and timeout. WSLC also accepts a
-proxy-only per-exec override:
+All state-aware backends use the exact development schema `0.9.0-alpha`.
+`Version` may be omitted or explicitly set to that registered value; the SDK
+rejects other values rather than emitting an envelope for an unregistered
+state-aware contract. State-aware exec options expose working directory,
+`KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and timeout.
+WSLC also accepts a proxy-only per-exec override:
 
 ```csharp
 var options = new WslcExecOptions

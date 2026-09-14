@@ -49,6 +49,10 @@ pub(crate) fn adapt_request(
     }
 }
 
+pub(crate) fn one_shot_into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
+    one_shot::into_wire(request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,10 +91,8 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
-            "experimental": {
-                "telemetry": {
-                    "enabled": false
-                }
+            "telemetry": {
+                "enabled": false
             }
         }"#;
 
@@ -100,12 +102,8 @@ mod tests {
 
         assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Provision)));
-        assert_eq!(
-            adapted.experimental_raw,
-            Some(serde_json::json!({
-                "telemetry": {"enabled": false}
-            }))
-        );
+        assert_eq!(adapted.config.telemetry.unwrap().enabled, Some(false));
+        assert!(adapted.experimental_raw.is_none());
         assert_eq!(adapted.source_text.as_ref(), json);
     }
 
@@ -115,10 +113,8 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "sandbox-id",
-            "experimental": {
-                "telemetry": {
-                    "enabled": false
-                }
+            "telemetry": {
+                "enabled": false
             }
         }"#;
 
@@ -129,12 +125,8 @@ mod tests {
         assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Start)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
-        assert_eq!(
-            adapted.experimental_raw,
-            Some(serde_json::json!({
-                "telemetry": {"enabled": false}
-            }))
-        );
+        assert_eq!(adapted.config.telemetry.unwrap().enabled, Some(false));
+        assert!(adapted.experimental_raw.is_none());
         assert_eq!(adapted.source_text.as_ref(), json);
     }
 
@@ -147,10 +139,8 @@ mod tests {
             "process": {
                 "commandLine": "echo hello"
             },
-            "experimental": {
-                "telemetry": {
-                    "enabled": false
-                }
+            "telemetry": {
+                "enabled": false
             }
         }"#;
 
@@ -161,6 +151,7 @@ mod tests {
         assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Exec)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
+        assert!(adapted.config.experimental.is_none());
         assert!(adapted.config.process.is_some());
 
         let process = adapted.config.process.unwrap();
@@ -169,12 +160,8 @@ mod tests {
         assert!(process.env.is_none());
         assert!(process.timeout.is_none());
 
-        assert_eq!(
-            adapted.experimental_raw,
-            Some(serde_json::json!({
-                "telemetry": {"enabled": false}
-            }))
-        );
+        assert_eq!(adapted.config.telemetry.unwrap().enabled, Some(false));
+        assert!(adapted.experimental_raw.is_none());
         assert_eq!(adapted.source_text.as_ref(), json);
     }
 
@@ -184,10 +171,8 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "stop",
             "sandboxId": "sandbox-id",
-            "experimental": {
-                "telemetry": {
-                    "enabled": false
-                }
+            "telemetry": {
+                "enabled": false
             }
         }"#;
 
@@ -198,12 +183,8 @@ mod tests {
         assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Stop)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
-        assert_eq!(
-            adapted.experimental_raw,
-            Some(serde_json::json!({
-                "telemetry": {"enabled": false}
-            }))
-        );
+        assert_eq!(adapted.config.telemetry.unwrap().enabled, Some(false));
+        assert!(adapted.experimental_raw.is_none());
         assert_eq!(adapted.source_text.as_ref(), json);
     }
 
@@ -213,10 +194,8 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "deprovision",
             "sandboxId": "sandbox-id",
-            "experimental": {
-                "telemetry": {
-                    "enabled": false
-                }
+            "telemetry": {
+                "enabled": false
             }
         }"#;
 
@@ -230,12 +209,8 @@ mod tests {
             Some(wire::Phase::Deprovision)
         ));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
-        assert_eq!(
-            adapted.experimental_raw,
-            Some(serde_json::json!({
-                "telemetry": {"enabled": false}
-            }))
-        );
+        assert_eq!(adapted.config.telemetry.unwrap().enabled, Some(false));
+        assert!(adapted.experimental_raw.is_none());
         assert_eq!(adapted.source_text.as_ref(), json);
     }
 }

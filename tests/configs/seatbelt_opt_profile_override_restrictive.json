@@ -1,0 +1,25 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/allowed/data.txt >/dev/null 2>&1 && echo FS_OK || echo FS_BLOCKED; python3 -c \"import socket;s=socket.socket();s.settimeout(5);s.connect(('1.1.1.1',443));print('EXTERNAL_OK')\" 2>/dev/null || echo EXTERNAL_BLOCKED",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "{{TESTDIR}}/allowed"
+        ],
+        "readonlyPaths": [
+            "{{TESTDIR}}"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "allow"
+        }
+    },
+    "seatbelt": {
+        "profileOverride": "(version 1)\n(allow default)\n(deny network*)\n(deny file-read* (subpath \"{{TESTDIR}}/allowed\"))\n"
+    }
+}

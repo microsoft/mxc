@@ -15,14 +15,8 @@ fn experimental_test_is_introduced_in_v09() {
 }
 
 #[test]
-fn experimental_telemetry_is_introduced_in_v09() {
-    assert_v09_introduces(
-        r#""experimental": {
-        "telemetry": {
-            "enabled": true
-        }
-    }"#,
-    );
+fn telemetry_is_introduced_in_v09() {
+    assert_v09_introduces(r#""telemetry": {"enabled": true}"#);
 }
 
 #[test]
