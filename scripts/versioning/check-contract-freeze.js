@@ -30,6 +30,7 @@ const immutableIdentityFields = [
   "builderPath",
   "fixturePath",
   "schemaSha256",
+  "publicationProfile",
 ];
 
 function fail(messages) {

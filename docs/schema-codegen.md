@@ -52,7 +52,16 @@ of truth. It includes the schema, Rust contract, adapter, builder, and fixture
 paths, plus the recorded SHA-256 digest for each published schema.
 `mxc_schema_gen registry` deterministically generates the machine-readable
 `schemas/contract-registry.generated.json` artifact from that Rust table;
-`versions --json` exposes the same compiled metadata directly.
+`versions --json` exposes the same compiled metadata directly, including the
+checked-in publication profile for the mutable contract.
+
+The publication profile is Rust-authored beside the development contract. It
+selects the stable one-shot root and zero or more graduated state-aware
+provision backends. Selecting a state-aware backend also selects the shared
+`start`, `exec`, `stop`, and `deprovision` roots. The current v0.9 profile is
+deliberately conservative and selects no state-aware backend until the
+pre-publication feature-location migration and graduation decision are
+complete.
 
 Before changing lifecycle state, preview publication with:
 
@@ -60,13 +69,19 @@ Before changing lifecycle state, preview publication with:
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- publish --version 0.9.0-alpha --next-dev 0.10.0-alpha --dry-run
 ```
 
-The same command without `--dry-run` writes the narrowed stable-candidate
-schema and reports its normalized SHA-256 digest. Publication intentionally
-excludes experimental and state-aware roots. In the same change, fork the
-contract module, adapter, builder, and fixtures; advance the development
-sources and consumers; then author the new lifecycle state and digest in the
-Rust `ContractVersion`/`CONTRACTS` registry. Finally run
-`mxc_schema_gen registry` to refresh the generated JSON artifact.
+The same command without `--dry-run` writes the narrowed schema selected by
+that profile and reports its normalized SHA-256 digest. Publication always
+excludes the `experimental` block and any backend whose stable provision shape
+is not ready. In the same change, fork the selected contract roots, adapters,
+builders, and fixtures; advance the development sources and consumers; then
+author the new lifecycle state and digest in the Rust
+`ContractVersion`/`CONTRACTS` registry. Finally run `mxc_schema_gen registry`
+to refresh the generated JSON artifact.
+
+Phase 11a can project Windows Sandbox provision plus the common state-aware
+roots without an `experimental` member. Selecting IsolationSession or WSLC
+currently fails with an explicit migration error because their provision data
+still lives under `experimental`; publication must not silently omit it.
 
 Both Rust model crates gate Schemars behind `schema-gen`, so normal builds do
 not carry it. The exact `OptionalField<T>` schema is transparent and

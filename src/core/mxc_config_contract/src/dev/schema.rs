@@ -8,8 +8,10 @@ use serde_json::{json, Value};
 
 use super::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StableCandidateRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
-    WslcProvisionRequest,
+    PublicationProfile, StableCandidateDeprovisionRequest, StableCandidateExecRequest,
+    StableCandidateOneShotRequest, StableCandidateStartRequest, StableCandidateStopRequest,
+    StableCandidateWindowsSandboxProvisionRequest, StartRequest, StateAwareBackend, StopRequest,
+    WindowsSandboxProvisionRequest, WslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -189,45 +191,123 @@ pub fn development_schema() -> Value {
     })
 }
 
-/// Generates the narrowed one-shot schema that publication freezes.
-pub fn publication_schema() -> Value {
+fn publication_provision_dispatch(backends: &[(StateAwareBackend, Value)]) -> Value {
+    backends
+        .iter()
+        .rev()
+        .fold(Value::Bool(false), |otherwise, (backend, selected)| {
+            branch(
+                discriminator("containment", backend.as_str()),
+                selected.clone(),
+                otherwise,
+            )
+        })
+}
+
+/// Generates the narrowed schema selected by a Rust publication profile.
+///
+/// # Errors
+///
+/// Returns an error when the profile is empty, selects a backend more than
+/// once, or selects a backend whose provision fields still require migration
+/// from the development-only `experimental` block.
+pub fn publication_schema_for_profile(profile: PublicationProfile) -> Result<Value, String> {
     let mut generator = SchemaGenerator::default();
-    let root = subschema::<StableCandidateRequest>(&mut generator);
+    let one_shot = profile
+        .one_shot
+        .then(|| subschema::<StableCandidateOneShotRequest>(&mut generator));
+    let mut selected_backends = Vec::new();
+    for backend in profile.state_aware_backends {
+        if selected_backends
+            .iter()
+            .any(|(selected, _)| selected == backend)
+        {
+            return Err(format!(
+                "publication profile selects {backend:?} more than once"
+            ));
+        }
+        let root = match backend {
+            StateAwareBackend::WindowsSandbox => {
+                subschema::<StableCandidateWindowsSandboxProvisionRequest>(&mut generator)
+            }
+            StateAwareBackend::IsolationSession => {
+                return Err(
+                    "IsolationSession cannot publish until appId moves from experimental.isolation_session.provision to its permanent field location"
+                        .to_string(),
+                );
+            }
+            StateAwareBackend::Wslc => {
+                return Err(
+                    "WSLC cannot publish until provision settings move from experimental.wslc.provision to their permanent field location"
+                        .to_string(),
+                );
+            }
+        };
+        selected_backends.push((*backend, root));
+    }
+
+    let state_aware = if selected_backends.is_empty() {
+        None
+    } else {
+        Some(phase_dispatch(
+            publication_provision_dispatch(&selected_backends),
+            subschema::<StableCandidateStartRequest>(&mut generator),
+            subschema::<StableCandidateExecRequest>(&mut generator),
+            subschema::<StableCandidateStopRequest>(&mut generator),
+            subschema::<StableCandidateDeprovisionRequest>(&mut generator),
+        ))
+    };
+    let dispatch = match (one_shot, state_aware) {
+        (Some(one_shot), Some(state_aware)) => {
+            branch(json!({ "required": ["phase"] }), state_aware, one_shot)
+        }
+        (Some(one_shot), None) => one_shot,
+        (None, Some(state_aware)) => state_aware,
+        (None, None) => return Err("publication profile selects no request roots".to_string()),
+    };
+
     let mut definitions =
         serde_json::to_value(generator.take_definitions()).expect("definitions serialize to JSON");
-    add_property_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "processContainer",
-        "appContainer",
-    );
-    exclude_duplicate_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "processContainer",
-        "appContainer",
-    );
-    add_property_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "seatbelt",
-        "macos_sandbox",
-    );
-    exclude_duplicate_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "seatbelt",
-        "macos_sandbox",
-    );
+    if profile.one_shot {
+        add_property_alias(
+            &mut definitions,
+            "OneShotRequest",
+            "processContainer",
+            "appContainer",
+        );
+        exclude_duplicate_alias(
+            &mut definitions,
+            "OneShotRequest",
+            "processContainer",
+            "appContainer",
+        );
+        add_property_alias(
+            &mut definitions,
+            "OneShotRequest",
+            "seatbelt",
+            "macos_sandbox",
+        );
+        exclude_duplicate_alias(
+            &mut definitions,
+            "OneShotRequest",
+            "seatbelt",
+            "macos_sandbox",
+        );
+    }
 
-    json!({
+    Ok(json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "MXC Configuration 0.9.0-alpha",
         "description": "Immutable published MXC configuration contract.",
         "$comment": "GENERATED FILE - DO NOT EDIT. Published contracts are immutable and verified by scripts/versioning/check-contract-freeze.js.",
-        "allOf": [root],
+        "allOf": [dispatch],
         "definitions": definitions
-    })
+    }))
+}
+
+/// Generates the schema selected by the checked-in v0.9 publication profile.
+pub fn publication_schema() -> Result<Value, String> {
+    publication_schema_for_profile(V0_9_0_ALPHA_PUBLICATION_PROFILE)
 }
 
 #[cfg(test)]
@@ -334,12 +414,12 @@ mod tests {
     #[test]
     fn generation_is_deterministic() {
         assert_eq!(development_schema(), development_schema());
-        assert_eq!(publication_schema(), publication_schema());
+        assert_eq!(publication_schema().unwrap(), publication_schema().unwrap());
     }
 
     #[test]
-    fn publication_schema_contains_only_the_stable_one_shot_surface() {
-        let schema = publication_schema();
+    fn current_publication_profile_contains_only_the_stable_one_shot_surface() {
+        let schema = publication_schema().unwrap();
         let serialized = serde_json::to_string(&schema).unwrap();
         let root = &schema["definitions"]["OneShotRequest"];
 
@@ -368,6 +448,75 @@ mod tests {
         ] {
             assert!(serialized.contains(&format!("\"{stable}\"")));
         }
+    }
+
+    #[test]
+    fn publication_profile_can_select_windows_sandbox_state_aware_roots() {
+        let schema = publication_schema_for_profile(PublicationProfile {
+            one_shot: true,
+            state_aware_backends: &[StateAwareBackend::WindowsSandbox],
+        })
+        .unwrap();
+        let definitions = definitions(&schema);
+        for root in [
+            "OneShotRequest",
+            "WindowsSandboxProvisionRequest",
+            "StartRequest",
+            "ExecRequest",
+            "StopRequest",
+            "DeprovisionRequest",
+        ] {
+            assert!(definitions.contains_key(root), "missing root {root}");
+            assert!(
+                definitions[root]["properties"]
+                    .get("experimental")
+                    .is_none(),
+                "{root} contains experimental"
+            );
+        }
+        assert!(!definitions.contains_key("IsolationSessionProvisionRequest"));
+        assert!(!definitions.contains_key("WslcProvisionRequest"));
+        let serialized = serde_json::to_string(&schema["allOf"][0]).unwrap();
+        assert!(serialized.contains("\"windows_sandbox\""));
+        assert!(serialized.contains("\"start\""));
+        assert!(serialized.contains("\"exec\""));
+        assert!(serialized.contains("\"stop\""));
+        assert!(serialized.contains("\"deprovision\""));
+    }
+
+    #[test]
+    fn publication_profile_rejects_backends_with_unmigrated_experimental_fields() {
+        const ISOLATION_SESSION: &[StateAwareBackend] = &[StateAwareBackend::IsolationSession];
+        const WSLC: &[StateAwareBackend] = &[StateAwareBackend::Wslc];
+        for (backends, message) in [(ISOLATION_SESSION, "appId"), (WSLC, "provision settings")] {
+            let error = publication_schema_for_profile(PublicationProfile {
+                one_shot: true,
+                state_aware_backends: backends,
+            })
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn publication_profile_rejects_empty_or_duplicate_root_selections() {
+        assert!(publication_schema_for_profile(PublicationProfile {
+            one_shot: false,
+            state_aware_backends: &[],
+        })
+        .unwrap_err()
+        .contains("no request roots"));
+
+        const DUPLICATE_WINDOWS_SANDBOX: &[StateAwareBackend] = &[
+            StateAwareBackend::WindowsSandbox,
+            StateAwareBackend::WindowsSandbox,
+        ];
+        assert!(publication_schema_for_profile(PublicationProfile {
+            one_shot: true,
+            state_aware_backends: DUPLICATE_WINDOWS_SANDBOX,
+        })
+        .unwrap_err()
+        .contains("more than once"));
     }
 
     #[test]

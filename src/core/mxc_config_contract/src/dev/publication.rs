@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Stable-candidate projection used by contract publication tooling.
+//! Stable-candidate projections and profiles used by publication tooling.
 
 use super::network::Network;
 use super::primitives::OptionalField;
@@ -9,7 +9,51 @@ use super::stable::{
     Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
     Telemetry, Ui,
 };
-use super::Version;
+use super::{
+    DeprovisionPhase, ExecPhase, ProvisionPhase, StartPhase, StopPhase, Version,
+    WindowsSandboxContainment,
+};
+
+/// A state-aware backend that may be selected by a publication profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateAwareBackend {
+    /// Windows Sandbox state-aware lifecycle.
+    WindowsSandbox,
+    /// IsolationSession state-aware lifecycle.
+    IsolationSession,
+    /// WSL container state-aware lifecycle.
+    Wslc,
+}
+
+impl StateAwareBackend {
+    /// Returns the stable containment spelling used by generated metadata.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StateAwareBackend::WindowsSandbox => "windows_sandbox",
+            StateAwareBackend::IsolationSession => "isolation_session",
+            StateAwareBackend::Wslc => "wslc",
+        }
+    }
+}
+
+/// The exact request-root set to freeze when a development contract publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicationProfile {
+    /// Whether the stable one-shot root is included.
+    pub one_shot: bool,
+    /// Graduated state-aware provision backends. Selecting any backend also
+    /// includes the shared start, exec, stop, and deprovision roots.
+    pub state_aware_backends: &'static [StateAwareBackend],
+}
+
+/// Conservative v0.9 publication profile.
+///
+/// Backend graduation is decided only after the `experimental` block has been
+/// removed and every selected provision field has a permanent stable location.
+pub const V0_9_0_ALPHA_PUBLICATION_PROFILE: PublicationProfile = PublicationProfile {
+    one_shot: true,
+    state_aware_backends: &[],
+};
 
 string_enum! {
     /// Stable containment selections eligible for publication.
@@ -33,7 +77,7 @@ string_enum! {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Request {
+pub struct OneShotRequest {
     /// Optional JSON Schema reference for editor validation.
     #[serde(rename = "$schema", default)]
     pub schema: OptionalField<String>,
@@ -77,6 +121,135 @@ pub struct Request {
     /// Optional runtime configuration settings.
     #[serde(default)]
     pub runtime_config: OptionalField<RuntimeConfig>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable Windows Sandbox state-aware provision request.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema-gen",
+    schemars(rename = "WindowsSandboxProvisionRequest")
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowsSandboxProvisionRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact provision phase marker.
+    pub phase: ProvisionPhase,
+    /// Exact Windows Sandbox containment marker.
+    pub containment: WindowsSandboxContainment,
+    /// Optional filesystem policy.
+    #[serde(default)]
+    pub filesystem: OptionalField<Filesystem>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable state-aware start request shared by published backends.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "StartRequest"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact start phase marker.
+    pub phase: StartPhase,
+    /// Identifier returned by the provision phase.
+    pub sandbox_id: String,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable state-aware exec request shared by published backends.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "ExecRequest"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact exec phase marker.
+    pub phase: ExecPhase,
+    /// Identifier of the sandbox to execute in.
+    pub sandbox_id: String,
+    /// Process to execute in the sandbox.
+    pub process: Process,
+    /// Optional per-execution network settings.
+    #[serde(default)]
+    pub network: OptionalField<Network>,
+    /// Optional per-execution runtime values.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable state-aware stop request shared by published backends.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "StopRequest"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StopRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact stop phase marker.
+    pub phase: StopPhase,
+    /// Identifier returned by the provision phase.
+    pub sandbox_id: String,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}
+
+/// Stable state-aware deprovision request shared by published backends.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "DeprovisionRequest"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeprovisionRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// The exact contract version marker.
+    pub version: Version,
+    /// Exact deprovision phase marker.
+    pub phase: DeprovisionPhase,
+    /// Identifier of the sandbox to deprovision.
+    pub sandbox_id: String,
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,

@@ -245,11 +245,17 @@ pub use one_shot::{
 };
 pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use publication::{
-    Containment as StableCandidateContainment, Request as StableCandidateRequest,
+    Containment as StableCandidateContainment,
+    DeprovisionRequest as StableCandidateDeprovisionRequest,
+    ExecRequest as StableCandidateExecRequest, OneShotRequest as StableCandidateOneShotRequest,
+    PublicationProfile, StartRequest as StableCandidateStartRequest, StateAwareBackend,
+    StopRequest as StableCandidateStopRequest,
+    WindowsSandboxProvisionRequest as StableCandidateWindowsSandboxProvisionRequest,
+    V0_9_0_ALPHA_PUBLICATION_PROFILE,
 };
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
-pub use schema::{development_schema, publication_schema};
+pub use schema::{development_schema, publication_schema, publication_schema_for_profile};
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
