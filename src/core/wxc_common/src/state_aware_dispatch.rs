@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn start_without_sandbox_id_cannot_reach_binding() {
         let error = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"start"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"start"}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
         )
         .unwrap_err();
@@ -1021,7 +1021,7 @@ mod tests {
     #[test]
     fn misplaced_phase_configuration_is_rejected_before_dispatch() {
         let err = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc",
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"iso:abc",
                 "experimental":{"isolation_session":{"provision":{"appId":"small"}}}}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
         )
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn provision_without_containment_cannot_reach_binding() {
         let err = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision"}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
         )
         .unwrap_err();

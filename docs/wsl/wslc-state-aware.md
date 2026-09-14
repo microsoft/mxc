@@ -111,7 +111,7 @@ acknowledges that WSLC cannot independently restrict those directions.
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-The exact `0.9.0-alpha` request root is selected before backend dispatch.
+The exact `0.10.0-alpha` request root is selected before backend dispatch.
 Fields absent from that phase's closed root fail structurally with
 `malformed_request`: provision excludes `ui`, start / stop / deprovision admit
 no filesystem, network, UI, or process policy, and exec excludes filesystem and

@@ -51,7 +51,7 @@ pub struct PublicationProfile {
 ///
 /// Backend graduation is decided only after the `experimental` block has been
 /// removed and every selected provision field has a permanent stable location.
-pub const V0_9_0_ALPHA_PUBLICATION_PROFILE: PublicationProfile = PublicationProfile {
+pub const V0_10_0_ALPHA_PUBLICATION_PROFILE: PublicationProfile = PublicationProfile {
     one_shot: true,
     state_aware_backends: &[],
 };

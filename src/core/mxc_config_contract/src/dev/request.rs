@@ -8,7 +8,7 @@ use super::state_aware::{
     DeprovisionRequest, ExecRequest, ProvisionRequest, StartRequest, StopRequest,
 };
 
-/// A validated request for the mutable `0.9.0-alpha` development contract.
+/// A validated request for the mutable `0.10.0-alpha` development contract.
 #[derive(Debug)]
 pub enum Request {
     /// A one-shot execution request with no lifecycle phase.
@@ -108,7 +108,7 @@ pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), Request
 /// An absent `phase` selects the one-shot contract. A present phase selects its
 /// corresponding state-aware contract, with provision requests additionally
 /// selected by their required `containment` declaration. The selected concrete
-/// request still requires the exact `0.9.0-alpha` version marker.
+/// request still requires the exact `0.10.0-alpha` version marker.
 ///
 /// # Errors
 ///

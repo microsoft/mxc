@@ -258,7 +258,7 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.9.0-alpha",
+        Version = "0.10.0-alpha",
         Network = new NetworkPolicy { AllowOutbound = true },
     },
     "python3 -c 'print(42)'")
@@ -295,7 +295,7 @@ configuration of its own:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.9.0-alpha",
+        Version = "0.10.0-alpha",
         Network = new NetworkPolicy
         {
             Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
@@ -752,7 +752,7 @@ var wslc = new WslcProvisionOptions
 };
 ```
 
-All state-aware backends use the exact development schema `0.9.0-alpha`.
+All state-aware backends use the exact development schema `0.10.0-alpha`.
 `Version` may be omitted or explicitly set to that registered value; the SDK
 rejects other values rather than emitting an envelope for an unregistered
 state-aware contract. State-aware exec options expose working directory,

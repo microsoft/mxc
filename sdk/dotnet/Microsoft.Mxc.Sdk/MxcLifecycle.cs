@@ -29,7 +29,7 @@ public static class MxcLifecycle
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
 
-    private const string InheritDefaultEnvironmentVersion = "0.9.0-alpha";
+    private const string InheritDefaultEnvironmentVersion = "0.10.0-alpha";
 
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";

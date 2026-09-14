@@ -1,0 +1,25 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "echo hello",
+    "inheritDefaultEnv": true
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  },
+  "processContainer": {
+    "capabilities": [
+      "internetClient"
+    ]
+  },
+  "telemetry": {
+    "enabled": false
+  }
+}

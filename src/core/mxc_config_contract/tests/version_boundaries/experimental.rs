@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::assert_v09_introduces;
+use crate::common::{assert_v09_introduces, assert_v10_introduces};
 
 #[test]
-fn development_test_field_is_introduced_in_v09() {
-    assert_v09_introduces(
+fn development_test_field_is_introduced_in_v10() {
+    assert_v10_introduces(
         r#""test": {
             "message": "version boundary test"
         }"#,
@@ -18,8 +18,8 @@ fn telemetry_is_introduced_in_v09() {
 }
 
 #[test]
-fn windows_sandbox_section_is_introduced_in_v09() {
-    assert_v09_introduces(
+fn windows_sandbox_section_is_introduced_in_v10() {
+    assert_v10_introduces(
         r#""windowsSandbox": {
             "idleTimeoutMs": 60000, "daemonPipeName": "mxc-boundary-test"
         }"#,
@@ -27,8 +27,8 @@ fn windows_sandbox_section_is_introduced_in_v09() {
 }
 
 #[test]
-fn wslc_section_is_introduced_in_v09() {
-    assert_v09_introduces(
+fn wslc_section_is_introduced_in_v10() {
+    assert_v10_introduces(
         r#""wslc": {
             "targetOs": "linux",
             "image": "ubuntu",

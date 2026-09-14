@@ -93,7 +93,7 @@ For example:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "provision",
   "containment": "isolation_session",
   "network": {
@@ -330,7 +330,7 @@ explicit empty `appId` remains `Some("")`, and exact input rejects `appId:
 null`. These distinctions survive binding unchanged, so application identity
 resolution remains owned by the backend.
 
-The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
+The exact `0.10.0-alpha` state-aware request roots reject structurally excluded
 fields before backend validation. For example, supplied `ui`, noncanonical
 provision `network` shapes, and policy on phases that do not define it surface
 as `malformed_request`. Requests that pass the exact structural contract but

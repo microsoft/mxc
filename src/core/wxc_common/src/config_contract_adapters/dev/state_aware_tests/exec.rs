@@ -22,7 +22,7 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false},"network":{"egress":{"default":"deny"},"ingress":{"default":"deny"}},"runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{id}","process":{{"commandLine":"echo hello","cwd":"/work","env":["FIRST=one","SECOND=two"],"timeout":60}}{extra}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"exec","sandboxId":"{id}","process":{{"commandLine":"echo hello","cwd":"/work","env":["FIRST=one","SECOND=two"],"timeout":60}}{extra}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(
@@ -64,7 +64,7 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
 #[test]
 fn minimal_exec_keeps_omitted_process_fields_absent() {
     let (common, operation) = adapt(
-        r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"id","process":{"commandLine":"echo"}}"#,
+        r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"id","process":{"commandLine":"echo"}}"#,
     );
     assert!(matches!(operation, StateAwareOperation::Exec { .. }));
     let process = common.process.unwrap();

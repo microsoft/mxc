@@ -183,7 +183,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
         Containment::Wslc(_) | Containment::IsolationSession
     ) {
         return Err(error(
-            "selected containment requires schema version 0.9.0-alpha",
+            "selected containment requires schema version 0.10.0-alpha",
         ));
     }
     let process_container = selected_process_container(containment);

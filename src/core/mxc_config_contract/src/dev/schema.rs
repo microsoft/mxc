@@ -13,7 +13,7 @@ use super::{
     StableCandidateStartRequest, StableCandidateStopRequest,
     StableCandidateWindowsSandboxProvisionRequest, StableCandidateWslcProvisionRequest,
     StartRequest, StateAwareBackend, StopRequest, WindowsSandboxProvisionRequest,
-    WslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
+    WslcProvisionRequest, V0_10_0_ALPHA_PUBLICATION_PROFILE,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -131,7 +131,7 @@ fn exclude_duplicate_alias(
     }));
 }
 
-/// Generates the unrendered JSON Schema for the mutable `0.9.0-alpha`
+/// Generates the unrendered JSON Schema for the mutable `0.10.0-alpha`
 /// development contract.
 ///
 /// The document selects one of eight closed request roots through nested
@@ -185,9 +185,9 @@ pub fn development_schema() -> Value {
 
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "MXC Configuration 0.9.0-alpha",
+        "title": "MXC Configuration 0.10.0-alpha",
         "description": "Exact mutable MXC development configuration contract.",
-        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json. This exact contract is authoritative for declared 0.9.0-alpha requests. Request roots are selected by phase and provision containment.",
+        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json. This exact contract is authoritative for declared 0.10.0-alpha requests. Request roots are selected by phase and provision containment.",
         "allOf": [dispatch],
         "definitions": definitions
     })
@@ -293,7 +293,7 @@ pub fn publication_schema_for_profile(profile: PublicationProfile) -> Result<Val
 
     Ok(json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "MXC Configuration 0.9.0-alpha",
+        "title": "MXC Configuration 0.10.0-alpha",
         "description": "Immutable published MXC configuration contract.",
         "$comment": "GENERATED FILE - DO NOT EDIT. Published contracts are immutable and verified by scripts/versioning/check-contract-freeze.js.",
         "allOf": [dispatch],
@@ -303,7 +303,7 @@ pub fn publication_schema_for_profile(profile: PublicationProfile) -> Result<Val
 
 /// Generates the schema selected by the checked-in v0.9 publication profile.
 pub fn publication_schema() -> Result<Value, String> {
-    publication_schema_for_profile(V0_9_0_ALPHA_PUBLICATION_PROFILE)
+    publication_schema_for_profile(V0_10_0_ALPHA_PUBLICATION_PROFILE)
 }
 
 #[cfg(test)]
@@ -541,7 +541,7 @@ mod tests {
                 .as_str()
                 .expect("version reference");
             let version = resolve_definition(version_ref, definitions);
-            assert_eq!(version["oneOf"][0]["enum"], json!(["0.9.0-alpha"]));
+            assert_eq!(version["oneOf"][0]["enum"], json!(["0.10.0-alpha"]));
         }
 
         let one_shot = &definitions["OneShotRequest"];

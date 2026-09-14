@@ -35,7 +35,7 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
 /** The exact contract currently registered for state-aware requests. */
-export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+export const STATE_AWARE_VERSION = '0.10.0-alpha' as const;
 
 /** Exact contract versions accepted by state-aware config types. */
 export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;

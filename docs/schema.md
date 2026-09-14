@@ -4,7 +4,7 @@
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](../schemas/dev/mxc-config.schema.0.9.0-alpha.json)
+[`schemas/dev/mxc-config.schema.0.10.0-alpha.json`](../schemas/dev/mxc-config.schema.0.10.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -16,7 +16,7 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -80,14 +80,14 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
-### IsolationSession unrestricted networking (0.9)
+### IsolationSession unrestricted networking (0.10)
 
-IsolationSession cannot restrict networking. Exact v0.9 requests must describe
+IsolationSession cannot restrict networking. Exact v0.10 requests must describe
 that actual posture through the standard directional network fields:
 
 ```json
 {
-    "version": "0.9.0-alpha",
+    "version": "0.10.0-alpha",
     "phase": "provision",
     "containment": "isolation_session",
     "network": {
@@ -103,8 +103,8 @@ that actual posture through the standard directional network fields:
 All three directional values must be explicitly `allow`; omission defaults to
 deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
 An absent or empty `network` object is rejected. The existing experimental
-execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
-unchanged by this addition.
+execution opt-in remains required. Published v0.6 through v0.9 contracts are
+unchanged by this development-only addition.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
@@ -116,7 +116,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.9.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -403,15 +403,15 @@ state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `ExecutionRequest` to run once, a state-aware envelope identifies which
 phase is being driven against an existing provisioned sandbox.
 
-State-aware envelopes currently require the exact `0.9.0-alpha` development
-contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
+State-aware envelopes currently require the exact `0.10.0-alpha` development
+contract. The published `0.6.0-alpha` through `0.9.0-alpha`
 contracts contain only one-shot request roots. The state-aware field shape is
 documented by the exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-    "version": "0.9.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+    "version": "0.10.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,
@@ -445,7 +445,7 @@ Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`
 
 ### Schema Versioning
 
-MXC config files include an optional `version` field using
+MXC config files include a required `version` field using
 [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
 this to detect incompatible configs and provide clear upgrade guidance. If
 `version` is absent, the config is assumed compatible with the current version.
@@ -455,19 +455,20 @@ yet stable — breaking changes may occur in any release. Once the schema is
 stable, version `1.0.0` (no suffix) will be released. After `1.0.0`, breaking
 changes require a major version bump per semver.
 
-The parser compares the config's major.minor against its supported version
-(pre-release labels are ignored for comparison):
+The parser selects an exact registered contract. Patch and prerelease spellings
+are significant:
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.6, <=0.9 | Accepted (assumed compatible) |
-| `"0.5.0-alpha"` | >=0.6, <=0.9 | **Rejected** — "older than supported" |
-| `"0.6.0-alpha"` | >=0.6, <=0.9 | Accepted (0.6 in range) |
-| `"0.7.0-alpha"` | >=0.6, <=0.9 | Accepted (0.7 in range) |
-| `"0.8.0-alpha"` | >=0.6, <=0.9 | Accepted (0.8 in range) |
-| `"0.9.0-alpha"` | >=0.6, <=0.9 | Accepted (0.9 in range) |
-| `"0.10.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
+| absent | exact registry | **Rejected** — missing declaration |
+| `"0.5.0-alpha"` | exact registry | **Rejected** — older than supported |
+| `"0.6.0-alpha"` | exact registry | Accepted published contract |
+| `"0.7.0-alpha"` | exact registry | Accepted published contract |
+| `"0.8.0-alpha"` | exact registry | Accepted published contract |
+| `"0.9.0-alpha"` | exact registry | Accepted published contract |
+| `"0.10.0-alpha"` | exact registry | Accepted development contract |
+| `"0.10.0"` | exact registry | **Rejected** — unregistered spelling |
+| `"1.0.0"` | exact registry | **Rejected** — newer than supported |
 
 #### When to bump
 

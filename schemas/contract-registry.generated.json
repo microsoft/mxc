@@ -44,21 +44,35 @@
       "version": "0.8.0-alpha"
     },
     {
-      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/dev",
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/v0_9",
       "builderPath": "src/core/mxc_engine/src/policy/exact/v0_9.rs",
-      "contractModulePath": "src/core/mxc_config_contract/src/dev",
+      "contractModulePath": "src/core/mxc_config_contract/src/published/v0_9_0_alpha",
       "fixturePath": "src/core/mxc_config_contract/tests/v0_9_0_alpha",
+      "publicationProfile": null,
+      "rustModule": "v0_9_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+      "schemaPath": "schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+      "schemaSha256": "0f8e8373a144b6046634f93885d4c9d9f041428ea1673c42f97d2889589499f8",
+      "status": "published",
+      "typescriptPath": null,
+      "version": "0.9.0-alpha"
+    },
+    {
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/dev",
+      "builderPath": "src/core/mxc_engine/src/policy/exact/v0_10.rs",
+      "contractModulePath": "src/core/mxc_config_contract/src/dev",
+      "fixturePath": "src/core/mxc_config_contract/tests/v0_10_0_alpha",
       "publicationProfile": {
         "oneShot": true,
         "stateAwareBackends": []
       },
-      "rustModule": "v0_9_0_alpha",
-      "schemaId": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-      "schemaPath": "schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+      "rustModule": "v0_10_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+      "schemaPath": "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
       "schemaSha256": null,
       "status": "development",
-      "typescriptPath": "sdk/node/src/generated/v0_9_0_alpha/wire.ts",
-      "version": "0.9.0-alpha"
+      "typescriptPath": "sdk/node/src/generated/v0_10_0_alpha/wire.ts",
+      "version": "0.10.0-alpha"
     }
   ],
   "formatVersion": 1

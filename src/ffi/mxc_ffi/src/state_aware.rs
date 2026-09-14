@@ -483,7 +483,7 @@ mod tests {
             r#""appIdd":"typo""#,
         ] {
             let json = format!(
-                "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+                "{{\n  \"version\":\"0.10.0-alpha\",\n  \"phase\":\"provision\",\n  \
                  \"containment\":\"isolation_session\",\n  \
                  \"_comment\":\"typed payload diagnostic\",\n  \
                  \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn typed_provision_configuration_reaches_backend_semantic_validation() {
         let json = serde_json::json!({
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn non_dry_run_exec_is_rejected() {
         let mut out = call(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST);
@@ -553,7 +553,7 @@ mod tests {
         // (A real isolation_session provision is avoided: on a capable host it
         // would actually provision a sandbox. See the mxc-sdk state_aware test.)
         let mut out = call(
-            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn null_out_reports_null_argument() {
         let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"}"#,
         )
         .unwrap();
         // SAFETY: valid string, deliberately-null out.
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn exec_null_out_handle_is_null_argument() {
         let j =
-            CString::new(r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
+            CString::new(r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out_handle.
         let status =
             unsafe { mxc_state_aware_exec(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn exec_non_exec_phase_reports_error_and_null_handle() {
         let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"}"#,
         )
         .unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn experimental_backend_is_refused_without_the_optin() {
         let mut out = call_opt(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             true,
             false,
         );
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn the_optin_admits_an_experimental_backend() {
         let mut out = call_opt(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             true,
             true,
         );
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn exec_honours_the_optin_on_its_own_path() {
         let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
         )
         .unwrap();
 
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn attached_rejects_a_null_outcome_before_running_anything() {
         let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:x",
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"isolationsession:x",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#,
         )
         .unwrap();
@@ -729,7 +729,7 @@ mod tests {
         // this is independent of the test binary's stdio. The message assertion
         // discriminates it from the other refusals, which share this status.
         let (status, outcome, mut err) = attached(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session",
                 "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             true,
         );

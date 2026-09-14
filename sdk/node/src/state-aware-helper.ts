@@ -18,7 +18,7 @@ export { STATE_AWARE_VERSION };
 // Keep the WSLC constant separate because it is part of the public SDK surface
 // and remains independently versioned, even though every state-aware backend
 // currently uses the exact 0.9 development contract.
-export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
+export const WSLC_STATE_AWARE_VERSION = '0.10.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is

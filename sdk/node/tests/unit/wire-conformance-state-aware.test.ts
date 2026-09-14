@@ -57,7 +57,7 @@ import type {
   StartRequest,
   StopRequest,
   DeprovisionRequest,
-} from '../../src/generated/v0_9_0_alpha/wire.js';
+} from '../../src/generated/v0_10_0_alpha/wire.js';
 
 import type {
   AssertTrue,

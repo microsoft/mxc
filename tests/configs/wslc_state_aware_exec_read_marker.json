@@ -1,9 +1,9 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "exec",
-    "sandboxId": "{{SANDBOX_ID}}",
-    "process": {
-        "commandLine": "cat /tmp/wslc_sa_marker",
-        "timeout": 30000
-    }
+  "version": "0.10.0-alpha",
+  "phase": "exec",
+  "sandboxId": "{{SANDBOX_ID}}",
+  "process": {
+    "commandLine": "cat /tmp/wslc_sa_marker",
+    "timeout": 30000
+  }
 }

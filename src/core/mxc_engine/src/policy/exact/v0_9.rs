@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev as contract;
+use mxc_config_contract::published::v0_9_0_alpha as contract;
 use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{
@@ -11,7 +11,7 @@ use crate::configs::{
 
 use super::super::{
     ClipboardPolicy, Containment, NetworkAction, NetworkEgressSection, NetworkIngressSection,
-    NetworkProtocol, NetworkRuleSection, UiSection, WslcSection,
+    NetworkProtocol, NetworkRuleSection, UiSection,
 };
 use super::{
     error, non_empty_port, normalized_capabilities, selected_process_container, PreparedInput,
@@ -152,41 +152,18 @@ fn map_ingress(value: &NetworkIngressSection) -> contract::NetworkIngress {
     }
 }
 
-fn map_wslc(wslc: &WslcSection) -> Result<contract::OneShotWslc, MxcError> {
-    let port_mappings = if wslc.port_mappings.is_empty() {
-        Default::default()
-    } else {
-        contract::OptionalField::present(
-            wslc.port_mappings
-                .iter()
-                .map(|(windows_port, container_port)| {
-                    Ok(contract::PortMapping {
-                        windows_port: non_empty_port(*windows_port, "windowsPort")?,
-                        container_port: non_empty_port(*container_port, "containerPort")?,
-                        protocol: contract::OptionalField::present(
-                            contract::TransportProtocol::Tcp,
-                        ),
-                    })
-                })
-                .collect::<Result<Vec<_>, MxcError>>()?,
-        )
-    };
-    Ok(contract::OneShotWslc {
-        target_os: Default::default(),
-        image: contract::OptionalField::present(wslc.image.clone()),
-        image_tar_path: optional!(contract, wslc.image_tar_path.clone()),
-        cpu_count: optional!(contract, wslc.cpu_count),
-        memory_mb: optional!(contract, wslc.memory_mb),
-        gpu: contract::OptionalField::present(wslc.gpu),
-        storage_path: optional!(contract, wslc.storage_path.clone()),
-        port_mappings,
-    })
-}
-
-pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotRequest, MxcError> {
+pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcError> {
     let policy = input.policy;
     let containment = input.containment;
     let network_format = input.network_format;
+    if matches!(
+        containment,
+        Containment::Wslc(_) | Containment::IsolationSession
+    ) {
+        return Err(error(
+            "selected containment requires schema version 0.10.0-alpha",
+        ));
+    }
     let process_container = selected_process_container(containment);
     let network = match policy.network.as_ref() {
         // A runtime-only section does not author a sandbox posture. In
@@ -262,26 +239,21 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
             })
         })
         .transpose()?;
-    let wslc = match containment {
-        Containment::Wslc(wslc) => contract::OptionalField::present(map_wslc(wslc)?),
-        _ => Default::default(),
-    };
-    Ok(contract::OneShotRequest {
+    Ok(contract::Request {
         schema: Default::default(),
         comment: Default::default(),
         version: contract::Version::V0_9_0Alpha,
         container_id: contract::OptionalField::present(input.container_id.clone()),
         containment: contract::OptionalField::present(
             if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
-                contract::OneShotContainment::Seatbelt
+                contract::Containment::Seatbelt
             } else {
                 match containment {
-                    Containment::Process => contract::OneShotContainment::Process,
-                    Containment::ProcessContainer(_) => {
-                        contract::OneShotContainment::ProcessContainer
+                    Containment::Process => contract::Containment::Process,
+                    Containment::ProcessContainer(_) => contract::Containment::ProcessContainer,
+                    Containment::Wslc(_) | Containment::IsolationSession => {
+                        unreachable!("development containment rejected above")
                     }
-                    Containment::Wslc(_) => contract::OneShotContainment::Wslc,
-                    Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
                 }
             },
         ),
@@ -342,8 +314,5 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 })
         ),
         telemetry: Default::default(),
-        test: Default::default(),
-        windows_sandbox: Default::default(),
-        wslc,
     })
 }

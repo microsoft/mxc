@@ -102,10 +102,11 @@ fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     // Keep this exhaustive after the status gate so every future development
     // contract must explicitly wire its schema source into the generator.
     let mut schema = match version {
-        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::development_schema(),
+        ContractVersion::V0_10_0Alpha => mxc_config_contract::dev::development_schema(),
         ContractVersion::V0_8_0Alpha
         | ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha => {
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_9_0Alpha => {
             unreachable!("published contracts were rejected above")
         }
     };
@@ -123,10 +124,11 @@ fn publication_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     }
 
     let schema = match version {
-        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::publication_schema()?,
+        ContractVersion::V0_10_0Alpha => mxc_config_contract::dev::publication_schema()?,
         ContractVersion::V0_8_0Alpha
         | ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha => {
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_9_0Alpha => {
             unreachable!("published contracts were rejected above")
         }
     };
@@ -216,8 +218,8 @@ fn versions_json() -> Value {
 
 fn publication_profile_json(version: ContractVersion) -> Value {
     match version {
-        ContractVersion::V0_9_0Alpha => {
-            let profile = mxc_config_contract::dev::V0_9_0_ALPHA_PUBLICATION_PROFILE;
+        ContractVersion::V0_10_0Alpha => {
+            let profile = mxc_config_contract::dev::V0_10_0_ALPHA_PUBLICATION_PROFILE;
             json!({
                 "oneShot": profile.one_shot,
                 "stateAwareBackends": profile
@@ -229,7 +231,8 @@ fn publication_profile_json(version: ContractVersion) -> Value {
         }
         ContractVersion::V0_6_0Alpha
         | ContractVersion::V0_7_0Alpha
-        | ContractVersion::V0_8_0Alpha => Value::Null,
+        | ContractVersion::V0_8_0Alpha
+        | ContractVersion::V0_9_0Alpha => Value::Null,
     }
 }
 
@@ -397,17 +400,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|record| record["version"] == "0.9.0-alpha")
+            .find(|record| record["version"] == "0.10.0-alpha")
             .unwrap();
 
         assert_eq!(development["status"], "development");
         assert_eq!(
             development["schemaPath"],
-            "schemas/dev/mxc-config.schema.0.9.0-alpha.json"
+            "schemas/dev/mxc-config.schema.0.10.0-alpha.json"
         );
         assert_eq!(
             development["typescriptPath"],
-            "sdk/node/src/generated/v0_9_0_alpha/wire.ts"
+            "sdk/node/src/generated/v0_10_0_alpha/wire.ts"
         );
         assert_eq!(development["publicationProfile"]["oneShot"], true);
         assert_eq!(
@@ -424,7 +427,7 @@ mod tests {
 
     #[test]
     fn publication_schema_is_narrower_than_development() {
-        let (schema, _) = publication_schema(ContractVersion::V0_9_0Alpha).unwrap();
+        let (schema, _) = publication_schema(ContractVersion::V0_10_0Alpha).unwrap();
         let serialized = serde_json::to_string(&schema).unwrap();
         assert!(!serialized.contains("\"experimental\""));
         assert!(!serialized.contains("\"windows_sandbox\""));

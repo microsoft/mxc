@@ -1,12 +1,14 @@
 {
-    "version": "0.9.0-alpha",
-    "phase": "exec",
-    "sandboxId": "{{SANDBOX_ID}}",
-    "filesystem": {
-        "readwritePaths": ["C:\\mxc_wslc_sa_test\\rw"]
-    },
-    "process": {
-        "commandLine": "echo unused",
-        "timeout": 30000
-    }
+  "version": "0.10.0-alpha",
+  "phase": "exec",
+  "sandboxId": "{{SANDBOX_ID}}",
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\mxc_wslc_sa_test\\rw"
+    ]
+  },
+  "process": {
+    "commandLine": "echo unused",
+    "timeout": 30000
+  }
 }

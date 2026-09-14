@@ -60,7 +60,7 @@ fn regenerates_contract_registry() {
     assert_eq!(
         contracts
             .iter()
-            .find(|contract| contract["version"] == "0.9.0-alpha")
+            .find(|contract| contract["version"] == "0.10.0-alpha")
             .unwrap()["status"],
         "development"
     );
@@ -76,9 +76,9 @@ fn publication_dry_run_does_not_modify_the_repository() {
         .args([
             "publish",
             "--version",
-            "0.9.0-alpha",
-            "--next-dev",
             "0.10.0-alpha",
+            "--next-dev",
+            "0.11.0-alpha",
             "--repo-root",
             repo_root.to_str().expect("UTF-8 repository path"),
             "--dry-run",
@@ -92,7 +92,7 @@ fn publication_dry_run_does_not_modify_the_repository() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("then update the Rust registry to publish 0.9.0-alpha"));
+        .contains("then update the Rust registry to publish 0.10.0-alpha"));
 }
 
 #[test]
@@ -103,9 +103,9 @@ fn publication_writes_only_the_stable_schema() {
         .args([
             "publish",
             "--version",
-            "0.9.0-alpha",
-            "--next-dev",
             "0.10.0-alpha",
+            "--next-dev",
+            "0.11.0-alpha",
             "--repo-root",
             repo_root.to_str().expect("UTF-8 repository path"),
         ])
@@ -124,7 +124,7 @@ fn publication_writes_only_the_stable_schema() {
         repo_root
             .join("schemas")
             .join("stable")
-            .join("mxc-config.schema.0.9.0-alpha.json"),
+            .join("mxc-config.schema.0.10.0-alpha.json"),
     )
     .expect("read published schema");
     assert!(!schema.contains("\"experimental\""));
@@ -139,9 +139,9 @@ fn publication_writes_only_the_stable_schema() {
         .args([
             "publish",
             "--version",
-            "0.9.0-alpha",
-            "--next-dev",
             "0.10.0-alpha",
+            "--next-dev",
+            "0.11.0-alpha",
             "--repo-root",
             repo_root.to_str().expect("UTF-8 repository path"),
         ])

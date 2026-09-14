@@ -769,7 +769,7 @@ mod tests {
             ""
         };
         format!(
-            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"{backend}"{network}{extra_fields}}}"#
+            r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"{backend}"{network}{extra_fields}}}"#
         )
     }
 
@@ -953,7 +953,7 @@ mod tests {
     fn state_aware_hash_excludes_credentials_and_unverified_ids() {
         let baseline = parse_state_aware(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"0.10.0-alpha",
                 "phase":"exec",
                 "sandboxId":"wslc:0123456789abcdef0123456789abcdef",
                 "process":{"commandLine":"echo hello"},
@@ -962,7 +962,7 @@ mod tests {
         );
         let mut changed = parse_state_aware(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"0.10.0-alpha",
                 "phase":"exec",
                 "sandboxId":"wslc:alice@example.test",
                 "process":{

@@ -56,11 +56,12 @@ reasons:
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
-  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`.
+  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or
+  `0.10.0-alpha`.
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
   The SDK enforces the same exact set, and state-aware requests require
-  `0.9.0-alpha`. The exact lifecycle registry is the Rust
+  `0.10.0-alpha`. The exact lifecycle registry is the Rust
   `mxc_config_contract::registry::CONTRACTS` table.
   `mxc_schema_gen registry` emits its machine-readable
   `schemas/contract-registry.generated.json` artifact. The compatibility constants in
@@ -87,10 +88,11 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
 │   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
-│   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
+│   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
 └── dev/
     ├── mxc-config.schema.0.9.0-dev.json    (rolling differential oracle)
-    └── mxc-config.schema.0.9.0-alpha.json  (exact closed development contract)
+    └── mxc-config.schema.0.10.0-alpha.json (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
@@ -103,10 +105,10 @@ characterization:
 - `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
   `wxc_common::wire` model. It is retained as a migration oracle for
   differential parser and SDK-conformance tests.
-- `mxc-config.schema.0.9.0-alpha.json` is generated from the exact
+- `mxc-config.schema.0.10.0-alpha.json` is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
-  state-aware roots, including recursively closed experimental structures, and
-  is the authoritative contract for declared `0.9.0-alpha` requests.
+  state-aware roots, including recursively closed development-only structures,
+  and is the authoritative contract for declared `0.10.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
 contract registered for the declared version. The rolling parser and builder
@@ -114,7 +116,9 @@ remain only to characterize intentional migration differences and detect
 unplanned drift. Corpus validation likewise selects the exact registered schema
 from each document's `version`.
 
-Both files are generated development artifacts rather than released schemas.
+Both files are generated development artifacts. Published v0.9 is the immutable
+projection under `schemas/stable/`, with an independently frozen Rust contract,
+adapter, fixtures, and normalized schema digest.
 See [Schema Code Generation](schema-codegen.md) for their regeneration commands
 and independent drift gates.
 
@@ -154,7 +158,7 @@ artifact.
 
 ### IsolationSession directional networking
 
-The mutable `0.9.0-alpha` contract now accepts the standard directional
+The mutable `0.10.0-alpha` contract accepts the standard directional
 all-allow posture for IsolationSession:
 
 ```json
@@ -286,7 +290,7 @@ and the authoritative closed mutable contract under
 
 ```text
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 ```
 
 Also regenerate their TypeScript oracles with the corresponding

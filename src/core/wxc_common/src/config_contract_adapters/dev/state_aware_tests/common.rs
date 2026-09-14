@@ -118,7 +118,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":true}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(operation.phase().as_str(), phase);
@@ -128,7 +128,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.process.is_none());
             assert!(common.filesystem.is_none());
             assert!(common.network.is_none());
-            assert_eq!(common.version.as_deref(), Some("0.9.0-alpha"));
+            assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
             assert_common_matches_legacy(&source, &common);
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));

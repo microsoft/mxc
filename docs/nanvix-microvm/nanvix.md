@@ -164,7 +164,7 @@ including egress allow with omitted ingress defaults.
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containment": "microvm",
   "process": { "commandLine": "print('network enabled')" },
   "network": {

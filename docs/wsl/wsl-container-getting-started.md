@@ -146,7 +146,7 @@ fields before spawning:
 import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
 
 const policy = {
-  version: '0.9.0-alpha',
+  version: '0.10.0-alpha',
   network: {
     egress: { default: 'allow' as const },
     ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
@@ -187,7 +187,7 @@ use mxc_sdk::{
 };
 
 let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
+    version: "0.10.0-alpha".to_string(),
     filesystem: None,
     network: None,
     ui: None,
@@ -333,7 +333,7 @@ address the container can reach:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
   "network": {

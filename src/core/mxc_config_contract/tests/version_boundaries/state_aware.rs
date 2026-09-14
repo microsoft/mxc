@@ -46,9 +46,9 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "Windows Sandbox provision",
         json: r#"{
-            "$schema": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+            "$schema": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.10.0-alpha.json",
             "_comment": "Provision a Windows Sandbox with fixed filesystem policy.",
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
             "filesystem": {
@@ -63,7 +63,7 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "IsolationSession provision",
         json: r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": false},
@@ -82,7 +82,7 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "WSLC provision",
         json: r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "provision",
             "containment": "wslc",
             "filesystem": {
@@ -108,7 +108,7 @@ const CASES: &[StateAwareCase] = &[
         name: "start",
         json: r#"{
             "_comment": "Start the provisioned sandbox.",
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "start",
             "sandboxId": "wsb:1234abcd",
             "telemetry": {"enabled": true}
@@ -118,7 +118,7 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "exec",
         json: r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "exec",
             "sandboxId": "wslc:1234abcd",
             "process": {
@@ -135,7 +135,7 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "stop",
         json: r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "stop",
             "sandboxId": "wsb:1234abcd",
             "telemetry": {"enabled": true}
@@ -145,7 +145,7 @@ const CASES: &[StateAwareCase] = &[
     StateAwareCase {
         name: "deprovision",
         json: r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "phase": "deprovision",
             "sandboxId": "wsb:1234abcd",
             "telemetry": {"enabled": false}
@@ -155,12 +155,12 @@ const CASES: &[StateAwareCase] = &[
 ];
 
 #[test]
-fn state_aware_roots_are_introduced_in_v09() {
+fn state_aware_roots_are_introduced_in_v10() {
     for case in CASES {
         serde_json::from_str::<serde_json::Value>(case.json)
             .unwrap_or_else(|error| panic!("{} used malformed JSON: {error}", case.name));
 
-        let v08_json = case.json.replace("0.9.0-alpha", "0.8.0-alpha");
+        let v08_json = case.json.replace("0.10.0-alpha", "0.8.0-alpha");
         assert!(
             serde_json::from_str::<V08Request>(&v08_json).is_err(),
             "published 0.8 accepted the {} request",
@@ -168,10 +168,10 @@ fn state_aware_roots_are_introduced_in_v09() {
         );
 
         let request = parse_request(case.json)
-            .unwrap_or_else(|error| panic!("development 0.9 rejected {}: {error}", case.name));
+            .unwrap_or_else(|error| panic!("development 0.10 rejected {}: {error}", case.name));
         assert!(
             case.expected.matches(&request),
-            "development 0.9 selected the wrong root for {}",
+            "development 0.10 selected the wrong root for {}",
             case.name
         );
     }

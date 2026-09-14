@@ -848,7 +848,7 @@ pub fn build_request(
 /// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
-///     version: "0.9.0-alpha".to_string(),
+///     version: "0.10.0-alpha".to_string(),
 ///     filesystem: None,
 ///     network: None,
 ///     ui: None,
@@ -1165,7 +1165,7 @@ mod tests {
                 .unwrap();
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
         let mut value = serde_json::to_value(&config).unwrap();
-        if policy.version == "0.9.0-alpha" {
+        if policy.version == "0.10.0-alpha" {
             let root = value.as_object_mut().unwrap();
             if let Some(serde_json::Value::Object(mut experimental)) = root.remove("experimental") {
                 for (legacy, field) in [
@@ -1252,11 +1252,11 @@ mod tests {
     fn host_process_versions() -> &'static [&'static str] {
         #[cfg(target_os = "macos")]
         {
-            &["0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+            &["0.7.0-alpha", "0.8.0-alpha", "0.10.0-alpha"]
         }
         #[cfg(not(target_os = "macos"))]
         {
-            &["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+            &["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.10.0-alpha"]
         }
     }
 
@@ -1321,7 +1321,7 @@ mod tests {
                     denied_paths: vec!["C:\\secrets".to_string()],
                     clear_policy_on_exit: Some(false),
                 }),
-                network: Some(if *version == "0.9.0-alpha" {
+                network: Some(if *version == "0.10.0-alpha" {
                     NetworkSection {
                         egress: Some(NetworkEgressSection {
                             default: Some(NetworkAction::Allow),
@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn exact_directional_policy_builder_matches_the_wire_oracle() {
-        for version in ["0.8.0-alpha", "0.9.0-alpha"] {
+        for version in ["0.8.0-alpha", "0.10.0-alpha"] {
             let policy = SandboxPolicy {
                 version: version.to_string(),
                 filesystem: None,
@@ -1428,7 +1428,7 @@ mod tests {
     #[test]
     fn exact_wslc_builder_matches_the_wire_oracle_with_all_options() {
         let policy = SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
+            version: "0.10.0-alpha".to_string(),
             filesystem: None,
             network: Some(NetworkSection {
                 egress: Some(NetworkEgressSection {
@@ -1497,7 +1497,7 @@ mod tests {
                 assert!(
                     error
                         .message
-                        .contains("requires schema version 0.9.0-alpha"),
+                        .contains("requires schema version 0.10.0-alpha"),
                     "{version}: {}",
                     error.message
                 );
@@ -2099,7 +2099,7 @@ mod tests {
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
         let config = serde_json::json!({
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "process": { "commandLine": TEST_COMMAND },
             "containment": "processcontainer",
             "network": {
@@ -2185,14 +2185,14 @@ mod tests {
 
     fn development_policy() -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
+            version: "0.10.0-alpha".to_string(),
             ..minimal_policy()
         }
     }
 
     fn development_policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
+            version: "0.10.0-alpha".to_string(),
             filesystem: None,
             network: Some(network),
             ui: None,
@@ -2379,7 +2379,7 @@ mod tests {
         .expect_err("WSLc must reject per-host egress filtering");
         assert!(
             err.message
-                .contains("schema 0.9.0-alpha no longer accepts legacy network authoring"),
+                .contains("schema 0.10.0-alpha no longer accepts legacy network authoring"),
             "got: {}",
             err.message
         );
@@ -2442,7 +2442,7 @@ mod tests {
         .expect_err("legacy network values cannot acknowledge v0.9 networking");
         assert!(error
             .message
-            .contains("schema 0.9.0-alpha no longer accepts legacy"));
+            .contains("schema 0.10.0-alpha no longer accepts legacy"));
     }
 
     #[test]

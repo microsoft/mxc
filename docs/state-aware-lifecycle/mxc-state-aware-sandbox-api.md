@@ -439,8 +439,8 @@ change: extend `StateAwareContainmentBackend`, define five new `*Config` interfa
 add an arm to `ConfigsForBackend`.
 
 Each Config carries an optional `version?: StateAwareSchemaVersion`, using the
-existing SDK type for the exact state-aware contract, currently `0.9.0-alpha`.
-When omitted, the SDK supplies `STATE_AWARE_VERSION` (`0.9.0-alpha`); an explicit
+existing SDK type for the exact state-aware contract, currently `0.10.0-alpha`.
+When omitted, the SDK supplies `STATE_AWARE_VERSION` (`0.10.0-alpha`); an explicit
 value must name that same registered state-aware contract. Other spellings are
 rejected, not range-validated or negotiated. The emitted JSON envelope always
 contains the required `version` declaration.
@@ -658,7 +658,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Exact registered schema version; state-aware requests declare `0.9.0-alpha`. The SDK fills this field when the consumer Config omits it. |
+| `version` | string | Yes | Exact registered schema version; state-aware requests declare `0.10.0-alpha`. The SDK fills this field when the consumer Config omits it. |
 | `isolationSession`, `windowsSandbox`, `wslc` | object | No | Permanent backend-specific sections. Provision subobjects are accepted only by the matching provision root. |
 
 Backend-routing fields:
@@ -861,7 +861,7 @@ const { sandboxId } = await provisionSandbox(
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
   "network": {
@@ -901,7 +901,7 @@ await startSandbox(
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "start",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
@@ -936,7 +936,7 @@ const r = await execInSandboxAsync(
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "exec",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello", "timeout": 5000 }
@@ -967,7 +967,7 @@ await stopSandbox(sandboxId, {}, { experimental: true });
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "stop",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
@@ -990,7 +990,7 @@ await deprovisionSandbox(sandboxId, {}, { experimental: true });
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "deprovision",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
@@ -1106,7 +1106,7 @@ implements one trait, the other, or both, depending on its declared participatio
 `src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
 deserialization into the exact contract selected by version, phase, and
 provision containment. Published versions select their one-shot root. The
-`0.9.0-alpha` development contract selects one-shot, `provision`, `start`,
+`0.10.0-alpha` development contract selects one-shot, `provision`, `start`,
 `exec`, `stop`, or `deprovision`; provision then selects its backend-specific
 closed root.
 
@@ -1981,7 +1981,7 @@ IsolationSession provision request uses:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "provision",
   "containment": "isolation_session",
   "network": {

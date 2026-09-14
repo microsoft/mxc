@@ -29,7 +29,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.version, '0.10.0-alpha');
     assert.equal(env.experimental, undefined);
   });
 
@@ -45,7 +45,7 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware windows_sandbox requests require schema version '0.9.0-alpha'",
+          "State-aware windows_sandbox requests require schema version '0.10.0-alpha'",
         ),
     );
   });
@@ -62,7 +62,7 @@ describe('buildStateAwareEnvelope', () => {
         },
       },
     });
-    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.version, '0.10.0-alpha');
     assert.deepEqual(env.process, {
       commandLine: 'echo hi',
       inheritDefaultEnv: true,
@@ -87,7 +87,7 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware wslc requests require schema version '0.9.0-alpha'",
+          "State-aware wslc requests require schema version '0.10.0-alpha'",
         ),
     );
   });
@@ -98,7 +98,7 @@ describe('buildStateAwareEnvelope', () => {
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
@@ -162,7 +162,7 @@ describe('buildStateAwareEnvelope', () => {
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /require schema version '0\.10\.0-alpha'/.test(err.message),
     );
   });
 
@@ -229,7 +229,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepStrictEqual(env.telemetry, { enabled: true });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '0.10.0-alpha');
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -433,7 +433,7 @@ describe('startSandbox', { skip: platformSkip }, () => {
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
     await startSandbox(id, { telemetry: { enabled: false } }, testOptions());
     assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: false });
-    assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+    assert.strictEqual(fake.captured.envelope?.version, '0.10.0-alpha');
     assert.strictEqual(fake.captured.envelope?.experimental, undefined);
   });
 
@@ -569,7 +569,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
@@ -644,14 +644,14 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to the shared 0.9.0-alpha development contract', () => {
+  it('defaults the version to the shared 0.10.0-alpha development contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '0.10.0-alpha');
   });
 
   it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
@@ -664,7 +664,7 @@ describe('wslc state-aware lifecycle', () => {
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /require schema version '0\.10\.0-alpha'/.test(err.message),
     );
   });
 
@@ -751,7 +751,7 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+      assert.strictEqual(fake.captured.envelope?.version, '0.10.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

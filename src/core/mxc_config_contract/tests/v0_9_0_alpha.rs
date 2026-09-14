@@ -1,25 +1,54 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#[path = "v0_9_0_alpha/annotations.rs"]
-mod annotations;
-#[path = "v0_9_0_alpha/common.rs"]
-mod common;
-#[path = "v0_9_0_alpha/enums.rs"]
-mod enums;
-#[path = "v0_9_0_alpha/experimental.rs"]
-mod experimental;
-#[path = "v0_9_0_alpha/fixtures.rs"]
-mod fixtures;
-#[path = "v0_9_0_alpha/network.rs"]
-mod network;
-#[path = "v0_9_0_alpha/one_shot.rs"]
-mod one_shot;
-#[path = "v0_9_0_alpha/optional_fields.rs"]
-mod optional_fields;
-#[path = "v0_9_0_alpha/request.rs"]
-mod request;
-#[path = "v0_9_0_alpha/seatbelt.rs"]
-mod seatbelt;
-#[path = "v0_9_0_alpha/state_aware.rs"]
-mod state_aware;
+use mxc_config_contract::published::v0_9_0_alpha::Request;
+use std::fs;
+use std::path::Path;
+
+#[test]
+fn published_v09_fixtures_are_frozen() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("v0_9_0_alpha")
+        .join("fixtures");
+    for (kind, accepted) in [("valid", true), ("invalid", false)] {
+        let directory = root.join(kind);
+        let mut paths = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert!(!paths.is_empty(), "{} is empty", directory.display());
+        for path in paths {
+            let source = fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Request>(&source).is_ok(),
+                accepted,
+                "{}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn published_v09_excludes_development_surfaces() {
+    for field in [
+        r#""phase":"start","sandboxId":"wsb:1234abcd""#,
+        r#""containment":"wslc","wslc":{}"#,
+        r#""containment":"windows_sandbox","windowsSandbox":{}"#,
+        r#""containment":"isolation_session""#,
+        r#""test":{}"#,
+    ] {
+        let source =
+            format!(r#"{{"version":"0.9.0-alpha","process":{{"commandLine":"echo"}},{field}}}"#);
+        assert!(
+            serde_json::from_str::<Request>(&source).is_err(),
+            "{source}"
+        );
+    }
+}

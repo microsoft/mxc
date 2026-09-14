@@ -45,7 +45,7 @@ public class MxcSandboxTests
     [Theory]
     [InlineData("")]
     [InlineData("0.9.0")]
-    [InlineData("0.10.0-alpha")]
+    [InlineData("0.11.0-alpha")]
     [InlineData("invalid")]
     public void Serialization_LegacyNetworkRejectsUnsupportedVersion(string version)
     {
@@ -361,7 +361,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+            new SandboxPolicy { Version = "0.10.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment
@@ -834,7 +834,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesIsolationSessionContainment()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+            new SandboxPolicy { Version = "0.10.0-alpha" },
             @"cmd.exe /c echo hi")
         {
             Experimental = true,
@@ -857,7 +857,7 @@ public class MxcSandboxTests
     public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+            new SandboxPolicy { Version = "0.10.0-alpha" },
             @"cmd.exe /c echo hi")
         {
             Containment = new IsolationSessionContainment(),

@@ -1,11 +1,14 @@
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "exec",
   "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
   "process": {
     "commandLine": "printf parity",
     "cwd": "/work",
-    "env": ["A=1", "B=two"],
+    "env": [
+      "A=1",
+      "B=two"
+    ],
     "timeout": 1234
   },
   "runtimeConfig": {

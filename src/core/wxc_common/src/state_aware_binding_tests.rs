@@ -314,7 +314,7 @@ fn unit(config: Option<&()>) -> Config {
 
 fn input<C: Case>(phase: Phase) -> Value {
     let mut value = json!({
-        "version": "0.9.0-alpha",
+        "version": "0.10.0-alpha",
         "phase": phase.as_str(),
         "telemetry": {"enabled": false},
     });

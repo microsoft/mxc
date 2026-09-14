@@ -150,16 +150,30 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
     },
     ContractDescriptor {
         version: ContractVersion::V0_9_0Alpha,
-        status: ContractStatus::Development,
+        status: ContractStatus::Published,
         schema_id:
-            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-        schema_path: "schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-        typescript_path: Some("sdk/node/src/generated/v0_9_0_alpha/wire.ts"),
+            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+        schema_path: "schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+        typescript_path: None,
         rust_module: "v0_9_0_alpha",
-        contract_module_path: "src/core/mxc_config_contract/src/dev",
-        adapter_path: "src/core/wxc_common/src/config_contract_adapters/dev",
+        contract_module_path: "src/core/mxc_config_contract/src/published/v0_9_0_alpha",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/v0_9",
         builder_path: "src/core/mxc_engine/src/policy/exact/v0_9.rs",
         fixture_path: "src/core/mxc_config_contract/tests/v0_9_0_alpha",
+        schema_sha256: Some("0f8e8373a144b6046634f93885d4c9d9f041428ea1673c42f97d2889589499f8"),
+    },
+    ContractDescriptor {
+        version: ContractVersion::V0_10_0Alpha,
+        status: ContractStatus::Development,
+        schema_id:
+            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+        schema_path: "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+        typescript_path: Some("sdk/node/src/generated/v0_10_0_alpha/wire.ts"),
+        rust_module: "v0_10_0_alpha",
+        contract_module_path: "src/core/mxc_config_contract/src/dev",
+        adapter_path: "src/core/wxc_common/src/config_contract_adapters/dev",
+        builder_path: "src/core/mxc_engine/src/policy/exact/v0_10.rs",
+        fixture_path: "src/core/mxc_config_contract/tests/v0_10_0_alpha",
         schema_sha256: None,
     },
 ];
@@ -171,6 +185,7 @@ pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
         ContractVersion::V0_7_0Alpha => CONTRACTS[1],
         ContractVersion::V0_8_0Alpha => CONTRACTS[2],
         ContractVersion::V0_9_0Alpha => CONTRACTS[3],
+        ContractVersion::V0_10_0Alpha => CONTRACTS[4],
     }
 }
 
@@ -228,7 +243,7 @@ mod tests {
             .filter(|contract| contract.is_development())
             .collect::<Vec<_>>();
         assert_eq!(development.len(), 1);
-        assert_eq!(development[0].version(), ContractVersion::V0_9_0Alpha);
+        assert_eq!(development[0].version(), ContractVersion::V0_10_0Alpha);
         assert!(development[0].schema_sha256().is_none());
         assert!(development[0].typescript_path().is_some());
     }

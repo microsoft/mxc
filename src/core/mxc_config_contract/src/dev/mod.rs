@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Wire types for the mutable `0.9.0-alpha` configuration contract.
+//! Wire types for the mutable `0.10.0-alpha` configuration contract.
 //!
 //! These types validate the JSON structure and value constraints of the
 //! in-development contract. They preserve omitted optional fields for a later
@@ -213,14 +213,14 @@ string_enum! {
     /// The exact version marker accepted by this contract.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Version {
-        /// The development `0.9.0-alpha` contract.
-        V0_9_0Alpha => ["0.9.0-alpha"],
+        /// The development `0.10.0-alpha` contract.
+        V0_10_0Alpha => ["0.10.0-alpha"],
     }
 }
 
 mod development;
 mod network;
-/// The development `0.9.0-alpha` one-shot configuration contract.
+/// The development `0.10.0-alpha` one-shot configuration contract.
 mod one_shot;
 mod primitives;
 mod publication;
@@ -228,7 +228,7 @@ mod request;
 #[cfg(feature = "schema-gen")]
 mod schema;
 mod stable;
-/// The development `0.9.0-alpha` state-aware configuration contract.
+/// The development `0.10.0-alpha` state-aware configuration contract.
 mod state_aware;
 
 pub use development::{
@@ -252,7 +252,7 @@ pub use publication::{
     StartRequest as StableCandidateStartRequest, StateAwareBackend,
     StopRequest as StableCandidateStopRequest,
     WindowsSandboxProvisionRequest as StableCandidateWindowsSandboxProvisionRequest,
-    WslcProvisionRequest as StableCandidateWslcProvisionRequest, V0_9_0_ALPHA_PUBLICATION_PROFILE,
+    WslcProvisionRequest as StableCandidateWslcProvisionRequest, V0_10_0_ALPHA_PUBLICATION_PROFILE,
 };
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]

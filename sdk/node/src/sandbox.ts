@@ -17,12 +17,13 @@ import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const MIN_VERSION = '0.6.0-alpha';
-const SUPPORTED_VERSION = '0.9.0-alpha';
+const SUPPORTED_VERSION = '0.10.0-alpha';
 const REGISTERED_VERSION_VALUES = [
     '0.6.0-alpha',
     '0.7.0-alpha',
     '0.8.0-alpha',
     '0.9.0-alpha',
+    '0.10.0-alpha',
 ];
 const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
 const REGISTERED_VERSION_ORDER = new Map(
@@ -106,7 +107,7 @@ function validateContainmentVersion(
                 effectiveContainment === 'wslc' ||
                 effectiveContainment === 'hyperlight' ||
                 effectiveContainment === 'isolation_session'
-              ? '0.9.0-alpha'
+              ? '0.10.0-alpha'
               : '0.6.0-alpha';
 
     const versionOrder = REGISTERED_VERSION_ORDER.get(version);
@@ -154,11 +155,14 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
 
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
-    if (policy.version === '0.9.0-alpha' && network !== undefined) {
+    if (
+        (policy.version === '0.9.0-alpha' || policy.version === '0.10.0-alpha')
+        && network !== undefined
+    ) {
         for (const field of LEGACY_NETWORK_FIELDS) {
             if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
                 throw new Error(
-                    `Schema 0.9.0-alpha no longer supports network.${field}. ` +
+                    `Schema ${policy.version} no longer supports network.${field}. ` +
                     'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
                     'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
                 );
@@ -294,7 +298,12 @@ function buildProcessBaseContainerConfig(
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network && policy.version !== '0.9.0-alpha' && !usesDirectionalNetwork(policy)) {
+    if (
+        config.network
+        && policy.version !== '0.9.0-alpha'
+        && policy.version !== '0.10.0-alpha'
+        && !usesDirectionalNetwork(policy)
+    ) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -412,7 +421,8 @@ export function createConfigFromPolicy(
     };
 
     if (directionalNetwork) {
-        if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
+        if (((policy.version === '0.9.0-alpha' || policy.version === '0.10.0-alpha')
+            && policy.network !== undefined) ||
             policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
             config.network = {
                 egress: policy.network?.egress,

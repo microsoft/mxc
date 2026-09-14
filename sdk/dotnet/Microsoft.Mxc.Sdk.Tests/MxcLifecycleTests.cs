@@ -319,7 +319,7 @@ public class MxcLifecycleTests
         Assert.Equal(
             "allow",
             root.GetProperty("network").GetProperty("egress").GetProperty("default").GetString());
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
         if (appId is null)
         {
             Assert.False(root.TryGetProperty("isolationSession", out _));
@@ -588,7 +588,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("windows_sandbox", root.GetProperty("containment").GetString());
         Assert.Equal(
             @"C:\input",
@@ -620,7 +620,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
@@ -686,7 +686,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
@@ -714,7 +714,7 @@ public class MxcLifecycleTests
                     InheritDefaultEnvironment = true,
                 }));
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Contains("require schema version '0.10.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -798,7 +798,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("start", root.GetProperty("phase").GetString());
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
@@ -813,11 +813,11 @@ public class MxcLifecycleTests
         var wsbStop = MxcLifecycle.BuildStopEnvelope(new SandboxId("wsb:01234567"));
         var overridden = MxcLifecycle.BuildDeprovisionEnvelope(
             new SandboxId("iso:abc"),
-            new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
+            new StateAwarePhaseOptions { Version = "0.10.0-alpha" });
 
-        Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
-        Assert.Equal("0.9.0-alpha", wsbStop["version"]!.GetValue<string>());
-        Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
+        Assert.Equal("0.10.0-alpha", wslcStart["version"]!.GetValue<string>());
+        Assert.Equal("0.10.0-alpha", wsbStop["version"]!.GetValue<string>());
+        Assert.Equal("0.10.0-alpha", overridden["version"]!.GetValue<string>());
     }
 
     [Fact]
@@ -828,7 +828,7 @@ public class MxcLifecycleTests
         var ex = Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options));
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Contains("require schema version '0.10.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -974,7 +974,7 @@ public class MxcLifecycleTests
         var ex = Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options));
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Contains("require schema version '0.10.0-alpha'", ex.Message);
     }
 
     [Fact]
