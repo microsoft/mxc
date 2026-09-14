@@ -10,6 +10,8 @@ use clap::{Args, Parser, Subcommand};
 use mxc_config_contract::{descriptor, supported_versions, ContractDescriptor, ContractVersion};
 use serde_json::{json, Value};
 
+const REGISTRY_ARTIFACT_PATH: &str = "schemas/contract-registry.generated.json";
+
 #[derive(Debug, Parser)]
 #[command(about = "Generate MXC configuration contract artifacts")]
 struct Cli {
@@ -29,6 +31,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Generate machine-readable lifecycle metadata from the Rust registry.
+    Registry {
+        /// Repository root receiving the generated registry artifact.
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        /// Output path. Defaults to schemas/contract-registry.generated.json.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Publish the current stable candidate and register the next development version.
+    Publish(PublishArgs),
 }
 
 #[derive(Debug, Args)]
@@ -42,6 +55,22 @@ struct GenerateArgs {
     /// Output path. Omit to write the artifact to standard output.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PublishArgs {
+    /// Current development contract to publish.
+    #[arg(long)]
+    version: String,
+    /// Exact version to register as the next mutable development contract.
+    #[arg(long)]
+    next_dev: String,
+    /// Repository root. Defaults to the root containing this crate.
+    #[arg(long)]
+    repo_root: Option<PathBuf>,
+    /// Validate and report the publication transaction without writing files.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +110,26 @@ fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescri
         }
     };
     mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
+    Ok((schema, descriptor))
+}
+
+fn publication_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
+    let descriptor = descriptor(version);
+    if !descriptor.is_development() {
+        return Err(format!(
+            "{} is already published and cannot be published again",
+            version.as_str()
+        ));
+    }
+
+    let schema = match version {
+        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::publication_schema(),
+        ContractVersion::V0_8_0Alpha
+        | ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha => {
+            unreachable!("published contracts were rejected above")
+        }
+    };
     Ok((schema, descriptor))
 }
 
@@ -151,11 +200,125 @@ fn versions_json() -> Value {
                     "status": descriptor.status().as_str(),
                     "schemaId": descriptor.schema_id(),
                     "schemaPath": descriptor.schema_path(),
-                    "typescriptPath": descriptor.typescript_path()
+                    "typescriptPath": descriptor.typescript_path(),
+                    "rustModule": descriptor.rust_module(),
+                    "contractModulePath": descriptor.contract_module_path(),
+                    "adapterPath": descriptor.adapter_path(),
+                    "builderPath": descriptor.builder_path(),
+                    "fixturePath": descriptor.fixture_path(),
+                    "schemaSha256": descriptor.schema_sha256()
                 })
             })
             .collect(),
     )
+}
+
+fn registry_json() -> Value {
+    json!({
+        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate from the Rust exact-contract registry with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- registry.",
+        "formatVersion": 1,
+        "contracts": versions_json()
+    })
+}
+
+fn default_repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+}
+
+fn registry_output_path(repo_root: Option<PathBuf>, out: Option<PathBuf>) -> PathBuf {
+    let root = repo_root.unwrap_or_else(default_repo_root);
+    out.unwrap_or_else(|| root.join(REGISTRY_ARTIFACT_PATH))
+}
+
+fn generate_registry(repo_root: Option<PathBuf>, out: Option<PathBuf>) -> Result<(), String> {
+    let output = registry_output_path(repo_root, out);
+    let mut content = serde_json::to_string_pretty(&registry_json())
+        .map_err(|error| format!("failed to serialize contract registry: {error}"))?;
+    content.push('\n');
+    write_artifact(&content, Some(&output), "generated contract registry")
+}
+
+fn sha256(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(content))
+}
+
+fn publish(args: PublishArgs) -> Result<(), String> {
+    let root = args.repo_root.unwrap_or_else(default_repo_root);
+    let version = ContractVersion::parse_exact(&args.version)
+        .ok_or_else(|| format!("unregistered contract version {}", args.version))?;
+    if !descriptor(version).is_development() {
+        return Err(format!("{} is not the development contract", args.version));
+    }
+    if ContractVersion::parse_exact(&args.next_dev).is_some() {
+        return Err(format!(
+            "next development version {} is already registered",
+            args.next_dev
+        ));
+    }
+    if version_order(&args.next_dev)? <= version_order(&args.version)? {
+        return Err(format!(
+            "next development version {} must be newer than {}",
+            args.next_dev, args.version
+        ));
+    }
+    let (mut schema, _) = publication_schema(version)?;
+    let stable_schema_id = format!(
+        "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.{}.json",
+        args.version
+    );
+    let stable_schema_path = format!("schemas/stable/mxc-config.schema.{}.json", args.version);
+    mxc_schema_support::prepare_schema(&mut schema, &stable_schema_id);
+    let schema_root = schema
+        .as_object()
+        .ok_or_else(|| "generated publication schema root is not an object".to_string())?;
+    let schema_content = format!("{}\n", mxc_schema_support::render_root_ordered(schema_root));
+    let digest = sha256(schema_content.as_bytes());
+
+    if args.dry_run {
+        println!(
+            "would write published schema {} with SHA-256 {}; then update the Rust registry to publish {} and register {} as development",
+            stable_schema_path, digest, args.version, args.next_dev
+        );
+        return Ok(());
+    }
+
+    let stable_path = root.join(&stable_schema_path);
+    if stable_path.exists() {
+        return Err(format!(
+            "refusing to overwrite existing published schema {}",
+            stable_path.display()
+        ));
+    }
+    write_artifact(&schema_content, Some(&stable_path), "published schema")?;
+    println!(
+        "published schema SHA-256: {digest}\nupdate the Rust ContractVersion/CONTRACTS registry to publish {} and register {} as development, then regenerate {}",
+        args.version, args.next_dev, REGISTRY_ARTIFACT_PATH
+    );
+    Ok(())
+}
+
+fn version_order(version: &str) -> Result<(u64, u64, u64), String> {
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
+    let mut parts = core.split('.');
+    let parse = |part: Option<&str>| {
+        part.ok_or_else(|| format!("invalid exact contract version {version:?}"))?
+            .parse::<u64>()
+            .map_err(|_| format!("invalid exact contract version {version:?}"))
+    };
+    let result = (
+        parse(parts.next())?,
+        parse(parts.next())?,
+        parse(parts.next())?,
+    );
+    if parts.next().is_some() {
+        return Err(format!("invalid exact contract version {version:?}"));
+    }
+    Ok(result)
 }
 
 fn print_versions(json_output: bool) -> Result<(), String> {
@@ -188,6 +351,8 @@ fn run() -> Result<(), String> {
             write_artifact(&content, args.out.as_deref(), "TypeScript wire types")
         }
         Command::Versions { json } => print_versions(json),
+        Command::Registry { repo_root, out } => generate_registry(repo_root, out),
+        Command::Publish(args) => publish(args),
     }
 }
 
@@ -230,5 +395,20 @@ mod tests {
     fn published_generation_is_rejected() {
         let error = development_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
         assert!(error.contains("not supported"), "{error}");
+    }
+
+    #[test]
+    fn publication_schema_is_narrower_than_development() {
+        let (schema, _) = publication_schema(ContractVersion::V0_9_0Alpha).unwrap();
+        let serialized = serde_json::to_string(&schema).unwrap();
+        assert!(!serialized.contains("\"experimental\""));
+        assert!(!serialized.contains("\"windows_sandbox\""));
+        assert!(serialized.contains("\"processcontainer\""));
+    }
+
+    #[test]
+    fn next_development_version_must_advance() {
+        assert!(version_order("0.10.0-alpha").unwrap() > version_order("0.9.0-alpha").unwrap());
+        assert!(version_order("0.8-alpha").is_err());
     }
 }

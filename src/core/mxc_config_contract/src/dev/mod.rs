@@ -223,6 +223,7 @@ mod network;
 /// The development `0.9.0-alpha` one-shot configuration contract.
 mod one_shot;
 mod primitives;
+mod publication;
 mod request;
 #[cfg(feature = "schema-gen")]
 mod schema;
@@ -238,11 +239,17 @@ pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,
 };
-pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
+pub use one_shot::{
+    Containment as OneShotContainment, Request as OneShotRequest, ALL_ONE_SHOT_CONTAINMENTS,
+    DEVELOPMENT_ONLY_CONTAINMENTS, STABLE_CANDIDATE_CONTAINMENTS,
+};
 pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
+pub use publication::{
+    Containment as StableCandidateContainment, Request as StableCandidateRequest,
+};
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
-pub use schema::development_schema;
+pub use schema::{development_schema, publication_schema};
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,

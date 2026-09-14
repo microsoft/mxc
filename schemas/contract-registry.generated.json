@@ -1,0 +1,58 @@
+{
+  "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate from the Rust exact-contract registry with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- registry.",
+  "contracts": [
+    {
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/v0_6.rs",
+      "builderPath": "src/core/mxc_engine/src/policy/exact/v0_6.rs",
+      "contractModulePath": "src/core/mxc_config_contract/src/published/v0_6_0_alpha",
+      "fixturePath": "src/core/mxc_config_contract/tests/v0_6_0_alpha",
+      "rustModule": "v0_6_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.6.0-alpha.json",
+      "schemaPath": "schemas/stable/mxc-config.schema.0.6.0-alpha.json",
+      "schemaSha256": "e6b2ef7b7733f5151cc53a676d6ba48dadc7e9137f61aba50ebfaebbb8297dba",
+      "status": "published",
+      "typescriptPath": null,
+      "version": "0.6.0-alpha"
+    },
+    {
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/v0_7.rs",
+      "builderPath": "src/core/mxc_engine/src/policy/exact/v0_7.rs",
+      "contractModulePath": "src/core/mxc_config_contract/src/published/v0_7_0_alpha",
+      "fixturePath": "src/core/mxc_config_contract/tests/v0_7_0_alpha",
+      "rustModule": "v0_7_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+      "schemaPath": "schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+      "schemaSha256": "beae8c5785f0591ba295cb4984665d23d8f5a74ece5c392f279da8c26ecc8672",
+      "status": "published",
+      "typescriptPath": null,
+      "version": "0.7.0-alpha"
+    },
+    {
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/v0_8.rs",
+      "builderPath": "src/core/mxc_engine/src/policy/exact/v0_8.rs",
+      "contractModulePath": "src/core/mxc_config_contract/src/published/v0_8_0_alpha",
+      "fixturePath": "src/core/mxc_config_contract/tests/v0_8_0_alpha",
+      "rustModule": "v0_8_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+      "schemaPath": "schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+      "schemaSha256": "0bd1e20f117821edd6b232e6b0aebe4c44101ea7ce07415f141ae81567cc0391",
+      "status": "published",
+      "typescriptPath": null,
+      "version": "0.8.0-alpha"
+    },
+    {
+      "adapterPath": "src/core/wxc_common/src/config_contract_adapters/dev",
+      "builderPath": "src/core/mxc_engine/src/policy/exact/v0_9.rs",
+      "contractModulePath": "src/core/mxc_config_contract/src/dev",
+      "fixturePath": "src/core/mxc_config_contract/tests/v0_9_0_alpha",
+      "rustModule": "v0_9_0_alpha",
+      "schemaId": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+      "schemaPath": "schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+      "schemaSha256": null,
+      "status": "development",
+      "typescriptPath": "sdk/node/src/generated/v0_9_0_alpha/wire.ts",
+      "version": "0.9.0-alpha"
+    }
+  ],
+  "formatVersion": 1
+}

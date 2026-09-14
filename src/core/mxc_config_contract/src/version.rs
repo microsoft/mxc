@@ -5,7 +5,7 @@
 ///
 /// Versions are matched by their complete registered spelling. No semantic
 /// version ranges or normalization are applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContractVersion {
     /// The `0.6.0-alpha` contract.
     V0_6_0Alpha,
@@ -29,8 +29,6 @@ impl ContractVersion {
     }
 
     /// Looks up an exact registered contract version.
-    ///
-    /// Returns `None` when `value` is not an exact supported spelling.
     pub fn parse_exact(value: &str) -> Option<Self> {
         match value {
             "0.6.0-alpha" => Some(ContractVersion::V0_6_0Alpha),
