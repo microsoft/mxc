@@ -166,15 +166,21 @@ socket call fails with `OSError: [Errno 134]`.
 `allowedHosts` and `blockedHosts` are supported and forwarded to the guest's
 host-side socket proxy, which enforces egress at `connect()`. The guest filter
 is **allow-XOR-block**, so the two lists are mutually exclusive (specifying both
-is rejected at preflight). Presence of either list implies host networking, so
-`defaultPolicy` is ignored when a list is set:
+is rejected at preflight). `allowedHosts` is an allowlist and is valid with the
+default `"block"` posture. `blockedHosts` is a blocklist over allow-by-default
+networking and therefore requires `defaultPolicy: "allow"`. A blocklist with a
+block default is rejected at preflight rather than widening the requested
+network boundary.
 
-| `allowedHosts` | `blockedHosts` | Effect |
-| -------------- | -------------- | ------ |
-| _(empty)_      | _(empty)_      | follows `defaultPolicy` (`block` = no egress, `allow` = unrestricted) |
-| `[A, ...]`     | _(empty)_      | **allowlist** — only the listed destinations are reachable |
-| _(empty)_      | `[B, ...]`     | **blocklist** — everything except the listed destinations is reachable |
-| `[A, ...]`     | `[B, ...]`     | rejected at preflight (mutually exclusive) |
+| `defaultPolicy` | `allowedHosts` | `blockedHosts` | Effect |
+| --------------- | -------------- | -------------- | ------ |
+| `block`         | _(empty)_      | _(empty)_      | no egress |
+| `allow`         | _(empty)_      | _(empty)_      | unrestricted egress |
+| `block`         | `[A, ...]`     | _(empty)_      | **allowlist** — only listed destinations are reachable |
+| `allow`         | `[A, ...]`     | _(empty)_      | **allowlist** — only listed destinations are reachable |
+| `allow`         | _(empty)_      | `[B, ...]`     | **blocklist** — every unlisted destination is reachable |
+| `block`         | _(empty)_      | `[B, ...]`     | rejected at preflight |
+| _either_        | `[A, ...]`     | `[B, ...]`     | rejected at preflight (mutually exclusive) |
 
 Entries may be IPv4 literals (`93.184.216.34`), IPv4 CIDR blocks
 (`10.0.0.0/8`), or hostnames. Hostnames are resolved to their IPv4 (A-record)
@@ -221,4 +227,5 @@ preflight.
 | Workload                        | Error                               |
 | ------------------------------- | ----------------------------------- |
 | Both `allowedHosts` + `blockedHosts` | Rejected at preflight (mutually exclusive) |
+| `blockedHosts` + `defaultPolicy: "block"` | Rejected at preflight (blocklists require an allow default) |
 | File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |
