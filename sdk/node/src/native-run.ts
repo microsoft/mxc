@@ -102,34 +102,39 @@ function parseStringArray(json: string | undefined): string[] {
 
 export function runNativeRequest(requestJson: string): NativeRunResult {
   const native = loadMxcFfi();
-  const run = native.handle.func(
-    'mxc_run_request',
-    'int32_t',
-    ['const char *', koffi.out(koffi.pointer(AbiRunResultType))],
-  ) as RunFunction;
-  const free = native.handle.func(
-    'mxc_run_result_free',
-    'void',
-    [koffi.pointer(AbiRunResultType)],
-  ) as (result: AbiRunResult) => void;
-  const result = {} as AbiRunResult;
-
   try {
-    const status = run(requestJson, result);
-    if (status !== 0 || result.status !== 0) {
-      throw nativeError(result.status || status, result.error);
+    const run = native.handle.func(
+      'mxc_run_request',
+      'int32_t',
+      ['const char *', koffi.out(koffi.pointer(AbiRunResultType))],
+    ) as RunFunction;
+    const free = native.handle.func(
+      'mxc_run_result_free',
+      'void',
+      [koffi.pointer(AbiRunResultType)],
+    ) as (result: AbiRunResult) => void;
+    const result = {} as AbiRunResult;
+    let filled = false;
+
+    try {
+      const status = run(requestJson, result);
+      filled = true;
+      if (status !== 0 || result.status !== 0) {
+        throw nativeError(result.status || status, result.error);
+      }
+      const metadata = decodeString(result.outputMetadata);
+      return {
+        stdout: decodeString(result.stdout) ?? '',
+        stderr: decodeString(result.stderr) ?? '',
+        exitCode: result.exitCode,
+        timedOut: result.timedOut !== 0,
+        outputMetadata: metadata === undefined ? undefined : JSON.parse(metadata),
+        warnings: parseStringArray(decodeString(result.warnings)),
+      };
+    } finally {
+      if (filled) free(result);
     }
-    const metadata = decodeString(result.outputMetadata);
-    return {
-      stdout: decodeString(result.stdout) ?? '',
-      stderr: decodeString(result.stderr) ?? '',
-      exitCode: result.exitCode,
-      timedOut: result.timedOut !== 0,
-      outputMetadata: metadata === undefined ? undefined : JSON.parse(metadata),
-      warnings: parseStringArray(decodeString(result.warnings)),
-    };
   } finally {
-    free(result);
     native.handle.unload();
   }
 }
