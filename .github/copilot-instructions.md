@@ -178,7 +178,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 - **SDK** (`sdk/node/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe`, `lxc-exec`, or `mxc-exec-mac`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/node/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/node/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/node/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
 
-The SDK auto-discovers native binaries by checking `sdk/node/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy binaries into the SDK bin directory.
+The SDK auto-discovers native binaries by checking `sdk/node/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy the executor and `mxc_ffi` shared library into the SDK bin directory; the platform CI workflows publish both in their per-target artifacts.
 
 ### C# SDK
 
