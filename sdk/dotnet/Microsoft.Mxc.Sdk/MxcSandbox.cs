@@ -357,6 +357,8 @@ public static class MxcSandbox
         value switch
         {
             "captureDenials" => BackendCapability.CaptureDenials,
+            "filesystemDeniedPaths" => BackendCapability.FilesystemDeniedPaths,
+            "ingressHostLoopbackAllow" => BackendCapability.IngressHostLoopbackAllow,
             _ => BackendCapability.Unknown,
         };
 

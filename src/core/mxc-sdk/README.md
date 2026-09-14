@@ -169,9 +169,17 @@ for backend in available_backends() {
     let capture_denials = backend
         .capabilities
         .contains(&BackendCapability::CaptureDenials);
+    let native_denied_paths = backend
+        .capabilities
+        .contains(&BackendCapability::FilesystemDeniedPaths);
+    let ingress_host_loopback_allow = backend
+        .capabilities
+        .contains(&BackendCapability::IngressHostLoopbackAllow);
     match backend.tier {
         Some(tier) => println!(
-            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            "{} (tier: {tier}, captureDenials: {capture_denials}, \
+             filesystemDeniedPaths: {native_denied_paths}, \
+             ingressHostLoopbackAllow: {ingress_host_loopback_allow})",
             backend.backend
         ),
         None => println!("{}", backend.backend),
@@ -181,9 +189,15 @@ for backend in available_backends() {
 
 The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
-`capabilities` reports optional features that passed the host probe, including
-the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
-handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+`capabilities` reports optional features that the named `tier` can enforce
+without falling back to a weaker tier. For ProcessContainer,
+`FilesystemDeniedPaths` means BaseContainer can enforce
+`filesystem.deniedPaths` natively, while `IngressHostLoopbackAllow` means it can
+enforce `network.ingress.hostLoopback = "allow"`. The default host-loopback deny
+posture needs no capability. Missing capabilities must be treated as unavailable;
+the detailed `wxc-exec --probe` output distinguishes the underlying machine
+facts. These results are advisory: callers must still handle
+`ErrorCode::BackendUnavailable` if availability changes before launch.
 And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.

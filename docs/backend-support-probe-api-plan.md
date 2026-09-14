@@ -54,6 +54,12 @@ This API answers **"what can I use here?"**, not "what is the full capability
 matrix of this machine?". 
 - We return **only** host-available backends. Nothing is reported as `false`.
 - A backend's **absence** means "not currently usable, **for any reason**"
+- A curated capability is a positive assertion that the reported tier can
+  enforce a high-value policy feature without falling back. The initial
+  ProcessContainer set is `captureDenials`, `filesystemDeniedPaths`, and
+  `ingressHostLoopbackAllow`; this is not a complete policy matrix.
+- A missing capability means "do not safely request this at the reported tier";
+  missing exports and failed OS queries fail closed.
 - For per-backend **diagnostics and reasons**, the tool is `wxc-exec --probe`
 - Each capability is **detected once, in Rust**, and the TypeScript SDK projects that result rather than re-checking.
 ## 3. Detection & isolation tiers

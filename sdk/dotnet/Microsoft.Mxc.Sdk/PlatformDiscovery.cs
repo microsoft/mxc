@@ -60,6 +60,16 @@ public enum BackendCapability
 
     /// <summary>Windows ProcessContainer denial capture.</summary>
     CaptureDenials,
+
+    /// <summary>
+    /// Native filesystem denied-path enforcement at the reported tier.
+    /// </summary>
+    FilesystemDeniedPaths,
+
+    /// <summary>
+    /// Inbound host-loopback allow enforcement at the reported tier.
+    /// </summary>
+    IngressHostLoopbackAllow,
 }
 
 /// <summary>One host-available backend and its probed capabilities.</summary>
@@ -74,7 +84,10 @@ public sealed class AvailableBackend
     /// </summary>
     public IsolationTier? Tier { get; init; }
 
-    /// <summary>Optional backend features usable on this host.</summary>
+    /// <summary>
+    /// Optional backend features enforceable at <see cref="Tier"/> without
+    /// falling back to a weaker tier.
+    /// </summary>
     public IReadOnlyList<BackendCapability> Capabilities { get; init; } =
         Array.Empty<BackendCapability>();
 }
