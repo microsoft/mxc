@@ -425,6 +425,10 @@ mod tests {
         assert!(message.contains("\\n") && message.contains("\\u{202e}"));
     }
 
+    /// Gated on Windows: Linux and macOS narrow every backend to their own
+    /// (see `ContainmentBackend::effective_on_host`), which
+    /// `a_foreign_backend_is_validated_against_the_one_the_host_runs` covers.
+    #[cfg(target_os = "windows")]
     #[test]
     fn only_seatbelt_accepts_a_tilde_cwd() {
         // Everything else hands the path to `cd -- "$1"` or `--chdir`, which
@@ -447,6 +451,7 @@ mod tests {
         assert!(validate_common(&seatbelt).is_ok());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn accepts_absolute_cwd_in_the_backend_path_style() {
         let cases = [
@@ -468,6 +473,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn rejects_a_unix_cwd_on_a_windows_backend_and_the_reverse() {
         // `/tmp` on Windows is relative to the launching process's drive.
@@ -478,6 +484,7 @@ mod tests {
         assert!(validate_common(&unix).is_err());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn wslc_reads_cwd_against_a_different_target_per_phase() {
         // One-shot takes a Windows host path; exec takes the in-container path.
@@ -489,6 +496,34 @@ mod tests {
             request_with_cwd("0.9.0-alpha", ContainmentBackend::Wslc, "/workspace");
         assert!(validate_common(&container_path).is_err());
         assert!(validate_exec_common(&container_path).is_ok());
+    }
+
+    /// The engine falls an unsupported request back to LXC on Linux and
+    /// overrides everything to Seatbelt on macOS without rewriting
+    /// `containment`, so a Windows-shaped cwd would otherwise reach a POSIX
+    /// backend as a relative path.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_foreign_backend_is_validated_against_the_one_the_host_runs() {
+        for backend in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::Wslc,
+        ] {
+            let req = request_with_cwd("0.9.0-alpha", backend.clone(), "C:\\workspace");
+            assert!(
+                validate_common(&req).is_err(),
+                "{} accepted a Windows cwd",
+                backend.wire_name()
+            );
+
+            let posix = request_with_cwd("0.9.0-alpha", backend.clone(), "/workspace");
+            assert!(
+                validate_common(&posix).is_ok(),
+                "{} rejected '/workspace'",
+                backend.wire_name()
+            );
+        }
     }
 
     #[test]

@@ -88,17 +88,20 @@ impl ContainmentBackend {
     /// Path shape an explicit `process.cwd` must have for this backend on
     /// `scope`.
     ///
-    /// The shape follows the *target* the path is handed to, not the host MXC
-    /// runs on. Those coincide everywhere except one-shot vs. state-aware WSLc.
+    /// Linux falls an unsupported request back to LXC and macOS overrides every
+    /// request to Seatbelt.
     pub fn working_directory_style(&self, scope: WorkingDirectoryScope) -> WorkingDirectoryStyle {
+        if cfg!(target_os = "macos") {
+            return WorkingDirectoryStyle::MacOs;
+        }
+        if cfg!(target_os = "linux") {
+            return WorkingDirectoryStyle::Unix;
+        }
         match self {
             ContainmentBackend::ProcessContainer
             | ContainmentBackend::WindowsSandbox
             | ContainmentBackend::IsolationSession => WorkingDirectoryStyle::Windows,
-            // NanVix and Hyperlight reject any working directory today; both
-            // run a POSIX-style guest, so a future implementation inherits the
-            // right shape rather than an exemption. `Vm` is non-Windows-only —
-            // a Windows host resolves that intent to `WindowsSandbox`.
+
             ContainmentBackend::Lxc
             | ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
