@@ -64,8 +64,9 @@ flowchart TB
         ER[ExecutionRequest]
         DD[Backend dispatch]
     end
-    subgraph JSON["JSON entry path"]
+    subgraph JSON["Existing executor path"]
         JJ[Versioned config JSON]
+        EX[wxc-exec / lxc-exec / mxc-exec-mac]
         JP[Config parser]
     end
 
@@ -73,13 +74,13 @@ flowchart TB
     NN -->|typed Koffi call| KF --> FF
     FF -->|typed conversion| SR
     RR --> SR
-    JJ --> JP --> SR
+    JJ --> EX --> JP --> ER
     SR --> ER --> DD
     DD --> OO[Strongly typed output or handle]
     classDef new fill:#0f5132,color:#fff
     classDef same fill:#343a40,color:#fff
     class RR,CC,NN,KF,FF,OO new
-    class SR,ER,DD,JJ,JP same
+    class SR,ER,DD,JJ,EX,JP same
 ```
 
 The normal SDK path is linear and typed. Each language supplies its idiomatic
@@ -87,9 +88,10 @@ versioned request type; `mxc_ffi` converts the C representation directly into
 the corresponding Rust representation and then into `SandboxRequest`. It does
 not serialize to JSON and call back through the JSON parser.
 
-JSON remains useful for config files, the executor, and callers that begin with
-JSON. That path parses JSON once into the versioned typed representation before
-joining the same SDK/engine path.
+JSON remains the configuration contract for the existing executor binaries.
+That path parses config JSON into `ExecutionRequest` and joins the typed SDK
+path at backend dispatch; it does not round-trip through `SandboxRequestV1` or
+the SDK's `SandboxRequest`.
 
 ## Versioned request type
 
