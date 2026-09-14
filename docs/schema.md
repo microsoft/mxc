@@ -146,10 +146,6 @@ that can be executed independently.
         "deniedPaths": ["C:\\Windows"]      // Blocked paths
     },
 
-    "fallback": {
-        "allowDaclMutation": true          // Allow Tier 3 DACL fallback (default true)
-    },
-
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
@@ -280,7 +276,7 @@ use:
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
-| Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
+| Windows ProcessContainer (PSEC / SBOX) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
@@ -298,17 +294,10 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
-On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
-containment tier selected at runtime:
-
-- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
-  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
-- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
-  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
-  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
-  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
-  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
-  `containerId` values for parallel runs.
+On Windows, `deniedPaths` is enforced natively by PSEC or SBOX only when the
+selected OS contract advertises deny-path support. MXC fails the request when
+the native contract cannot represent the deny policy; it never mutates host
+filesystem security descriptors as a fallback.
 
 #### Path grants and root directories for Windows BaseContainer
 
@@ -359,14 +348,6 @@ The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
 when `containment` is `processcontainer`.
-
-### Fallback Policy
-
-The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
 
 ### Containment Backends
 

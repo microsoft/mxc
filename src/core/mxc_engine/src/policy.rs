@@ -497,8 +497,7 @@ pub enum Containment {
     /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
     #[default]
     Process,
-    /// Windows ProcessContainer with explicit AppContainer/BaseContainer
-    /// settings.
+    /// Windows ProcessContainer with explicit native BaseContainer settings.
     ProcessContainer(ProcessContainer),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]

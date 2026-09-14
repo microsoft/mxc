@@ -48,7 +48,6 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
   'plm.exe',
-  'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
@@ -82,7 +81,7 @@ const OPTIONAL_BINARIES = [
   // up here. They are not required: no SDK consumer needs them, and the ADO
   // package producer filters its artifact through signPattern, which
   // deliberately ships only product binaries.
-  'wxc-ui-probe.exe',     // WinProcessContainer-Tests.ps1
+  'wxc-ui-probe.exe',     // Windows UI-policy validation
   'wxc-test-driver.exe',  // run_test_configs.ps1
 ];
 
@@ -106,10 +105,8 @@ export function platformName(): string {
 /**
  * Assert that a dry-run completed successfully (exit 0 + validation-passed banner).
  *
- * Dry-run failure paths aren't asserted here — the dispatcher's tier-fallback
- * chain (BaseContainer → AppContainer+BFS → AppContainer+DACL) finds a viable
- * runner on every supported host, so a failing dry-run from the test harness
- * is a real regression, not an expected outcome.
+ * Dry-run failure paths aren't asserted here because these tests run only on
+ * hosts where the native ProcessContainer contract is expected to be usable.
  */
 export function assertDryRunResult(
   stdout: string,

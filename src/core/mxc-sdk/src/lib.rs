@@ -45,7 +45,7 @@
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] |
 //! | Seatbelt | macOS | [`Containment::Process`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | ProcessContainer (PSEC / SBOX) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |

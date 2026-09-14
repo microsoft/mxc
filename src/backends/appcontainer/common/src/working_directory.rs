@@ -1,9 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Working-directory resolution shared by the two Windows ProcessContainer
-//! launch paths (`AppContainerScriptRunner` -> `CreateProcessW` and
-//! `BaseContainerRunner` -> `Experimental_CreateProcessInSandbox`).
+//! Working-directory resolution shared by the PSEC and SBOX Windows
+//! ProcessContainer launch paths.
 //!
 //! Both launch APIs treat a `NULL` current directory as "inherit the parent's
 //! cwd". Under a deny-by-default sandbox token that directory is usually not
@@ -18,8 +17,7 @@
 use wxc_common::models::{ExecutionRequest, WorkingDirectorySource};
 
 /// Drive root used when neither `process.cwd` nor the filesystem policy yields
-/// a usable directory. Matches what `wxc-host-prep prepare-system-drive` grants
-/// sandbox tokens traverse access to.
+/// a usable directory.
 const DEFAULT_DRIVE_ROOT: &str = "C:\\";
 
 /// Where the launch working directory came from.

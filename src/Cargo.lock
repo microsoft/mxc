@@ -598,12 +598,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "embed-manifest"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94cdc65b1cf9e871453ce2f86f5aaec24ff2eaa36a1fa3e02e441dddc3613b99"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3251,22 +3245,6 @@ dependencies = [
  "bwrap_common",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "wxc_host_prep"
-version = "0.8.0"
-dependencies = [
- "clap",
- "embed-manifest",
- "mxc_build_common",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "windows",
- "windows-core",
- "wxc_common",
 ]
 
 [[package]]

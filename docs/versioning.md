@@ -484,12 +484,10 @@ Stage 2 — Containment resolve (independent of schema version)
 
 Stage 3 — Host-capability negotiate (runtime probe, no version input)
   For ProcessContainer on Windows:
-    BaseContainer usable on this host?  (is_base_container_usable())
-      yes → BaseContainer (native OS sandbox API)
-      no  → AppContainer fallback tier (BFS when compiled in with the
-            `tier2_bfs` feature and `bfscfg.exe` is present, else DACL)
-  The chosen tier and any fallback are logged (warnings + "selected isolation
-  tier: …"). This capability fallback is the ONLY fallback.
+    PSEC compatible and usable? → PSEC
+    otherwise SBOX compatible and usable? → SBOX
+    otherwise → backend_unavailable
+  MXC does not emulate native containment by modifying host filesystem ACLs.
 ```
 
 For the BaseContainer tier, Stage 3 translates the policy into a FlatBuffer and

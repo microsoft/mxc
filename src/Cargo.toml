@@ -33,7 +33,6 @@ members = [
     "core/wxc_common",
     "ffi/mxc_ffi",
     "host/plm",
-    "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
     "mxc_telemetry",
     "testing/unix_test_proxy",

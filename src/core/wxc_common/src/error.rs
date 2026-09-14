@@ -23,9 +23,6 @@ pub enum WxcError {
     #[error("Filesystem policy error: {0}")]
     FilesystemPolicy(String),
 
-    #[error("Filesystem policy error: bfscfg.exe is not available on this host")]
-    BfsNotAvailable,
-
     #[error("Initialization error: {0}")]
     Initialization(String),
 
@@ -49,19 +46,11 @@ impl From<std::io::Error> for WxcError {
 }
 
 #[cfg(target_os = "windows")]
-pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
-    "filesystem.deniedPaths is not supported by this AppContainer filesystem mode. \
-     Paths are denied by default unless granted via readwritePaths or readonlyPaths. \
-     Remove deniedPaths, or narrow readwritePaths/readonlyPaths to exclude the path \
-     you wanted to deny.";
-
-#[cfg(target_os = "windows")]
 pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
     "filesystem.deniedPaths cannot be enforced by the BaseContainer backend on this \
      OS build: it does not advertise the native deny-paths capability \
      (SANDBOX_CAP_FS_DENY via Experimental_QuerySandboxSupport). Run on a build with \
-     BaseContainer deny support, or use the ProcessContainer dispatcher so it can select \
-     the AppContainer + DACL fallback (which enforces deniedPaths via DENY ACEs).";
+     BaseContainer deny support or remove filesystem.deniedPaths.";
 
 #[cfg(target_os = "windows")]
 pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =

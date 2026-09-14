@@ -146,7 +146,6 @@ fn state_aware_common(
         sandbox_id: None,
         process: None,
         filesystem: None,
-        fallback: None,
         network: None,
         runtime_config: None,
         telemetry: telemetry.into_option().map(convert_telemetry),

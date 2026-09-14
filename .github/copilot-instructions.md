@@ -67,22 +67,43 @@ three `Build.*.Job.yml` workflows before calling the matrix job.
   (`nightly` Mon–Sat, `nightly` + `weekly` on Sunday); `workflow_dispatch`
   takes a `plan` input.
 - `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
-  takes a `plan`. Its `resolve` job expands the plan into per-family matrices;
-  the `windows` / `linux` / `macos` jobs then download the artifact, prepare
-  the host, and run the backend suite.
-- `scripts/ci/validation-test-matrix.json` — the declarative catalog
-  (`platforms`, `triggers`, `backendDelayedStart`). Its `triggers` keys *are*
-  the plan list. `scripts/ci/resolve-validation-test-matrix.mjs` validates the
-  catalog and expands a plan, so a backend may only be triggered where its
-  platform declares it.
-- `scripts/ci/prepare-{windows,linux,macos}-host.{ps1,sh}` — per-backend host
-  prep, plus an inventory of the workload interpreters. Backend prerequisites
-  are installed per job; most workload interpreters come from image provisioning
-  scripts outside this repository, while Windows prep installs packaged `winapp`
-  and OpenSSL per job.
-- `scripts/ci/run_backend_validation_tests.{ps1,sh}` — map a matrix `backend`
-  id to the repository's existing backend suite. An unwired id fails loudly
-  rather than reporting a false success.
+  takes a `plan` input. Its `resolve` job expands the plan into per-family
+  matrices, then the `windows` / `linux` / `macos` jobs each download the
+  artifact, prepare the host, and run the backend suite.
+
+An entry point must build the artifacts (call the three `Build.*.Job.yml`
+workflows) before calling the matrix job.
+
+**The matrix is declarative:**
+
+- `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
+  with per-architecture target/artifact/1ES pool and the backends that platform
+  supports), `triggers` (which OS/backend pairs each plan runs), and the
+  optional `backendDelayedStart` (per-backend job-start stagger, in seconds).
+  The `triggers` keys *are* the plan list — the resolver reads them at run time,
+  so adding a plan needs no script change.
+- `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
+  expands a plan (currently `pr`, `nightly`, `weekly`, `enabled`) into GitHub
+  Actions matrices. It rejects an invalid catalog before any specialized test
+  runner is allocated, so add a backend to a trigger only where the platform
+  declares it.
+- A non-macOS platform architecture with an empty `pool` is never scheduled,
+  which is how a catalog entry stays declared but dormant. macOS entries use a
+  GitHub-hosted `runner` instead of a 1ES `pool`.
+
+**Host preparation** happens in the matrix job before the tests, keyed by the
+matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
+`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
+explicit no-op, so the step runs unconditionally for every entry.
+
+**Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
+(Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map
+the matrix `backend` id to the repository's existing backend suite. The
+`process` case requires the native probe to report an enabled PSEC or SBOX
+contract and runs a filesystem smoke test. A backend with no wired suite fails
+loudly rather than reporting a false success. The Windows dispatcher points `TEMP` at
+`$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
+directory is picked up by the job's log upload without per-file CI wiring.
 
 ### Individual components
 
@@ -148,7 +169,7 @@ cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repea
 # CI validation entry points — run a backend suite against a downloaded artifact
 # the way the validation matrix does. Take the matrix backend id exactly as it
 # appears in scripts/ci/validation-test-matrix.json.
-scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
+scripts\ci\run_backend_validation_tests.ps1 -Backend process -BinaryDirectory <dir> -Architecture x64
 scripts\ci\run_backend_validation_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
 
 # Resolve a plan locally to see exactly what CI would schedule
@@ -165,8 +186,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 | Backend | Binary | Platform | Module |
 |---------|--------|----------|--------|
-| AppContainer | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/appcontainer_runner.rs` |
-| BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/base_container_runner.rs` — prefers `CreateProcessSecurityEnvironment` with PSEC whenever its runtime probe succeeds and the requested policy is compatible, independent of schema version. PSEC is the only path that receives schema 0.8 egress filters, runtime proxy, proxy peer identity, and host-loopback configuration. When PSEC is unavailable or policy-incompatible, MXC tries `Experimental_CreateProcessInSandbox`; SBOX is selected only when its legacy FlatBuffer contract can represent the request without dropping those PSEC-only features, otherwise selection continues to the AppContainer tiers. SBOX keeps legacy proxy behavior but rejects schema 0.8 runtime proxy. `captureDenials` prefers the complete compatible PSEC + V2 Learning Mode path; when that path cannot fully honor a request, MXC retains the highest compatible legacy tier and pairs it with guarded WPR using exact handle-attested process scope. Both providers honor explicit `retainEtl` after a terminal wait; abandoned processes discard the trace. |
+| ProcessContainer (native BaseContainer) | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/base_container_runner.rs` — prefers PSEC whenever its runtime probe succeeds and the requested policy is compatible; otherwise tries transitional SBOX when its legacy FlatBuffer contract can represent the complete request. There is no AppContainer, BFS, or host-DACL fallback. PSEC is the only path that receives schema 0.8 egress filters, runtime proxy, proxy peer identity, and host-loopback configuration. `captureDenials` prefers PSEC + V2 Learning Mode and otherwise uses compatible SBOX with guarded WPR. |
 | Windows Sandbox | `wxc-exec.exe` | Windows | `backends/windows_sandbox/lifecycle/src/` (live transient one-shot `WindowsSandboxRunner` + state-aware `StatefulSandboxBackend`). Experimental — requires `--experimental`. Supports both **one-shot** (a fresh, disposable VM per invocation with guaranteed teardown, via `ScriptRunner`) and **state-aware** (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. State-aware holds a single live VM across separate `wxc-exec` phase processes behind a persistent detached host-side daemon (`backends/windows_sandbox/daemon/`); the OS enforces a single running Windows Sandbox VM per host, so the daemon owns it and reclaims an orphaned VM on restart only via positive process-identity proof. The shared boot sequence (write per-launch nonce, launch VM, capture ownership proof, wait rendezvous, connect) lives in `backends/windows_sandbox/lifecycle/src/vm.rs::launch_managed_vm`; each mode plugs in its own `LaunchObserver` for the per-caller ownership / proof bookkeeping. Honors `readwritePaths`/`readonlyPaths`/`deniedPaths` (HOST paths) at provision via `.wsb` `<MappedFolder>` entries (mapped at the same absolute host path inside the guest; rejects `deniedPaths` equal-to or nested-within a mapped share since `.wsb` has no Deny primitive); filesystem policy is immutable post-provision. Network isolation is enforced unconditionally by the in-guest agent; `network`/`ui` are not honored. ID prefix `wsb` (strict `wsb:<8-hex>` grammar). Per-launch handshake: 32-byte `Nonce` + 1-byte `ChannelRole` tag on every TCP connection (boot + reconnect); the guest pairs accepted sockets by declared role, not by accept order. The guest agent binary `wxc-windows-sandbox-guest.exe` (`backends/windows_sandbox/guest/`) is injected into the VM. |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `backends/nanvix/runner/src/lib.rs` — feature-gated behind `microvm` |
 | Hyperlight | `wxc-exec.exe` | Windows | `backends/hyperlight/common/src/lib.rs` — Hyperlight + Unikraft micro-VM backend |
@@ -210,7 +230,6 @@ Core references:
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
 - `docs/ci-validation-infrastructure.md` — validation (E2E) test matrix: workflows and job names, catalog format, per-backend coverage and status, and the runbook for adding/removing an OS, backend, or plan
-- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/0.7.0/policy.md` — sandbox policy 0.7.0 specification
 - `docs/telemetry/telemetry.md` — telemetry overview; `docs/telemetry/telemetry-consent-design.md` (Windows-only consent design and per-SDK surface) and `docs/telemetry/telemetry-administrative-policy.md` (the MDM / Group Policy ceiling)
 
@@ -255,17 +274,17 @@ The workspace is organized into six top-level directories under `src/`:
 | `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_engine/`, `mxc-sdk/`, `mxc_pty/`, `mxc_build_common/`, `learning_mode_core/`, `generated/` |
 | `backends/` | Backend-specific code (one subfolder per containment backend or backend support component) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common,lifecycle}`, `isolation_session/{bindings,common}`, `learning_mode/windows`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `ffi/` | Foreign-function-interface crates (C ABI for language bindings) | `mxc_ffi/` |
-| `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
+| `host/` | Host-side utilities | `plm/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `unix_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
 | `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
 
-- `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by host tools and backends (`process_util`, `string_util`, `filesystem_dacl`, `diagnostic`). It must not depend on any `backends/*` crate.
+- `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by backends (`process_util`, `string_util`, `filesystem_security`, `diagnostic`). It must not depend on any `backends/*` crate.
 - Each Windows containment backend lives in its own `backends/*/common` crate (e.g. `appcontainer_common`, `windows_sandbox_common`, `isolation_session_common`, `hyperlight_common`, `nanvix_runner`). Backend crates depend on `wxc_common`; there are no cross-edges between backend crates. Windows Sandbox additionally has `windows_sandbox_lifecycle`, which owns the one-shot and state-aware runners and depends on `windows_sandbox_common` for the wire protocol, plus separate daemon and guest binaries.
 - `learning_mode_core` is the cross-platform learning-mode denial model and output layer. It owns denial types, summaries, analyzer abstractions, plain-JSON document emission, and the serializable output-pointer type, and must not depend on any `backends/*` crate.
 - `learning_mode_windows` (`backends/learning_mode/windows`) is a Windows-only backend support crate for the AppInfo-brokered Learning Mode APIs in `processmodel.dll`. It runtime-resolves the Learning Mode trace and process security-environment exports, owns their typed handle/lifecycle wrappers, decodes sealed ETL traces through `learning_mode_core`, and process-scopes guarded WPR retention with Windows Trace Relogger using exact job-attested PID/creation/exit `FILETIME` ranges. It depends on `wxc_common` plus `learning_mode_core`; runner integration consumes it from the AppContainer backend layer. The trace contract is `HRESULT Start` + retryable `HRESULT Stop` + infallible `Close`: `Stop` never consumes the trace handle, and every started trace must be closed exactly once (closing without stopping is the early-exit discard path). The process security-environment contract is `HRESULT Create` + infallible by-value `Close` and consumes a PSEC 1.0 FlatBuffer, not the legacy SBOX buffer; generated PSEC bindings live in `core/generated/process_security_environment_specification`.
 - `plm` (`host/plm`) is the Windows-only legacy WPR Learning Mode helper. Public `plm.exe` is `asInvoker`: ETL analysis and every caller-selected file path stay under the caller token. It self-elevates only hidden fixed WPR operations; the retained elevated guardian accepts authenticated attach and stop/analyze/discard controls over unique local PID-checked named pipes and uses the compiled-in profile from protected fixed-volume ProgramData scratch. WPR's host-wide source ETL never crosses the privilege boundary: after terminal job tracking, the guardian relogs a separate ETL containing only supported Learning Mode events from exact handle-attested process generations, analyzes that filtered ETL, and returns its bytes only when explicitly retained. Relogging failure transfers no trace. Successful authenticated stop/discard disarms the child before releasing the PLM singleton. Owner death, pipe break, or another uncertain control failure preserves the recovery marker and deliberately leaves WPR untouched for administrator recovery.
-- `wxc`, `lxc`, and `mxc_darwin` are thin binary crates (`wxc-exec` / `lxc-exec` / `mxc-exec-mac`) that wire up CLI args (`clap`), load/validate config, handle maintenance modes (`--probe`, `--available-backends`, `--delete`, `--setup-*`, `--audit`), and **delegate all backend dispatch to `mxc_engine`**. They contain no `match request.containment` of their own. `wxc-exec` additionally owns the Windows Ctrl-C / DACL-cleanup / telemetry orchestration around the engine call. Its `--audit` compatibility workflow synthesizes allow-mode `captureDenials` with ETL retention, then generates policy-authoring artifacts from the actionable denials document returned by the selected engine backend. `--probe` (Windows only) emits the AppContainer diagnostics object, including per-request `FilesystemDeniedPaths` / `IngressHostLoopbackAllow` capability details; `--available-backends` (Linux only, `lxc-exec`) emits the `mxc_engine::available_backends()` array and is read-only with respect to host state. The two are deliberately distinct flags because their payload shapes differ — see `docs/backend-support-probe-api-plan.md` §6.
-- `mxc_engine` is the **single execution engine** — the one home for "given an `ExecutionRequest`, run it". It owns: run-to-completion backend selection (`run` / `resolve_runner`, covering **all** backends, incl. the Windows ProcessContainer BaseContainer/AppContainer BFS/DACL fallback tiers via `appcontainer_common::dispatcher::dispatch_with_fallback`, and every experimental backend, feature-gated); streaming (`spawn` → `Box<dyn SandboxProcess>`); state-aware lifecycle dispatch (`run_state_aware`, including Windows Sandbox and IsolationSession); host probing (`platform_support` / `PlatformSupport` plus `available_backends` / `AvailableBackend`); and config building (`build_request` / `build_request_with_containment`, `SandboxPolicy` + sections, `available_tools_policy`/`user_profile_policy`/`temporary_files_policy`). `available_backends` reports each backend's highest tier and selected capabilities; `wxc-exec --probe` provides diagnostic details. Rust policy builders construct the exact contract registered for the declared version before shared semantic validation; rolling builders remain only for differential characterization. It depends on the backend crates (cfg-split: appcontainer/windows_sandbox lifecycle/isolation_session/wslc/nanvix on Windows, bubblewrap/lxc/nanvix on Linux, seatbelt on macOS) so it can't live in `wxc_common`. Both the executor binaries and `mxc-sdk` call into it. `ResolvedRunner` carries the boxed runner plus (Windows only) the optional `DaclManager` guard, so `wxc-exec` can park the guard for its signal handler.
+- `wxc`, `lxc`, and `mxc_darwin` are thin binary crates (`wxc-exec` / `lxc-exec` / `mxc-exec-mac`) that wire up CLI args (`clap`), load/validate config, handle maintenance modes (`--probe`, `--delete`, `--setup-*`, `--audit`), and **delegate all backend dispatch to `mxc_engine`**. They contain no `match request.containment` of their own. `wxc-exec` also owns Windows cancellation telemetry around the engine call.
+- `mxc_engine` is the **single execution engine** — the one home for "given an `ExecutionRequest`, run it". It owns run-to-completion and streaming backend selection, state-aware lifecycle dispatch, host probing, and config building. Windows ProcessContainer dispatch uses only PSEC or SBOX through `appcontainer_common::dispatcher`; unavailable or incompatible native contracts fail before launch.
 - `mxc-sdk` is the **public Rust SDK** — a thin facade over `mxc_engine`.
   Build a `SandboxRequest` with `build_request`, then either `run(request)`
   (run-to-completion; returns an `Output` with the `WaitOutcome`, captured
@@ -281,8 +300,8 @@ The workspace is organized into six top-level directories under `src/`:
   `Sandbox`) is its only local module. `exec_attached` relays a state-aware exec
   onto the calling process's stdio and allocates a pty on IsolationSession; no
   other entry point allocates one. Streaming supports Seatbelt (macOS),
-  Bubblewrap (Linux), Windows ProcessContainer (AppContainer + BaseContainer),
-  WSLC (Windows, experimental — needs the crate's `wslc` feature plus
+  Bubblewrap (Linux), Windows ProcessContainer (PSEC or SBOX),
+  and WSLC (Windows, experimental — needs the crate's `wslc` feature plus
   `SandboxRequest::set_experimental(true)`; no stdin and `id() == 0`, since the
   WSLC SDK exposes neither), and IsolationSession (Windows, experimental —
   needs the crate's `isolation_session` feature plus the same opt-in;
@@ -309,7 +328,7 @@ State-aware adapters produce a checked `StateAwareInput` containing common field
 
 ### Binary naming
 
-- Windows: `wxc-exec.exe` (AppContainer / Windows Sandbox / MicroVM); `wxc-host-prep.exe` (host setup — see `docs/host-prep.md`)
+- Windows: `wxc-exec.exe` (ProcessContainer / Windows Sandbox / MicroVM)
 - Linux: `lxc-exec` (LXC containers)
 - macOS: `mxc-exec-mac` (Seatbelt)
 - Target triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`

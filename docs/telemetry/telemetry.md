@@ -105,7 +105,7 @@ targets for this work.
 | Requirement | ETW event | Required fields | Backend coverage |
 |---|---|---|---|
 | Process outcome (M-ETW-1) | `MXC.ProcessExited`, `MXC.ProcessTimedOut`, `MXC.ProcessKillFailed` | `identity`, `processId`, plus `exitCode`, `timeoutMs`, or `error` | ProcessContainer and IsolationSession |
-| Enforcement degradation (M-ETW-2) | `MXC.EnforcementDegraded` | `identity`, `tier`, `needsDaclAugmentation`, `degradationReasons`, `effectiveEnforcementLevel` | ProcessContainer; not applicable to IsolationSession, which has no tier ladder |
+| Enforcement degradation (M-ETW-2) | `MXC.EnforcementDegraded` | Retained event contract: `identity`, `tier`, `needsDaclAugmentation`, `degradationReasons`, `effectiveEnforcementLevel` | Not emitted by current ProcessContainer dispatch, which has no fallback tier ladder and fails closed when neither native contract is compatible; not applicable to IsolationSession |
 | Policy hash (M-ETW-3) | `MXC.PolicyHash` | Stable `policyHash` and/or `policyVersion` | ProcessContainer and IsolationSession |
 | Network policy (M-ETW-4) | `MXC.SandboxNetworkPolicyApplied` | `identity`, `enforcementMode`, `defaultPolicy`, `proxyPort` | ProcessContainer; not applicable when IsolationSession rejects network policy before provisioning |
 | Sandbox teardown (M-ETW-5) | `MXC.SandboxTornDown` | `identity`, `status`, and released-resource fields | ProcessContainer and IsolationSession |
@@ -522,9 +522,11 @@ Fields are record-specific. Process-boundary records include `backend`,
 `identity`, `tier` (for `process_container`), and `pid`. Early records emitted
 before a sandbox exists carry only the fields shown in the table below; in
 particular, `mxc.PolicyHash` has `backend`, `policy_hash`, and
-`config_schema_version`, `mxc.EnforcementDegraded` has `backend`, `identity`,
-and `tier`, and `mxc.ConfigRejected` has `correlation_id` and `backend` plus its
-rejection fields.
+`config_schema_version`, and `mxc.ConfigRejected` has `correlation_id` and
+`backend` plus its rejection fields. The retained `mxc.EnforcementDegraded`
+event contract includes `backend`, `identity`, and `tier`, but current
+ProcessContainer dispatch does not emit it because it has no fallback tier
+ladder.
 
 `correlation_id` is a per-invocation opaque hex token, minted once per process
 and stable for its lifetime. It exists because a rejection is refused *before* a
@@ -536,73 +538,33 @@ rejection records from the same invocation. A successful launch emits no
 |---|---|---|
 | `mxc.PolicyHash` | Every launch, after the effective request is resolved | `backend`, `policy_hash`, `config_schema_version` |
 | `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
-| `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
+| `mxc.EnforcementDegraded` | Reserved event contract; current ProcessContainer dispatch never degrades to a lower tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
 | `mxc.NetworkPolicyApplied` | After network policy setup, on success **and** failure | `backend`, `identity`, `tier` (no `pid` yet), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
 | `mxc.ProcessExited` | Sandboxed process exited on its own | `exit_code` |
 | `mxc.ProcessTimedOut` | `scriptTimeout` breached | `timeout_ms` |
 | `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
-| `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
+| `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
 | `mxc.ConfigRejected` | A request was refused before it could run | `correlation_id`, `backend`, `reason`, `offending_field`, `phase` |
 
-### Error semantics: `FallbackError` vs `ActivityError`
+### Native ProcessContainer failure semantics and `ActivityError`
 
-Tier selection can *degrade* (proceed with weaker enforcement) or *fail*
-(refuse to run). Telling those apart is the whole point of the distinction
-below — a reader who cannot separate "a sandbox ran with reduced isolation"
-from "a benign race aborted the launch" cannot use this log for security
-decisions.
-
-**`FallbackError` (MXC-owned, `fallback_detector.rs`) is always
-security-relevant and always fail-closed.** It aborts tier selection; no
-sandbox runs. It exists precisely so MXC never silently broadens access when
-it cannot honour the requested policy:
-
-| Variant | Meaning | Why it is security-relevant |
-|---|---|---|
-| `DaclFallbackDisabled` | The selected tier would have to mutate host DACLs, but the caller set `fallback.allowDaclMutation = false`. | The caller explicitly forbade host mutation. Running anyway would modify the host outside the sandbox contract. |
-| `WriteDacUnavailable` | `WRITE_DAC` is unavailable on a path needing ACE augmentation (or the path would not open). | The `deniedPaths` policy cannot be enforced. Proceeding would run with the deny silently absent. |
-| `SystemRootUnresolved` | `%SystemRoot%` could not be resolved. | MXC refuses to guess `C:\Windows`: an attacker who can scrub the environment could otherwise force a silent Tier 2 → Tier 3 downgrade. |
-
-Because these abort the run, they are **not** reported via
-`mxc.EnforcementDegraded` — nothing was degraded, because nothing ran. They
-surface as the invocation's failure and, where the refusal is a config-level
-rejection, as `mxc.ConfigRejected`.
-
-**Degradation is the other case, and it is what `mxc.EnforcementDegraded`
-reports.** A tier below the preferred one was selected, or DACL augmentation
-was required, and the run *proceeds*. The bounded `degradation_reasons`
-vocabulary distinguishes the causes:
-
-| Reason code | Security-relevant? | Meaning |
-|---|---|---|
-| `base_container_deny_unsupported` | **Yes** | The OS does not advertise `SANDBOX_CAP_FS_DENY`, so `deniedPaths` cannot be enforced natively at Tier 1. |
-| `dacl_augmentation_required` | **Yes** | Enforcement depends on mutating host DACLs rather than on native containment. |
-| `host_prep_system_drive_missing` | **Yes** | The system-drive ACEs `wxc-host-prep prepare-system-drive` stamps are not in effect. |
-| `host_prep_null_device_missing` | **Yes** | The `\Device\Null` descriptor is not in effect (the kernel resets it every boot). |
-| `base_container_unavailable` | Environmental | Tier 1 was not preferred, or is unusable on this host. |
-| `tier2_feature_disabled` | Build-time | The `tier2_bfs` Cargo feature is off, so Tier 2 was skipped. |
-| `bfscfg_unavailable` | Environmental | `bfscfg.exe` could not be resolved, so BFS cannot enforce the filesystem policy. |
-
-The last three describe *why the host or build could not offer a stronger
-tier*, not a weakening of a policy MXC claimed to apply; the first four mean an
-enforcement mechanism the policy relied on is absent. Both still produce a
-record — the consumer decides how to weigh them.
+ProcessContainer dispatch prefers PSEC and otherwise tries transitional SBOX
+only when that contract can represent the complete request. If neither native
+contract is available and compatible, MXC refuses to launch. It does not
+degrade to AppContainer, BFS, or host-DACL mutation, so
+`mxc.EnforcementDegraded` is not emitted by the current dispatcher.
 
 **`ActivityError` is an OS-side ETW field, not an MXC record field.** MXC does
 not emit, define, or interpret it, and it does not appear in the local audit
 format described here. It is named in this section only because the two are
 easy to confuse: a non-zero `ActivityError` on an OS Sandboxing-provider event
-is an OS-internal outcome, and it must not be read as an MXC enforcement
-degradation. Use `mxc.EnforcementDegraded` for that question.
+is an OS-internal outcome, not evidence that MXC selected weaker enforcement.
 
 Notes on the ones that are easy to misread:
 
-* **`mxc.EnforcementDegraded` is absent on a clean run.** It fires only when
-  selected enforcement is below the preferred level, additional host setup was
-  needed, or a bounded reason was recorded. The effective level is a closed MXC
-  vocabulary describing the enforcement mechanism selected by MXC; it is not an
-  assertion about an independent OS telemetry field. The streaming path emits
-  the record *before* the spawn, so it exists even when the spawn then fails.
+* **`mxc.EnforcementDegraded` is a retained contract with no current
+  ProcessContainer producer.** Native dispatch either selects a compatible
+  PSEC/SBOX contract or fails before launch.
 * **`mxc.ProcessKillFailed` is not automatically a defect.** Termination can
   race with normal process exit. The record is captured but never propagated —
   the kill path stays best-effort and non-fatal.
@@ -664,8 +626,8 @@ record must not be read as "the event did not happen":
 | `mxc.PolicyHash` | ✅ | ✅ | ✅ | ✅ |
 | `mxc.SandboxIdentity` | — | ✅ | — | — |
 | `mxc.ConfigRejected` | ✅ (`wxc-exec`) | ✅ | — | — |
-| `mxc.EnforcementDegraded` | ✅ | — | n/a (no tier model) | n/a |
-| `mxc.NetworkPolicyApplied` | ✅ (T1/T2/T3) | — | — | — |
+| `mxc.EnforcementDegraded` | — (no fallback tier model) | — | n/a (no tier model) | n/a |
+| `mxc.NetworkPolicyApplied` | ✅ (native PSEC/SBOX) | — | — | — |
 | `mxc.ProcessExited` / `TimedOut` / `KillFailed` | ✅ (including isolation-session one-shot) | ✅ (isolation-session exec) | — | — |
 | `mxc.SandboxTornDown` | ✅ | ✅ (isolation-session stop/deprovision) | — | — |
 
@@ -725,9 +687,9 @@ matrix. See [Platform scope](#platform-scope).
 | Requirement | Existing OS coverage | MXC local coverage | Join/correlation notes |
 |---|---|---|---|
 | Process outcome (M-ETW-1) | Existing OS process-lifecycle records cover normal exit. The OS does not provide a verified timeout or kill-failure record for this requirement. | `mxc.ProcessTimedOut` and `mxc.ProcessKillFailed` cover the MXC boundary for both one-shot and state-aware paths. | Join the OS lifecycle identity to the MXC sandbox identity where available; use the process ID for process records. |
-| Enforcement degradation (M-ETW-2) | Not applicable to this backend: `isolation_session` has no MXC process-container tier/fallback model. | `mxc.EnforcementDegraded` covers process-container tier selection and includes `effective_enforcement_level`. | No isolation-session tier join is expected. |
+| Enforcement degradation (M-ETW-2) | Not applicable to this backend: `isolation_session` has no MXC process-container tier model. | The retained `mxc.EnforcementDegraded` contract has no current ProcessContainer producer because native dispatch fails closed instead of degrading. | No isolation-session tier join is expected. |
 | Policy hash (M-ETW-3) | No policy hash field is emitted by the isolation-session OS provider. | `mxc.PolicyHash` records the effective MXC policy locally, excluding secrets and command content. | Correlate by the invocation/lifecycle context; the hash is an MXC record, not an OS field. |
-| Network policy (M-ETW-4) | Not applicable to `isolation_session`: MXC rejects its network and proxy policy before OS provisioning. | `mxc.NetworkPolicyApplied` covers process-container network setup on every tier, including the OS-enforced BaseContainer (`capabilities`) case. | This row changes only if the separate M1 network-proxy requirement is implemented. |
+| Network policy (M-ETW-4) | Not applicable to `isolation_session`: MXC rejects its network and proxy policy before OS provisioning. | `mxc.NetworkPolicyApplied` covers native ProcessContainer network setup. | This row changes only if the separate M1 network-proxy requirement is implemented. |
 | Sandbox teardown (M-ETW-5) | Existing OS lifecycle and security records cover OS cleanup. | `mxc.SandboxTornDown` covers process-container cleanup and isolation-session `stop`/`deprovision`, naming each reported release outcome without duplicating the agent-user/container result. | Join by the lifecycle identity where available; OS cleanup may outlive the MXC process boundary. |
 | IsolationSession telemetry (M-ETW-6) | Existing OS providers record isolation-session lifecycle, but not all MXC-side policy or rejection detail; no separate OS provider is assumed. | `Microsoft.MXC` carries applicable MXC-owned IsolationSession lifecycle events; the JSON audit records remain a separate local sink. | Join MXC lifecycle events by the existing lifecycle correlation context where available. |
 | Configuration rejection (M-ETW-7) | Existing OS records do not expose the MXC parser's bounded field path and rejection category. | `mxc.ConfigRejected` records the bounded reason, offending field, backend, phase, and a per-invocation `correlation_id`. | MXC validation commonly occurs before the OS call, so no OS rejection event should be expected for these records. The human-readable error remains on the existing operator-facing channel; the audit record contains no rich error text. |

@@ -13,7 +13,6 @@ jobs:
           - arch: x64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
             features: hyperlight isolation_session microvm wslc
           - arch: arm64
             runner: windows-11-arm
@@ -99,7 +98,6 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/wxc-exec.exe
             src/target/${{ matrix.target }}/release/plm.exe
-            src/target/${{ matrix.target }}/release/wxc-host-prep.exe
             src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe

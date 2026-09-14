@@ -1,19 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Windows ProcessContainer (AppContainer / BaseContainer) executor
-//! **characterization** tests.
+//! Windows native ProcessContainer executor characterization tests.
 //!
 //! These lock in the *current* run-to-completion behavior of the `wxc-exec.exe`
 //! ProcessContainer path before the unified `SandboxBackend`/`Runner` refactor
 //! lands. They assert what the code does **today**.
 //!
-//! ProcessContainer execution requires an elevated, host-prepped Windows host
-//! (see `docs/host-prep.md`). Standard CI runners are **not** capable, so these
-//! tests skip unless a prepared lane sets `MXC_E2E_HOST_PREPPED=1`
-//! (`host_prepped_optin()`), and additionally skip if `wxc-exec.exe` has not
-//! been built or the host is missing process prerequisites. They therefore
-//! never red-fail on incapable CI, but lock in behavior on a prepared box.
+//! ProcessContainer execution requires an enabled native PSEC or SBOX contract.
+//! These tests skip unless a capable lane opts in and `wxc-exec.exe` is built.
 //!
 //! Scope note: env inheritance is intentionally not characterized here — the
 //! AppContainer "clean environment" model differs from the Unix backends. cwd
@@ -21,17 +16,10 @@
 //! Windows runners resolve an empty `process.cwd` to a concrete directory
 //! rather than passing `NULL` to the launch API.
 //!
-//! Tier note: the ProcessContainer tier (BaseContainer vs AppContainer+DACL) is
-//! **not** independently selectable from a config — the dispatcher derives it
-//! purely from host capability. A dedicated executor built with the
-//! `force-tier-testing` feature can override selection through `MXC_FORCE_TIER`;
-//! normal production executors do not honor it. Without that feature these tests
-//! exercise whichever tier the prepared lane resolves to; running them on both a
-//! BaseContainer-capable and a downlevel host covers both tiers. Because that is
-//! not enforceable in ordinary CI, the tier-independent guarantee — that neither
-//! runner can resolve a `NULL` cwd — is additionally locked in by the unit tests
-//! on the shared `appcontainer_common::working_directory` mapping both launch
-//! sites call, which run on every lane with no host prerequisites.
+//! ProcessContainer uses only native PSEC or transitional SBOX. The
+//! tier-independent guarantee that the runner never resolves a `NULL` cwd is
+//! additionally locked in by unit tests on the shared
+//! `appcontainer_common::working_directory` mapping.
 #![cfg(target_os = "windows")]
 
 use std::fs;

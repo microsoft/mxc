@@ -24,7 +24,7 @@
 //! written:
 //!
 //! * The URL surface (`new`, `from_url`, `to_url`, and the `original_url`
-//!   field) has live callers today.  `appcontainer_runner::inject_proxy_vars`
+//!   field) has live callers today. `environment::inject_proxy_vars`
 //!   turns `to_url()` into the `HTTP_PROXY` / `HTTPS_PROXY` values injected into
 //!   the sandboxed process, `proxy_coordinator` uses it to launch the elevated
 //!   shim, `unix_proxy_coordinator` logs it, `config_parser` produces addresses
@@ -83,7 +83,7 @@ fn pin_for(address: &str, ip: IpAddr) -> ProxyHostPin {
     }
 }
 
-// Protects `appcontainer_runner::inject_proxy_vars` and the proxy coordinators,
+// Protects `environment::inject_proxy_vars` and the proxy coordinators,
 // which build the sandbox's proxy URL from an address created with `new`.  A
 // loopback bind address is the common case for the builtin test proxy.
 #[test]
@@ -93,7 +93,7 @@ fn to_url_constructs_http_url_for_loopback_when_no_original_url() {
     assert_eq!(addr.to_url(), "http://127.0.0.1:8080");
 }
 
-// Protects `appcontainer_runner::inject_proxy_vars`.  A proxy bound to a
+// Protects `environment::inject_proxy_vars`. A proxy bound to a
 // non-loopback address is constructible via `new`, and the sandbox must be told
 // that exact endpoint.  Reporting `127.0.0.1` here would hand the sandbox a
 // different endpoint than the firewall authorized -- a policy bypass.

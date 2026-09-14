@@ -7,6 +7,7 @@ import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandbox
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
+  _setProbeRunner,
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
@@ -1991,9 +1992,18 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         this.skip('processcontainer is Windows-only');
         return;
       }
-      assert.doesNotThrow(() =>
-        resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+      _setProbeRunner(() =>
+        JSON.stringify({ tier: 'base-container', probes: { baseContainerUsable: true } }),
       );
+      _resetPlatformSupportCache();
+      try {
+        assert.doesNotThrow(() =>
+          resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
+        );
+      } finally {
+        _setProbeRunner(null);
+        _resetPlatformSupportCache();
+      }
     });
 
     it('should reject "appcontainer" on non-Windows hosts with the canonical error', function (this: { skip: (reason?: string) => void }) {

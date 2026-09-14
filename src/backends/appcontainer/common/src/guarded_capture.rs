@@ -3,25 +3,21 @@
 
 //! Dependency-injection boundary for the guarded WPR capture fallback.
 //!
-//! `appcontainer_common` implements the legacy containment tiers (BaseContainer
-//! SBOX, AppContainer + BFS, AppContainer + DACL) that a host without the
-//! native V2 PSEC + Learning Mode APIs still needs `captureDenials` on.
+//! `appcontainer_common` uses guarded WPR when transitional SBOX must provide
+//! `captureDenials` without the native V2 PSEC + Learning Mode APIs.
 //! Elevated WPR capture lives in `plm` (the host's guarded PLM tool), and
 //! `appcontainer_common` MUST NOT depend on `plm` directly: `plm` links the
 //! Windows ETL decoder (`learning_mode_windows`) and elevation/pipe machinery
 //! that is unrelated to this crate's job, and the crate-layering rule
 //! (backend-support crates don't cross-depend on one another) forbids it.
 //!
-//! Instead, this module defines the minimal traits a legacy-tier runner needs
+//! Instead, this module defines the minimal traits the SBOX runner needs
 //! to start and stop a guarded WPR capture scoped to its own sandboxed process
 //! tree. `mxc_engine` (which already depends on `plm` for the executor
 //! binaries' guarded-PLM lifecycle) implements them by adapting
 //! `plm::elevated::{start_guarded_session_with_executable, GuardedSession}`,
-//! and hands the concrete factory to the dispatcher only when it explicitly
-//! opts a request into the fallback (see
-//! `dispatcher::dispatch_with_fallback_and_capture` /
-//! `dispatcher::spawn_with_fallback_and_capture`) — a runner never picks up
-//! guarded capture silently.
+//! and hands the concrete factory to the dispatcher only when the request
+//! needs guarded capture.
 
 use std::path::Path;
 
@@ -79,8 +75,8 @@ pub trait GuardedCaptureSession: Send {
     ///
     /// This method must not return, on either success or error, until the
     /// elevated guardian has terminated and released every duplicated sandbox
-    /// handle. Runners rely on that guarantee before allowing firewall,
-    /// filesystem, and DACL enforcement guards to drop.
+    /// handle. The runner relies on that guarantee before releasing its
+    /// containment resources.
     fn discard(&mut self) -> Result<(), String>;
 
     /// Stops the guarded capture and analyzes it against exact process
@@ -151,10 +147,8 @@ pub(crate) fn release_after_termination_failure(
 /// (`provider_allows_trace_transfer`). When retention is requested and neither
 /// holds, the request is rejected with [`RETAIN_ETL_UNSUPPORTED_MSG`].
 ///
-/// Centralized so both the AppContainer fallback tiers (which have no native
-/// capture path and always pass `native_capture_retains_etl = false`) and the
-/// BaseContainer runner (which passes `true` when its native PSEC/V2 capture is
-/// selected, making the guarded-provider capability irrelevant) share one gate.
+/// Centralized so SBOX guarded capture and native PSEC/V2 capture share one
+/// retention gate.
 pub fn validate_retain_etl_supported(
     retain_etl: bool,
     provider_allows_trace_transfer: bool,
@@ -170,8 +164,8 @@ pub fn validate_retain_etl_supported(
 }
 
 /// Structured output metadata plus the teardown status produced by finalizing a
-/// guarded WPR capture. Both legacy-tier runners (`appcontainer_runner`,
-/// `base_container_runner`) consume this so the analysis-success/trace-failure
+/// guarded WPR capture. The transitional SBOX path consumes this so the
+/// analysis-success/trace-failure
 /// and trace-success/JSON-failure transitions live in exactly one place and
 /// cannot drift between the two runners.
 #[derive(Debug)]

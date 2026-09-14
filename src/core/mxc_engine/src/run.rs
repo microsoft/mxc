@@ -11,18 +11,14 @@
 //! Two entry points:
 //!
 //! - [`resolve_runner`] performs backend selection only, returning a
-//!   [`ResolvedRunner`] (the boxed runner plus, on Windows, an optional
-//!   [`DaclManager`](wxc_common::filesystem_dacl::DaclManager) guard for the
-//!   ProcessContainer fallback tiers, whose `Drop` restores host ACEs).
-//!   Callers that must manage the guard's lifetime across signal / audit
-//!   machinery (`wxc-exec`) use this and own the guard themselves.
+//!   [`ResolvedRunner`] containing the boxed runner.
 //! - [`run`] is the convenience wrapper: resolve, run to completion, and drop
 //!   the runner (then, on Windows, the guard) in the correct order. Callers
 //!   without such machinery (`lxc-exec`, `mxc-exec-mac`, and the FFI layer) use
 //!   this.
 //!
-//! Backend selection is per-host: the Windows body drives the ProcessContainer
-//! fallback tiers plus the Windows experimental backends; the Linux body
+//! Backend selection is per-host: the Windows body drives native
+//! ProcessContainer plus the Windows experimental backends; the Linux body
 //! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
 //! resolves to Seatbelt.
 
@@ -37,33 +33,13 @@ use crate::error::Error;
 
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
-/// On Windows, `dacl_manager` — when present — is the guard for the
-/// ProcessContainer DACL-fallback tier: its `Drop` restores the host ACEs the
-/// tier applied. It must outlive the run — drop the `runner` first, then the
-/// manager (struct fields drop in declaration order, so `runner` is declared
-/// first). Callers that hand the manager off to external cleanup machinery
-/// (`wxc-exec` parks it for its Ctrl-C handler) take it out of the struct.
 pub struct ResolvedRunner {
     /// The boxed run-to-completion runner for the selected backend.
     pub runner: Box<dyn ScriptRunner>,
-    /// Guard restoring host ACEs applied by the ProcessContainer DACL-fallback
-    /// tier; `None` for every other tier and backend. Windows only.
-    #[cfg(target_os = "windows")]
-    pub dacl_manager: Option<wxc_common::filesystem_dacl::DaclManager>,
 }
 
 impl ResolvedRunner {
-    /// Wrap a runner that needs no DACL guard.
-    #[cfg(target_os = "windows")]
-    fn without_guard(runner: Box<dyn ScriptRunner>) -> Self {
-        Self {
-            runner,
-            dacl_manager: None,
-        }
-    }
-
-    /// Wrap a runner (non-Windows hosts have no DACL guard).
-    #[cfg(not(target_os = "windows"))]
+    /// Wrap a resolved runner.
     fn without_guard(runner: Box<dyn ScriptRunner>) -> Self {
         Self { runner }
     }
@@ -72,10 +48,8 @@ impl ResolvedRunner {
 /// Select the containment backend for `request` and construct its
 /// run-to-completion [`ScriptRunner`].
 ///
-/// On Windows the ProcessContainer backend drives
-/// [`dispatch_with_fallback`](appcontainer_common::dispatcher::dispatch_with_fallback),
-/// logging the selected isolation tier and any tier-selection warnings to
-/// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
+/// On Windows the ProcessContainer backend uses only the native PSEC or SBOX
+/// BaseContainer contracts.
 ///
 /// Experimental backends require `request.experimental_enabled`; when it is
 /// unset they return a [`malformed_request`](MxcError::malformed_request)
@@ -135,20 +109,16 @@ pub fn resolve_runner_for_audit(
 
 /// Resolve `request`'s backend and run it to completion.
 ///
-/// Convenience over [`resolve_runner`] for callers without external guard /
-/// signal machinery: it runs the resolved runner and drops it — then, on
-/// Windows, the DACL guard — in the correct order before returning the
-/// [`ScriptResponse`].
+/// Convenience over [`resolve_runner`] that runs the resolved backend to
+/// completion.
 pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResponse, Error> {
     let mut resolved = resolve_runner(request, logger)?;
     let response = resolved.runner.run(request, logger);
-    // `resolved` drops here: `runner` first (releasing child handles), then —
-    // on Windows — `dacl_manager` (restoring host ACEs).
     Ok(response)
 }
 
 // ---------------------------------------------------------------------------
-// Windows: ProcessContainer fallback tiers + Windows experimental backends.
+// Windows: native ProcessContainer + Windows experimental backends.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
@@ -160,49 +130,13 @@ fn resolve_runner_inner_windows(
 
     match request.containment {
         ContainmentBackend::ProcessContainer => {
-            // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback_and_capture` prefers
-            // the native BaseContainer (OS sandbox API) when usable and
-            // otherwise falls back to AppContainer tiers (BFS / DACL). The
-            // schema version does not influence this choice. When the request
-            // sets `captureDenials`, `factory_for_request` hands the guarded
-            // WPR fallback factory to the dispatcher so an AppContainer
-            // fallback tier can still honor it instead of failing closed.
+            // ProcessContainer uses native PSEC when compatible and otherwise
+            // transitional SBOX. Guarded WPR supplies denial capture when
+            // native PSEC capture is unavailable.
             let capture_factory = crate::guarded_capture::factory_for_request(request);
-            match appcontainer_common::dispatcher::dispatch_with_fallback_and_capture(
-                request,
-                capture_factory,
-            ) {
-                Ok(dispatched) => {
-                    for w in &dispatched.warnings {
-                        let _ = writeln!(logger, "warning: {w}");
-                    }
-                    let _ = writeln!(
-                        logger,
-                        "selected isolation tier: {}",
-                        dispatched.tier.as_str()
-                    );
-                    dispatched.log_enforcement_degraded(logger);
-                    let (runner, dacl_manager) = dispatched.into_runner_and_guard();
-                    Ok(ResolvedRunner {
-                        runner,
-                        dacl_manager,
-                    })
-                }
-                Err(e) => {
-                    // Surface any retained-entry DACL warnings through the
-                    // logger so the caller's buffer flush still reports them.
-                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                        warnings, ..
-                    } = &e
-                    {
-                        for w in warnings {
-                            let _ = writeln!(logger, "dacl warning: {w}");
-                        }
-                    }
-                    Err(MxcError::backend_unavailable(format!("{e}")))
-                }
-            }
+            appcontainer_common::dispatcher::dispatch(request, capture_factory)
+                .map(|runner| ResolvedRunner { runner })
+                .map_err(|error| MxcError::backend_unavailable(error.to_string()))
         }
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]

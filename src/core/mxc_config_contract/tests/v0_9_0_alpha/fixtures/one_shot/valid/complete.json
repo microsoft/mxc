@@ -25,9 +25,6 @@
       "/secret"
     ]
   },
-  "fallback": {
-    "allowDaclMutation": false
-  },
   "network": {
     "defaultPolicy": "allow",
     "enforcementMode": "capabilities",

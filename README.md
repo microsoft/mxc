@@ -26,14 +26,17 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 with an enabled native PSEC or SBOX contract | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | Runtime capability probe; expected on current prerelease and later Windows builds |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
 
 The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`, and `seatbelt`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
-For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows 11 release (23H2 / 24H2 / 25H2 / 25H2+), see [Windows OS-version policy support](./docs/process-container/os-version-support.md).
+Windows `processcontainer` support is capability-based: MXC requires either
+PSEC (`CreateProcessSecurityEnvironment`) or transitional SBOX
+(`Experimental_CreateProcessInSandbox`) to be enabled and able to represent the
+request. See [Windows OS-version policy support](./docs/process-container/os-version-support.md).
 
 
 ### Requirements
@@ -295,7 +298,6 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/schema.md](docs/schema.md) | Full JSON configuration schema reference |
 | [docs/versioning.md](docs/versioning.md) | Schema versioning and experimental feature lifecycle |
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
-| [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
 | [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |

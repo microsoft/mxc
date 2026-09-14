@@ -71,23 +71,26 @@ fn processcontainer_lpac() {
     assert_wxc_success("basic_lpac.json", &["--debug"]);
 }
 
-fn filesystem_bfs() {
+fn processcontainer_filesystem() {
     let _temp = TempDirs::create(&["C:\\temp\\wxc_test_allowed", "C:\\temp\\wxc_test_denied"]);
-    assert_wxc_success("filesystem_bfs_test.json", &["--debug"]);
+    assert_wxc_success("processcontainer_filesystem_test.json", &["--debug"]);
 }
 
-fn filesystem_bfs_readonly() {
+fn processcontainer_filesystem_readonly() {
     let temp = TempDirs::create(&["C:\\temp\\wxc_test_allowedreadonly"]);
     temp.write_absolute_file(
         "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
         "Test Input",
     );
-    assert_wxc_success("filesystem_bfs_readonly_test.json", &["--debug"]);
+    assert_wxc_success(
+        "processcontainer_filesystem_readonly_test.json",
+        &["--debug"],
+    );
 }
 
-fn filesystem_bfs_spaces() {
+fn processcontainer_filesystem_spaces() {
     let _temp = TempDirs::create(&["C:\\Users\\Public\\wxc bfs test"]);
-    assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
+    assert_wxc_success("processcontainer_filesystem_spaces_test.json", &["--debug"]);
 }
 
 fn pwsh_setlocation() {
@@ -538,33 +541,33 @@ fn test_processcontainer_capture_denials_timeout_retention() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs() {
+#[ignore] // Requires an enabled native PSEC or SBOX contract
+fn test_processcontainer_filesystem() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs);
+    with_test_lock(processcontainer_filesystem);
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_readonly() {
+#[ignore] // Requires an enabled native PSEC or SBOX contract
+fn test_processcontainer_filesystem_readonly() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs_readonly);
+    with_test_lock(processcontainer_filesystem_readonly);
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled
-fn test_filesystem_bfs_spaces() {
+#[ignore] // Requires an enabled native PSEC or SBOX contract
+fn test_processcontainer_filesystem_spaces() {
     if !cached_has_wxc_exe() {
         return;
     }
     assert_python();
-    with_test_lock(filesystem_bfs_spaces);
+    with_test_lock(processcontainer_filesystem_spaces);
 }
 
 #[test]
@@ -672,8 +675,8 @@ fn test_on_repeat() {
         for pass in 1..=10 {
             println!("=== Pass {pass} of 10 ===");
             processcontainer_basic();
-            filesystem_bfs();
-            filesystem_bfs_readonly();
+            processcontainer_filesystem();
+            processcontainer_filesystem_readonly();
             processcontainer_lpac();
         }
     });

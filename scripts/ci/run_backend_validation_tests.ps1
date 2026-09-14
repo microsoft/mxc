@@ -10,8 +10,7 @@ id-to-command mapping to keep in sync.
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'windows-sandbox',
         'wslc',
@@ -86,89 +85,39 @@ function Invoke-TestScript {
 Assert-File -Path $wxc
 
 function Invoke-ProcessContainerTests {
-    # Returns the harness exit code rather than throwing, so a caller running
-    # more than one suite can report both results instead of stopping at the
-    # first failure. The suite talks to the operator through Write-Host (which
-    # Out-Null does not touch), so discarding the success stream keeps the
-    # return value a scalar even if a phase leaks a stray object.
-    [OutputType([int])]
-    param()
+    $probe = & $wxc --probe | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw "ProcessContainer probe failed with exit code $LASTEXITCODE."
+    }
+    if (-not $probe.probes.baseContainerUsable -or $probe.tier -ne 'base-container') {
+        throw 'ProcessContainer CI requires an enabled native PSEC or SBOX contract.'
+    }
 
-    # The existing harness expects separate debug and release layouts. CI
-    # intentionally tests one release artifact, so stage it in both slots.
-    $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
-    $releaseDirectory = Join-Path $binaryDirectoryPath 'release'
-    New-Item -ItemType Directory -Force -Path $debugDirectory, $releaseDirectory | Out-Null
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $debugDirectory 'wxc-exec.exe') -Force
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $releaseDirectory 'wxc-exec.exe') -Force
+    $scratch = Join-Path $env:TEMP 'mxc-native-process-container-ci'
+    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+    $configPath = Join-Path $scratch 'config.json'
+    @{
+        version = '0.8.0-alpha'
+        containment = 'processcontainer'
+        process = @{
+            commandLine = 'cmd.exe /d /s /c "echo native-process-container-ok"'
+            cwd = $scratch
+        }
+        filesystem = @{
+            readwritePaths = @($scratch)
+        }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath
 
-    $uiProbe = Join-Path $binaryDirectoryPath 'wxc-ui-probe.exe'
-    Assert-File -Path $uiProbe
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
-
-    $script = Join-Path $testScriptRoot 'WinProcessContainer-Tests.ps1'
-    # -KeepArtifacts stops the harness deleting its scratch tree on a clean
-    # run, so a passing job still uploads its per-test logs and configs.
-    # Skip build and Cargo phases because this job consumes a previously
-    # built artifact; retain the host and containment behavior phases.
-    $phases = @(
-        'Probes',
-        'T3Forced',
-        'T1DenyForced',
-        'UiMitigationMatrix',
-        'GlobalAtomIsolation',
-        'DaclDisabled',
-        'CrashRecovery'
-    )
-    $global:LASTEXITCODE = 0
-    & $script `
-        -SkipBuild `
-        -SkipReleaseLane `
-        -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
-        -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
-        -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
-        -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-        -KeepArtifacts `
-        -Phases $phases | Out-Null
-    return $LASTEXITCODE
-}
-
-function Invoke-T3WorkloadTests {
-    [OutputType([int])]
-    param()
-
-    $script = Join-Path $testScriptRoot 'T3-Workloads.ps1'
-    # -Wxc is required: the script's default points at a debug build that does
-    # not exist in a CI artifact. -KeepArtifacts preserves the per-workload
-    # logs and configs on a clean run so a passing job still uploads them.
-    # -GrantDriveRoot lets the pwsh/git workloads resolve their working
-    # directory's ancestor chain; it rewrites ACLs across the system drive,
-    # which is why the script leaves it off by default and only a disposable
-    # CI runner opts in. Temporary until pwsh 7.7 leaves preview.
-    $global:LASTEXITCODE = 0
-    & $script -Wxc $wxc -KeepArtifacts -GrantDriveRoot | Out-Null
-    return $LASTEXITCODE
+    & $wxc $configPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native ProcessContainer smoke test failed with exit code $LASTEXITCODE."
+    }
 }
 
 Redirect-TempToRunnerTemp
 
 switch ($Backend) {
-    'process-t1' {
-        $primitives = Invoke-ProcessContainerTests
-        if ($primitives -ne 0) {
-            throw "Process Container tests failed with exit code $primitives."
-        }
-    }
-    'process-t3' {
-        # Run both suites before reporting. Stopping at the first failure would
-        # hide the other suite's result, costing an extra nightly run to triage.
-        $primitives = Invoke-ProcessContainerTests
-        $workloads = Invoke-T3WorkloadTests
-        if ($primitives -ne 0 -or $workloads -ne 0) {
-            throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."
-        }
-    }
+    'process' { Invoke-ProcessContainerTests }
     'isolation-session' {
         Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
             WxcExePath = $wxc

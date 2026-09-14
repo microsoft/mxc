@@ -393,7 +393,6 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                     .unwrap_or_default(),
             ),
         }),
-        fallback: Default::default(),
         network,
         ui: optional!(contract, policy.ui.as_ref().map(map_ui)),
         process_container: optional!(contract, process_container),

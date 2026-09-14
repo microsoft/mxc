@@ -258,13 +258,12 @@ type _SeatbeltWireKeys = AssertTrue<
 type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
-// (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`),
-// and `fallback` (AppContainer DACL-mutation policy not surfaced through the
-// one-shot policy API). Any OTHER new root wire field fails.
+// (`$schema`, `_comment`) and the state-aware-only keys (`phase`, `sandboxId`).
+// Any other new root wire field fails.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback'
+    '$schema' | '_comment' | 'phase' | 'sandboxId'
   >
 >;
 

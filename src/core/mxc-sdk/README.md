@@ -332,17 +332,16 @@ The handle is modelled on [`std::process::Child`]:
   non-streamed stdio.
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
-**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
-features, and with the request's experimental opt-in — **WSLC** and
+**Windows ProcessContainer (native PSEC or transitional SBOX)**, and — behind
+their features, and with the request's experimental opt-in — **WSLC** and
 **IsolationSession**.
 
-> **Windows note:** the ProcessContainer backend resolves to a concrete
-> isolation tier by host capability, using the **same** three-tier fallback as
-> the `wxc-exec` executor: BaseContainer (native OS sandbox API) when usable,
-> otherwise AppContainer + BFS (`bfscfg.exe`) when available, otherwise
-> AppContainer + DACL. The streaming handle owns any host-DACL guard, so ACE
-> restore outlives the child. A host with none of the tiers available surfaces a
-> clear error rather than silently running unsandboxed.
+> **Windows note:** the ProcessContainer backend prefers native PSEC whenever
+> its runtime probe succeeds and the policy is compatible, otherwise it tries
+> transitional SBOX when that contract can represent the complete request. A
+> host with neither compatible contract surfaces a clear error rather than
+> falling back to AppContainer, BFS, host-DACL mutation, or unsandboxed
+> execution.
 
 ## State-aware lifecycle
 
@@ -584,6 +583,5 @@ curated engine surface and wraps the engine's streaming handle in [`Sandbox`].
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not (yet) depend on
 this crate. The engine reuses the same backend crates they do; on Windows both
 the streaming and the run-to-completion paths share
-`appcontainer_common::dispatcher`'s tier selection (`select_backend_with_fallback`),
-so they agree on the BaseContainer / AppContainer + BFS / AppContainer + DACL
-tier and spawn the appropriate handle.
+`appcontainer_common::dispatcher`, so they use the same native PSEC/SBOX
+selection and fail-closed behavior.

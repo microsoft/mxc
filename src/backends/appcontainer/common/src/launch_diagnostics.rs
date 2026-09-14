@@ -254,17 +254,15 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
         "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
          The BaseContainer feature is not enabled on this OS build. \
          It may be possible to enable it through the Windows experimental \
-         features settings, or run on a host that supports the BaseContainer \
-         backend (MXC falls back to AppContainer automatically on builds \
-         without it)."
+         features settings, or run on a host with an enabled native \
+         BaseContainer contract."
             .to_string()
     } else {
         let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
         if disabled.is_empty() {
             "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
              The BaseContainer feature is not enabled on this OS build; it may \
-             require additional enablement. MXC falls back to AppContainer \
-             automatically on builds without BaseContainer support."
+             require additional enablement."
                 .to_string()
         } else {
             let disabled_list: Vec<String> =
@@ -274,8 +272,7 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
                  The BaseContainer feature is not enabled on this OS build \
                  (disabled feature flags: {}). It may be possible to enable it \
                  through the Windows experimental features settings, or run on a \
-                 host that supports the BaseContainer backend (MXC falls back to \
-                 AppContainer automatically on builds without it).",
+                 host with an enabled native BaseContainer contract.",
                 disabled_list.join(", ")
             )
         }

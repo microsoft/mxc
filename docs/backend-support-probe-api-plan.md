@@ -62,15 +62,14 @@ This keeps §2's "absence means unusable" rule intact while still letting a
 caller pre-flight a policy that depends on an optional capability.
 
 Example results:
-> **"Stock Windows"** here means a clean Windows install with only the default
-> optional features enabled (no BaseContainer, Windows Sandbox, etc.), so the
-> process-container backend falls to its `appcontainer-dacl` floor. See
+> **"Stock Windows"** here means a Windows install where neither native
+> BaseContainer contract is enabled. See
 > [`docs/process-container/os-version-support.md`](process-container/os-version-support.md)
 > for the per-release policy-support matrix that determines the reachable tier.
 
 | Host | Result |
 | --- | --- |
-| Stock Windows | `[{ backend: "processcontainer", tier: Some("appcontainer-dacl") }]` |
+| Stock Windows without PSEC/SBOX | `[]` |
 | Windows w/ BaseContainer | `[{ backend: "processcontainer", tier: Some("base-container") }]` |
 | macOS | `[{ backend: "seatbelt", tier: None }]` |
 | Linux w/ bwrap + lxc | `[{ backend: "bubblewrap", tier: None }, { backend: "lxc", tier: None }]` |
@@ -95,22 +94,15 @@ ones.
 
 | Backend | How presence is detected today | Where | Risk with this method |
 | --- | --- | --- | --- |
-| `base-container` | `fallback_detector::is_base_container_usable()` loads `processmodel.dll`<br>and calls an OS capability/create API.<br>No process or VM launch; result cached in a `OnceLock`. | Rust | A cached result (`true` **or** `false`) can go stale if BaseContainer enablement<br>changes mid-process, and the probe is not perfectly pure since it loads a DLL. |
+| `base-container` | `BaseContainerRunner::is_base_container_usable()` loads `processmodel.dll`<br>and calls an OS capability/create API.<br>No process or VM launch; result cached in a `OnceLock`. | Rust | A cached result (`true` **or** `false`) can go stale if BaseContainer enablement<br>changes mid-process, and the probe is not perfectly pure since it loads a DLL. |
 | `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo `<br>`/featurename:Containers-DisposableClientVM ` and looks for `State : Enabled`<br>if DISM throws (usually non-elevated) it falls back to<br>`fs.existsSync(%SystemRoot%\\System32\\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from<br>*no permission* and drops to the exe-existence checkwhich proves the feature is installed,<br>not that a sandbox VM can boot. (Will move to Rust) |
 | `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH`, not that liblxc is loadable or that the caller has<br>the privileges to actually start a container, so it can report available on a host where a real run fails.<br>(Will move to Rust) |
 | `wslc` | `WslcSdk::load()` loads `wslcsdk.dll` from the executable's own directory;<br>validates that every required export resolves. | Rust (execute path) | Runs on the *execute* path, not as a cheap standalone probe:<br>it actually loads the DLL and resolves symbols. Proves the SDK runtime loads,<br>not that a WSL distro/runtime is functional. Feature-gated. |
 
-### 3.2 Isolation tiers (process-container only)
+### 3.2 Windows ProcessContainer
 
-Only the Windows process-container backend has a within-backend tier ladder. The
-three tiers, and the **policy-free** checks that decide whether each is
-reachable, already exist in `appcontainer_common`:
-
-| Tier | Reachable when | Detector |
-| --- | --- | --- |
-| `base-container` | BaseContainer API is **usable** (not merely symbol-present) | `fallback_detector::is_base_container_usable()` (the cached wrapper) |
-| `appcontainer-bfs` | built with the `tier2_bfs` feature | `cfg!(feature = "tier2_bfs")` |
-| `appcontainer-dacl` | always (universal Windows floor) | — |
+The backend is returned only when PSEC or transitional SBOX is usable. There is
+no within-backend fallback ladder and no universal Windows floor.
 
 
 
@@ -149,8 +141,8 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 
 ## 5. Testing
 - Every returned `backend` is a valid `wxc_common::wire::Containment` name.
-- On Windows the result contains `processcontainer` with a `tier` of one of the three known strings;
-`appcontainer-dacl` is the floor when nothing higher is reachable.
+- On Windows, `processcontainer` appears only when native PSEC or SBOX is usable,
+  with `tier: "base-container"`.
 - On non-Windows, `processcontainer` never appears.
 - On macOS, `seatbelt` appears with `tier: None` when `/usr/bin/sandbox-exec` exists.
 - A serde snapshot pins the camelCase JSON shape
@@ -207,26 +199,11 @@ Linux it may only ever report `bubblewrap`, and unit tests lock that down.
 `available_backends()` answers the broader host-capability question, so it is
 a separate function.
 
-### 7.2 Single `tier: Option<String>`
+### 7.2 ProcessContainer implementation name
 
-The fallback detector selects exactly **one** tier, so a per-tier availability
-vector is overkill for a menu. 
-
-### 7.3 Effective tier is a ceiling, not a guarantee
-
-The named tier is  the strongest isolation the host is capable
-of. A real request can still end up **lower**: some policy options force a
-weaker tier (e.g. `deniedPaths` on a host without `SANDBOX_CAP_FS_DENY`
-support, or `preferBaseContainer=false`). 
-
-### 7.4 Which tier gets named is based on precedence, not policy
-
-A host can support several tiers at once. Rather than run your request to see
-which one it would pick, the API just names the **strongest** tier the host can
-do, by a fixed ranking. Because it never takes a request, it performs none of the
-policy-dependent host permission checks that `fallback_detector::detect()` does
-(and none of the later `DaclManager` ACE writes that real dispatch performs). It
-is purely a reachability walk over the tier ladder.
+The optional `tier` field remains `"base-container"` for compatibility, but
+there is no tier ladder. Individual requests may still fail when neither PSEC
+nor SBOX can represent their complete policy.
 
 ### 7.5 The `base-container` tier uses `is_base_container_usable()`
 
@@ -239,7 +216,7 @@ They are *abstract intents*, not backends with their own runner.
 
 ### 7.7 `base-container` detection caching
 
-`fallback_detector::is_base_container_usable()` caches its result in a
+`BaseContainerRunner::is_base_container_usable()` caches its result in a
 `OnceLock`. So "fresh detection on every call" is not fully achievable for the
 `base-container` tier, and a cached `true` can go **stale** if BaseContainer
 enablement changes mid-process. Both are accepted and documented rather than

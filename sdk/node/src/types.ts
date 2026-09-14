@@ -164,11 +164,8 @@ export interface BaseProcessUiConfig {
 /**
  * ProcessContainer configuration for the Windows process-level backend.
  *
- * `processcontainer` is the abstraction layer; the runner picks between
- * the legacy AppContainer implementation (which honors `capabilities`,
- * `leastPrivilege`) and the newer BaseContainer implementation (which
- * honors `ui`) at run time based on the host OS and the `--experimental`
- * flag.
+ * The runner selects native PSEC when compatible and otherwise transitional
+ * SBOX. Both contracts must be enabled by the host OS.
  */
 export interface ProcessContainerConfig {
   /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
@@ -562,16 +559,9 @@ export interface SeatbeltConfig {
 export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
- * Isolation tier selected by the runtime fallback detector.
- *
- * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
- * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
- * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ * Native Windows ProcessContainer implementation.
  */
-export type IsolationTier =
-  | 'base-container'
-  | 'appcontainer-bfs'
-  | 'appcontainer-dacl';
+export type IsolationTier = 'base-container';
 
 /**
  * Host support for enforcing sandbox UI restrictions.
@@ -643,13 +633,11 @@ export interface PlatformSupport {
    */
   unavailableReasons?: Partial<Record<ContainmentBackend, string>>;
   /**
-   * Tier that would be selected for an empty policy on this system.
-   * Omitted on non-Windows platforms or when the probe fails.
+   * Present when the native Windows BaseContainer contract is available.
    */
   isolationTier?: IsolationTier;
   /**
-   * Tier degradation warnings (one per fall-through during selection).
-   * Omitted on non-Windows platforms or when the probe fails.
+   * Native ProcessContainer capability warnings.
    */
   isolationWarnings?: string[];
   /**

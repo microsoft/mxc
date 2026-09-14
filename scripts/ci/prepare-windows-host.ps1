@@ -11,15 +11,14 @@
     Directory holding the downloaded build artifact.
 
 .EXAMPLE
-    ./scripts/ci/prepare-windows-host.ps1 -Backend process-t3 -BinaryDirectory artifacts/bin
+    ./scripts/ci/prepare-windows-host.ps1 -Backend process -BinaryDirectory artifacts/bin
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'wslc',
         'windows-sandbox',
@@ -594,7 +593,6 @@ Install-PackagedTooling
 Assert-WorkloadInterpreters
 
 switch ($Backend) {
-    'process-t3' { Initialize-ProcessContainerHost }
     'microvm' { Initialize-MicroVmHost }
     'wslc' { Initialize-WslcHost }
     default { Write-Host "$Backend has no artifact-only Windows test prerequisites yet." }

@@ -127,16 +127,6 @@ export interface ExecRequest {
 }
 
 /**
- * Operator consent for containment fallback behavior.
- */
-export interface Fallback {
-  /**
-   * Whether the runtime may mutate host filesystem DACLs as a fallback.
-   */
-  allowDaclMutation?: boolean;
-}
-
-/**
  * Filesystem access policy.
  */
 export interface Filesystem {
@@ -481,10 +471,6 @@ export type OneShotRequest = {
    * Optional experimental settings.
    */
   experimental?: OneShotExperimental;
-  /**
-   * Optional fallback consent.
-   */
-  fallback?: Fallback;
   /**
    * Optional filesystem policy.
    */

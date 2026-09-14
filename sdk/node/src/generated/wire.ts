@@ -99,16 +99,6 @@ export interface Experimental {
 }
 
 /**
- * AppContainer DACL-mutation fallback policy.
- */
-export interface Fallback {
-  /**
-   * Allow the runner to mutate DACLs as a fallback.
-   */
-  allowDaclMutation?: boolean | null;
-}
-
-/**
  * Filesystem access policy.
  */
 export interface Filesystem {
@@ -625,10 +615,6 @@ export interface MXCConfiguration {
    * Experimental features. Only honored when `--experimental` is passed.
    */
   experimental?: Experimental | null;
-  /**
-   * AppContainer DACL-mutation fallback policy (Windows).
-   */
-  fallback?: Fallback | null;
   /**
    * Filesystem access policy. Shared across all backends.
    */

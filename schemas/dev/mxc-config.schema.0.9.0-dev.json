@@ -248,20 +248,6 @@
       },
       "type": "object"
     },
-    "Fallback": {
-      "additionalProperties": false,
-      "description": "AppContainer DACL-mutation fallback policy.",
-      "properties": {
-        "allowDaclMutation": {
-          "description": "Allow the runner to mutate DACLs as a fallback.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "Filesystem": {
       "additionalProperties": false,
       "description": "Filesystem access policy.",
@@ -1203,17 +1189,6 @@
         }
       ],
       "description": "Experimental features. Only honored when `--experimental` is passed."
-    },
-    "fallback": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Fallback"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "AppContainer DACL-mutation fallback policy (Windows)."
     },
     "filesystem": {
       "anyOf": [

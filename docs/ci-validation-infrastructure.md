@@ -106,12 +106,12 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) |
 |-------------|--------|----------|------------|--------------------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process-t1, process-t3, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
 | `windows-prerelease-isolation-session` | windows | *(dormant)* | *(dormant)* | same as above |
 | `windows-canary` | windows | *(dormant)* | *(dormant)* | same as above |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | wslc, windows-sandbox, microvm, hyperlight |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | wslc, windows-sandbox, microvm, hyperlight |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm, hyperlight |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, hyperlight, lxc |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
@@ -125,36 +125,10 @@ after expansion (`suppressNonMacArm64`). macOS is ARM64-only.
 
 ### Backend ids
 
-A backend id is passed straight through: the matrix job hands it to the host-prep
-script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
-share a suite each keep their own case so they can diverge later without a
-mapping table — `process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
-`T3-Workloads.ps1`. Teaching the Process Container test suite to
-accept an explicit tier (so a T1 host can also be exercised
-at the T3 fallback) is a worthwhile future improvement.
-
-`process-t3` runs its two suites back to back and reports them together: a
-failure in the primitives suite does not skip the workloads suite, so one job
-run shows both results instead of costing a second run to triage.
-
-The dispatcher passes `T3-Workloads.ps1` its `-GrantDriveRoot` switch. The
-pwsh- and git-driven workloads resolve the whole ancestor chain of their working
-directory at startup, so granting only the scratch leaf leaves them failing
-before they reach the behaviour under test. Granting the drive root covers the
-chain, but at T3 a policy path becomes an inheritable ACE, so it rewrites ACLs
-across the system drive on every run and again on teardown — acceptable on a
-disposable runner, which is why the switch is off by default and only CI opts
-in. Temporary until pwsh 7.7 leaves preview.
-
-The suite's git workloads also restamp the ownership of the repo they build.
-The 1ES agent runs elevated, and an elevated token's *default owner* is
-`BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
-git refuses such a repo ("detected dubious ownership") unless the caller is
-itself an elevated administrator, which a contained process never is. That is a
-property of the agent rather than of containment — the identical fixture is
-user-owned on a dev box — so the suite reowns it to the current user and keeps
-the two environments testing the same thing.
+A backend id is passed straight through: the matrix job hands it to host
+preparation and then to the dispatcher, which has one `switch`/`case` per id.
+The `process` backend is declared only on hosts expected to expose native PSEC
+or SBOX.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -174,10 +148,8 @@ backend **and** has a non-empty pool.
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
 
-Resolved `nightly` today = **19 jobs**: 9 Windows (prerelease × process-t1,
-isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc),
-8 Linux (each of the four distros × bubblewrap + lxc) and 2 macOS
-(macOS 26 and macOS 15 × seatbelt).
+Resolved `nightly` runs ProcessContainer only on the prerelease process host;
+older Windows pools continue to cover their independently available backends.
 
 ### `backendDelayedStart`
 
@@ -208,8 +180,7 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). |
+| ProcessContainer | ✅ Good | Prerelease Windows with native PSEC or SBOX only. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -227,8 +198,8 @@ every entry.
 
 `prepare-windows-host.ps1`:
 
-- `process-t3` — runs `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`.
+- `process` — no host mutation; the test suite requires the native probe to
+  report PSEC or SBOX.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
@@ -310,8 +281,7 @@ version, because the SDK targets it.
 
 The list is **suite-agnostic by design** and is checked for every backend, not
 only the ones whose suites need it today: it describes what a validation *host*
-provides, not what any one suite consumes. `T3-Workloads.ps1` is simply the
-first caller, and wiring up the next one needs no change here.
+provides, not what any one suite consumes.
 
 Each script carries its own copy — `Assert-WorkloadInterpreters` in
 `prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
@@ -418,10 +388,8 @@ test runner is allocated.
    enables the backend's cargo feature.
 5. **Trigger:** add the OS/backend pair to a plan.
 
-If two ids should run the same suite, give each its own `case` and have both call
-the shared function — that is how `process-t1` and `process-t3` are wired. Keep
-that split in the dispatcher, not in the workflow YAML, so a case can start
-passing a distinguishing argument later without touching the matrix.
+If two ids should run the same suite, give each its own `case` and have both
+call a shared function so they can diverge later without workflow changes.
 
 ### Add a new OS image
 

@@ -1491,13 +1491,6 @@ fn convert_wire_config(
     validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
 
-    // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
-        if let Some(v) = fbcfg.allow_dacl_mutation {
-            policy.fallback.allow_dacl_mutation = v;
-        }
-    }
-
     let parsed_network = parse_network_policy(
         &mut policy,
         &schema_version,
@@ -3380,7 +3373,6 @@ mod tests {
                     "lifecycle":{"destroyOnExit":false,"preservePolicy":true},
                     "process":{"commandLine":"echo v07","env":["B=2"]},
                     "filesystem":{"readonlyPaths":["C:\\input"]},
-                    "fallback":{"allowDaclMutation":false},
                     "network":{
                         "defaultPolicy":"allow",
                         "enforcementMode":"capabilities",
@@ -7946,39 +7938,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 0);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_default_true() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.fallback.allow_dacl_mutation);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_explicit_false() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "fallback": {"allowDaclMutation": false}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.fallback.allow_dacl_mutation);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_explicit_true() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "fallback": {"allowDaclMutation": true}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
     // ====== Containment backend selection tests ======

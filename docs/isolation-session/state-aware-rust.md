@@ -293,12 +293,11 @@ meaning for this backend.
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
-| `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
-| `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
-| `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
-| `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
-| `experimental.isolation_session.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
-| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
+| `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
+| `process.commandLine` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
+| `process.{cwd,env,timeout}` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
+| `experimental.isolation_session.provision.appId` | accepted, ignored | **honored** | n/a | n/a | n/a | n/a |
+| `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
 | another backend's `experimental.<backend>` section | rejected | rejected | rejected | rejected | rejected | rejected |
 
@@ -313,38 +312,45 @@ Notes on the rows that are not a simple accept/reject:
   filesystem and network policy are rejected outright, leaving nothing to
   preserve. On the state-aware path the parser rejects the whole `lifecycle`
   section for every backend, so no per-value handling applies.
-- **`fallback`** is `n/a` rather than `rejected`. `allowDaclMutation` gates an
-  AppContainer-only DACL fallback this backend never performs, so either value
-  is vacuously satisfied and neither asserts anything untrue. Bringing it under
-  the single-backend-section check uniformly across backends is tracked
-  separately.
-- **Foreign or mis-slotted experimental payloads** are rejected by the exact
-  request root, not silently ignored. Only provision defines the
-  `experimental.isolation_session.provision` input. Exact adaptation carries
-  its runtime configuration directly to checked engine binding; the dispatcher
-  does not navigate or reparse experimental JSON.
-- **`containerId`** is not part of the exact state-aware roots. Lifecycle
-  requests address the sandbox by its returned `sandboxId` after provision.
-- **`process` on non-exec state-aware phases** is structurally rejected. Supply
-  process settings only on exec; other phases do not run a workload.
+- **A lone foreign `experimental.<backend>` section on a non-provision phase** is
+  accepted and ignored, not rejected. Those requests carry no `containment`, so
+  `validate_experimental_backend_keys` has no resolved backend to compare
+  against; it rejects two or more foreign keys as unambiguously wrong but
+  tolerates exactly one. The *stable* sections (`processContainer`, `lxc`,
+  `seatbelt`) are rejected on every phase by the separate stray-section check.
+  Closing the lone-foreign-key case requires resolving the backend from the
+  `sandboxId` prefix, which is cross-backend work tracked separately.
+- **`containerId`** is a caller-supplied label, not a restriction. This backend
+  addresses sandboxes by the OS-assigned agent user name, so the field has no
+  effect and ignoring it asserts nothing.
+- **`process` on non-exec state-aware phases** is accepted and ignored. The
+  dispatcher reads `process` only on `exec`, so a `commandLine`, `cwd`, `env` or
+  `timeout` supplied at provision / start / stop / deprovision has no effect and
+  no error. Nothing runs at those phases, so nothing is lost — but the request is
+  not what the caller believes it is. Supply `process` only on `exec`.
+- **Mis-slotted `experimental.isolation_session` payloads are accepted and
+  ignored, not rejected.** `deserialize_config` navigates exactly
+  `experimental.<backend>.<the request's own phase>`; anything else in that block
+  is read by nothing. Two shapes reach that state:
+  - a nested `provision` block on a *one-shot* request;
+  - a block under a phase that is not this request's phase, e.g.
+    `{"phase": "start", …, "isolation_session": {"provision": {…}}}`.
 
-With either valid network spelling, an absent provision member remains `None`,
-while a present empty object remains a configuration with absent fields. An
-explicit empty `appId` remains `Some("")`, and exact input rejects `appId:
-null`. These distinctions survive binding unchanged, so application identity
-resolution remains owned by the backend.
+  Each is a caller supplying a documented field in an undocumented position, so
+  the value is silently not applied. Detecting mis-slotted
+  payloads generically is a cross-backend concern and is deliberately not solved
+  here. Nest the config under the request's own phase; the SDK already does.
 
-The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
-fields before backend validation. For example, supplied `ui`, noncanonical
-provision `network` shapes, and policy on phases that do not define it surface
-as `malformed_request`. Requests that pass the exact structural contract but
-violate a backend semantic invariant surface as `policy_validation`; a
-structurally valid but oversized `appId` is one such case.
+Rejection of `policy.*` fields surfaces on the **state-aware** surface as
+`error.code = "policy_validation"`. On the **one-shot** surface the typed variant
+is discarded (`ScriptResponse::error`) and the envelope carries
+`error.code = "backend_error"` with the reason in the message; one-shot has no
+typed policy code today. A structurally invalid `appId` likewise surfaces as
+`policy_validation`.
 
-On the **one-shot** surface the backend's typed policy variant is discarded
-(`ScriptResponse::error`) and the envelope carries `error.code =
-"backend_error"` with the reason in the message. A supplied `network.proxy` is
-also structurally refused as `malformed_request`.
+One exception: a supplied `network.proxy` is refused during config parsing,
+before any backend validation runs, so it surfaces as `malformed_request` on
+both surfaces.
 
 ## Mode-specific fields
 

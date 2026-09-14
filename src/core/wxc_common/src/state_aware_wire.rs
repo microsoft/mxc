@@ -34,9 +34,6 @@ impl StateAwareInput {
         if common.container_id.is_some() {
             contradictory.push("containerId");
         }
-        if common.fallback.is_some() {
-            contradictory.push("fallback");
-        }
         if common.seatbelt.is_some() {
             contradictory.push("seatbelt");
         }

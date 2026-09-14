@@ -87,9 +87,6 @@ pub struct MxcConfig {
     /// Filesystem access policy. Shared across all backends.
     pub filesystem: Option<Filesystem>,
 
-    /// AppContainer DACL-mutation fallback policy (Windows).
-    pub fallback: Option<Fallback>,
-
     /// Network access policy. Shared across all backends.
     pub network: Option<Network>,
 
@@ -130,7 +127,7 @@ pub enum Phase {
 pub enum Containment {
     /// OS-native process sandbox (resolved per host).
     Process,
-    /// Windows AppContainer / BaseContainer.
+    /// Windows native ProcessContainer (PSEC or SBOX).
     #[serde(rename = "processcontainer", alias = "appcontainer")]
     ProcessContainer,
     /// VM-class isolation (resolved per host).
@@ -356,15 +353,6 @@ pub struct Filesystem {
     pub readonly_paths: Option<Vec<String>>,
     /// Paths explicitly denied (override broader allow rules).
     pub denied_paths: Option<Vec<String>>,
-}
-
-/// AppContainer DACL-mutation fallback policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Fallback {
-    /// Allow the runner to mutate DACLs as a fallback.
-    pub allow_dacl_mutation: Option<bool>,
 }
 
 /// Network access policy.
