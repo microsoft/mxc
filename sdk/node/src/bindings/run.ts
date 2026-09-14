@@ -2,8 +2,9 @@
 // Licensed under the MIT License.
 
 import koffi, { type KoffiFunc } from 'koffi';
-import { MxcError, type ErrorCode } from './errors.js';
-import { loadMxcFfi } from './native-library.js';
+import { MxcError, type ErrorCode } from '../errors.js';
+import { loadMxcFfi } from '../native-library.js';
+import type { BindingSandboxRequest } from './request.js';
 
 interface AbiErrorDetail {
   message: unknown | null;
@@ -23,7 +24,7 @@ interface AbiRunResult {
   warnings: unknown | null;
 }
 
-export interface NativeRunResult {
+export interface BindingRunResult {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -100,7 +101,7 @@ function parseStringArray(json: string | undefined): string[] {
   return value;
 }
 
-export function runNativeRequest(requestJson: string): NativeRunResult {
+export function runBindingRequest(request: BindingSandboxRequest): BindingRunResult {
   const native = loadMxcFfi();
   try {
     const run = native.handle.func(
@@ -117,6 +118,7 @@ export function runNativeRequest(requestJson: string): NativeRunResult {
     let filled = false;
 
     try {
+      const requestJson = JSON.stringify(request);
       const status = run(requestJson, result);
       filled = true;
       if (status !== 0 || result.status !== 0) {
