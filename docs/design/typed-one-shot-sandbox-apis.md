@@ -9,6 +9,8 @@ and Node SDKs.
 - Carry typed request data through `mxc_ffi`; do not serialize SDK requests to
   JSON at the FFI boundary.
 - Move the Node SDK in-process by calling `mxc_ffi` through Koffi.
+- Remove the Node SDK's executor-backed implementation rather than retaining it
+  as a fallback beside the in-process path.
 - Normalize each typed request once into the existing `SandboxRequest` /
   `ExecutionRequest` pipeline.
 - Keep JSON as a supported configuration representation for the executor and
@@ -64,7 +66,7 @@ flowchart TB
         ER[ExecutionRequest]
         DD[Backend dispatch]
     end
-    subgraph JSON["Existing executor path"]
+    subgraph JSON["CLI configuration path (not used by Node SDK)"]
         JJ[Versioned config JSON]
         EX[wxc-exec / lxc-exec / mxc-exec-mac]
         JP[Config parser]
@@ -89,9 +91,18 @@ the corresponding Rust representation and then into `SandboxRequest`. It does
 not serialize to JSON and call back through the JSON parser.
 
 JSON remains the configuration contract for the existing executor binaries.
-That path parses config JSON into `ExecutionRequest` and joins the typed SDK
-path at backend dispatch; it does not round-trip through `SandboxRequestV1` or
-the SDK's `SandboxRequest`.
+That separate CLI path parses config JSON into `ExecutionRequest` and joins the
+typed SDK path at backend dispatch; the Node SDK does not invoke or fall back to
+it.
+
+### v0.9 release boundary
+
+For v0.9, Node run-to-completion moves fully in-process through Koffi and
+`mxc_ffi`. The temporary binding may serialize its private request projection
+for the existing `mxc_run_request` entry point, but it must not retain a second
+executor-backed run path or select between in-process and executor execution.
+The V1 typed C boundary replaces that private serialization in the following
+release without changing which execution path Node uses.
 
 ## Versioned input types
 
@@ -294,9 +305,9 @@ request back to JSON internally.
 | Scope | Decision |
 | --- | --- |
 | Add | Equivalent `SandboxRequestV1`, `RunOptionsV1`, and `SpawnOptionsV1` types in Rust, C#, Node, and `mxc_ffi`; a Koffi-based Node adapter. |
-| Change | C# and Node one-shot run/spawn use the typed `mxc_ffi` request boundary. |
-| Keep | Existing parser, schemas, `SandboxRequest`, `ExecutionRequest`, engine validation, backends, outputs, and streaming handles. |
-| Avoid | JSON as the primary SDK or FFI input; binding-only `RequestSpec` JSON; a second Node-native implementation beside `mxc_ffi`. |
+| Change | C# and Node one-shot run/spawn use the typed `mxc_ffi` request boundary; Node no longer launches executor binaries. |
+| Keep | Existing parser and schemas for the separate CLI path, plus `SandboxRequest`, `ExecutionRequest`, engine validation, backends, outputs, and streaming handles. |
+| Avoid | JSON as the primary SDK or FFI input; binding-only `RequestSpec` JSON; parallel in-process and executor-backed Node implementations. |
 | Follow-up | Generate language projections from one authority; redesign state-aware lifecycle APIs; consider optional JSON conversion helpers. |
 
 ## Migration
@@ -310,7 +321,9 @@ request back to JSON internally.
    Koffi.
 5. Validate run-to-completion, streaming, cancellation, error parity, optional
    field presence, and cleanup across all three SDKs.
-6. Retire the binding-only `RequestSpec` JSON path after compatibility coverage
+6. Remove the Node executor path; unsupported in-process requests fail
+   explicitly rather than falling back to an executor.
+7. Retire the binding-only `RequestSpec` JSON path after compatibility coverage
    is complete.
 
 Existing public APIs remain available during migration. Deprecation is a
@@ -323,6 +336,7 @@ separate decision.
 - Normal SDK run and spawn calls do not serialize or parse request JSON.
 - `mxc_ffi` converts typed C data directly into the Rust request path.
 - Node runs in-process through Koffi and the shared `mxc_ffi` implementation.
+- Node does not launch or fall back to an executor binary.
 - Optional and tri-state fields retain the same semantics in every language.
 - The same supported production request behaves consistently across SDKs and
   the equivalent executor JSON configuration.
