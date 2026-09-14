@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 
 import { parentPort, workerData } from 'node:worker_threads';
-import { MxcError } from './errors.js';
-import { runNativeRequest } from './native-run.js';
+import { MxcError } from '../errors.js';
+import { runBindingRequest } from './run.js';
 import type {
-  NativeRunWorkerData,
-  NativeRunWorkerMessage,
-} from './native-run-worker.js';
+  BindingRunWorkerData,
+  BindingRunWorkerMessage,
+} from './run-worker.js';
 
 function serializeError(error: unknown) {
   if (error instanceof MxcError) {
@@ -26,10 +26,10 @@ function serializeError(error: unknown) {
   };
 }
 
-const data = workerData as NativeRunWorkerData;
-let message: NativeRunWorkerMessage;
+const data = workerData as BindingRunWorkerData;
+let message: BindingRunWorkerMessage;
 try {
-  message = { ok: true, result: runNativeRequest(data.requestJson) };
+  message = { ok: true, result: runBindingRequest(data.request) };
 } catch (error) {
   message = { ok: false, error: serializeError(error) };
 }

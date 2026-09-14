@@ -6,14 +6,23 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, it } from 'node:test';
 import { MxcError } from '../../src/errors.js';
 import {
-  _setNativeRunWorkerFactory,
-  runNativeRequestAsync,
-  type NativeRunWorkerLike,
-  type NativeRunWorkerMessage,
-} from '../../src/native-run-worker.js';
+  _setBindingRunWorkerFactory,
+  runBindingRequestAsync,
+  type BindingRunWorkerLike,
+  type BindingRunWorkerMessage,
+} from '../../src/bindings/run-worker.js';
+import type { BindingSandboxRequest } from '../../src/bindings/request.js';
 
-class FakeWorker extends EventEmitter implements NativeRunWorkerLike {
-  reply(message: NativeRunWorkerMessage): void {
+const request: BindingSandboxRequest = {
+  policy: { version: '0.9.0-alpha' },
+  command: 'echo hello',
+  containment: { type: 'process' },
+  environment: {},
+  experimental: false,
+};
+
+class FakeWorker extends EventEmitter implements BindingRunWorkerLike {
+  reply(message: BindingRunWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
   }
 
@@ -22,12 +31,12 @@ class FakeWorker extends EventEmitter implements NativeRunWorkerLike {
   }
 }
 
-afterEach(() => _setNativeRunWorkerFactory());
+afterEach(() => _setBindingRunWorkerFactory());
 
-describe('native run worker', () => {
+describe('mxc_ffi run worker', () => {
   it('resolves a native result asynchronously', async () => {
     const worker = new FakeWorker();
-    _setNativeRunWorkerFactory(() => {
+    _setBindingRunWorkerFactory(() => {
       worker.reply({
         ok: true,
         result: {
@@ -41,12 +50,12 @@ describe('native run worker', () => {
       return worker;
     });
 
-    assert.strictEqual((await runNativeRequestAsync('{}')).stdout, 'ok');
+    assert.strictEqual((await runBindingRequestAsync(request)).stdout, 'ok');
   });
 
   it('reconstructs typed native errors', async () => {
     const worker = new FakeWorker();
-    _setNativeRunWorkerFactory(() => {
+    _setBindingRunWorkerFactory(() => {
       worker.reply({
         ok: false,
         error: { code: 'policy_validation', message: 'denied' },
@@ -54,17 +63,17 @@ describe('native run worker', () => {
       return worker;
     });
 
-    await assert.rejects(runNativeRequestAsync('{}'), (error) =>
+    await assert.rejects(runBindingRequestAsync(request), (error) =>
       error instanceof MxcError && error.code === 'policy_validation');
   });
 
   it('rejects worker failures', async () => {
     const worker = new FakeWorker();
-    _setNativeRunWorkerFactory(() => {
+    _setBindingRunWorkerFactory(() => {
       worker.fail(new Error('worker failed'));
       return worker;
     });
 
-    await assert.rejects(runNativeRequestAsync('{}'), /worker failed/);
+    await assert.rejects(runBindingRequestAsync(request), /worker failed/);
   });
 });
