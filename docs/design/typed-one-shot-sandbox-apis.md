@@ -93,23 +93,30 @@ That path parses config JSON into `ExecutionRequest` and joins the typed SDK
 path at backend dispatch; it does not round-trip through `SandboxRequestV1` or
 the SDK's `SandboxRequest`.
 
-## Versioned request type
+## Versioned input types
 
-Rust, C#, and Node expose one equivalent, idiomatic `SandboxRequestV1` contract.
-Supporting section and backend types are part of that request generation; there
-is no separate versioned policy contract.
+Rust, C#, and Node expose equivalent, idiomatic `SandboxRequestV1`,
+`RunOptionsV1`, and `SpawnOptionsV1` contracts. The version is encoded in each
+type's name; none of these types contains a runtime `version` field.
 
-- Compatible changes append optional fields to V1.
+- Compatible changes append optional fields to the V1 types.
 - Removing a field or changing its meaning requires a new V2 type.
 - Presence is preserved where omission differs from an explicit default.
   Optional booleans and similar values must represent unset, true, and false.
-- Host-controlled invocation options remain outside `SandboxRequestV1`.
+- Execution and host-controlled invocation fields remain outside
+  `SandboxRequestV1`.
 - Testing-only CLI authorization, including `--allow-testing-features`, remains
   unavailable through the in-process SDKs.
 
 For the first implementation, update the Rust, C#, and Node types together and
-gate their parity in CI. Generating the language projections from one source of
-truth is a follow-up; V1 does not add another interface-definition language.
+gate their parity in CI. The C ABI entry point also names the version, so
+`mxc_run_v1` accepts only V1 structures. Generating the language projections
+from one source of truth is a follow-up; V1 does not add another
+interface-definition language.
+
+Versioned config JSON still carries its schema version because JSON has no
+named compile-time type. That does not imply a `version` member on the SDK
+structures.
 
 ### Request shape
 
@@ -120,19 +127,24 @@ tagged C ABI representation.
 
 ```typescript
 interface SandboxRequestV1 {
-  version: string;
+  filesystem?: FilesystemV1;
+  network?: NetworkV1;
+  ui?: UiV1;
+  containment?: ContainmentV1;
+}
+
+interface ExecutionOptionsV1 {
   command: string;
   workingDirectory?: string;
   environment?: Record<string, string>;
   timeoutMs?: number;
-
-  filesystem?: FilesystemV1;
-  network?: NetworkV1;
-  ui?: UiV1;
+  containerName?: string;
+  experimental?: boolean;
   telemetry?: TelemetryV1;
-
-  containment?: ContainmentV1;
 }
+
+type RunOptionsV1 = ExecutionOptionsV1;
+type SpawnOptionsV1 = ExecutionOptionsV1;
 
 type ContainmentV1 =
   // Portable intents resolved by the engine.
@@ -159,13 +171,22 @@ on macOS. The `vm` and `microvm` variants likewise express portable intent
 without selecting an implementation. A caller may instead choose a concrete
 backend when it needs that implementation or one of its unique settings.
 
-Shared intent does not move into backend configuration. Filesystem grants,
-network restrictions, UI restrictions, timeout, environment, and command stay
-at the request's top level and have the same meaning in every language.
-Backend-specific configuration contains only capabilities that cannot be
-expressed portably, such as ProcessContainer capabilities or a WSLC image.
-Backend validation must reject a shared field it cannot honor rather than
-ignore it.
+Shared sandbox intent does not move into backend configuration. Filesystem,
+network, and UI restrictions stay on `SandboxRequestV1`. Command, working
+directory, environment, timeout, and per-invocation telemetry stay on the
+versioned run or spawn options. Backend-specific configuration contains only
+capabilities that cannot be expressed portably, such as ProcessContainer
+capabilities or a WSLC image. Backend validation must reject a shared field it
+cannot honor rather than ignore it.
+
+`RunOptionsV1` and `SpawnOptionsV1` may share the same execution fields
+initially but remain distinct named contracts so they can evolve independently.
+This policy/config/execution split is a decision proposed here; the meeting
+settled named versioned types and explicitly deferred fully formalizing that
+delineation.
+Language-local controls that do not cross the native boundary, such as a
+JavaScript `AbortSignal`, may remain idiomatic SDK parameters rather than being
+forced into the cross-language structure.
 
 Using a tagged containment union also prevents disconnected combinations that
 a giant config permits. For example, a WSLC image can appear only on the
@@ -180,8 +201,8 @@ exposing the same semantics.
 **Rust (`mxc-sdk`)**
 
 ```rust
-pub fn run(request: SandboxRequestV1, options: RunOptions) -> Result<Output, Error>;
-pub fn spawn(request: SandboxRequestV1, options: SpawnOptions) -> Result<Sandbox, Error>;
+pub fn run(request: SandboxRequestV1, options: RunOptionsV1) -> Result<Output, Error>;
+pub fn spawn(request: SandboxRequestV1, options: SpawnOptionsV1) -> Result<Sandbox, Error>;
 ```
 
 **C ABI (`mxc_ffi`)**
@@ -189,35 +210,35 @@ pub fn spawn(request: SandboxRequestV1, options: SpawnOptions) -> Result<Sandbox
 ```c
 int32_t mxc_run_v1(
     const MxcSandboxRequestV1* request,
-    const MxcRunOptions* options,
+    const MxcRunOptionsV1* options,
     MxcRunResult* result);
 
 int32_t mxc_spawn_v1(
     const MxcSandboxRequestV1* request,
-    const MxcSpawnOptions* options,
+    const MxcSpawnOptionsV1* options,
     MxcSandbox** sandbox,
     MxcErrorDetail* error);
 ```
 
-The C request is a typed, borrowed view valid for the duration of the call.
-Nested strings and arrays use explicit pointers and lengths. Nullable pointers
-or explicit presence fields preserve optional and tri-state semantics. The Rust
-adapter validates the C representation and constructs the Rust V1 request
+The C request and options are typed, borrowed views valid for the duration of
+the call. Nested strings and arrays use explicit pointers and lengths. Nullable
+pointers or explicit presence fields preserve optional and tri-state semantics.
+The Rust adapter validates both representations and constructs the Rust request
 without an intermediate JSON string.
 
 **C# (`Microsoft.Mxc.Sdk`)**
 
 ```csharp
-RunResult Run(SandboxRequestV1 request, RunOptions? options = null);
-Task<RunResult> RunAsync(SandboxRequestV1 request, RunOptions? options = null);
-MxcSandboxProcess Spawn(SandboxRequestV1 request, SpawnOptions? options = null);
+RunResult Run(SandboxRequestV1 request, RunOptionsV1 options);
+Task<RunResult> RunAsync(SandboxRequestV1 request, RunOptionsV1 options);
+MxcSandboxProcess Spawn(SandboxRequestV1 request, SpawnOptionsV1 options);
 ```
 
 **TypeScript (`@microsoft/mxc-sdk`)**
 
 ```typescript
-runSandbox(request: SandboxRequestV1, options?: RunOptions): Promise<RunResult>;
-spawnSandbox(request: SandboxRequestV1, options?: SpawnOptions): Promise<SandboxProcess>;
+runSandbox(request: SandboxRequestV1, options: RunOptionsV1): Promise<RunResult>;
+spawnSandbox(request: SandboxRequestV1, options: SpawnOptionsV1): Promise<SandboxProcess>;
 ```
 
 ## Node Koffi adapter
@@ -225,8 +246,8 @@ spawnSandbox(request: SandboxRequestV1, options?: SpawnOptions): Promise<Sandbox
 Node uses Koffi as a thin adapter over the typed `mxc_ffi` C ABI. Koffi declares
 the C functions, structs, arrays, and opaque handles and runs blocking calls
 off the JavaScript event-loop thread. TypeScript marshals its V1 request into
-the matching C representation and adapts results and handles to promises and
-Node streams.
+the matching C request and option representations and adapts results and
+handles to promises and Node streams.
 
 The adapter must preserve the C ABI's ownership and concurrency rules: calls
 on a sandbox handle are serialized, separate stdin/stdout/stderr handles may
@@ -253,7 +274,7 @@ request back to JSON internally.
 
 | Scope | Decision |
 | --- | --- |
-| Add | Equivalent `SandboxRequestV1` types in Rust, C#, Node, and `mxc_ffi`; a Koffi-based Node adapter. |
+| Add | Equivalent `SandboxRequestV1`, `RunOptionsV1`, and `SpawnOptionsV1` types in Rust, C#, Node, and `mxc_ffi`; a Koffi-based Node adapter. |
 | Change | C# and Node one-shot run/spawn use the typed `mxc_ffi` request boundary. |
 | Keep | Existing parser, schemas, `SandboxRequest`, `ExecutionRequest`, engine validation, backends, outputs, and streaming handles. |
 | Avoid | JSON as the primary SDK or FFI input; binding-only `RequestSpec` JSON; a second Node-native implementation beside `mxc_ffi`. |
@@ -261,10 +282,10 @@ request back to JSON internally.
 
 ## Migration
 
-1. Define the Rust `SandboxRequestV1` contract and its normalization into
-   `SandboxRequest`.
-2. Add the equivalent typed V1 C representation and direct conversion in
-   `mxc_ffi`.
+1. Define the Rust `SandboxRequestV1`, `RunOptionsV1`, and `SpawnOptionsV1`
+   contracts and their normalization into `SandboxRequest`.
+2. Add the equivalent typed V1 C request and option representations and direct
+   conversion in `mxc_ffi`.
 3. Update C# to expose its idiomatic V1 types over the typed C ABI.
 4. Update Node to expose equivalent TypeScript types and call `mxc_ffi` through
    Koffi.
@@ -278,7 +299,8 @@ separate decision.
 
 ## Success criteria
 
-- Rust, C#, and Node expose equivalent, idiomatic, strongly typed V1 requests.
+- Rust, C#, and Node expose equivalent, idiomatic, strongly typed V1 request
+  and operation-option contracts without embedded version fields.
 - Normal SDK run and spawn calls do not serialize or parse request JSON.
 - `mxc_ffi` converts typed C data directly into the Rust request path.
 - Node runs in-process through Koffi and the shared `mxc_ffi` implementation.
