@@ -61,6 +61,9 @@ public enum BackendCapability
     /// <summary>Windows ProcessContainer denial capture.</summary>
     CaptureDenials,
 
+    /// <summary>Bubblewrap proxy-only egress in a private network namespace.</summary>
+    ProxyEnforcement,
+
     /// <summary>
     /// Native filesystem denied-path enforcement at the reported tier.
     /// </summary>
@@ -70,9 +73,6 @@ public enum BackendCapability
     /// Host-loopback allow enforcement at the reported tier.
     /// </summary>
     IngressHostLoopbackAllow,
-
-    /// <summary>Bubblewrap proxy-only egress in a private network namespace.</summary>
-    ProxyEnforcement,
 }
 
 /// <summary>One host-available backend and its probed capabilities.</summary>

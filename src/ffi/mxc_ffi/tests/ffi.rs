@@ -70,7 +70,12 @@ fn extern_discovery_returns_owned_json() {
     {
         assert!(matches!(
             capability.as_str(),
-            Some("captureDenials" | "filesystemDeniedPaths" | "ingressHostLoopbackAllow")
+            Some(
+                "captureDenials"
+                    | "filesystemDeniedPaths"
+                    | "ingressHostLoopbackAllow"
+                    | "proxyEnforcement"
+            )
         ));
     }
 
