@@ -47,6 +47,68 @@ fn run_state_aware_json_malformed_json_is_malformed_request() {
 }
 
 #[test]
+fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
+    for fields in [
+        r#""appId":null"#,
+        r#""appId":17"#,
+        r#""appId":"first","appId":"second""#,
+        r#""appIdd":"typo""#,
+    ] {
+        let json = format!(
+            "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+             \"containment\":\"isolation_session\",\n  \
+             \"network\":{{\"defaultPolicy\":\"allow\",\"allowLocalNetwork\":true}},\n  \
+             \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+        );
+        let error = run_state_aware_json(&json, true, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
+        assert!(error
+            .message
+            .contains("experimental.isolation_session.provision"));
+        assert!(error.message.contains("line "));
+        assert!(error.message.contains("column "));
+        assert!(error.operation.is_none());
+        assert!(error.native_code.is_none());
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+#[test]
+fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
+    for app_id in ["", "example"] {
+        let json = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
+            "experimental": {"isolation_session": {"provision": {"appId": app_id}}},
+        })
+        .to_string();
+        let result = run_state_aware_json(&json, true, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+            serde_json::json!({"result": {}})
+        );
+    }
+    let json = serde_json::json!({
+        "version": "0.9.0-alpha",
+        "phase": "provision",
+        "containment": "isolation_session",
+        "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
+        "experimental": {"isolation_session": {"provision": {"appId": "x".repeat(257)}}},
+    })
+    .to_string();
+    let error = run_state_aware_json(&json, true, true).unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "appId must be at most 256 characters (got 257)"
+    );
+    assert!(error.operation.is_none());
+    assert!(error.native_code.is_none());
+}
+
+#[test]
 fn exec_sandbox_rejects_non_exec_phase() {
     let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
     // `Sandbox` is not `Debug`, so match rather than `expect_err`.

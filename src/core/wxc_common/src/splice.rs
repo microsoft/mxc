@@ -434,6 +434,7 @@ mod tests {
     fn splice_output_reparses_into_the_same_request() {
         let over = "cli-app.exe --from-cli";
         let original = r#"{
+            "version": "0.9.0-alpha",
             "process": { "cwd": "C:\\workspace" },
             "filesystem": { "readwritePaths": ["C:\\workspace"] }
         }"#;

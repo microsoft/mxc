@@ -57,6 +57,7 @@ export {
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
+  BubblewrapNetworkSupport,
 } from './types.js';
 
 // Export platform detection functions
@@ -105,6 +106,7 @@ export {
   StateAwareContainmentBackend,
   StateAwareSchemaVersion,
   SandboxId,
+  IsolationSessionNetworkConfig,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionExecConfig,

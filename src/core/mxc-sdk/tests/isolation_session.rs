@@ -8,7 +8,7 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::policy::{NetworkSection, SandboxPolicy};
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
 use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
 
 /// The network acknowledgment this backend requires; an absent policy is
@@ -160,16 +160,13 @@ fn one_shot_requires_the_experimental_optin() {
 /// caller-fixable refusal into an opaque backend error.
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        // The backend cannot filter the container's network, so it accepts only
-        // an explicit acknowledgment; an absent policy reads as a deny it has no
-        // way to enforce.
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = iso_policy();
+    policy.filesystem = Some(FilesystemSection {
+        readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
     let mut request = build_request_with_containment(
         &policy,
         &Containment::IsolationSession,
@@ -628,8 +625,8 @@ fn one_shot_kill_stops_the_workload() {
         "the workload must be running before the kill, or this test cannot fail"
     );
 
-    // Bounded, because teardown has been seen to block on a platform call that
-    // never returns. The handle comes back so this test, not the worker, decides
+    // Bounded so a kill that never returns fails this test rather than hanging
+    // the suite. The handle comes back so this test, not the worker, decides
     // when it drops.
     let (killed_tx, killed_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -769,6 +766,7 @@ fn provision_and_start() -> Started {
 
 fn exec_capture_stdout(sandbox_id: &str, command: &str) -> String {
     let request = serde_json::json!({
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": sandbox_id,
         "process": { "commandLine": command, "timeout": 30000 }

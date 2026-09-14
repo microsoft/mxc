@@ -229,6 +229,7 @@ pub struct RuntimeConfigSection {
     pub network_proxy: Option<String>,
 }
 
+#[cfg(test)]
 pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
     use serde_json::json;
     match proxy {
@@ -239,6 +240,7 @@ pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 }
 
 /// True when the network section carries any host allow/deny rules.
+#[cfg(test)]
 pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
     let non_empty = |key: &str| {
         network

@@ -156,6 +156,7 @@ enum RequestContainment {
         #[serde(default, rename = "portMappings")]
         port_mappings: Vec<WslcPortMappingSpec>,
     },
+    IsolationSession {},
 }
 
 #[derive(serde::Deserialize)]
@@ -271,6 +272,7 @@ impl RequestContainment {
                     .collect();
                 Containment::Wslc(wslc)
             }
+            Self::IsolationSession {} => Containment::IsolationSession,
         }
     }
 }
@@ -846,6 +848,39 @@ mod tests {
         assert!(config.gpu);
         assert_eq!(config.storage_path.as_deref(), Some(r"C:\wslc"));
         assert_eq!(config.port_mappings, [(8080, 80)]);
+    }
+
+    /// The discriminator is derived from the enum's `rename_all`, not written by
+    /// hand, and the managed binding spells it independently.
+    #[test]
+    fn isolation_session_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment =
+            serde_json::from_str(r#"{ "type": "isolationSession" }"#)
+                .expect("request containment parses");
+
+        assert!(matches!(
+            containment.into_sdk(),
+            Containment::IsolationSession
+        ));
+    }
+
+    /// `deny_unknown_fields` does not reach an internally tagged unit variant,
+    /// so the empty-struct form is what closes this one.
+    #[test]
+    fn isolation_session_rejects_a_member_it_does_not_define() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "containment": { "type": "isolationSession", "unexpected": true }
+            }"#,
+        )
+        .expect_err("an undefined member must not be discarded");
+
+        assert!(
+            error.message.contains("unexpected"),
+            "the error must name the member: {error}"
+        );
     }
 
     #[test]

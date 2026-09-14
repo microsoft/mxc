@@ -157,20 +157,62 @@ export interface Filesystem {
 export type IsolationSessionContainment = "isolation_session";
 
 /**
- * The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.
+ * The canonical directional unrestricted-network posture.
  */
-export interface IsolationSessionNetwork {
+export interface IsolationSessionDirectionalNetwork {
   /**
-   * Required acknowledgment that local network access is allowed.
+   * Required unrestricted outbound posture.
+   */
+  egress: IsolationSessionNetworkEgress;
+  /**
+   * Required unrestricted inbound and host-loopback posture.
+   */
+  ingress: IsolationSessionNetworkIngress;
+}
+
+/**
+ * The canonical legacy unrestricted-network posture retained for compatibility.
+ */
+export interface IsolationSessionLegacyNetwork {
+  /**
+   * Legacy unrestricted inbound/local-network posture.
    */
   allowLocalNetwork: True;
   /**
-   * Exact `allow` default network policy marker.
+   * Legacy unrestricted outbound posture.
    */
-  defaultPolicy: IsolationSessionNetworkDefaultPolicy;
+  defaultPolicy: IsolationSessionLegacyNetworkAllow;
 }
 
-export type IsolationSessionNetworkDefaultPolicy = "allow";
+export type IsolationSessionLegacyNetworkAllow = "allow";
+
+export type IsolationSessionNetwork = IsolationSessionLegacyNetwork & { egress?: never; ingress?: never } | IsolationSessionDirectionalNetwork & { allowLocalNetwork?: never; defaultPolicy?: never };
+
+export type IsolationSessionNetworkAllow = "allow";
+
+/**
+ * Unrestricted outbound posture.
+ */
+export interface IsolationSessionNetworkEgress {
+  /**
+   * Allow outbound traffic by default.
+   */
+  default: IsolationSessionNetworkAllow;
+}
+
+/**
+ * Unrestricted inbound and host-loopback posture.
+ */
+export interface IsolationSessionNetworkIngress {
+  /**
+   * Allow private-network inbound traffic by default.
+   */
+  default: IsolationSessionNetworkAllow;
+  /**
+   * Allow bidirectional host-loopback connectivity.
+   */
+  hostLoopback: IsolationSessionNetworkAllow;
+}
 
 /**
  * IsolationSession settings accepted during provisioning.
@@ -193,7 +235,9 @@ export interface IsolationSessionProvisionExperimental {
 }
 
 /**
- * A complete state-aware `provision` request for isolation_session
+ * A complete state-aware `provision` request for IsolationSession.
+ *
+ * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture. The historical legacy pair and the standard directional all-allow shape are accepted.
  */
 export interface IsolationSessionProvisionRequest {
   /**
@@ -209,11 +253,11 @@ export interface IsolationSessionProvisionRequest {
    */
   containment: IsolationSessionContainment;
   /**
-   * Optional closed experimental settings.
+   * Optional closed experimental settings containing only `appId`.
    */
   experimental?: IsolationSessionProvisionExperimental;
   /**
-   * Required unrestricted-network acknowledgment.
+   * Required unrestricted network posture.
    */
   network: IsolationSessionNetwork;
   /**
@@ -579,7 +623,7 @@ export interface Process {
   cwd?: string;
   /**
    * Optional environment entries encoded as `KEY=VALUE` strings.
-   * 
+   *
    * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.
    */
   env?: string[];

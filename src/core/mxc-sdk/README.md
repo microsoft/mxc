@@ -188,6 +188,25 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
+On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
+this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+which runs the sandbox in a private network namespace). That mode has no
+fallback, so check it before building a proxy request:
+
+```rust,no_run
+use mxc_sdk::{platform_support, ProxyEnforcement};
+
+if let Some(network) = platform_support().bubblewrap_network {
+    if network.proxy_enforcement != ProxyEnforcement::Supported {
+        println!("proxy mode unavailable: {:?}", network.warnings);
+    }
+}
+```
+
+Reported fail-closed: when the probe cannot run, the result is `Unsupported`
+with the reason in `warnings`. The field is absent only when Bubblewrap itself
+is unavailable, which [`PlatformSupport::reason`] explains.
+
 ## Denial capture (Windows)
 
 `ProcessContainer::capture_denials` enables learning-mode capture: the
@@ -348,11 +367,12 @@ use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. IsolationSession accepts only the canonical unrestricted-network
-// acknowledgment; an absent policy defaults to `block`, which it refuses.
+// Provision. Describe the backend's unrestricted network posture explicitly.
+// The canonical legacy spelling remains accepted during the transition.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+        "network":{"egress":{"default":"allow"},
+          "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     false, // dry_run
     true,  // experimental
 )?;
