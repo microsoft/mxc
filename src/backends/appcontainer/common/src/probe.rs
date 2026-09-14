@@ -58,13 +58,16 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
-    /// Whether the BaseContainer (Tier 1) tier can enforce
-    /// `filesystem.deniedPaths` on this host (the `SANDBOX_CAP_FS_DENY` bit
-    /// from `Experimental_QuerySandboxSupport`). `false` on builds where deny
-    /// support has not yet shipped, where `deniedPaths` is rejected at launch.
-    /// Tier 3 (AppContainer + DACL) enforces `deniedPaths` via DENY ACEs
-    /// regardless of this bit; it is meaningful only for the BaseContainer tier.
+    /// Whether the preferred BaseContainer (Tier 1) contract can enforce
+    /// `filesystem.deniedPaths` natively on this host. PSEC support is
+    /// authoritative when PSEC is usable; otherwise this reports the
+    /// transitional SBOX `SANDBOX_CAP_FS_DENY` bit. Tier 3 (AppContainer +
+    /// DACL) enforces denied paths independently, so this fact is meaningful
+    /// only for BaseContainer.
     pub base_container_supports_deny_paths: bool,
+    /// Whether the preferred BaseContainer contract can honor
+    /// `network.ingress.hostLoopback = "allow"`.
+    pub base_container_supports_ingress_host_loopback_allow: bool,
     /// Whether the in-proc IsolationSession service can be activated on this
     /// host. Always `false` here — `appcontainer_common` has no dependency on
     /// the isolation-session backend; `wxc-exec --probe` overrides it when
@@ -134,7 +137,10 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
         base_container_supports_deny_paths:
-            crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
+            crate::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+        base_container_supports_ingress_host_loopback_allow:
+            crate::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(
+            ),
         isolation_session_available: false,
         hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
@@ -212,6 +218,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_ingress_host_loopback_allow: false,
                 isolation_session_available: true,
                 hyperlight_available: false,
                 ui_capabilities: all_ui_capabilities(),
@@ -226,6 +233,11 @@ mod tests {
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
+        assert_eq!(v["probes"]["baseContainerSupportsDenyPaths"], false);
+        assert_eq!(
+            v["probes"]["baseContainerSupportsIngressHostLoopbackAllow"],
+            false
+        );
         assert_eq!(v["probes"]["isolationSessionAvailable"], true);
         assert_eq!(v["probes"]["uiCapabilities"]["canBlockClipboardRead"], true);
         assert_eq!(
@@ -250,6 +262,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_ingress_host_loopback_allow: false,
                 isolation_session_available: false,
                 hyperlight_available: false,
                 ui_capabilities: UiCapabilitySupport {

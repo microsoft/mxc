@@ -19,6 +19,10 @@ use wxc_common::models::ContainmentBackend;
 pub enum BackendCapability {
     /// Windows ProcessContainer denial capture.
     CaptureDenials,
+    /// Native `filesystem.deniedPaths` enforcement at the reported tier.
+    FilesystemDeniedPaths,
+    /// `network.ingress.hostLoopback = "allow"` at the reported tier.
+    IngressHostLoopbackAllow,
 }
 
 /// One host-available backend, plus its effective isolation tier (if any).
@@ -36,7 +40,7 @@ pub struct AvailableBackend {
     /// backends with no tier ladder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
-    /// Optional backend features usable on this host.
+    /// Optional features enforceable at the reported tier without fallback.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<BackendCapability>,
 }
@@ -70,9 +74,16 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
+        use appcontainer_common::fallback_detector::is_base_container_usable;
+
+        let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
         windows_backends(
-            appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(
-            ),
+            tier,
+            ProcessContainerCapabilities {
+                capture_denials: appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                filesystem_denied_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+                ingress_host_loopback_allow: appcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
+            },
         )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -109,16 +120,32 @@ fn linux_backends() -> Vec<AvailableBackend> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_backends(capture_denials_usable: bool) -> Vec<AvailableBackend> {
-    use appcontainer_common::fallback_detector::is_base_container_usable;
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcessContainerCapabilities {
+    capture_denials: bool,
+    filesystem_denied_paths: bool,
+    ingress_host_loopback_allow: bool,
+}
 
+#[cfg(target_os = "windows")]
+fn windows_backends(
+    tier: appcontainer_common::fallback_detector::IsolationTier,
+    support: ProcessContainerCapabilities,
+) -> Vec<AvailableBackend> {
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
-    let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
-    let capabilities = capture_denials_usable
-        .then_some(BackendCapability::CaptureDenials)
-        .into_iter()
-        .collect();
+    let mut capabilities = Vec::new();
+    if support.capture_denials {
+        capabilities.push(BackendCapability::CaptureDenials);
+    }
+    if tier == appcontainer_common::fallback_detector::IsolationTier::BaseContainer {
+        if support.filesystem_denied_paths {
+            capabilities.push(BackendCapability::FilesystemDeniedPaths);
+        }
+        if support.ingress_host_loopback_allow {
+            capabilities.push(BackendCapability::IngressHostLoopbackAllow);
+        }
+    }
     let process_container = AvailableBackend {
         backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
         tier: Some(tier.as_str().to_string()),
@@ -256,6 +283,19 @@ mod tests {
     }
 
     #[test]
+    fn policy_capabilities_are_serialized_in_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&BackendCapability::FilesystemDeniedPaths).expect("serializes"),
+            r#""filesystemDeniedPaths""#
+        );
+        assert_eq!(
+            serde_json::to_string(&BackendCapability::IngressHostLoopbackAllow)
+                .expect("serializes"),
+            r#""ingressHostLoopbackAllow""#
+        );
+    }
+
+    #[test]
     fn every_reported_backend_is_a_real_wire_name() {
         let known = all_wire_names();
         for entry in available_backends() {
@@ -338,8 +378,16 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_capture_denials_from_probe_result() {
+        use appcontainer_common::fallback_detector::IsolationTier;
+
         for capture_denials_usable in [false, true] {
-            let backends = windows_backends(capture_denials_usable);
+            let backends = windows_backends(
+                IsolationTier::BaseContainer,
+                ProcessContainerCapabilities {
+                    capture_denials: capture_denials_usable,
+                    ..Default::default()
+                },
+            );
             let process_container = backends
                 .iter()
                 .find(|backend| backend.backend == "processcontainer")
@@ -350,6 +398,59 @@ mod tests {
                     .contains(&BackendCapability::CaptureDenials),
                 capture_denials_usable
             );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reports_policy_capabilities_for_base_container() {
+        use appcontainer_common::fallback_detector::IsolationTier;
+
+        let backends = windows_backends(
+            IsolationTier::BaseContainer,
+            ProcessContainerCapabilities {
+                filesystem_denied_paths: true,
+                ingress_host_loopback_allow: true,
+                ..Default::default()
+            },
+        );
+        let process_container = backends
+            .iter()
+            .find(|backend| backend.backend == "processcontainer")
+            .expect("processcontainer must always be reported on Windows");
+
+        assert_eq!(
+            process_container.capabilities,
+            vec![
+                BackendCapability::FilesystemDeniedPaths,
+                BackendCapability::IngressHostLoopbackAllow,
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_omits_base_container_capabilities_from_lower_tiers() {
+        use appcontainer_common::fallback_detector::IsolationTier;
+
+        for tier in [
+            IsolationTier::AppContainerBfs,
+            IsolationTier::AppContainerDacl,
+        ] {
+            let backends = windows_backends(
+                tier,
+                ProcessContainerCapabilities {
+                    filesystem_denied_paths: true,
+                    ingress_host_loopback_allow: true,
+                    ..Default::default()
+                },
+            );
+            let process_container = backends
+                .iter()
+                .find(|backend| backend.backend == "processcontainer")
+                .expect("processcontainer must always be reported on Windows");
+
+            assert!(process_container.capabilities.is_empty());
         }
     }
 

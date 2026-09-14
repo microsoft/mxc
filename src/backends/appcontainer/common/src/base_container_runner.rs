@@ -636,6 +636,31 @@ impl BaseContainerRunner {
             .is_some_and(|capabilities| Self::decode_deny_capability(1, capabilities))
     }
 
+    /// Whether the BaseContainer contract selected for a policy-free request
+    /// can enforce `filesystem.deniedPaths` without falling back.
+    ///
+    /// PSEC is preferred whenever it is usable, so its support query is
+    /// authoritative in that case. The transitional SBOX query is consulted
+    /// only when PSEC itself is unavailable.
+    pub fn supports_native_denied_paths() -> bool {
+        if Self::is_process_security_environment_usable() {
+            return SecurityEnvironmentApi::load()
+                .and_then(|api| api.supports_deny_paths())
+                .unwrap_or(false);
+        }
+        Self::base_container_supports_deny_paths()
+    }
+
+    /// Whether the preferred BaseContainer contract can enforce
+    /// `network.ingress.hostLoopback = "allow"`.
+    ///
+    /// This policy requires both the PSEC 1.1 contract and its network-ingress
+    /// capability. Discovery fails closed on every load or query error.
+    pub fn supports_ingress_host_loopback_allow() -> bool {
+        Self::is_process_security_environment_usable()
+            && Self::query_psec_ingress_support().unwrap_or(false)
+    }
+
     /// Decode a `QuerySandboxSupport` result for the deny-paths capability.
     /// `succeeded` is the export's Win32 `BOOL` return (TRUE = nonzero = the
     /// query call succeeded), NOT an HRESULT. The capability is present only
@@ -712,15 +737,8 @@ impl BaseContainerRunner {
 
         // PSEC 1.1 is usable only when the OS reports both the contract version
         // and the ingress capability bit.
-        let psec_ingress_contract_supported = SecurityEnvironmentApi::load()
-            .and_then(|api| {
-                if api.supports_version(1, 1)? {
-                    api.supports_network_ingress()
-                } else {
-                    Ok(false)
-                }
-            })
-            .map_err(|error| ScriptResponse {
+        let psec_ingress_contract_supported =
+            Self::query_psec_ingress_support().map_err(|error| ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
                 ..ScriptResponse::error(&format!(
                     "failed to query Process Security Environment ingress support: {error}"
@@ -736,6 +754,14 @@ impl BaseContainerRunner {
                  contract version 1.1 with ingress support",
             )
         })
+    }
+
+    fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
+        let api = SecurityEnvironmentApi::load()?;
+        if !api.supports_version(1, 1)? {
+            return Ok(false);
+        }
+        api.supports_network_ingress()
     }
 
     /// Transitional guard for the legacy SBOX fallback. Remove it with the
