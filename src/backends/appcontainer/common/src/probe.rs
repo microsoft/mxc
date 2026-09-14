@@ -14,7 +14,7 @@
 use serde::Serialize;
 
 use crate::fallback_detector::{self, FallbackError};
-use wxc_common::models::ContainerPolicy;
+use wxc_common::models::ExecutionRequest;
 use wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
@@ -119,9 +119,8 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
     }
 }
 
-/// Run the fallback detector against `policy` and return a JSON-shaped
-/// summary. The detector is always asked to prefer BaseContainer (Tier 1).
-pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
+/// Probe backend support for `request`.
+pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
     let probes = ProbeFacts {
         base_container_api_present:
             crate::base_container_runner::BaseContainerRunner::is_base_container_api_present()
@@ -140,7 +139,11 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
         hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
-    match fallback_detector::detect(policy, /* prefer_base_container */ true) {
+    let base_container_usable =
+        crate::base_container_runner::BaseContainerRunner::is_usable_for_request(request);
+    let supports_deny_paths =
+        crate::base_container_runner::BaseContainerRunner::supports_deny_paths_for_request(request);
+    match detect_request_tier(request, base_container_usable, supports_deny_paths) {
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
             needs_dacl_augmentation: Some(decision.needs_dacl_augmentation),
@@ -156,6 +159,19 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             error: Some(format_fallback_error(&e)),
         },
     }
+}
+
+fn detect_request_tier(
+    request: &ExecutionRequest,
+    base_container_usable: bool,
+    supports_deny_paths: bool,
+) -> Result<fallback_detector::TierDecision, FallbackError> {
+    fallback_detector::detect_with_base_container_capabilities(
+        &request.policy,
+        base_container_usable,
+        base_container_usable,
+        supports_deny_paths,
+    )
 }
 
 fn format_fallback_error(e: &FallbackError) -> String {
@@ -295,8 +311,8 @@ mod tests {
     #[test]
     fn run_probe_with_force_tier() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
-        let policy = ContainerPolicy::default();
-        let out = run_probe(&policy);
+        let request = ExecutionRequest::default();
+        let out = run_probe(&request);
         assert_eq!(out.tier, Some("appcontainer-bfs"));
         assert_eq!(out.needs_dacl_augmentation, Some(false));
         assert!(out.error.is_none());
@@ -305,9 +321,9 @@ mod tests {
     #[test]
     fn run_probe_handles_dacl_disabled_error() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut policy = ContainerPolicy::default();
-        policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&policy);
+        let mut request = ExecutionRequest::default();
+        request.policy.fallback.allow_dacl_mutation = false;
+        let out = run_probe(&request);
         assert!(out.tier.is_none());
         assert!(out.needs_dacl_augmentation.is_none());
         assert!(out.error.is_some());
@@ -321,9 +337,9 @@ mod tests {
     #[test]
     fn omitted_fields_when_error() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut policy = ContainerPolicy::default();
-        policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&policy);
+        let mut request = ExecutionRequest::default();
+        request.policy.fallback.allow_dacl_mutation = false;
+        let out = run_probe(&request);
         let v = serde_json::to_value(&out).expect("to_value");
         let obj = v.as_object().expect("object");
         assert!(
@@ -343,12 +359,23 @@ mod tests {
     fn probe_always_emits_isolation_session_available() {
         // The SDK's isolation-session gate reads this non-optional field, so
         // it must always serialize (never omitted), even when false.
-        let out = run_probe(&ContainerPolicy::default());
+        let out = run_probe(&ExecutionRequest::default());
         let v = serde_json::to_value(&out).expect("to_value");
         let probes = v["probes"].as_object().expect("probes object");
         assert!(
             probes.contains_key("isolationSessionAvailable"),
             "isolationSessionAvailable must always be present, got: {v}"
         );
+    }
+
+    #[test]
+    fn request_detector_keeps_supported_denied_paths_on_base_container() {
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".to_string()];
+
+        let decision =
+            detect_request_tier(&request, true, true).expect("BaseContainer should be selected");
+
+        assert_eq!(decision.tier, IsolationTier::BaseContainer);
     }
 }
