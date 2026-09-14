@@ -88,6 +88,7 @@ jobs:
 
   - powershell: |
       $messagesPath = Join-Path $env:AGENT_TEMPDIRECTORY "mxc-sdk-isolation-session-test-build.jsonl"
+      $probeMessagesPath = Join-Path $env:AGENT_TEMPDIRECTORY "mxc-sta-probe-build.jsonl"
       Push-Location "$(workingDirectory)"
       try {
           & cargo test --locked --release --target "$(triplet)" `
@@ -96,6 +97,14 @@ jobs:
               > $messagesPath
           if ($LASTEXITCODE -ne 0) {
               throw "Building the mxc-sdk IsolationSession test executable failed with exit code $LASTEXITCODE"
+          }
+
+          & cargo build --locked --release --target "$(triplet)" `
+              -p mxc-sdk --features isolation_session `
+              --example sta_probe --message-format=json `
+              > $probeMessagesPath
+          if ($LASTEXITCODE -ne 0) {
+              throw "Building the mxc-sdk STA probe failed with exit code $LASTEXITCODE"
           }
       }
       finally {
@@ -116,6 +125,21 @@ jobs:
 
       Write-Host "##vso[task.setvariable variable=mxcSdkIsolationSessionTestExe]$testExe"
       Write-Host "  -> $testExe"
+
+      $probeExe = Get-Content -LiteralPath $probeMessagesPath | ForEach-Object {
+          try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { $null }
+      } | Where-Object {
+          $_.reason -eq 'compiler-artifact' -and
+          $_.target.name -eq 'sta_probe' -and
+          $_.executable
+      } | Select-Object -Last 1 -ExpandProperty executable
+
+      if (-not $probeExe -or -not (Test-Path -LiteralPath $probeExe -PathType Leaf)) {
+          throw "Cargo did not report the mxc-sdk STA probe executable"
+      }
+
+      Write-Host "##vso[task.setvariable variable=mxcStaProbeExe]$probeExe"
+      Write-Host "  -> $probeExe"
     displayName: 'Build in-process IsolationSession tests'
 
   # Build the SDK and integration tests so the Node E2E suite can be
@@ -144,10 +168,39 @@ jobs:
     displayName: 'Build SDK integration tests'
     workingDirectory: sdk/node/tests/integration
 
+  - task: UseDotNet@2
+    displayName: 'Use .NET SDK 10'
+    inputs:
+      packageType: sdk
+      version: 10.x
+
+  - powershell: |
+      $project = "$(Build.SourcesDirectory)/sdk/dotnet/Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj"
+      $out = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-tests'
+      Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+
+      & dotnet publish $project -c Release -r win-x64 `
+          -p:MxcWithIsolationSession=true `
+          --self-contained true -o $out --nologo
+      if ($LASTEXITCODE -ne 0) {
+          throw "Publishing Microsoft.Mxc.Sdk.Tests failed with exit code $LASTEXITCODE"
+      }
+
+      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
+          $required = Join-Path $out $name
+          if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "The self-contained .NET test payload is missing $name"
+          }
+      }
+
+      Write-Host "##vso[task.setvariable variable=mxcDotNetTestsDir]$out"
+      Write-Host "  -> $out"
+    displayName: 'Publish self-contained .NET SDK tests'
+
   # Stage the test bundle for publishing as a pipeline artifact.
   - powershell: |
       $out = "$(outputDirectory)"
-      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/inproc", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
+      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/inproc", "$out/dotnet", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
 
       # wxc-exec binary (isolation_session enabled)
       Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
@@ -157,6 +210,13 @@ jobs:
       # in-process rather than through wxc-exec.
       Copy-Item "$(mxcSdkIsolationSessionTestExe)" "$out/inproc/mxc-sdk-isolation-session-tests.exe"
       Write-Host "  -> inproc/mxc-sdk-isolation-session-tests.exe"
+      Copy-Item "$(mxcStaProbeExe)" "$out/inproc/sta_probe.exe"
+      Write-Host "  -> inproc/sta_probe.exe"
+
+      # Self-contained xUnit v3 executable plus the .NET runtime and native
+      # MXC unit, so the test machine needs no installed .NET SDK/runtime.
+      Copy-Item "$(mxcDotNetTestsDir)/*" "$out/dotnet/" -Recurse -Force
+      Write-Host "  -> dotnet/Microsoft.Mxc.Sdk.Tests.exe"
 
       # Self-contained Node runtime for the SDK integration tests
       $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -337,7 +397,33 @@ jobs:
       if (($testList -join "`n") -notmatch '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$') {
           throw "Packaged in-process test discovery did not find any tests"
       }
+
+      $probeExe = "$(outputDirectory)/inproc/sta_probe.exe"
+      if (-not (Test-Path -LiteralPath $probeExe -PathType Leaf)) {
+          throw "Packaged STA probe executable not found: $probeExe"
+      }
+      $probeOutput = @(& $probeExe invalid 2>&1)
+      $probeOutput | ForEach-Object { Write-Host $_ }
+      if ($LASTEXITCODE -ne 2 -or ($probeOutput -join "`n") -notmatch 'unknown mode: invalid') {
+          throw "Packaged STA probe launch validation failed with exit code $LASTEXITCODE"
+      }
     displayName: 'Validate packaged in-process tests'
+
+  - powershell: |
+      $testExe = "$(outputDirectory)/dotnet/Microsoft.Mxc.Sdk.Tests.exe"
+      if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+          throw "Packaged .NET test executable not found: $testExe"
+      }
+
+      $testList = @(& $testExe -list full 2>&1)
+      $testList | ForEach-Object { Write-Host $_ }
+      if ($LASTEXITCODE -ne 0) {
+          throw "Packaged .NET test discovery failed with exit code $LASTEXITCODE"
+      }
+      if (($testList -join "`n") -notmatch 'Microsoft\.Mxc\.Sdk\.Tests') {
+          throw "Packaged .NET test discovery did not find any tests"
+      }
+    displayName: 'Validate packaged .NET tests'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'
