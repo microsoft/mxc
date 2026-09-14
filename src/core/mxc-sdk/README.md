@@ -39,10 +39,10 @@ Ok(())
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
 [`build_request`] resolves the host's default containment backend (see
-[Supported backends](#supported-backends)), builds the wire config, and runs it
-through the shared parser. The command is supplied to [`build_request`], so the
-returned [`SandboxRequest`] is complete; optionally adjust its working directory
-or environment before spawning.
+[Supported backends](#supported-backends)), builds the rolling wire config, and
+runs it through the shared production parser. The command is supplied to
+[`build_request`], so the returned [`SandboxRequest`] is complete; optionally
+adjust its working directory or environment before spawning.
 
 Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
 called. Enabling that per-invocation switch still requires persisted user
@@ -150,8 +150,8 @@ questions:
   decide whether `run` / `spawn_sandbox` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones this SDK cannot drive
-  one-shot — LXC, Windows Sandbox, and IsolationSession — each with its
-  effective isolation **tier**.
+  one-shot — LXC and Windows Sandbox — each with its effective isolation
+  **tier**.
 
 ```rust,no_run
 use mxc_sdk::{available_backends, platform_support, BackendCapability};
@@ -199,6 +199,25 @@ changes before launch.
 And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
+
+On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
+this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+which runs the sandbox in a private network namespace). That mode has no
+fallback, so check it before building a proxy request:
+
+```rust,no_run
+use mxc_sdk::{platform_support, ProxyEnforcement};
+
+if let Some(network) = platform_support().bubblewrap_network {
+    if network.proxy_enforcement != ProxyEnforcement::Supported {
+        println!("proxy mode unavailable: {:?}", network.warnings);
+    }
+}
+```
+
+Reported fail-closed: when the probe cannot run, the result is `Unsupported`
+with the reason in `warnings`. The field is absent only when Bubblewrap itself
+is unavailable, which [`PlatformSupport::reason`] explains.
 
 ## Denial capture (Windows)
 
@@ -280,10 +299,11 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
-- `warnings()` returns policy and operational warnings detected while spawning
-  the sandbox, such as `permissiveLearningMode` weakening deny-by-default, a
-  network rule that installs but cannot carry traffic, or telemetry being
-  unavailable/routed only to local ETW.
+- `warnings()` returns policy and operational warnings from the sandbox, such as
+  `permissiveLearningMode` weakening deny-by-default, a
+  network rule that installs but cannot carry traffic, telemetry being
+  unavailable/routed only to local ETW, or a cleanup step that failed after the
+  workload exited.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose
@@ -311,9 +331,10 @@ The handle is modelled on [`std::process::Child`]:
   plain `kill()` would also take that descendant down). Returns `None` for
   non-streamed stdio.
 
-Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
-**Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every
-backend the library supports.
+Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
+**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
+features, and with the request's experimental opt-in — **WSLC** and
+**IsolationSession**.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -358,11 +379,12 @@ use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. IsolationSession accepts only the canonical unrestricted-network
-// acknowledgment; an absent policy defaults to `block`, which it refuses.
+// Provision. Describe the backend's unrestricted network posture explicitly.
+// The canonical legacy spelling remains accepted during the transition.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},
+          "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     false, // dry_run
     true,  // experimental
 )?;
@@ -370,14 +392,14 @@ let provisioned = run_state_aware_json(
 
 // Start. The exec phase runs against a started session.
 run_state_aware_json(
-    r#"{"phase":"start","sandboxId":"..."}"#,
+    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
     false, // dry_run
     true,  // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = exec_attached(
-    r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
 let _ = outcome;
@@ -413,14 +435,18 @@ default):
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
+| Windows | IsolationSession                                | `Containment::IsolationSession`  |
 
 `Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 Constructing the listed variants is unaffected.
 
-`Containment::IsolationSession` names that backend, but no entry point taking a
-`Containment` serves it: `run` and `spawn_sandbox` both return
-[`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware
-lifecycle — `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+`Containment::IsolationSession` names the isolation-session backend, served by
+`run` and `spawn_sandbox` with piped stdio. It is experimental, so the request
+must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
+process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
+dropping the handle tears the session down synchronously rather than in the
+background. Reach its multi-call lifecycle through
+`run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
 Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
@@ -434,8 +460,9 @@ opt-in on two axes: build this crate with its **`wslc` feature**, and call
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
 memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
-go through the same parser the executor uses — so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at build time, not at spawn.
+go through the same production parser as the executor, so a rejected value
+(e.g. a port mapping with a zero or duplicated host port) fails at build time,
+not at spawn.
 
 ```rust,no_run
 use std::error::Error;
@@ -445,7 +472,7 @@ use mxc_sdk::{
 
 fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
+    version: "0.9.0-alpha".to_string(),
     filesystem: None, network: None, ui: None, timeout_ms: None,
 };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };

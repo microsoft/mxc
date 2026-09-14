@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "isolation_session",
     "filesystem": {

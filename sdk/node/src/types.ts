@@ -15,8 +15,27 @@ export interface ProcessConfig {
   commandLine: string;
   /** Working directory for the process */
   cwd?: string;
-  /** Environment variables as KEY=VALUE strings */
+  /**
+   * Environment variables as KEY=VALUE strings.
+   *
+   * Omit this field to give the child the backend's default environment (on
+   * Windows, the user's profile block). Supply it -- including as an empty
+   * array -- and it is used **verbatim**: MXC adds nothing to it, so an
+   * environment missing what the platform requires will fail the launch.
+   * Set {@link ProcessConfig.inheritDefaultEnv} to layer these on the
+   * default environment instead of replacing it.
+   */
   env?: string[];
+  /**
+   * Start from the backend's default environment and layer {@link
+   * ProcessConfig.env} on top of it, rather than replacing it (default false).
+   *
+   * Use this when you want "the usual environment, plus these": on Windows the
+   * default is the user's profile block, which only the OS can produce, so it
+   * cannot be assembled by a caller. Note this is a different set from the
+   * calling process's `process.env`, which you can still pass explicitly.
+   */
+  inheritDefaultEnv?: boolean;
   /** Execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
 }
@@ -588,6 +607,26 @@ export interface UiCapabilitySupport {
 }
 
 /**
+ * Host support for enforcing Bubblewrap proxy-only egress.
+ *
+ * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * namespace and default-drop everything except the proxy endpoint. That
+ * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
+ * iptables family) plus unprivileged user and network namespaces the kernel
+ * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * full list. There is deliberately no fallback to the weaker shared-host-network
+ * model, so a request that cannot configure private networking fails rather
+ * than silently degrading. This reports, before launching, whether the host
+ * can satisfy such a policy.
+ */
+export interface BubblewrapNetworkSupport {
+  /** Whether proxy-only egress can be enforced on this host. */
+  proxyEnforcement: 'supported' | 'unsupported';
+  /** Why enforcement is unsupported. Empty when it is supported. */
+  warnings: string[];
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -618,4 +657,10 @@ export interface PlatformSupport {
    * determine them, including on Linux and macOS today.
    */
   uiCapabilities?: UiCapabilitySupport;
+  /**
+   * Bubblewrap host network capability. Omitted on non-Linux platforms and
+   * when bubblewrap itself is unavailable. Reported fail-closed: if the probe
+   * cannot run, `proxyEnforcement` is `'unsupported'`, never absent.
+   */
+  bubblewrapNetwork?: BubblewrapNetworkSupport;
 }

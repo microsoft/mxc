@@ -29,7 +29,9 @@ struct RequestSpec {
     #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
-    environment: BTreeMap<String, String>,
+    environment: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    inherit_default_env: bool,
     #[serde(default)]
     experimental: bool,
 }
@@ -154,6 +156,7 @@ enum RequestContainment {
         #[serde(default, rename = "portMappings")]
         port_mappings: Vec<WslcPortMappingSpec>,
     },
+    IsolationSession {},
 }
 
 #[derive(serde::Deserialize)]
@@ -269,6 +272,7 @@ impl RequestContainment {
                     .collect();
                 Containment::Wslc(wslc)
             }
+            Self::IsolationSession {} => Containment::IsolationSession,
         }
     }
 }
@@ -319,11 +323,11 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
             format!("unknown request field `{path}`"),
         ));
     }
-    if let Some(name) = spec
-        .environment
-        .keys()
-        .find(|name| name.is_empty() || name.contains('='))
-    {
+    if let Some(name) = spec.environment.as_ref().and_then(|environment| {
+        environment
+            .keys()
+            .find(|name| name.is_empty() || name.contains('='))
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("invalid environment variable name `{name}`"),
@@ -341,7 +345,13 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
-    request.set_env(spec.environment);
+    if let Some(environment) = spec.environment {
+        if spec.inherit_default_env {
+            request.inherit_default_env(environment);
+        } else {
+            request.set_env(environment);
+        }
+    }
     request.set_experimental(spec.experimental);
     if let Some(enabled) = telemetry.and_then(|telemetry| telemetry.enabled) {
         request.set_telemetry_opt_in(enabled);
@@ -368,7 +378,11 @@ mod tests {
             serde_json::from_str(process_container).expect("process-container golden parses");
         assert_eq!(process_spec.command, "echo parity");
         assert_eq!(
-            process_spec.environment.get("PARITY").map(String::as_str),
+            process_spec
+                .environment
+                .as_ref()
+                .and_then(|environment| environment.get("PARITY"))
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(process_spec.policy.timeout_ms, Some(30_000));
@@ -490,6 +504,28 @@ mod tests {
             _ => panic!("WSLC golden selected the wrong containment"),
         }
         build_request_from_json(wslc).expect("WSLC golden builds a public SDK request");
+    }
+
+    #[test]
+    fn environment_presence_distinguishes_default_from_explicitly_empty() {
+        let omitted = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect("omitted environment builds");
+        assert!(omitted.env().is_none());
+
+        let explicitly_empty = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi",
+                "environment": {}
+            }"#,
+        )
+        .expect("explicitly empty environment builds");
+        assert_eq!(explicitly_empty.env(), Some([].as_slice()));
     }
 
     #[test]
@@ -812,6 +848,39 @@ mod tests {
         assert!(config.gpu);
         assert_eq!(config.storage_path.as_deref(), Some(r"C:\wslc"));
         assert_eq!(config.port_mappings, [(8080, 80)]);
+    }
+
+    /// The discriminator is derived from the enum's `rename_all`, not written by
+    /// hand, and the managed binding spells it independently.
+    #[test]
+    fn isolation_session_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment =
+            serde_json::from_str(r#"{ "type": "isolationSession" }"#)
+                .expect("request containment parses");
+
+        assert!(matches!(
+            containment.into_sdk(),
+            Containment::IsolationSession
+        ));
+    }
+
+    /// `deny_unknown_fields` does not reach an internally tagged unit variant,
+    /// so the empty-struct form is what closes this one.
+    #[test]
+    fn isolation_session_rejects_a_member_it_does_not_define() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "containment": { "type": "isolationSession", "unexpected": true }
+            }"#,
+        )
+        .expect_err("an undefined member must not be discarded");
+
+        assert!(
+            error.message.contains("unexpected"),
+            "the error must name the member: {error}"
+        );
     }
 
     #[test]

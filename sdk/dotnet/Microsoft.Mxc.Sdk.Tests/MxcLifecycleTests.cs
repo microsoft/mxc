@@ -185,6 +185,29 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void IsolationSessionProvisionOptions_AcceptsDirectionalUnrestrictedNetwork()
+    {
+        var options = new IsolationSessionProvisionOptions(
+            new StateAwareNetworkPolicy
+            {
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                Ingress = new NetworkIngressPolicy
+                {
+                    Default = NetworkAction.Allow,
+                    HostLoopback = NetworkAction.Allow,
+                },
+            });
+
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.IsolationSession,
+            options);
+        var network = envelope["network"]!.AsObject();
+        Assert.Equal("allow", network["egress"]!["default"]!.GetValue<string>());
+        Assert.Equal("allow", network["ingress"]!["default"]!.GetValue<string>());
+        Assert.Equal("allow", network["ingress"]!["hostLoopback"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void BuildProvisionEnvelope_RevalidatesMutatedIsolationSessionNetwork()
     {
         var options = new IsolationSessionProvisionOptions(
@@ -297,7 +320,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("provision", root.GetProperty("phase").GetString());
         Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
 
@@ -392,7 +415,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("windows_sandbox", root.GetProperty("containment").GetString());
         Assert.Equal(
             @"C:\input",
@@ -401,7 +424,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_WslcUsesV08AndNestsImageOptions()
+    public void BuildProvisionEnvelope_WslcUsesV09AndNestsImageOptions()
     {
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
@@ -419,7 +442,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("wslc", root.GetProperty("containment").GetString());
         Assert.Equal(
             "allow",
@@ -469,6 +492,7 @@ public class MxcLifecycleTests
                 {
                     WorkingDirectory = "/work",
                     Environment = new List<string> { "A=1", "B=two" },
+                    InheritDefaultEnvironment = true,
                     TimeoutMs = 1234,
                     Network = new WslcExecNetworkPolicy
                     {
@@ -479,11 +503,12 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.8.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         var process = root.GetProperty("process");
         Assert.Equal("/work", process.GetProperty("cwd").GetString());
         Assert.Equal("A=1", process.GetProperty("env")[0].GetString());
         Assert.Equal("B=two", process.GetProperty("env")[1].GetString());
+        Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.Equal(1234, process.GetProperty("timeout").GetInt32());
         var network = root.GetProperty("network");
         Assert.Equal(
@@ -491,6 +516,22 @@ public class MxcLifecycleTests
             network.GetProperty("proxy").GetProperty("url").GetString());
         Assert.False(network.TryGetProperty("defaultPolicy", out _));
         Assert.False(network.TryGetProperty("allowLocalNetwork", out _));
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RejectsUnregisteredVersionWithInheritedEnvironment()
+    {
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildExecEnvelope(
+                new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+                "echo hi",
+                new WslcExecOptions
+                {
+                    Version = "0.8.0-alpha",
+                    InheritDefaultEnvironment = true,
+                }));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -514,7 +555,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("start", root.GetProperty("phase").GetString());
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
@@ -522,7 +563,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void IdPhases_InferBackendVersionAndHonorOverrides()
+    public void IdPhases_InferBackendVersionAndAcceptRegisteredExplicitVersion()
     {
         var wslcStart = MxcLifecycle.BuildStartEnvelope(
             new SandboxId("wslc:0123456789abcdef0123456789abcdef"));
@@ -531,9 +572,20 @@ public class MxcLifecycleTests
             new SandboxId("iso:abc"),
             new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
 
-        Assert.Equal("0.8.0-alpha", wslcStart["version"]!.GetValue<string>());
-        Assert.Equal("0.6.0-alpha", wsbStop["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
+        Assert.Equal("0.9.0-alpha", wsbStop["version"]!.GetValue<string>());
         Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void IdPhases_RejectUnregisteredVersionOverrides()
+    {
+        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]
@@ -658,7 +710,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildStartEnvelope_LeavesExplicitTelemetryVersionForNativeValidation()
+    public void BuildStartEnvelope_RejectsUnregisteredVersionWhenTelemetryIsPresent()
     {
         var options = new StateAwarePhaseOptions
         {
@@ -666,9 +718,10 @@ public class MxcLifecycleTests
             Telemetry = new TelemetrySettings { Enabled = false },
         };
 
-        var root = MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options);
-        Assert.Equal(SchemaVersions.LatestStable, root["version"]?.GetValue<string>());
-        Assert.False(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        var ex = Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options));
+
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
     }
 
     [Fact]

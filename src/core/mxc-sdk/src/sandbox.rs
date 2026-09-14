@@ -51,8 +51,9 @@ pub enum WaitOutcome {
 pub struct Output {
     /// How the process finished.
     pub outcome: WaitOutcome,
-    /// Policy and operational warnings emitted while starting the sandbox,
-    /// including security warnings and network rules that cannot carry traffic.
+    /// Policy and operational warnings from the sandbox, such as security
+    /// warnings, network rules that cannot carry traffic, or a cleanup step
+    /// that failed after the workload exited.
     pub warnings: Vec<String>,
     /// Everything the child wrote to stdout.
     pub stdout: Vec<u8>,
@@ -77,9 +78,10 @@ impl Sandbox {
         Self { inner }
     }
 
-    /// Policy and operational warnings emitted while starting the sandbox,
-    /// including security warnings and network rules that cannot carry traffic.
-    pub fn warnings(&self) -> &[String] {
+    /// Policy and operational warnings from this sandbox, such as security
+    /// warnings, network rules that cannot carry traffic, or a cleanup step
+    /// that failed after the workload exited.
+    pub fn warnings(&self) -> Vec<String> {
         self.inner.warnings()
     }
 
@@ -169,7 +171,9 @@ impl Sandbox {
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
         let outcome = self.wait()?;
-        let warnings = self.inner.warnings().to_vec();
+        // Sampled after the wait: a backend whose teardown runs there reports
+        // its failures here.
+        let warnings = self.inner.warnings();
         let output_metadata = self.inner.output_metadata().cloned();
         Ok(Output {
             outcome,
@@ -210,8 +214,8 @@ mod tests {
     }
 
     impl SandboxProcess for FakeProcess {
-        fn warnings(&self) -> &[String] {
-            &self.warnings
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
         }
 
         fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {

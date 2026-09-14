@@ -32,7 +32,7 @@ fn run_state_aware_json_rejects_one_shot_config() {
 fn run_state_aware_json_rejects_non_dry_run_exec() {
     // A non-dry-run exec streams; it must be routed through exec_sandbox, not
     // the envelope entry point.
-    let json = r#"{"phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err =
         run_state_aware_json(json, false, false).expect_err("non-dry-run exec must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
@@ -47,8 +47,70 @@ fn run_state_aware_json_malformed_json_is_malformed_request() {
 }
 
 #[test]
+fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
+    for fields in [
+        r#""appId":null"#,
+        r#""appId":17"#,
+        r#""appId":"first","appId":"second""#,
+        r#""appIdd":"typo""#,
+    ] {
+        let json = format!(
+            "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+             \"containment\":\"isolation_session\",\n  \
+             \"network\":{{\"defaultPolicy\":\"allow\",\"allowLocalNetwork\":true}},\n  \
+             \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+        );
+        let error = run_state_aware_json(&json, true, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
+        assert!(error
+            .message
+            .contains("experimental.isolation_session.provision"));
+        assert!(error.message.contains("line "));
+        assert!(error.message.contains("column "));
+        assert!(error.operation.is_none());
+        assert!(error.native_code.is_none());
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+#[test]
+fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
+    for app_id in ["", "example"] {
+        let json = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
+            "experimental": {"isolation_session": {"provision": {"appId": app_id}}},
+        })
+        .to_string();
+        let result = run_state_aware_json(&json, true, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+            serde_json::json!({"result": {}})
+        );
+    }
+    let json = serde_json::json!({
+        "version": "0.9.0-alpha",
+        "phase": "provision",
+        "containment": "isolation_session",
+        "network": {"defaultPolicy": "allow", "allowLocalNetwork": true},
+        "experimental": {"isolation_session": {"provision": {"appId": "x".repeat(257)}}},
+    })
+    .to_string();
+    let error = run_state_aware_json(&json, true, true).unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "appId must be at most 256 characters (got 257)"
+    );
+    assert!(error.operation.is_none());
+    assert!(error.native_code.is_none());
+}
+
+#[test]
 fn exec_sandbox_rejects_non_exec_phase() {
-    let json = r#"{"phase":"provision","containment":"isolation_session"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
     // `Sandbox` is not `Debug`, so match rather than `expect_err`.
     match exec_sandbox(json, false) {
         Ok(_) => panic!("a provision request is not an exec"),
@@ -75,7 +137,7 @@ fn exec_sandbox_rejects_one_shot_config() {
 // covered by the host-gated executor E2E suites.)
 #[test]
 fn unregistered_backend_prefix_is_unsupported_containment() {
-    let json = r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
     let err = run_state_aware_json(json, false, false)
         .expect_err("an unregistered sandbox-id prefix has no backend");
     assert_eq!(err.code, ErrorCode::UnsupportedContainment);
@@ -86,7 +148,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 /// before backend dispatch on every platform.
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
@@ -107,7 +169,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 /// this fails. A dry run keeps it side-effect-free.
 #[test]
 fn the_optin_admits_an_experimental_backend() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     if let Err(err) = run_state_aware_json(json, true, true) {
         assert_ne!(
             err.code,
@@ -123,7 +185,7 @@ fn the_optin_admits_an_experimental_backend() {
 /// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
-    let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
@@ -142,7 +204,7 @@ fn the_refusal_carries_no_api_call_detail() {
 /// `backend_unavailable`, which is the very code the gate returns.)
 #[test]
 fn exec_honours_the_optin_on_its_own_path() {
-    let json = r#"{"phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
     match exec_sandbox(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),

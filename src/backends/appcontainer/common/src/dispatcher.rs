@@ -775,7 +775,7 @@ struct DaclGuardedProcess {
 }
 
 impl SandboxProcess for DaclGuardedProcess {
-    fn warnings(&self) -> &[String] {
+    fn warnings(&self) -> Vec<String> {
         self.inner.warnings()
     }
 

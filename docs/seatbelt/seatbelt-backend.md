@@ -151,13 +151,22 @@ and standard tools work:
 
 | Access | Paths |
 |---|---|
-| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select` |
+| Read-only | `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/System`, `/Library`, `/private/etc`, `/private/var/db/timezone`, `/private/var/db/dyld`, `/private/var/select`, the active developer directory |
 | Read **+ write** | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` |
 | Read-data only | `/` itself — the loader can't resolve path lookups without it |
 
 The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
+
+The developer grant resolves from the `xcode-select` symlink, and only when root
+owns both the link and every directory above it, so an unprivileged process
+cannot point it elsewhere. `DEVELOPER_DIR` is ignored for the same reason. When
+the link selects
+`<Xcode.app>/Contents/Developer`, MXC grants read-only access to the enclosing
+app bundle because dispatched tools load sibling frameworks; otherwise only the
+selected directory is granted. Many `/usr/bin` tools (`python3`, `git`) are
+`xcrun` shims that need this access. `deniedPaths` still overrides the grant.
 
 SIP-protected paths stay unwritable no matter what you put in
 `readwritePaths` — the kernel enforces that independently of the profile.
@@ -501,6 +510,8 @@ Apple credentials.
 Run with `--debug` to print the generated profile — most surprises are obvious
 once you can see the rules that were emitted.
 
+`--log-file <path>` prints the generated profile to a file.
+
 ### Common symptoms
 
 | Symptom | Likely cause | Fix |
@@ -594,3 +605,10 @@ every invocation is a fresh process tree.
 **`sandbox_init` is deprecated in headers** (since 10.8) but still ships and is
 used by Apple's own apps and Chromium. It's the same framework behind the App
 Sandbox.
+
+## Tests
+
+`tests/scripts/run_seatbelt_all_tests.sh` runs the whole suite; the individual
+`run_seatbelt_<area>_test.sh` scripts can be run on their own. There is no skip
+path — a missing prerequisite fails, so a green run always means the assertions
+executed.

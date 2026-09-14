@@ -238,7 +238,8 @@ pub enum FallbackError {
 ///
 /// The algorithm matches the design doc:
 ///
-/// 1. If `MXC_FORCE_TIER` is set in a test build, honor it (test seam).
+/// 1. If `MXC_FORCE_TIER` is set in a unit test or a build with the
+///    `force-tier-testing` feature, honor it.
 /// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
 ///    backend is *usable*. See [`is_base_container_usable`], a capability check
 ///    (not just symbol presence) so a disabled build degrades to a lower tier
@@ -291,21 +292,13 @@ pub(crate) fn detect_with_base_container_capabilities(
     let has_fs_policy =
         !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty() || denied;
 
-    // Test-only injection seam. An invalid value is silently ignored and we
-    // proceed with the real probe chain — that lets tests assert
-    // pass-through behavior without any error plumbing.
+    // Test-executor injection seam. An invalid value is silently ignored and
+    // we proceed with the real probe chain.
     //
-    // Gate is `cfg(test)`, not `cfg(debug_assertions)`: production
-    // `wxc-exec.exe` builds (release *and* dev binaries) must not honor
-    // `MXC_FORCE_TIER` from the environment. `cfg(test)` ensures the
-    // seam is compiled in only when the crate is built as a test binary
-    // — which is exactly the case for unit tests under any profile,
-    // including CI's `cargo test --profile release` invocation. The
-    // dispatcher/fallback unit tests in this crate's `mod tests` thus
-    // actually exercise tier selection under release-profile CI runs
-    // (previously the seam was elided by `cfg(debug_assertions)` and
-    // the tests silently no-op'd).
-    #[cfg(test)]
+    // Normal debug and release builds do not compile this branch. Unit tests
+    // always get it; a runnable test executor gets it only through the explicit
+    // `force-tier-testing` Cargo feature.
+    #[cfg(any(test, feature = "force-tier-testing"))]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
         if let Ok(tier) = forced.parse::<IsolationTier>() {
             return forced_decision(tier, policy, denied);
@@ -586,7 +579,7 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "force-tier-testing"))]
 fn forced_decision(
     tier: IsolationTier,
     policy: &ContainerPolicy,

@@ -33,15 +33,63 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.experimental, undefined);
   });
 
-  it('leaves explicit telemetry schema validation to the native parser', () => {
+  it('rejects an explicitly older schema version when telemetry is present', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'start',
+        backendKey: 'windows_sandbox',
+        sandboxId: 'wsb:01234567',
+        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes(
+          "State-aware windows_sandbox requests require schema version '0.9.0-alpha'",
+        ),
+    );
+  });
+
+  it('selects schema 0.9 when exec inherits the backend environment', () => {
     const env = buildStateAwareEnvelope({
-      phase: 'start',
-      backendKey: 'windows_sandbox',
-      sandboxId: 'wsb:01234567',
-      config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
+        },
+      },
     });
-    assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '0.8.0-alpha');
+    assert.equal(env.version, '0.9.0-alpha');
+    assert.deepEqual(env.process, {
+      commandLine: 'echo hi',
+      inheritDefaultEnv: true,
+    });
+  });
+
+  it('rejects an explicitly older schema version when the environment is inherited', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        sandboxId: 'wslc:abc',
+        config: {
+          version: '0.8.0-alpha',
+          process: {
+            commandLine: 'echo hi',
+            inheritDefaultEnv: true,
+          },
+        },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes(
+          "State-aware wslc requests require schema version '0.9.0-alpha'",
+        ),
+    );
   });
 
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
@@ -50,7 +98,7 @@ describe('buildStateAwareEnvelope', () => {
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: { readwritePaths: ['C:\\workspace'] },
         network: { defaultPolicy: 'block' },
         ui: { disable: true, clipboard: 'none', injection: false },
@@ -102,14 +150,18 @@ describe('buildStateAwareEnvelope', () => {
     }
   });
 
-  it('uses caller-supplied version when provided', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'isolation_session',
-      containment: 'isolation_session',
-      config: { version: '0.6.5-alpha' },
-    });
-    assert.strictEqual(env.version, '0.6.5-alpha');
+  it('rejects an untyped caller-supplied version with malformed_request', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'isolation_session',
+        containment: 'isolation_session',
+        config: { version: '0.6.5-alpha' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('nests provision appId under experimental.isolation_session.provision', () => {
@@ -269,11 +321,16 @@ describe('parseNonExecResponse', () => {
 describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
-  // The unrestricted-network acknowledgment is a required member of
+  // The unrestricted-network posture is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
   // itself use this minimal valid value.
-  const ACK = { network: { defaultPolicy: 'allow', allowLocalNetwork: true } } as const;
+  const ACK = {
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  } as const;
 
   beforeEach(() => { activeFake = null; });
   afterEach(() => { _resetSpawnImpl(); activeFake = null; });
@@ -288,7 +345,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         appId: 'example.app.id',
       },
       testOptions(),
@@ -306,8 +366,8 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
-      defaultPolicy: 'allow',
-      allowLocalNetwork: true,
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
     });
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
@@ -509,7 +569,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
@@ -584,24 +644,28 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to 0.8.0-alpha (not the isolation_session default)', () => {
+  it('defaults the version to the shared 0.9.0-alpha development contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.8.0-alpha');
+    assert.strictEqual(env.version, '0.9.0-alpha');
   });
 
-  it('still honors a caller-supplied version over the wslc default', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'wslc',
-      containment: 'wslc',
-      config: { version: '0.8.1-alpha', image: 'alpine:latest' },
-    });
-    assert.strictEqual(env.version, '0.8.1-alpha');
+  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'wslc',
+        containment: 'wslc',
+        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
@@ -665,7 +729,7 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.8.0-alpha');
+      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

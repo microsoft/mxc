@@ -24,9 +24,11 @@ mod wslc;
 
 pub use containment::{probe_containment, Containment, ContainmentProbeError};
 pub use isolation_session::{
-    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
-    IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
+    IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    StateAwareIsolationSession,
 };
 pub use windows_sandbox::{
     WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,

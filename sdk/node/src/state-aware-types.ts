@@ -33,12 +33,15 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+/** The exact contract currently registered for state-aware requests. */
+export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+
+/** Exact contract versions accepted by state-aware config types. */
+export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;
+
 interface StateAwareConfig {
-  /**
-   * Schema version. When omitted, the SDK selects `0.9.0-alpha` if telemetry
-   * is present; otherwise it selects the backend default.
-   */
-  version?: string;
+  /** Schema version. Omit to use the current state-aware contract. */
+  version?: StateAwareSchemaVersion;
   /** Optional telemetry request for this phase. */
   telemetry?: TelemetryConfig;
 }
@@ -70,17 +73,42 @@ export interface IsolationSessionProvisionConfig extends StateAwareConfig {
    */
   appId?: string;
   /**
-   * Unrestricted-network acknowledgment (**required**). The isolation session
-   * container runs on a network MXC cannot filter or deny — outbound is open,
-   * and a process inside can listen on a port reachable from outside via
-   * localhost. The caller must explicitly acknowledge this; the ONLY accepted
-   * value is `{ defaultPolicy: 'allow', allowLocalNetwork: true }`. Any other
-   * network policy (including omission, which the backend treats as the
-   * unenforceable default-deny) is rejected at provision. The posture is fixed
-   * at provision, so `network` is not accepted on the post-provision phases.
+   * Required unrestricted-network posture. The API accepts the historical
+   * legacy pair or the standard directional all-allow form. Rules, proxies,
+   * mixed postures, and omission are rejected.
    */
-  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
+  network: IsolationSessionNetworkConfig;
 }
+
+/** Network spellings that truthfully describe IsolationSession. */
+export type IsolationSessionNetworkConfig =
+  | {
+      defaultPolicy: 'allow';
+      allowLocalNetwork: true;
+      enforcementMode?: never;
+      allowedHosts?: never;
+      blockedHosts?: never;
+      proxy?: never;
+      egress?: never;
+      ingress?: never;
+    }
+  | {
+      egress: {
+        default: 'allow';
+        allow?: never;
+        deny?: never;
+      };
+      ingress: {
+        default: 'allow';
+        hostLoopback: 'allow';
+      };
+      enforcementMode?: never;
+      defaultPolicy?: never;
+      allowLocalNetwork?: never;
+      allowedHosts?: never;
+      blockedHosts?: never;
+      proxy?: never;
+    };
 
 export type IsolationSessionStartConfig = StateAwareConfig;
 
@@ -196,7 +224,7 @@ export type WslcDeprovisionConfig = StateAwareConfig;
  * The five per-phase Config slots every state-aware backend must declare.
  * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
  * no implicit index signature, so a `Record<string, unknown>` base would
- * spuriously reject `{ version?: string }`-shaped configs.
+ * spuriously reject configs carrying an optional schema version.
  */
 type StateAwarePhaseConfigs = Record<Phase, object>;
 

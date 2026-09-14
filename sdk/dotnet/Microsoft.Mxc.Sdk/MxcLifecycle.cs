@@ -29,6 +29,8 @@ public static class MxcLifecycle
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
 
+    private const string InheritDefaultEnvironmentVersion = "0.9.0-alpha";
+
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
 
@@ -99,7 +101,7 @@ public static class MxcLifecycle
         var backend = ContainmentKey(containment);
         var envelope = NewEnvelope(
             "provision",
-            options?.Version ?? DefaultVersion(containment));
+            ResolveVersion(containment, options?.Version));
         envelope["containment"] = backend;
 
         switch (options)
@@ -268,7 +270,12 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
-        var envelope = BuildIdEnvelope("exec", id, options?.Version);
+        var version = options?.Version;
+        if (options?.InheritDefaultEnvironment is not null && version is null)
+        {
+            version = InheritDefaultEnvironmentVersion;
+        }
+        var envelope = BuildIdEnvelope("exec", id, version);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -277,6 +284,10 @@ public static class MxcLifecycle
         if (options?.Environment is { } env)
         {
             process["env"] = SerializeToNode(env);
+        }
+        if (options?.InheritDefaultEnvironment is { } inheritDefaultEnv)
+        {
+            process["inheritDefaultEnv"] = inheritDefaultEnv;
         }
         if (options?.TimeoutMs is { } timeout)
         {
@@ -441,7 +452,7 @@ public static class MxcLifecycle
         var containment = ContainmentForId(id);
         var envelope = NewEnvelope(
             phase,
-            version ?? DefaultVersion(containment));
+            ResolveVersion(containment, version));
         envelope["sandboxId"] = id.Value;
         return envelope;
     }
@@ -484,6 +495,23 @@ public static class MxcLifecycle
         containment == StateAwareContainment.Wslc
             ? WslcStateAwareVersion
             : StateAwareVersion;
+
+    private static string ResolveVersion(
+        StateAwareContainment containment,
+        string? requestedVersion)
+    {
+        var expectedVersion = DefaultVersion(containment);
+        if (requestedVersion is not null
+            && !string.Equals(requestedVersion, expectedVersion, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"State-aware {containment} requests require schema version "
+                    + $"'{expectedVersion}', got '{requestedVersion}'.",
+                nameof(requestedVersion));
+        }
+
+        return expectedVersion;
+    }
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,

@@ -23,6 +23,8 @@ pub enum BackendCapability {
     FilesystemDeniedPaths,
     /// `network.ingress.hostLoopback = "allow"` at the reported tier.
     IngressHostLoopbackAllow,
+    /// Bubblewrap proxy-only egress in a private network namespace.
+    ProxyEnforcement,
 }
 
 /// One host-available backend, plus its effective isolation tier (if any).
@@ -43,6 +45,14 @@ pub struct AvailableBackend {
     /// Optional features supported by the reported tier.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<BackendCapability>,
+    /// Diagnostics for a capability this host cannot offer.
+    ///
+    /// Not a guarantee for every absent capability: only checks that produce a
+    /// reason populate this. Bubblewrap's `ProxyEnforcement` does, since its
+    /// dependency walk names what is missing; Windows omits `CaptureDenials`
+    /// without a warning.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl AvailableBackend {
@@ -51,6 +61,7 @@ impl AvailableBackend {
             backend: backend.to_string(),
             tier: None,
             capabilities: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -92,6 +103,14 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
 }
 
+/// Serialize [`available_backends`] for the `--available-backends` CLI surface.
+///
+/// Distinct from `wxc-exec --probe`, which emits the AppContainer diagnostics
+/// object; this is the backend-availability array.
+pub fn to_json_pretty(backends: &[AvailableBackend]) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(backends)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
@@ -107,8 +126,8 @@ fn macos_backends() -> Vec<AvailableBackend> {
 fn linux_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
     if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
-        backends.push(AvailableBackend::tierless(
-            ContainmentBackend::Bubblewrap.wire_name(),
+        backends.push(bubblewrap_backend(
+            bwrap_common::proxy_network::probe_proxy_enforcement(),
         ));
     }
     if lxc_common::availability::is_lxc_available() {
@@ -117,6 +136,20 @@ fn linux_backends() -> Vec<AvailableBackend> {
         ));
     }
     backends
+}
+
+/// Split from [`linux_backends`] so the reporting is testable without a host
+/// that has (or lacks) the private-network dependencies.
+#[cfg(target_os = "linux")]
+fn bubblewrap_backend(proxy_enforcement: Result<(), String>) -> AvailableBackend {
+    let mut backend = AvailableBackend::tierless(ContainmentBackend::Bubblewrap.wire_name());
+    match proxy_enforcement {
+        Ok(()) => backend
+            .capabilities
+            .push(BackendCapability::ProxyEnforcement),
+        Err(reason) => backend.warnings.push(reason),
+    }
+    backend
 }
 
 #[cfg(target_os = "windows")]
@@ -150,6 +183,7 @@ fn windows_backends(
         backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
         tier: Some(tier.as_str().to_string()),
         capabilities,
+        warnings: Vec::new(),
     };
     let mut backends = vec![process_container];
 
@@ -260,6 +294,7 @@ mod tests {
             backend: "processcontainer".to_string(),
             tier: Some("appcontainer-dacl".to_string()),
             capabilities: Vec::new(),
+            warnings: Vec::new(),
         };
         let json = serde_json::to_string(&backend).expect("serializes");
         assert_eq!(
@@ -274,12 +309,54 @@ mod tests {
             backend: "processcontainer".to_string(),
             tier: Some("base-container".to_string()),
             capabilities: vec![BackendCapability::CaptureDenials],
+            warnings: Vec::new(),
         };
         let json = serde_json::to_string(&backend).expect("serializes");
         assert_eq!(
             json,
             r#"{"backend":"processcontainer","tier":"base-container","capabilities":["captureDenials"]}"#
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_reports_proxy_enforcement_capability_when_probe_succeeds() {
+        let backend = bubblewrap_backend(Ok(()));
+        assert_eq!(backend.backend, "bubblewrap");
+        assert_eq!(
+            backend.capabilities,
+            vec![BackendCapability::ProxyEnforcement]
+        );
+        assert!(backend.warnings.is_empty());
+        let json = serde_json::to_string(&backend).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"backend":"bubblewrap","capabilities":["proxyEnforcement"]}"#
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_reports_reason_instead_of_capability_when_probe_fails() {
+        let backend = bubblewrap_backend(Err("slirp4netns not found".to_string()));
+        assert!(backend.capabilities.is_empty());
+        assert_eq!(backend.warnings, vec!["slirp4netns not found".to_string()]);
+        let json = serde_json::to_string(&backend).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"backend":"bubblewrap","warnings":["slirp4netns not found"]}"#
+        );
+    }
+
+    #[test]
+    fn to_json_pretty_emits_an_array() {
+        let rendered =
+            to_json_pretty(&[AvailableBackend::tierless("seatbelt")]).expect("serializes");
+        assert!(
+            rendered.starts_with('['),
+            "probe output must be a JSON array"
+        );
+        assert!(rendered.contains("\"seatbelt\""));
     }
 
     #[test]

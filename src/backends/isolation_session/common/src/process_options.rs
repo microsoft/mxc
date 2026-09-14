@@ -60,7 +60,7 @@ pub(super) fn build_process_options(
     interactive: bool,
 ) -> ProcessOptions {
     let env_vars: Vec<(String, String)> = request
-        .env
+        .env_entries()
         .iter()
         .filter_map(|entry| {
             let mut parts = entry.splitn(2, '=');
@@ -325,7 +325,10 @@ mod tests {
     fn options_parses_env_vars() {
         let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
-            env: vec!["FOO=bar".to_string(), "PATH=C:\\bin;C:\\tools".to_string()],
+            env: Some(vec![
+                "FOO=bar".to_string(),
+                "PATH=C:\\bin;C:\\tools".to_string(),
+            ]),
             ..Default::default()
         };
         let opts = build_process_options(&request, false);
@@ -341,11 +344,11 @@ mod tests {
     fn options_skips_malformed_env_vars() {
         let request = ExecutionRequest {
             script_code: "echo hi".to_string(),
-            env: vec![
+            env: Some(vec![
                 "GOOD=value".to_string(),
                 "=no_name".to_string(),
                 "ALSO_GOOD=".to_string(),
-            ],
+            ]),
             ..Default::default()
         };
         let opts = build_process_options(&request, false);

@@ -1548,6 +1548,7 @@ dependencies = [
  "isolation_session_common",
  "learning_mode_core",
  "lxc_common",
+ "mxc_config_contract",
  "nanvix_runner",
  "plm",
  "seatbelt_common",

@@ -1,20 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! State-aware dispatcher: routes a parsed state-aware request to the right
-//! backend's `StatefulSandboxBackend` impl, runs the per-phase typed flow, and
+//! State-aware dispatcher: consumes a checked backend-bound operation, runs
+//! the backend's `StatefulSandboxBackend` per-phase typed flow, and
 //! produces either a JSON response envelope (non-exec phases or dispatch
 //! failure) or an exit code (exec phase, which streams its output live).
 //!
-//! `run_state_aware` is the entry point invoked from `wxc-exec`'s main flow.
-//! It resolves the backend (by `containment` for provision, by `sandbox_id`
-//! prefix for non-provision phases) and either dispatches to the registered
-//! state-aware backend or surfaces `unsupported_phase` for backends without a
-//! state-aware impl.
+//! `mxc_engine` resolves the backend and applies execution gates before checked
+//! binding. The local `run_state_aware` is its fallback for backends without a
+//! state-aware implementation and surfaces `unsupported_phase`.
 //!
 //! `dispatch_state_aware<B>` is the per-backend phase router, generic over the
-//! `StatefulSandboxBackend` impl. It validates, calls the right phase method,
-//! and wraps the typed result into a wire-format response envelope.
+//! `StatefulSandboxBackend` impl. It borrows configuration for validation, moves
+//! it into the phase method, and wraps the result in a wire response envelope.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,6 +29,7 @@ use crate::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
+use crate::state_aware_binding::{BoundStateAwareOperation, BoundStateAwareRequest};
 use crate::state_aware_request::{ParsedStateAwareRequest, Phase};
 use crate::validator::validate_exec_common;
 
@@ -79,17 +78,15 @@ pub fn run_state_aware(
 /// nothing to stream) and is intentionally not accepted.
 pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
     backend: &mut B,
-    parsed: ParsedStateAwareRequest,
+    bound: BoundStateAwareRequest<B>,
 ) -> Result<ExecHandle, MxcError> {
-    if !matches!(parsed.phase, Phase::Exec) {
+    let phase = bound.phase();
+    let (request, operation) = bound.into_parts();
+    let BoundStateAwareOperation::Exec { sandbox_id, config } = operation else {
         return Err(MxcError::malformed_request(format!(
-            "streaming exec requires the exec phase, got {}",
-            parsed.phase
+            "streaming exec requires the exec phase, got {phase}"
         )));
-    }
-    let request = parsed.request.clone();
-    let sandbox_id = parsed.sandbox_id_required()?.to_string();
-    let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
+    };
     validate_exec_common(&request)?;
     backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
     // The caller drives the returned streams itself, so the backend must
@@ -101,15 +98,12 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
 /// backend constructs `B` and delegates here.
 pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
     backend: &mut B,
-    parsed: ParsedStateAwareRequest,
+    bound: BoundStateAwareRequest<B>,
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
-    let request = parsed.request.clone();
-    let phase = parsed.phase;
-    match phase {
-        Phase::Provision => {
-            let config =
-                parsed.deserialize_config::<B::ProvisionConfig>(B::BACKEND_KEY, "provision")?;
+    let (request, operation) = bound.into_parts();
+    match operation {
+        BoundStateAwareOperation::Provision(config) => {
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -117,9 +111,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             let result = backend.provision(&request, config)?;
             Ok(DispatchOutcome::Envelope(provision_envelope(result)?))
         }
-        Phase::Start => {
-            let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::StartConfig>(B::BACKEND_KEY, "start")?;
+        BoundStateAwareOperation::Start { sandbox_id, config } => {
             backend.validate_start(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -127,14 +119,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             let result = backend.start(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
         }
-        Phase::Exec => {
-            let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
-            // Everything needed for exec is now owned (`request` clone, owned
-            // `sandbox_id`, owned `config`); drop the parsed request so its
-            // retained decoded source text and raw `experimental` tree are not
-            // held for the (potentially long) blocking child run + stdio relay.
-            drop(parsed);
+        BoundStateAwareOperation::Exec { sandbox_id, config } => {
             validate_exec_common(&request)?;
             backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
@@ -144,9 +129,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
-        Phase::Stop => {
-            let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config = parsed.deserialize_config::<B::StopConfig>(B::BACKEND_KEY, "stop")?;
+        BoundStateAwareOperation::Stop { sandbox_id, config } => {
             backend.validate_stop(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -154,10 +137,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             let result = backend.stop(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
         }
-        Phase::Deprovision => {
-            let sandbox_id = parsed.sandbox_id_required()?.to_string();
-            let config =
-                parsed.deserialize_config::<B::DeprovisionConfig>(B::BACKEND_KEY, "deprovision")?;
+        BoundStateAwareOperation::Deprovision { sandbox_id, config } => {
             backend.validate_deprovision(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -171,8 +151,8 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
 /// Resolves the target backend: from `containment` for provision, from the
 /// `sandbox_id` prefix for non-provision phases.
 pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBackend, MxcError> {
-    if parsed.phase == Phase::Provision {
-        return parsed.containment.clone().ok_or_else(|| {
+    if parsed.phase() == Phase::Provision {
+        return parsed.containment().ok_or_else(|| {
             MxcError::malformed_request("provision phase requires a containment field")
         });
     }
@@ -580,7 +560,7 @@ mod tests {
     use super::*;
     use crate::models::ExecutionRequest;
     use crate::mxc_error::MxcErrorCode;
-    use serde::{Deserialize, Serialize};
+    use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
     use serde_json::json;
     use std::cell::Cell;
     use std::time::Duration;
@@ -749,11 +729,8 @@ mod tests {
         }
     }
 
-    /// Backend that exercises typed-config deserialisation via
-    /// `ParsedStateAwareRequest::deserialize_config`. The dispatcher's start
-    /// phase must extract `experimental.<BACKEND_KEY>.start` into this type
-    /// and pass it through to `start()`.
-    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+    /// Configs need no Deserialize implementation: dispatch receives owned values.
+    #[derive(Debug, PartialEq, Eq, Default)]
     struct TypedStartConfig {
         configuration_id: String,
     }
@@ -804,29 +781,37 @@ mod tests {
         }
     }
 
-    fn parsed(
-        phase: Phase,
-        sandbox_id: Option<&str>,
-        exp: Option<Value>,
-    ) -> ParsedStateAwareRequest {
-        ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase,
-            containment: Some(ContainmentBackend::IsolationSession),
-            sandbox_id: sandbox_id.map(String::from),
-            experimental_raw: exp,
-            source_text: None,
-        }
+    fn bound(phase: Phase, sandbox_id: Option<&str>) -> BoundStateAwareRequest<StubBackend> {
+        let operation = match phase {
+            Phase::Provision => BoundStateAwareOperation::Provision(None),
+            Phase::Start => BoundStateAwareOperation::Start {
+                sandbox_id: sandbox_id.unwrap().into(),
+                config: None,
+            },
+            Phase::Exec => BoundStateAwareOperation::Exec {
+                sandbox_id: sandbox_id.unwrap().into(),
+                config: None,
+            },
+            Phase::Stop => BoundStateAwareOperation::Stop {
+                sandbox_id: sandbox_id.unwrap().into(),
+                config: None,
+            },
+            Phase::Deprovision => BoundStateAwareOperation::Deprovision {
+                sandbox_id: sandbox_id.unwrap().into(),
+                config: None,
+            },
+        };
+        BoundStateAwareRequest::for_test(ExecutionRequest::default(), operation)
     }
 
-    /// Like [`parsed`], but with a command line set so the request survives
+    /// Like [`bound`], but with a command line set so the request survives
     /// `validate_exec_common` and dispatch actually reaches `exec`. The default
     /// request has an empty `script_code`, which is rejected before the backend
     /// is called.
-    fn parsed_runnable_exec(sandbox_id: &str) -> ParsedStateAwareRequest {
-        let mut p = parsed(Phase::Exec, Some(sandbox_id), None);
-        p.request.script_code = "echo hi".to_string();
-        p
+    fn bound_runnable_exec(sandbox_id: &str) -> BoundStateAwareRequest<StubBackend> {
+        let (mut request, operation) = bound(Phase::Exec, Some(sandbox_id)).into_parts();
+        request.script_code = "echo hi".to_string();
+        BoundStateAwareRequest::for_test(request, operation)
     }
 
     fn assert_envelope(outcome: DispatchOutcome) -> Value {
@@ -845,7 +830,7 @@ mod tests {
     fn dispatch_provision_calls_validate_then_provision() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Provision, None, None), false).unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Provision, None), false).unwrap(),
         );
         assert_eq!(b.validate_provision_calls.get(), 1);
         assert_eq!(b.provision_calls.get(), 1);
@@ -856,7 +841,7 @@ mod tests {
     fn dispatch_provision_dry_run_skips_provision_call_but_runs_validate() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Provision, None, None), true).unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Provision, None), true).unwrap(),
         );
         assert_eq!(b.validate_provision_calls.get(), 1);
         assert_eq!(b.provision_calls.get(), 0);
@@ -867,8 +852,7 @@ mod tests {
     fn dispatch_provision_returns_validate_error_without_calling_provision() {
         let mut b = StubBackend::new();
         b.validate_provision_error = Some(MxcError::policy_validation("nope"));
-        let err =
-            dispatch_state_aware(&mut b, parsed(Phase::Provision, None, None), false).unwrap_err();
+        let err = dispatch_state_aware(&mut b, bound(Phase::Provision, None), false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
         assert_eq!(b.validate_provision_calls.get(), 1);
         assert_eq!(b.provision_calls.get(), 0);
@@ -878,27 +862,30 @@ mod tests {
     fn dispatch_provision_propagates_provision_error() {
         let mut b = StubBackend::new();
         b.provision_error = Some(MxcError::backend_error("boom"));
-        let err =
-            dispatch_state_aware(&mut b, parsed(Phase::Provision, None, None), false).unwrap_err();
+        let err = dispatch_state_aware(&mut b, bound(Phase::Provision, None), false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
         assert_eq!(b.provision_calls.get(), 1);
     }
 
     #[test]
-    fn dispatch_start_requires_sandbox_id() {
-        let mut b = StubBackend::new();
-        let err =
-            dispatch_state_aware(&mut b, parsed(Phase::Start, None, None), false).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-        assert_eq!(b.start_calls.get(), 0);
+    fn start_without_sandbox_id_cannot_reach_binding() {
+        let error = crate::config_parser::load_mxc_request_from_json(
+            r#"{"version":"0.9.0-alpha","phase":"start"}"#,
+            &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+        )
+        .unwrap_err();
+        let crate::config_parser::ParseError::StateAware(error) = error else {
+            panic!("expected state-aware structural rejection");
+        };
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("sandboxId"));
     }
 
     #[test]
     fn dispatch_start_calls_validate_then_start() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Start, Some("stubd:abc"), None), false)
-                .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Start, Some("stubd:abc")), false).unwrap(),
         );
         assert_eq!(b.validate_start_calls.get(), 1);
         assert_eq!(b.start_calls.get(), 1);
@@ -908,8 +895,8 @@ mod tests {
     #[test]
     fn dispatch_exec_validate_common_rejects_empty_command_line() {
         let mut b = StubBackend::new();
-        let err = dispatch_state_aware(&mut b, parsed(Phase::Exec, Some("stubd:abc"), None), false)
-            .unwrap_err();
+        let err =
+            dispatch_state_aware(&mut b, bound(Phase::Exec, Some("stubd:abc")), false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert_eq!(b.validate_exec_calls.get(), 0);
         assert_eq!(b.exec_calls.get(), 0);
@@ -918,8 +905,7 @@ mod tests {
     #[test]
     fn dispatch_exec_dry_run_skips_exec_call() {
         let mut b = StubBackend::new();
-        let mut p = parsed(Phase::Exec, Some("stubd:abc"), None);
-        p.request.script_code = "echo".into();
+        let p = bound_runnable_exec("stubd:abc");
         let env = assert_envelope(dispatch_state_aware(&mut b, p, true).unwrap());
         assert_eq!(b.validate_exec_calls.get(), 1);
         assert_eq!(b.exec_calls.get(), 0);
@@ -941,8 +927,7 @@ mod tests {
     fn dispatch_start_dry_run_skips_start_call_but_runs_validate() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Start, Some("stubd:abc"), None), true)
-                .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Start, Some("stubd:abc")), true).unwrap(),
         );
         assert_eq!(b.validate_start_calls.get(), 1);
         assert_eq!(b.start_calls.get(), 0, "dry-run must not start the sandbox");
@@ -953,8 +938,7 @@ mod tests {
     fn dispatch_stop_dry_run_skips_stop_call_but_runs_validate() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Stop, Some("stubd:abc"), None), true)
-                .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Stop, Some("stubd:abc")), true).unwrap(),
         );
         assert_eq!(b.validate_stop_calls.get(), 1);
         assert_eq!(b.stop_calls.get(), 0, "dry-run must not stop the sandbox");
@@ -965,12 +949,8 @@ mod tests {
     fn dispatch_deprovision_dry_run_skips_deprovision_call_but_runs_validate() {
         let mut b = StubBackend::new();
         let env = assert_envelope(
-            dispatch_state_aware(
-                &mut b,
-                parsed(Phase::Deprovision, Some("stubd:abc"), None),
-                true,
-            )
-            .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Deprovision, Some("stubd:abc")), true)
+                .unwrap(),
         );
         assert_eq!(b.validate_deprovision_calls.get(), 1);
         assert_eq!(
@@ -985,8 +965,7 @@ mod tests {
     fn dispatch_stop_routes_correctly() {
         let mut b = StubBackend::new();
         assert_envelope(
-            dispatch_state_aware(&mut b, parsed(Phase::Stop, Some("stubd:abc"), None), false)
-                .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Stop, Some("stubd:abc")), false).unwrap(),
         );
         assert_eq!(b.validate_stop_calls.get(), 1);
         assert_eq!(b.stop_calls.get(), 1);
@@ -996,12 +975,8 @@ mod tests {
     fn dispatch_deprovision_routes_correctly() {
         let mut b = StubBackend::new();
         assert_envelope(
-            dispatch_state_aware(
-                &mut b,
-                parsed(Phase::Deprovision, Some("stubd:abc"), None),
-                false,
-            )
-            .unwrap(),
+            dispatch_state_aware(&mut b, bound(Phase::Deprovision, Some("stubd:abc")), false)
+                .unwrap(),
         );
         assert_eq!(b.validate_deprovision_calls.get(), 1);
         assert_eq!(b.deprovision_calls.get(), 1);
@@ -1010,10 +985,15 @@ mod tests {
     #[test]
     fn typed_config_stub_receives_typed_start_config() {
         let mut b = TypedConfigStubBackend::new();
-        let exp = json!({
-            "typed_stub": { "start": {"configuration_id": "small"} }
-        });
-        let p = parsed(Phase::Start, Some("typed:abc"), Some(exp));
+        let p = BoundStateAwareRequest::for_test(
+            ExecutionRequest::default(),
+            BoundStateAwareOperation::Start {
+                sandbox_id: "typed:abc".into(),
+                config: Some(TypedStartConfig {
+                    configuration_id: "small".into(),
+                }),
+            },
+        );
         assert_envelope(dispatch_state_aware(&mut b, p, false).unwrap());
         let captured = b.captured_start_config.into_inner();
         assert_eq!(
@@ -1025,29 +1005,36 @@ mod tests {
     }
 
     #[test]
-    fn typed_config_stub_receives_none_when_experimental_block_absent() {
+    fn typed_config_stub_receives_absent_configuration() {
         let mut b = TypedConfigStubBackend::new();
-        let p = parsed(Phase::Start, Some("typed:abc"), None);
+        let p = BoundStateAwareRequest::for_test(
+            ExecutionRequest::default(),
+            BoundStateAwareOperation::Start {
+                sandbox_id: "typed:abc".into(),
+                config: None,
+            },
+        );
         assert_envelope(dispatch_state_aware(&mut b, p, false).unwrap());
         assert_eq!(b.captured_start_config.into_inner(), None);
     }
 
     #[test]
-    fn typed_config_stub_surfaces_shape_mismatch_as_malformed_request() {
-        let mut b = TypedConfigStubBackend::new();
-        // Wrong shape — missing required `configuration_id`.
-        let exp = json!({
-            "typed_stub": { "start": {"wrong_field": 1} }
-        });
-        let p = parsed(Phase::Start, Some("typed:abc"), Some(exp));
-        let err = dispatch_state_aware(&mut b, p, false).unwrap_err();
+    fn misplaced_phase_configuration_is_rejected_before_dispatch() {
+        let err = crate::config_parser::load_mxc_request_from_json(
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc",
+                "experimental":{"isolation_session":{"provision":{"appId":"small"}}}}"#,
+            &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+        )
+        .unwrap_err();
+        let crate::config_parser::ParseError::StateAware(err) = err else {
+            panic!("expected state-aware structural rejection");
+        };
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(
-            err.message.contains("experimental.typed_stub.start"),
+            err.message.contains("experimental"),
             "expected envelope-ready error path, got: {}",
             err.message
         );
-        assert_eq!(b.captured_start_config.into_inner(), None);
     }
 
     // ---------- run_state_aware / resolve_backend ----------
@@ -1056,42 +1043,30 @@ mod tests {
     fn run_state_aware_provision_for_recognized_backend_returns_unsupported_phase() {
         // No state-aware impls registered yet — every recognized backend is
         // unsupported. Smoke-test scenario #2 from decision 6.
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Provision,
-            containment: Some(ContainmentBackend::Wslc),
-            sandbox_id: None,
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = ParsedStateAwareRequest::new(
+            ExecutionRequest::default(),
+            StateAwareOperation::Provision(StateAwareProvision::Wslc(None)),
+        );
         let err = run_state_aware(p, false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::UnsupportedPhase);
     }
 
     #[test]
-    fn run_state_aware_provision_without_containment_is_malformed() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Provision,
-            containment: None,
-            sandbox_id: None,
-            experimental_raw: None,
-            source_text: None,
+    fn provision_without_containment_cannot_reach_binding() {
+        let err = crate::config_parser::load_mxc_request_from_json(
+            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+        )
+        .unwrap_err();
+        let crate::config_parser::ParseError::StateAware(err) = err else {
+            panic!("expected state-aware structural rejection");
         };
-        let err = run_state_aware(p, false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
     }
 
     #[test]
     fn resolve_backend_for_iso_prefix_returns_isolation_session() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Start,
-            containment: None,
-            sandbox_id: Some("iso:wxc-abcd1234".into()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = parsed_start("iso:wxc-abcd1234");
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::IsolationSession
@@ -1100,14 +1075,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_for_wsb_prefix_returns_windows_sandbox() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Start,
-            containment: None,
-            sandbox_id: Some("wsb:deadbeef".into()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = parsed_start("wsb:deadbeef");
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::WindowsSandbox
@@ -1116,46 +1084,34 @@ mod tests {
 
     #[test]
     fn resolve_backend_for_wslc_prefix_returns_wslc() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Start,
-            containment: None,
-            sandbox_id: Some("wslc:deadbeef".into()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = parsed_start("wslc:deadbeef");
         assert_eq!(resolve_backend(&p).unwrap(), ContainmentBackend::Wslc);
     }
 
     #[test]
     fn resolve_backend_for_unknown_prefix_returns_unsupported_containment() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Start,
-            containment: None,
-            sandbox_id: Some("unknownxyz:abc".into()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = parsed_start("unknownxyz:abc");
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[test]
     fn resolve_backend_for_malformed_id_surfaces_malformed_id() {
-        let p = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Start,
-            containment: None,
-            sandbox_id: Some("no-colon".into()),
-            experimental_raw: None,
-            source_text: None,
-        };
+        let p = parsed_start("no-colon");
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     // ===== stdio topology per entry point ===================================
+
+    fn parsed_start(id: &str) -> ParsedStateAwareRequest {
+        ParsedStateAwareRequest::new(
+            ExecutionRequest::default(),
+            StateAwareOperation::Start {
+                sandbox_id: id.into(),
+            },
+        )
+    }
     //
     // Which topology each entry point sends is the whole point of the parameter,
     // and getting it backwards would compile: a relayed exec would lose its
@@ -1168,7 +1124,7 @@ mod tests {
     #[test]
     fn dispatch_state_aware_asks_for_relayed_stdio() {
         let mut b = StubBackend::new();
-        let _ = dispatch_state_aware(&mut b, parsed_runnable_exec("stubd:abc"), false);
+        let _ = dispatch_state_aware(&mut b, bound_runnable_exec("stubd:abc"), false);
         assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
         assert_eq!(
             b.last_exec_stdio.get(),
@@ -1182,7 +1138,7 @@ mod tests {
     #[test]
     fn dispatch_state_aware_exec_asks_for_piped_stdio() {
         let mut b = StubBackend::new();
-        let _ = dispatch_state_aware_exec(&mut b, parsed_runnable_exec("stubd:abc"));
+        let _ = dispatch_state_aware_exec(&mut b, bound_runnable_exec("stubd:abc"));
         assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
         assert_eq!(
             b.last_exec_stdio.get(),

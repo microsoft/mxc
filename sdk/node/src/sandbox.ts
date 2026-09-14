@@ -16,8 +16,18 @@ import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
-const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
+const SUPPORTED_VERSION = '0.9.0-alpha';
+const REGISTERED_VERSION_VALUES = [
+    '0.6.0-alpha',
+    '0.7.0-alpha',
+    '0.8.0-alpha',
+    '0.9.0-alpha',
+];
+const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
+const REGISTERED_VERSION_ORDER = new Map(
+    REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
+);
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -61,6 +71,57 @@ function validatePolicyVersion(version: string): void {
             `Policy version '${version}' is newer than supported` +
             ` (max: ${supported!.major}.${supported!.minor}.x).` +
             ` Upgrade the SDK.`
+        );
+    }
+    if (!REGISTERED_VERSIONS.has(version)) {
+        throw new Error(
+            `Policy version '${version}' is not a registered schema contract. ` +
+            `Use one of: ${REGISTERED_VERSION_VALUES.join(', ')}.`
+        );
+    }
+}
+
+function validateContainmentVersion(
+    version: string,
+    containment: ContainmentType | ContainmentBackend,
+    platform: NodeJS.Platform,
+): void {
+    const effectiveContainment =
+        containment === 'process' && platform === 'darwin' ? 'seatbelt' : containment;
+    const minimumVersion =
+        effectiveContainment === 'seatbelt'
+            ? '0.7.0-alpha'
+            : effectiveContainment === 'vm' ||
+                effectiveContainment === 'microvm' ||
+                effectiveContainment === 'windows_sandbox' ||
+                effectiveContainment === 'wslc' ||
+                effectiveContainment === 'hyperlight' ||
+                effectiveContainment === 'isolation_session'
+              ? '0.9.0-alpha'
+              : '0.6.0-alpha';
+
+    const versionOrder = REGISTERED_VERSION_ORDER.get(version);
+    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
+    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
+        throw new Error(
+            `Schema ${version} does not support containment '${containment}'; ` +
+            `use schema ${minimumVersion} or later.`
+        );
+    }
+}
+
+function validateTelemetryVersion(policy: SandboxPolicy): void {
+    if (policy.telemetry === undefined) {
+        return;
+    }
+
+    const minimumVersion = '0.9.0-alpha';
+    const versionOrder = REGISTERED_VERSION_ORDER.get(policy.version);
+    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
+    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
+        throw new Error(
+            `Schema ${policy.version} does not support telemetry; ` +
+            `use schema ${minimumVersion} or later.`
         );
     }
 }
@@ -289,9 +350,11 @@ export function createConfigFromPolicy(
 ): ContainerConfig {
     diagLogVersion();
     validatePolicyVersion(policy.version);
+    const platform = os.platform();
+    validateContainmentVersion(policy.version, containment, platform);
+    validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
 
-    const platform = os.platform();
     const containerId = containerName ?? generateRandomContainerName();
 
     const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;
@@ -488,6 +551,25 @@ export interface SandboxSpawnOptions {
   allowTestingFeatures?: boolean;
 
   /**
+   * Start from the backend's default environment and layer the supplied
+   * environment variables on top of it, rather than replacing it
+   * (default false).
+   *
+   * Without this, an environment you supply is used verbatim — which on the
+   * Windows process container means a sparse environment is missing the
+   * variables Windows requires to be present, and the launch fails. Use this
+   * to express "the usual environment, plus these": the default is the user's
+   * profile block, which only the OS can produce.
+   *
+   * This is a different, smaller set than the calling process's `process.env`,
+   * which you can still pass explicitly as the `env` argument if you want your
+   * own variables handed to the child.
+   *
+   * Maps to `process.inheritDefaultEnv` in the JSON config.
+   */
+  inheritDefaultEnv?: boolean;
+
+  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
@@ -562,6 +644,28 @@ function injectEnvIntoConfig(
 }
 
 /**
+ * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
+ * environment is layered on the backend's default rather than replacing it.
+ * An option left unset does not clobber a value the caller already put in the
+ * config; an explicit boolean overrides it.
+ */
+function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
+  if (options.inheritDefaultEnv === undefined) {
+    return;
+  }
+  if (!options.inheritDefaultEnv) {
+    if (config.process) {
+      delete config.process.inheritDefaultEnv;
+    }
+    return;
+  }
+  if (!config.process) {
+    config.process = { commandLine: '' };
+  }
+  config.process.inheritDefaultEnv = true;
+}
+
+/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -575,6 +679,7 @@ function spawnWithConfig(
   if (env) {
     injectEnvIntoConfig(config, env);
   }
+  applyInheritDefaultEnv(config, options);
 
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
@@ -691,6 +796,7 @@ export function spawnSandboxFromConfig(
     if (env) {
       injectEnvIntoConfig(config, env);
     }
+    applyInheritDefaultEnv(config, options);
 
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {

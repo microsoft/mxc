@@ -7,7 +7,6 @@
 //! between caller invocations.
 
 use std::io::IsTerminal;
-use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -23,9 +22,7 @@ use wxc_common::validator::{validate_state_aware_network_policy_support, Network
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::{
-    log_sandbox_torn_down, ClosingProcess, IsolationSessionManager, MtaReference, TeardownOutcome,
-};
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::{validate_post_provision_policy, validate_provision_policy};
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox_id::{self, SandboxIdPayload};
@@ -203,7 +200,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         // Structural only — MXC does not judge what a valid application
         // identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
@@ -336,56 +338,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     request,
                     wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
                 );
-                // The caller's deadline, enforced by our own wait below. The
-                // service timer is armed with a margin so it cannot fire first
-                // and turn a timeout into an ordinary exit we could not report.
                 let timeout_ms = options.timeout_ms;
                 let options = with_service_timeout_grace(options);
 
-                // Acquired before the workload starts, so a failure here cannot
-                // leave one running with no handle to reach it.
-                let mta = MtaReference::acquire().map_err(map_lifecycle_error)?;
-                let started = Arc::new(ClosingProcess::new(
-                    manager
-                        .start_process(&options, None)
-                        .map_err(map_lifecycle_error)?,
-                    mta,
-                ));
-
-                // Read the handles before the closures take ownership. A zero
-                // means the stream is genuinely absent, which is exactly the
-                // sentinel the consumer already treats as "no stream".
-                let stdout = HANDLE(started.stdout as *mut std::ffi::c_void);
-                let stderr = HANDLE(started.stderr as *mut std::ffi::c_void);
-                let stdin = HANDLE(started.stdin as *mut std::ffi::c_void);
-
-                // `IsoSessionProcess` is an agile WinRT object (the bindings
-                // declare it `Send + Sync`), so both closures can hold it
-                // without the apartment-affine worker thread the WSLC backend
-                // needs.
-                let waiter_process = Arc::clone(&started);
-                let stdin_process = Arc::clone(&started);
-                Ok(ExecHandle {
-                    stdout,
-                    stderr,
-                    stdin,
-                    stdin_closer: Some(Box::new(move || {
-                        let _ = stdin_process.process.CloseStandardInput();
-                    })),
-                    // Reports `TimedOut` when the deadline elapsed with the
-                    // process still running — see `StartedProcess::wait`, which
-                    // samples that before the shutdown ladder destroys the
-                    // evidence by killing the survivor.
-                    waiter: Box::new(move || {
-                        waiter_process.wait(timeout_ms).map_err(map_lifecycle_error)
-                    }),
-                    // The result now reaches the caller instead of being
-                    // discarded here. It reports whether the platform *accepted*
-                    // the kill: `terminate`'s bounded post-kill wait is not
-                    // consulted, so a `Terminate` that was accepted and then did
-                    // not take effect still reports success.
-                    terminator: Box::new(move || started.terminate().map_err(map_lifecycle_error)),
-                })
+                manager
+                    .piped_exec_handle(&options, timeout_ms, None)
+                    .map_err(map_lifecycle_error)
             }
         }
     }
@@ -399,11 +357,7 @@ mod tests {
 
     // ====== Wire-format constants ======
 
-    // `BACKEND_KEY` names the `experimental.<key>.<phase>` slot the
-    // dispatcher reads via `deserialize_config`. A typo here would
-    // silently swallow every per-phase config (the field would still
-    // deserialize from the containment slot via models.rs's serde
-    // rename — only the experimental block would go missing).
+    // Checked binding verifies BACKEND_KEY before delivering configuration.
     // ====== Stdio topology ======
 
     /// A piped exec must never get a ConPTY — **including on a host whose
@@ -490,16 +444,10 @@ mod tests {
 
     // ====== Wire-model / backend config parity ======
 
-    // The generated JSON schema (`schemas/dev/`) and the SDK wire types
-    // (`sdk/node/src/generated/wire.ts`) are both emitted from
-    // `wxc_common::wire::IsolationSession`, while the phases that actually
-    // accept a config are the associated types on the impl above. On the
-    // state-aware path the wire model is never constructed — the dispatcher
-    // deserializes raw JSON straight into those associated types — so nothing
-    // couples the two at compile time. The tests below pin that contract from
-    // both directions: the key set the wire model advertises, that the `()`
-    // phases reject a payload, and that the phases which do take one still
-    // accept the payload the wire model describes.
+    // Retained rolling schema/type oracles still use wire::IsolationSession.
+    // These tests characterize their configuration compatibility independently
+    // of the exact adapter. Production dispatch uses checked typed binding, not
+    // this deserialization path; common recording-backend tests cover delivery.
 
     #[test]
     fn wire_model_nests_config_only_for_phases_that_take_one() {

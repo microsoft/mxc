@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json",
   "title": "MXC Configuration",
-  "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
+  "description": "Rolling compatibility model retained as a test oracle while production requests use registered exact contracts. It includes historical fields that exact `0.9.0-alpha` rejects; authors should use the exact development schema.",
   "additionalProperties": false,
   "definitions": {
     "BaseProcessUi": {
@@ -750,12 +750,19 @@
           ]
         },
         "env": {
-          "description": "Environment variables as `\"KEY=VALUE\"` strings.",
+          "description": "Environment variables as `\"KEY=VALUE\"` strings.\n\nOmit the field to give the child the backend's default environment (on Windows, the user's profile block). Supply it — including as an empty array — and it is used verbatim; MXC adds nothing to it unless `inheritDefaultEnv` is set.",
           "items": {
             "type": "string"
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "inheritDefaultEnv": {
+          "description": "Start from the backend's default environment and layer `env` on top of it, rather than replacing it (default false).\n\nThis exists because the default environment is not something a caller can assemble: on Windows it is the user's profile block, which only the OS can produce. Entries in `env` override same-named defaults. Has no effect on backends whose default environment is empty, and none when `env` is omitted (that already yields the default).",
+          "type": [
+            "boolean",
             "null"
           ]
         },

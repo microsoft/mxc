@@ -28,6 +28,78 @@ pub struct LaunchDiagnostic {
 
 // -- Public API --------------------------------------------------------------
 
+/// Environment variable names Windows requires to be *present* in the child's
+/// environment block when creating a contained (AppContainer / PSEC) process.
+///
+/// Determined empirically against `CreateProcessW` with
+/// `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`: with either name absent the
+/// call fails `ERROR_ENVVAR_NOT_FOUND` (203) before the workload ever starts.
+/// The check is presence-only and case-insensitive — an empty or nonsense value
+/// satisfies it — which is the fingerprint of a name lookup rather than path
+/// resolution.
+///
+/// MXC does not inject these into a caller-supplied environment: `process.env`
+/// is honored verbatim, so a caller that replaces the block wholesale owns the
+/// contents. This list exists to turn the resulting bare 203 into a message
+/// that names what is missing.
+pub const REQUIRED_CHILD_ENV_VARS: [&str; 2] = ["SYSTEMROOT", "LOCALAPPDATA"];
+
+/// Diagnose `ERROR_ENVVAR_NOT_FOUND` from a contained-process launch.
+///
+/// `supplied_env` is the caller's `process.env` — `None` when they supplied
+/// none, in which case MXC built the block itself and a missing variable is not
+/// the caller's doing, so no diagnostic is produced.
+///
+/// Returns `None` unless the error is 203 *and* a caller-supplied block is
+/// missing at least one of [`REQUIRED_CHILD_ENV_VARS`]; the generic
+/// [`diagnose_create_process_failure`] handles every other case.
+pub fn diagnose_missing_required_env(
+    win32_error: u32,
+    supplied_env: Option<&[String]>,
+) -> Option<LaunchDiagnostic> {
+    if win32_error != ERROR_ENVVAR_NOT_FOUND.0 {
+        return None;
+    }
+    let supplied = supplied_env?;
+
+    let missing: Vec<&str> = REQUIRED_CHILD_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|required| {
+            !supplied.iter().any(|entry| {
+                entry
+                    .split_once('=')
+                    .is_some_and(|(key, _)| key.eq_ignore_ascii_case(required))
+            })
+        })
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let described = if supplied.is_empty() {
+        "an empty environment".to_string()
+    } else {
+        format!("an environment of {} variable(s)", supplied.len())
+    };
+
+    Some(LaunchDiagnostic {
+        kind: "missing_required_env",
+        message: format!(
+            "The sandboxed process could not be created because its environment is missing \
+             the variable(s) Windows requires to be present: {}. \
+             MXC started from your `process.env` ({described}) and does not inject these \
+             required Windows variables. \
+             Set `process.inheritDefaultEnv` to true to layer `process.env` on the default \
+             user environment. Alternatively, add the missing variable(s) to `process.env` \
+             — any value will do, the check is presence-only — or omit `process.env` \
+             entirely to use the default user environment \
+             (ERROR_ENVVAR_NOT_FOUND, 203).",
+            missing.join(", ")
+        ),
+    })
+}
+
 /// Diagnose a failed `CreateProcess` / `Experimental_CreateProcessInSandbox`
 /// call. Inspects the Win32 error code and the command line to identify known
 /// failure conditions.
@@ -119,8 +191,8 @@ const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
 // flow through `u32`, which matches the existing public surface of
 // this module (`diagnose_create_process_failure` takes `u32`).
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_NOT_SUPPORTED, E_NOTIMPL,
-    STATUS_DLL_INIT_FAILED,
+    ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_ENVVAR_NOT_FOUND,
+    ERROR_NOT_SUPPORTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED,
 };
 
 // -- Internal heuristics -----------------------------------------------------
@@ -144,13 +216,15 @@ fn check_exe_heuristics(
         });
     }
 
-    if exit_code == Some(STATUS_DLL_INIT_FAILED.0 as u32) && is_powershell(exe_path) {
+    if exit_code == Some(STATUS_DLL_INIT_FAILED.0 as u32) {
         return Some(LaunchDiagnostic {
             kind: "dll_init_failed_ui_required",
-            message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
-                      This typically means the sandbox is blocking Win32k system calls \
-                      (UI subsystem access), which PowerShell requires to initialize. \
-                      Enable UI access in your sandbox policy (set `ui.allowWindows: true`)."
+            message: "The target executable exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
+                      This often means the sandbox is blocking Win32k system calls \
+                      (UI subsystem access), which is often required to initialize. \
+                      Enable UI access in your sandbox policy: set `ui.disable: false` \
+                      in the JSON config, or `ui.allowWindows: true` if you are using \
+                      the SDK's SandboxPolicy."
                 .to_string(),
         });
     }
@@ -287,15 +361,6 @@ fn is_packaged_app(exe_path: &Path) -> bool {
     normalized.contains("\\windowsapps\\") || normalized.contains("/windowsapps/")
 }
 
-fn is_powershell(exe_path: &Path) -> bool {
-    let filename = exe_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    filename == "pwsh.exe" || filename == "powershell.exe"
-}
-
 fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
     let filename = exe_path
         .file_name()
@@ -325,6 +390,70 @@ fn drive_root(exe_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- diagnose_missing_required_env tests --
+
+    fn env(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn missing_required_env_names_the_absent_variables() {
+        let supplied = env(&["PATH=C:\\Windows"]);
+        let diag = diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, Some(&supplied))
+            .expect("203 with a sparse caller env must produce a diagnostic");
+
+        assert_eq!(diag.kind, "missing_required_env");
+        assert!(diag.message.contains("SYSTEMROOT"));
+        assert!(diag.message.contains("LOCALAPPDATA"));
+        assert!(diag.message.contains("started from your `process.env`"));
+        assert!(diag.message.contains("does not inject"));
+        assert!(diag.message.contains("1 variable(s)"));
+        assert!(diag
+            .message
+            .contains("Set `process.inheritDefaultEnv` to true"));
+    }
+
+    #[test]
+    fn missing_required_env_reports_only_what_is_absent() {
+        let supplied = env(&["SystemRoot=C:\\Windows"]);
+        let diag =
+            diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, Some(&supplied)).unwrap();
+
+        // Presence is case-insensitive, so SystemRoot satisfies SYSTEMROOT.
+        assert!(!diag.message.contains("SYSTEMROOT"));
+        assert!(diag.message.contains("LOCALAPPDATA"));
+    }
+
+    #[test]
+    fn missing_required_env_describes_an_explicitly_empty_environment() {
+        let diag = diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, Some(&[])).unwrap();
+        assert!(diag.message.contains("an empty environment"));
+    }
+
+    #[test]
+    fn missing_required_env_ignores_other_error_codes() {
+        let supplied = env(&["PATH=C:\\Windows"]);
+        assert!(diagnose_missing_required_env(5, Some(&supplied)).is_none());
+    }
+
+    #[test]
+    fn missing_required_env_ignores_a_caller_supplied_complete_environment() {
+        // 203 with both names present is not the sparse-env failure; let the
+        // generic diagnostic describe it rather than emitting a wrong cause.
+        let supplied = env(&[
+            "SYSTEMROOT=C:\\Windows",
+            "LOCALAPPDATA=C:\\Users\\u\\AppData\\Local",
+        ]);
+        assert!(diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, Some(&supplied)).is_none());
+    }
+
+    #[test]
+    fn missing_required_env_ignores_a_block_mxc_built_itself() {
+        // `None` means the caller supplied no environment, so MXC built the
+        // block; a 203 there is not something the caller can fix in config.
+        assert!(diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, None).is_none());
+    }
 
     // -- diagnose_create_process_failure tests --
 
@@ -400,17 +529,6 @@ mod tests {
         );
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "dll_init_failed_ui_required");
-    }
-
-    #[test]
-    fn dll_init_failed_non_powershell_does_not_trigger() {
-        let diag = diagnose_process_exit(
-            r"C:\tools\myapp.exe",
-            &["C:\\".to_string()],
-            &[],
-            STATUS_DLL_INIT_FAILED.0 as u32,
-        );
-        assert!(diag.is_none());
     }
 
     #[test]

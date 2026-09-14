@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ACCESS_DISABLED_BY_POLICY,
-    ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ALREADY_EXISTS, ERROR_ENVVAR_NOT_FOUND, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -37,7 +38,7 @@ use crate::guarded_capture::{
     GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
-use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_missing_required_env};
 use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
 use wxc_common::audit::{
@@ -81,6 +82,7 @@ fn create_process_failure(
     command_line: &str,
     readonly_paths: &[String],
     working_directory: &str,
+    supplied_env: Option<&[String]>,
 ) -> WxcError {
     let message = if err.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
         diagnose_create_process_failure(
@@ -89,6 +91,11 @@ fn create_process_failure(
             readonly_paths,
         )
         .message
+    } else if let Some(diag) = (err.code() == ERROR_ENVVAR_NOT_FOUND.to_hresult())
+        .then(|| diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, supplied_env))
+        .flatten()
+    {
+        diag.message
     } else {
         format!("CreateProcessW failed: {err}")
     };
@@ -110,6 +117,9 @@ pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
         for ch in format!("{}={}", key, value).encode_utf16() {
             block.push(ch);
         }
+        block.push(0);
+    }
+    if block.is_empty() {
         block.push(0);
     }
     block.push(0);
@@ -178,6 +188,41 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
         }
     }
     entries
+}
+
+/// Build the child's entries by layering caller-supplied `KEY=VALUE` strings on
+/// top of the clean default user environment (`process.inheritDefaultEnv`).
+///
+/// The default block comes from `CreateEnvironmentBlock(bInherit=FALSE)`, so it
+/// is the *user's profile* environment and never the `wxc-exec` process's own.
+/// A caller entry replaces a same-named default (case-insensitively, as Windows
+/// environment names are case-insensitive) rather than duplicating it, since a
+/// block with two entries for one name has no well-defined winner.
+pub(crate) fn build_inherited_entries(
+    env_vars: &[String],
+    proxy_address: Option<&wxc_common::models::ProxyAddress>,
+) -> Result<Vec<(String, String)>, WxcError> {
+    let mut entries = create_default_env_entries()?;
+
+    for (key, value) in env_vars.iter().filter_map(|entry| {
+        entry
+            .split_once('=')
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+    }) {
+        match entries
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(&key))
+        {
+            Some(slot) => *slot = (key, value),
+            None => entries.push((key, value)),
+        }
+    }
+
+    if let Some(addr) = proxy_address {
+        inject_proxy_vars(&mut entries, addr);
+    }
+
+    Ok(entries)
 }
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
@@ -1039,19 +1084,29 @@ impl AppContainerScriptRunner {
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
         // full environment). Always build an explicit block:
-        //   1. If explicit env vars were provided, use only those (+ proxy injection).
-        //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
-        //      default user environment and merge proxy vars if needed.
-        let env_block: Vec<u16> = if !request.env.is_empty() {
-            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
-            encode_env_block(&entries)
-        } else {
-            // Get clean default user env without inheriting process env vars.
-            let mut entries = create_default_env_entries()?;
-            if let Some(addr) = self.proxy_address.as_ref() {
-                inject_proxy_vars(&mut entries, addr);
+        //   1. If the caller supplied an environment, use exactly that (+ proxy
+        //      injection), including when it is empty. MXC does not add to a
+        //      caller-supplied environment unless `inheritDefaultEnv` asked it
+        //      to layer the environment on the default block.
+        //   2. If the caller supplied none, call CreateEnvironmentBlock(bInherit=FALSE)
+        //      for a clean default user environment and merge proxy vars if needed.
+        let env_block: Vec<u16> = match request.env.as_deref() {
+            Some(supplied) if request.inherit_default_env => {
+                let entries = build_inherited_entries(supplied, self.proxy_address.as_ref())?;
+                encode_env_block(&entries)
             }
-            encode_env_block(&entries)
+            Some(supplied) => {
+                let entries = build_explicit_entries(supplied, self.proxy_address.as_ref());
+                encode_env_block(&entries)
+            }
+            None => {
+                // Get clean default user env without inheriting process env vars.
+                let mut entries = create_default_env_entries()?;
+                if let Some(addr) = self.proxy_address.as_ref() {
+                    inject_proxy_vars(&mut entries, addr);
+                }
+                encode_env_block(&entries)
+            }
         };
 
         let env_ptr = env_block.as_ptr() as *const core::ffi::c_void;
@@ -1102,6 +1157,11 @@ impl AppContainerScriptRunner {
                 &request.script_code,
                 &request.policy.readonly_paths,
                 &working_directory.describe(),
+                if request.inherit_default_env {
+                    None
+                } else {
+                    request.env.as_deref()
+                },
             )
         })?;
 
@@ -2441,6 +2501,11 @@ mod tests {
     }
 
     #[test]
+    fn encode_env_block_empty_input_is_double_null_terminated() {
+        assert_eq!(super::encode_env_block(&[]), vec![0u16, 0u16]);
+    }
+
+    #[test]
     fn encode_decode_round_trip_with_drive_vars() {
         let entries = vec![
             ("=C:".to_string(), "C:\\Users\\test".to_string()),
@@ -2548,6 +2613,7 @@ mod tests {
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
             &[],
             r"C:\work",
+            None,
         );
         let message = mapped.to_string();
 
@@ -2561,7 +2627,7 @@ mod tests {
     #[test]
     fn appcontainer_other_win32_error_preserves_create_process_message() {
         let err = windows_core::Error::from_hresult(ERROR_CALL_NOT_IMPLEMENTED.to_hresult());
-        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work");
+        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work", None);
         let message = mapped.to_string();
 
         assert!(message.contains("CreateProcessW failed"));

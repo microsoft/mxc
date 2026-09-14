@@ -107,6 +107,15 @@ test("compareVersions orders by major, then minor, then patch", () => {
   assert.equal(compareVersions(parseVersion("1.2.3"), parseVersion("1.2.3")), 0);
 });
 
+test("compareVersions orders multi-digit minor versions numerically", () => {
+  assert.ok(
+    compareVersions(
+      parseVersion("0.9.0-alpha"),
+      parseVersion("0.10.0-alpha")
+    ) < 0
+  );
+});
+
 test("compareVersions ranks a prerelease below its release", () => {
   assert.ok(compareVersions(parseVersion("1.0.0-alpha"), parseVersion("1.0.0")) < 0);
   assert.ok(compareVersions(parseVersion("1.0.0"), parseVersion("1.0.0-alpha")) > 0);

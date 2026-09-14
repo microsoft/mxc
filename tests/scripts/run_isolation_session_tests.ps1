@@ -29,7 +29,7 @@
       - isolation_session_exit42.json --exit code propagation
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
-      - isolation_session_timeout.json --OS-side timeout terminates with exit code 1
+      - isolation_session_timeout.json --timeout enforcement
 
     Manual smoke configs (NOT asserted --observe the output yourself):
       - isolation_session_streaming_smoke.json --output appears with delays
@@ -215,6 +215,7 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
+        [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
         [string[]]$OutputLineNotEqual = @()
     )
@@ -252,7 +253,12 @@ function Run-IsolationSessionTest {
     $pass = $true
     $reason = ""
 
-    if ($exitCode -ne $ExpectedExit) {
+    if ($ExpectedExitAnyOf.Count -gt 0) {
+        if ($ExpectedExitAnyOf -notcontains $exitCode) {
+            $pass = $false
+            $reason = "Expected exit one of $($ExpectedExitAnyOf -join ', '), got $exitCode"
+        }
+    } elseif ($exitCode -ne $ExpectedExit) {
         $pass = $false
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
@@ -316,11 +322,11 @@ $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
-# Same shape as hello.json with an unknown configurationId in the experimental block.
-# The backend should ignore that field and run normally.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_ignored.json" `
-    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
-    -OutputLineNotEqual @($HostWhoami)))
+# Exact one-shot contracts are recursively closed, so backend configuration
+# that the IsolationSession one-shot surface does not define is rejected.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("unknown field ``isolation_session``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -332,19 +338,17 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s; OS-side per-process timer set to 1500ms forces
-# the agent to exit with code 1.
+# Timeout: ping runs ~30s against a 1500ms deadline. The service-side timer and
+# the local wait report different codes, and either can win the race to end the
+# run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
-    -ExpectedExit 1))
+    -ExpectedExitAnyOf 1, -1))
 
-# One-shot takes no backend configuration at all, so any key under
-# `experimental.isolation_session` is just an unrecognised key in the
-# deliberately permissive `experimental` block and is ignored — the run
-# proceeds normally. Guarding it with an explicit rejection would be
-# scaffolding that graduation to the closed stable surface deletes anyway.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_ignored.json" `
-    -ExpectedExit 0 `
-    -OutputContains @("ONE_SHOT_STRAY_CONFIG_IGNORED")))
+# A nested unknown backend payload is rejected at the same closed exact
+# contract boundary, before the command can run.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("unknown field ``isolation_session``")))
 
 # One-shot network rejection: the isolation session container's network is
 # unrestricted and cannot be filtered or denied, so a non-canonical network

@@ -47,6 +47,9 @@ jobs:
       - name: Check C# API parity with Rust SDK surfaces
         run: node scripts/check-dotnet-api-parity.js
 
+      - name: Check Linux probe-timeout parity (SDK backstop > native worst case)
+        run: node scripts/versioning/check-linux-probe-timeouts.js
+
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 

@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_one_shot_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::handle_dry_run_exit;
@@ -50,6 +50,10 @@ struct Cli {
     /// test HTTP proxy). Distinct from --experimental.
     #[arg(long = "allow-testing-features")]
     allow_testing_features: bool,
+
+    /// Report host backend availability as JSON and exit
+    #[arg(long = "available-backends")]
+    available_backends: bool,
 
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
@@ -138,6 +142,20 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Detection-only fast path used by SDK `getPlatformSupport()`; runs before
+    // config handling so no JSON file is needed just to ask what the host can
+    // do, and mutates no host state.
+    if cli.available_backends {
+        match mxc_engine::to_json_pretty(&mxc_engine::available_backends()) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("Error: probe serialization failed: {e}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
     // disk just to install.
@@ -218,7 +236,7 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());

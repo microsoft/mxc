@@ -309,15 +309,18 @@ fn platform_support_windows_includes_processcontainer() {
         support.available_methods.first().map(String::as_str),
         Some("processcontainer")
     );
-    // Beyond processcontainer, only `wslc` may appear (SDK-launchable, opt-in).
-    // `windows_sandbox` and `isolation_session` are host-capability backends
-    // reported by `available_backends()`, not here — so assert they never leak
-    // into this launchable set, or a regression would slip through.
+    // Beyond processcontainer, only the opt-in backends may appear.
+    // `windows_sandbox` is a host-capability backend reported by
+    // `available_backends()`, not here — so assert it never leaks into this
+    // launchable set, or a regression would slip through.
     for method in &support.available_methods {
         assert!(
-            matches!(method.as_str(), "processcontainer" | "wslc"),
-            "unexpected Windows method (only processcontainer + optional wslc \
-             are SDK-launchable): {method}"
+            matches!(
+                method.as_str(),
+                "processcontainer" | "wslc" | "isolation_session"
+            ),
+            "unexpected Windows method (only processcontainer plus the opt-in \
+             wslc / isolation_session are SDK-launchable): {method}"
         );
     }
 }
@@ -360,4 +363,20 @@ fn available_tools_policy_filters_system_critical() {
         "system-critical dir must be filtered: {:?}",
         result.readonly_paths
     );
+}
+
+/// The nested bubblewrap-network types must be nameable from the SDK facade
+/// alone; a consumer should never need `mxc_engine` as a direct dependency.
+#[test]
+fn bubblewrap_network_types_are_reachable_from_the_facade() {
+    use mxc_sdk::{BubblewrapNetworkSupport, ProxyEnforcement};
+
+    let network: Option<BubblewrapNetworkSupport> = platform_support().bubblewrap_network;
+    if let Some(network) = network {
+        assert!(
+            network.proxy_enforcement == ProxyEnforcement::Supported
+                || !network.warnings.is_empty(),
+            "an unsupported result must carry the reason (fail-closed contract)"
+        );
+    }
 }

@@ -115,7 +115,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment
@@ -210,6 +210,7 @@ public class MxcSandboxTests
     [InlineData("captureDenials", BackendCapability.CaptureDenials)]
     [InlineData("filesystemDeniedPaths", BackendCapability.FilesystemDeniedPaths)]
     [InlineData("ingressHostLoopbackAllow", BackendCapability.IngressHostLoopbackAllow)]
+    [InlineData("proxyEnforcement", BackendCapability.ProxyEnforcement)]
     public void Discovery_MapsEveryNativeCapability(
         string wireName,
         BackendCapability expected)
@@ -227,6 +228,55 @@ public class MxcSandboxTests
         Assert.Equal(
             BackendCapability.Unknown,
             MxcSandbox.ParseBackendCapability(wireName));
+    }
+
+    /// <summary>
+    /// The payload a Linux host emits when it has bubblewrap but cannot enforce
+    /// proxy-only egress. Dropping the warning would leave callers with an
+    /// absent capability and no way to learn why.
+    /// </summary>
+    [Fact]
+    public void Discovery_CarriesWarningsFromAnUnsupportedCapability()
+    {
+        const string json = """
+            [
+              {
+                "backend": "bubblewrap",
+                "warnings": ["Bubblewrap: network.proxy requires 'slirp4netns' on PATH"]
+              },
+              { "backend": "lxc" }
+            ]
+            """;
+
+        var backends = MxcSandbox.ParseAvailableBackends(json);
+
+        var bubblewrap = Assert.Single(
+            backends,
+            backend => backend.Backend == ContainmentBackend.Bubblewrap);
+        Assert.Empty(bubblewrap.Capabilities);
+        Assert.Equal(
+            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH",
+            Assert.Single(bubblewrap.Warnings));
+
+        // An entry the native side omitted `warnings` from must still project
+        // an empty collection rather than null.
+        var lxc = Assert.Single(backends, backend => backend.Backend == ContainmentBackend.Lxc);
+        Assert.Empty(lxc.Warnings);
+    }
+
+    [Fact]
+    public void Discovery_CarriesProxyEnforcementCapabilityWithoutWarnings()
+    {
+        const string json =
+            """[{ "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] }]""";
+
+        var bubblewrap = Assert.Single(MxcSandbox.ParseAvailableBackends(json));
+
+        Assert.Equal(ContainmentBackend.Bubblewrap, bubblewrap.Backend);
+        Assert.Equal(
+            BackendCapability.ProxyEnforcement,
+            Assert.Single(bubblewrap.Capabilities));
+        Assert.Empty(bubblewrap.Warnings);
     }
 
     [Fact]
@@ -465,7 +515,8 @@ public class MxcSandboxTests
             ContainerName = "test-container",
             WorkingDirectory = @"C:\work",
             Experimental = true,
-            Environment =
+            InheritDefaultEnvironment = true,
+            Environment = new()
             {
                 ["GREETING"] = "hello",
             },
@@ -479,7 +530,31 @@ public class MxcSandboxTests
         Assert.Equal("test-container", root.GetProperty("containerName").GetString());
         Assert.Equal(@"C:\work", root.GetProperty("workingDirectory").GetString());
         Assert.Equal("hello", root.GetProperty("environment").GetProperty("GREETING").GetString());
+        Assert.True(root.GetProperty("inheritDefaultEnv").GetBoolean());
         Assert.True(root.GetProperty("experimental").GetBoolean());
+    }
+
+    [Fact]
+    public void SandboxRequest_DistinguishesOmittedAndExplicitlyEmptyEnvironment()
+    {
+        var omitted = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi");
+        using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("environment", out _));
+        Assert.False(omittedDoc.RootElement.TryGetProperty("inheritDefaultEnv", out _));
+
+        var explicitlyEmpty = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Environment = new(),
+        };
+        using var explicitlyEmptyDoc =
+            JsonDocument.Parse(MxcSandbox.SerializeRequest(explicitlyEmpty));
+        var environment = explicitlyEmptyDoc.RootElement.GetProperty("environment");
+        Assert.Equal(JsonValueKind.Object, environment.ValueKind);
+        Assert.Empty(environment.EnumerateObject());
     }
 
     [Fact]
@@ -560,6 +635,53 @@ public class MxcSandboxTests
             containment.GetProperty("portMappings")[0].GetProperty("windowsPort").GetInt32());
         Assert.Equal(80,
             containment.GetProperty("portMappings")[0].GetProperty("containerPort").GetInt32());
+    }
+
+    [Fact]
+    public void SandboxRequest_SerializesIsolationSessionContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Experimental = true,
+            Containment = new IsolationSessionContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        // The native side derives this spelling from a serde attribute while the
+        // managed side names it in an attribute of its own.
+        Assert.Equal("isolationSession", containment.GetProperty("type").GetString());
+
+        // The backend takes no configuration, so the discriminator is the whole
+        // object.
+        Assert.Single(containment.EnumerateObject());
+    }
+
+    [Fact]
+    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Containment = new IsolationSessionContainment(),
+        };
+
+        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+
+        // Both refusals name the backend. Which of the two fires depends on
+        // whether the native library was built with the backend.
+        Assert.Contains(
+            nameof(ContainmentBackend.IsolationSession),
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.True(
+            exception.Code is ErrorCode.MalformedRequest
+                or ErrorCode.UnsupportedContainment,
+            $"unexpected refusal: {exception.Code}: {exception.Message}");
     }
 
     [Fact]

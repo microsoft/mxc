@@ -241,10 +241,10 @@ pub struct MxcRunResult {
     /// Security warnings raised during the run, as a JSON array of strings
     /// (UTF-8, NUL-terminated), or null when the run raised none.
     ///
-    /// The sandbox emits these when a policy relaxes containment — notably
+    /// A policy that relaxes containment raises one — notably
     /// `permissiveLearningMode`, which disables deny-by-default. They are not
     /// written to the host's stderr, so this field is the only way an FFI
-    /// caller learns that containment was relaxed.
+    /// caller sees them.
     pub warnings_json_utf8: *mut c_char,
 }
 
