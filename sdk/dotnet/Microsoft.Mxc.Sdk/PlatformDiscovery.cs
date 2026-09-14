@@ -67,7 +67,7 @@ public enum BackendCapability
     FilesystemDeniedPaths,
 
     /// <summary>
-    /// Inbound host-loopback allow enforcement at the reported tier.
+    /// Host-loopback allow enforcement at the reported tier.
     /// </summary>
     IngressHostLoopbackAllow,
 }
@@ -85,8 +85,7 @@ public sealed class AvailableBackend
     public IsolationTier? Tier { get; init; }
 
     /// <summary>
-    /// Optional backend features enforceable at <see cref="Tier"/> without
-    /// falling back to a weaker tier.
+    /// Optional backend features supported by <see cref="Tier"/>.
     /// </summary>
     public IReadOnlyList<BackendCapability> Capabilities { get; init; } =
         Array.Empty<BackendCapability>();

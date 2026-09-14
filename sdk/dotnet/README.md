@@ -137,11 +137,11 @@ the backends it can launch. `GetAvailableBackends()` is broader: it reports
 every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
-`Capabilities` reports optional features that the reported `Tier` can enforce
-without falling back. `FilesystemDeniedPaths` means BaseContainer can enforce
-`filesystem.deniedPaths` natively. `IngressHostLoopbackAllow` means it can
-enforce `network.ingress.hostLoopback = "allow"`; the default deny posture needs
-no capability. A missing capability must be treated as unavailable.
+`Capabilities` lists optional features supported by that tier.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
+or could not be detected.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.

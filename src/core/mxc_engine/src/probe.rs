@@ -40,7 +40,7 @@ pub struct AvailableBackend {
     /// backends with no tier ladder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
-    /// Optional features enforceable at the reported tier without fallback.
+    /// Optional features supported by the reported tier.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<BackendCapability>,
 }

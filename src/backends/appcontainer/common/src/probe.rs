@@ -58,14 +58,9 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
-    /// Whether the preferred BaseContainer (Tier 1) contract can enforce
-    /// `filesystem.deniedPaths` natively on this host. PSEC support is
-    /// authoritative when PSEC is usable; otherwise this reports the
-    /// transitional SBOX `SANDBOX_CAP_FS_DENY` bit. Tier 3 (AppContainer +
-    /// DACL) enforces denied paths independently, so this fact is meaningful
-    /// only for BaseContainer.
+    /// Whether PSEC or SBOX can enforce `filesystem.deniedPaths` at Tier 1.
     pub base_container_supports_deny_paths: bool,
-    /// Whether the preferred BaseContainer contract can honor
+    /// Whether BaseContainer can honor
     /// `network.ingress.hostLoopback = "allow"`.
     pub base_container_supports_ingress_host_loopback_allow: bool,
     /// Whether the in-proc IsolationSession service can be activated on this
