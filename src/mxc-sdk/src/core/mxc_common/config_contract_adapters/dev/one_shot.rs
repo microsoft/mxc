@@ -34,15 +34,6 @@ fn convert_lifecycle(value: contract::Lifecycle) -> wire::Lifecycle {
     }
 }
 
-fn convert_fallback(value: contract::Fallback) -> wire::Fallback {
-    let contract::Fallback {
-        allow_dacl_mutation,
-    } = value;
-    wire::Fallback {
-        allow_dacl_mutation: allow_dacl_mutation.into_option(),
-    }
-}
-
 fn convert_clipboard(value: contract::UiClipboard) -> wire::ClipboardPolicy {
     match value {
         contract::UiClipboard::None => wire::ClipboardPolicy::None,
@@ -269,7 +260,6 @@ pub(super) fn into_common_request_ir(
         lifecycle,
         process,
         filesystem,
-        fallback,
         network,
         lxc,
         process_container,
@@ -298,7 +288,6 @@ pub(super) fn into_common_request_ir(
         lxc: lxc.into_option().map(convert_lxc),
         wslc: wslc.into_option().map(convert_wslc),
         filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: telemetry.into_option().map(convert_telemetry),

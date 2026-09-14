@@ -378,7 +378,7 @@ export interface IsolationSessionProvisionMetadata {
 Isolation tier selected by the runtime fallback detector.
 
 ```typescript
-export type IsolationTier = 'base-container' | 'appcontainer-bfs' | 'appcontainer-dacl';
+export type IsolationTier = 'base-container';
 ```
 
 

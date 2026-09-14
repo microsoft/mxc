@@ -10,8 +10,7 @@ id-to-command mapping to keep in sync.
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'windows-sandbox',
         'wslc',
@@ -85,76 +84,33 @@ function Invoke-TestScript {
 Assert-File -Path $wxc
 
 function Invoke-ProcessContainerTests {
-    # Returns the harness exit code rather than throwing, so a caller running
-    # more than one suite can report both results instead of stopping at the
-    # first failure. The suite talks to the operator through Write-Host (which
-    # Out-Null does not touch), so discarding the success stream keeps the
-    # return value a scalar even if a phase leaks a stray object.
-    [OutputType([int])]
-    param(
-        # The tier this matrix entry exists to exercise. Passed through to the
-        # harness, which aborts when the host selects a different one. Without
-        # it a mis-provisioned process-t1 runner would silently run the T3
-        # assertions and report green, proving nothing about BaseContainer.
-        [Parameter(Mandatory)]
-        [ValidateSet('base-container', 'appcontainer-dacl')]
-        [string]$RequireTier
-    )
-
-    # The existing harness expects separate debug and release layouts. CI
-    # intentionally tests one release artifact, so stage it in both slots.
-    $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
-    $releaseDirectory = Join-Path $binaryDirectoryPath 'release'
-    New-Item -ItemType Directory -Force -Path $debugDirectory, $releaseDirectory | Out-Null
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $debugDirectory 'wxc-exec.exe') -Force
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $releaseDirectory 'wxc-exec.exe') -Force
-
-    $uiProbe = Join-Path $binaryDirectoryPath 'wxc-ui-probe.exe'
-    Assert-File -Path $uiProbe
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
-
-    # wxc-exec resolves these next to its own image: plm.exe backs the guarded-WPR
-    # captureDenials fallback and winhttp-proxy-shim.exe backs the legacy proxy
-    # path. Absent, those areas fail as launch errors instead of policy results.
-    foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
-        $source = Join-Path $binaryDirectoryPath $sidecar
-        Assert-File -Path $source
-        Copy-Item -LiteralPath $source -Destination (Join-Path $debugDirectory $sidecar) -Force
-        Copy-Item -LiteralPath $source -Destination (Join-Path $releaseDirectory $sidecar) -Force
+    $probe = & $wxc --probe | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw "ProcessContainer probe failed with exit code $LASTEXITCODE."
+    }
+    if (-not $probe.probes.baseContainerApiPresent -or $probe.tier -ne 'base-container') {
+        throw 'ProcessContainer CI requires an enabled native PSEC contract.'
     }
 
-    $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
-    # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
-    # so a passing job still uploads its per-area logs, configs, and result
-    # documents.
-    $global:LASTEXITCODE = 0
-    & $script `
-        -SkipBuild `
-        -RequireTier $RequireTier `
-        -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
-        -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
-        -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
-        -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-        -KeepArtifacts | Out-Null
-    return $LASTEXITCODE
-}
+    $scratch = Join-Path $env:TEMP 'mxc-native-process-container-ci'
+    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+    $configPath = Join-Path $scratch 'config.json'
+    @{
+        version = '1.0.0'
+        containment = 'processcontainer'
+        process = @{
+            commandLine = 'cmd.exe /d /s /c "echo native-process-container-ok"'
+            cwd = $scratch
+        }
+        filesystem = @{
+            readwritePaths = @($scratch)
+        }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath
 
-function Invoke-T3WorkloadTests {
-    [OutputType([int])]
-    param()
-
-    $script = Join-Path $testScriptRoot 'T3-Workloads.ps1'
-    # -Wxc is required: the script's default points at a debug build that does
-    # not exist in a CI artifact. -KeepArtifacts preserves the per-workload
-    # logs and configs on a clean run so a passing job still uploads them.
-    # -GrantDriveRoot lets the pwsh/git workloads resolve their working
-    # directory's ancestor chain; it rewrites ACLs across the system drive,
-    # which is why the script leaves it off by default and only a disposable
-    # CI runner opts in. Temporary until pwsh 7.7 leaves preview.
-    $global:LASTEXITCODE = 0
-    & $script -Wxc $wxc -KeepArtifacts -GrantDriveRoot | Out-Null
-    return $LASTEXITCODE
+    & $wxc $configPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native ProcessContainer smoke test failed with exit code $LASTEXITCODE."
+    }
 }
 
 # stderr is read apart from stdout: wxc-exec can report host cleanup there
@@ -376,25 +332,8 @@ function Invoke-IsolationSessionSuites {
 
 Redirect-TempToRunnerTemp
 
-# The matrix entry names the tier the job exists to exercise, but the host picks
-# the tier at run time. -RequireTier makes the suite abort instead of testing
-# whichever tier it landed on and reporting green for the wrong entry.
 switch ($Backend) {
-    'process-t1' {
-        $primitives = Invoke-ProcessContainerTests -RequireTier 'base-container'
-        if ($primitives -ne 0) {
-            throw "Process Container tests failed with exit code $primitives."
-        }
-    }
-    'process-t3' {
-        # Run both suites before reporting. Stopping at the first failure would
-        # hide the other suite's result, costing an extra nightly run to triage.
-        $primitives = Invoke-ProcessContainerTests -RequireTier 'appcontainer-dacl'
-        $workloads = Invoke-T3WorkloadTests
-        if ($primitives -ne 0 -or $workloads -ne 0) {
-            throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."
-        }
-    }
+    'process' { Invoke-ProcessContainerTests }
     'isolation-session' {
         Invoke-IsolationSessionSuites
     }

@@ -144,9 +144,7 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 }
 
 function isTier(value: unknown): value is IsolationTier {
-  return value === 'base-container'
-    || value === 'appcontainer-bfs'
-    || value === 'appcontainer-dacl';
+  return value === 'base-container';
 }
 
 function isStringArray(value: unknown): value is string[] {

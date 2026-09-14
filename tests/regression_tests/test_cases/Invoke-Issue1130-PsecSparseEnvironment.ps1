@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Purpose: Verify BaseContainer rejects a sparse explicit environment before launching the child.
+# Purpose: Verify PSEC rejects a sparse explicit environment before launching the child.
 
 param(
     [string]$WxcExec,

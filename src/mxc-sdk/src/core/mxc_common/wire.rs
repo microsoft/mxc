@@ -24,7 +24,7 @@ pub enum Phase {
 pub enum Containment {
     /// OS-native process sandbox (resolved per host).
     Process,
-    /// Windows AppContainer / BaseContainer.
+    /// Windows native ProcessContainer (PSEC).
     #[serde(rename = "processcontainer", alias = "appcontainer")]
     ProcessContainer,
     /// VM-class isolation (resolved per host).
@@ -268,14 +268,6 @@ pub struct Filesystem {
     pub readonly_paths: Option<Vec<String>>,
     /// Paths explicitly denied (override broader allow rules).
     pub denied_paths: Option<Vec<String>>,
-}
-
-/// AppContainer DACL-mutation fallback policy.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Fallback {
-    /// Allow the runner to mutate DACLs as a fallback.
-    pub allow_dacl_mutation: Option<bool>,
 }
 
 /// Network access policy.

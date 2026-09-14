@@ -39,8 +39,6 @@ hyperlight = [
     "dep:flate2",
     "dep:tar",
 ]
-force-tier-testing = []
-tier2_bfs = []
 schema-gen = ["dep:schemars"]
 
 [dependencies]

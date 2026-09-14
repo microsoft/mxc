@@ -151,10 +151,6 @@ that can be executed independently.
         "deniedPaths": ["C:\\Windows"]      // Blocked paths
     },
 
-    "fallback": {
-        "allowDaclMutation": true          // Allow Tier 3 DACL fallback (default true)
-    },
-
     "network": {
         "egress": {
             "default": "deny",
@@ -267,7 +263,7 @@ use:
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
-| Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
+| Windows ProcessContainer (PSEC) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
@@ -329,17 +325,8 @@ The ProcessContainer-only `processContainer.filesystem` section contains:
 |-------|------|---------|-------------|
 | `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. It cannot be combined with `processContainer.leastPrivilege`; that combination fails rather than falling back. |
 
-On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
-containment tier selected at runtime:
-
-- **BaseContainer (Tier 1):** enforced natively by the OS when PSEC advertises
-  `PSE_SUPPORT_FS_DENY`. No host filesystem changes are made.
-- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
-  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
-  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
-  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
-  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
-  `containerId` values for parallel runs.
+On Windows, `deniedPaths` is enforced natively when PSEC advertises
+`PSE_SUPPORT_FS_DENY`. MXC does not modify host filesystem security descriptors.
 
 #### Path grants and root directories for Windows BaseContainer
 
@@ -390,14 +377,6 @@ The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
 fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
 valid only when `containment` is `processcontainer`.
-
-### Fallback Policy
-
-The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
 
 ### Containment Backends
 

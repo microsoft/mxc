@@ -114,13 +114,13 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
 |-------------|--------|----------|------------|--------------------------|------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
-| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm | — |
+| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc | — |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
@@ -135,49 +135,9 @@ virtualization on ARM CPUs yet, so only backends that don't require virtualizati
 ### Backend ids
 
 A backend id is passed straight through: the matrix job hands it to the host-prep
-script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
-share a suite each keep their own case so they can diverge later without a
-mapping table — `process-t1` and `process-t3` both run
-`run_processcontainer_all_tests.ps1`, and `process-t3` additionally runs
-`T3-Workloads.ps1`.
-
-The two ids no longer run an identical command. The suite derives every
-expectation from the tier the host actually selects, which makes it
-self-consistent anywhere — and therefore silently useless on a host that was
-supposed to be T1 and fell back to T3, since it would run the T3 expectations
-and report green. The dispatcher now passes `-RequireTier base-container` for
-`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`; the suite
-resolves the tier once at startup and aborts on a mismatch instead of scoring
-the run. Tier selection follows from the host's Windows build, so without the
-check a pool that quietly fell back to AppContainer would run the suite and
-report green while proving nothing about T1.
-
-Both ids also get the same host preparation. A T1 host selects BaseContainer for
-most policies but still exercises the AppContainer fallback tiers, and an
-unprepared host fails the launch outright rather than producing a policy result,
-so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
-
-`process-t3` runs its two suites back to back and reports them together: a
-failure in the primitives suite does not skip the workloads suite, so one job
-run shows both results instead of costing a second run to triage.
-
-The dispatcher passes `T3-Workloads.ps1` its `-GrantDriveRoot` switch. The
-pwsh- and git-driven workloads resolve the whole ancestor chain of their working
-directory at startup, so granting only the scratch leaf leaves them failing
-before they reach the behaviour under test. Granting the drive root covers the
-chain, but at T3 a policy path becomes an inheritable ACE, so it rewrites ACLs
-across the system drive on every run and again on teardown — acceptable on a
-disposable runner, which is why the switch is off by default and only CI opts
-in. Temporary until pwsh 7.7 leaves preview.
-
-The suite's git workloads also restamp the ownership of the repo they build.
-The 1ES agent runs elevated, and an elevated token's *default owner* is
-`BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
-git refuses such a repo ("detected dubious ownership") unless the caller is
-itself an elevated administrator, which a contained process never is. That is a
-property of the agent rather than of containment — the identical fixture is
-user-owned on a dev box — so the suite reowns it to the current user and keeps
-the two environments testing the same thing.
+script and then to the dispatcher, which has one `switch`/`case` per id. The
+`process` case requires `wxc-exec --probe` to report an enabled native PSEC
+contract, then runs a filesystem smoke test against the downloaded artifact.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -226,8 +186,7 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes supported directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface). Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd) on top of the T3 primitives. The directional networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
+| ProcessContainer | ✅ Good | Windows hosts with an enabled native PSEC contract. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -244,10 +203,8 @@ every entry.
 
 `prepare-windows-host.ps1`:
 
-- `process-t1`, `process-t3` — run `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`. T1 needs them too: the suite deliberately
-  drives the AppContainer fallback tiers, and an unprepared host fails those
-  launches with `WIN32_ERROR(5)` instead of reporting a policy result.
+- `process` — no host mutation; the test requires the native probe to report
+  PSEC.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
@@ -336,8 +293,7 @@ since Python publishes no LTS line of its own.
 
 The list is **suite-agnostic by design** and is checked for every backend, not
 only the ones whose suites need it today: it describes what a validation *host*
-provides, not what any one suite consumes. `T3-Workloads.ps1` is simply the
-first caller, and wiring up the next one needs no change here.
+provides, not what any one suite consumes.
 
 Each script carries its own copy — `Assert-WorkloadInterpreters` in
 `prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
@@ -446,10 +402,8 @@ test runner is allocated.
    enables the backend's cargo feature.
 5. **Trigger:** add the OS/backend pair to a plan.
 
-If two ids should run the same suite, give each its own `case` and have both call
-the shared function — that is how `process-t1` and `process-t3` are wired. Keep
-that split in the dispatcher, not in the workflow YAML, so a case can start
-passing a distinguishing argument later without touching the matrix.
+If two ids should run the same suite, give each its own `case` and have both
+call a shared function so they can diverge later without workflow changes.
 
 ### Add a new OS image
 

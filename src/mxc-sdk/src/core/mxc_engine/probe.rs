@@ -3,17 +3,13 @@
 
 //! Host backend-availability probe — the read-only [`available_backends`] API.
 //!
-//! Reports only the containment backends the current host can run, each with
-//! its effective isolation tier when it has a tier ladder. Answers "what can I
+//! Reports only the containment backends the current host can run. Answers "what can I
 //! use here?"; a backend's absence means "not currently usable, for any reason".
 //! Separate from [`platform_support`](crate::mxc_engine::platform_support), which answers the
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use crate::mxc_common::models::ContainmentBackend;
 use serde::Serialize;
-
-#[cfg(target_os = "windows")]
-use crate::mxc_engine::guarded_capture;
 
 /// Optional feature supported by a containment backend on the current host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -24,7 +20,7 @@ pub enum BackendCapability {
     CaptureDenials,
     /// Native `filesystem.deniedPaths` enforcement at the reported tier.
     FilesystemDeniedPaths,
-    /// Native `processContainer.filesystem.enumeratePaths` enforcement at the reported tier.
+    /// Native `processContainer.filesystem.enumeratePaths` enforcement.
     FilesystemEnumeratePaths,
     /// `network.ingress.hostLoopback = "allow"` at the reported tier.
     IngressHostLoopbackAllow,
@@ -80,8 +76,7 @@ impl AvailableBackend {
 /// neither `bwrap` nor `lxc`), not an error. Order is stable but callers should
 /// match by `backend` name, not position.
 ///
-/// Not cached — read once at startup, not in a hot loop. The reported `tier` is
-/// a ceiling: policy can still force a weaker tier at dispatch.
+/// Not cached — read once at startup, not in a hot loop.
 pub fn available_backends() -> Vec<AvailableBackend> {
     #[cfg(target_os = "macos")]
     {
@@ -95,15 +90,8 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     {
         use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-        let tier = select_tier(
-            BaseContainerRunner::is_base_container_api_present(),
-            cfg!(feature = "tier2_bfs"),
-        );
         let mut support = ProcessContainerCapabilities {
-            capture_denials: capture_denials_available(
-                BaseContainerRunner::is_native_capture_available(),
-                guarded_capture::is_available(),
-            ),
+            capture_denials: BaseContainerRunner::is_native_capture_available(),
             filesystem_denied_paths: BaseContainerRunner::supports_native_denied_paths(),
             filesystem_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
             ingress_host_loopback_allow: BaseContainerRunner::supports_ingress_host_loopback_allow(
@@ -116,7 +104,10 @@ pub fn available_backends() -> Vec<AvailableBackend> {
                 "failed to query identity-less loopback proxy support: {error}"
             )),
         }
-        windows_backends(tier, support)
+        windows_backends(
+            BaseContainerRunner::is_base_container_api_present(),
+            support,
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -126,7 +117,7 @@ pub fn available_backends() -> Vec<AvailableBackend> {
 
 /// Serialize [`available_backends`] for the `--available-backends` CLI surface.
 ///
-/// Distinct from `wxc-exec --probe`, which emits the AppContainer diagnostics
+/// Distinct from `wxc-exec --probe`, which emits ProcessContainer diagnostics
 /// object; this is the backend-availability array.
 pub fn to_json_pretty(backends: &[AvailableBackend]) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(backends)
@@ -185,42 +176,35 @@ struct ProcessContainerCapabilities {
 }
 
 #[cfg(target_os = "windows")]
-fn capture_denials_available(native_capture: bool, guarded_capture: bool) -> bool {
-    native_capture || guarded_capture
-}
-
-#[cfg(target_os = "windows")]
 fn windows_backends(
-    tier: crate::process_container_common::fallback_detector::IsolationTier,
+    base_container_usable: bool,
     support: ProcessContainerCapabilities,
 ) -> Vec<AvailableBackend> {
-    // `processcontainer` is always present and the only backend with a tier
-    // ladder, so it carries its effective (highest-reachable) tier.
     let mut capabilities = Vec::new();
     if support.capture_denials {
         capabilities.push(BackendCapability::CaptureDenials);
     }
-    if tier == crate::process_container_common::fallback_detector::IsolationTier::BaseContainer {
-        if support.filesystem_denied_paths {
-            capabilities.push(BackendCapability::FilesystemDeniedPaths);
-        }
-        if support.filesystem_enumerate_paths {
-            capabilities.push(BackendCapability::FilesystemEnumeratePaths);
-        }
-        if support.ingress_host_loopback_allow {
-            capabilities.push(BackendCapability::IngressHostLoopbackAllow);
-        }
-        if support.identityless_loopback_proxy {
-            capabilities.push(BackendCapability::IdentitylessLoopbackProxy);
-        }
+    if support.filesystem_denied_paths {
+        capabilities.push(BackendCapability::FilesystemDeniedPaths);
     }
-    let process_container = AvailableBackend {
-        backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
-        tier: Some(tier.as_str().to_string()),
-        capabilities,
-        warnings: support.warnings,
-    };
-    let mut backends = vec![process_container];
+    if support.filesystem_enumerate_paths {
+        capabilities.push(BackendCapability::FilesystemEnumeratePaths);
+    }
+    if support.ingress_host_loopback_allow {
+        capabilities.push(BackendCapability::IngressHostLoopbackAllow);
+    }
+    if support.identityless_loopback_proxy {
+        capabilities.push(BackendCapability::IdentitylessLoopbackProxy);
+    }
+    let mut backends = Vec::new();
+    if base_container_usable {
+        backends.push(AvailableBackend {
+            backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
+            tier: Some("base-container".to_string()),
+            capabilities,
+            warnings: support.warnings,
+        });
+    }
 
     if crate::windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
         backends.push(AvailableBackend::tierless(
@@ -257,32 +241,6 @@ fn windows_backends(
     backends
 }
 
-/// Effective process-container tier, strongest reachable rung first:
-/// BaseContainer → AppContainerBfs → AppContainerDacl. Split from the host
-/// detectors so precedence is testable without a real Windows host or the
-/// `tier2_bfs` feature.
-///
-/// This reports the tier **ceiling** — the strongest tier the host can reach
-/// for *some* request. On a `tier2_bfs` build that is `AppContainerBfs`
-/// regardless of `bfscfg.exe`: a request with no filesystem policy reaches BFS
-/// without it (`fallback_detector::detect`). `bfscfg.exe` only decides whether a
-/// *policy-carrying* request stays at BFS or drops to DACL, so it belongs in
-/// request-time dispatch, not in the ceiling.
-#[cfg(target_os = "windows")]
-fn select_tier(
-    base_container_usable: bool,
-    tier2_bfs_enabled: bool,
-) -> crate::process_container_common::fallback_detector::IsolationTier {
-    use crate::process_container_common::fallback_detector::IsolationTier;
-    if base_container_usable {
-        IsolationTier::BaseContainer
-    } else if tier2_bfs_enabled {
-        IsolationTier::AppContainerBfs
-    } else {
-        IsolationTier::AppContainerDacl
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +273,7 @@ mod tests {
         }
     }
 
-    const CANONICAL_TIERS: [&str; 3] = ["base-container", "appcontainer-bfs", "appcontainer-dacl"];
+    const CANONICAL_TIERS: [&str; 1] = ["base-container"];
 
     #[test]
     fn tier_is_omitted_from_json_when_none() {
@@ -328,14 +286,14 @@ mod tests {
     fn tier_is_serialized_in_camel_case_when_present() {
         let backend = AvailableBackend {
             backend: "processcontainer".to_string(),
-            tier: Some("appcontainer-dacl".to_string()),
+            tier: Some("base-container".to_string()),
             capabilities: Vec::new(),
             warnings: Vec::new(),
         };
         let json = serde_json::to_string(&backend).expect("serializes");
         assert_eq!(
             json,
-            r#"{"backend":"processcontainer","tier":"appcontainer-dacl"}"#
+            r#"{"backend":"processcontainer","tier":"base-container"}"#
         );
     }
 
@@ -402,11 +360,6 @@ mod tests {
             r#""filesystemDeniedPaths""#
         );
         assert_eq!(
-            serde_json::to_string(&BackendCapability::FilesystemEnumeratePaths)
-                .expect("serializes"),
-            r#""filesystemEnumeratePaths""#
-        );
-        assert_eq!(
             serde_json::to_string(&BackendCapability::IngressHostLoopbackAllow)
                 .expect("serializes"),
             r#""ingressHostLoopbackAllow""#
@@ -442,24 +395,18 @@ mod tests {
         }
     }
 
-    /// Guards `CANONICAL_TIERS` against drift from `IsolationTier::as_str()`.
     #[cfg(target_os = "windows")]
     #[test]
-    fn canonical_tier_strings_match_isolation_tier() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-        assert_eq!(IsolationTier::BaseContainer.as_str(), CANONICAL_TIERS[0]);
-        assert_eq!(IsolationTier::AppContainerBfs.as_str(), CANONICAL_TIERS[1]);
-        assert_eq!(IsolationTier::AppContainerDacl.as_str(), CANONICAL_TIERS[2]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_always_reports_processcontainer_with_a_tier() {
+    fn windows_reports_processcontainer_with_a_tier_when_available() {
         let backends = available_backends();
-        let pc = backends
-            .iter()
-            .find(|b| b.backend == "processcontainer")
-            .expect("processcontainer must always be reported on Windows");
+        let pc = backends.iter().find(|b| b.backend == "processcontainer");
+        assert_eq!(
+            pc.is_some(),
+            crate::process_container_common::base_container_runner::BaseContainerRunner::is_base_container_api_present()
+        );
+        let Some(pc) = pc else {
+            return;
+        };
         let tier = pc.tier.as_deref().expect("processcontainer carries a tier");
         assert!(
             CANONICAL_TIERS.contains(&tier),
@@ -469,27 +416,12 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn capture_denials_is_available_with_either_provider() {
-        for (native, guarded, expected) in [
-            (false, false, false),
-            (true, false, true),
-            (false, true, true),
-            (true, true, true),
-        ] {
-            assert_eq!(capture_denials_available(native, guarded), expected);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_reports_capture_denials_from_combined_provider_result() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-
-        for capture_denials_available in [false, true] {
+    fn windows_reports_capture_denials_from_probe_result() {
+        for capture_denials_usable in [false, true] {
             let backends = windows_backends(
-                IsolationTier::BaseContainer,
+                true,
                 ProcessContainerCapabilities {
-                    capture_denials: capture_denials_available,
+                    capture_denials: capture_denials_usable,
                     ..Default::default()
                 },
             );
@@ -501,7 +433,7 @@ mod tests {
                 process_container
                     .capabilities
                     .contains(&BackendCapability::CaptureDenials),
-                capture_denials_available
+                capture_denials_usable
             );
         }
     }
@@ -509,14 +441,13 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_policy_capabilities_for_base_container() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-
         let backends = windows_backends(
-            IsolationTier::BaseContainer,
+            true,
             ProcessContainerCapabilities {
                 filesystem_denied_paths: true,
                 filesystem_enumerate_paths: true,
                 ingress_host_loopback_allow: true,
+                identityless_loopback_proxy: true,
                 ..Default::default()
             },
         );
@@ -531,98 +462,18 @@ mod tests {
                 BackendCapability::FilesystemDeniedPaths,
                 BackendCapability::FilesystemEnumeratePaths,
                 BackendCapability::IngressHostLoopbackAllow,
+                BackendCapability::IdentitylessLoopbackProxy,
             ]
         );
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_omits_base_container_capabilities_from_lower_tiers() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-
-        for tier in [
-            IsolationTier::AppContainerBfs,
-            IsolationTier::AppContainerDacl,
-        ] {
-            let backends = windows_backends(
-                tier,
-                ProcessContainerCapabilities {
-                    filesystem_denied_paths: true,
-                    filesystem_enumerate_paths: true,
-                    ingress_host_loopback_allow: true,
-                    identityless_loopback_proxy: true,
-                    ..Default::default()
-                },
-            );
-            let process_container = backends
-                .iter()
-                .find(|backend| backend.backend == "processcontainer")
-                .expect("processcontainer must always be reported on Windows");
-
-            assert!(process_container.capabilities.is_empty());
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_reports_identityless_proxy_with_or_without_general_ingress_support() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-
-        for (supported, ingress_supported) in [(false, false), (true, false), (true, true)] {
-            let backends = windows_backends(
-                IsolationTier::BaseContainer,
-                ProcessContainerCapabilities {
-                    identityless_loopback_proxy: supported,
-                    ingress_host_loopback_allow: ingress_supported,
-                    ..Default::default()
-                },
-            );
-            let process_container = &backends[0];
-            assert_eq!(
-                process_container
-                    .capabilities
-                    .contains(&BackendCapability::IdentitylessLoopbackProxy),
-                supported
-            );
-            assert_eq!(
-                process_container
-                    .capabilities
-                    .contains(&BackendCapability::IngressHostLoopbackAllow),
-                ingress_supported
-            );
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_preserves_capability_probe_warnings() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-
-        let warning = "failed to query identity-less loopback proxy support".to_string();
-        let backends = windows_backends(
-            IsolationTier::BaseContainer,
-            ProcessContainerCapabilities {
-                warnings: vec![warning.clone()],
-                ..Default::default()
-            },
-        );
-        assert_eq!(backends[0].warnings, vec![warning]);
-        assert!(!backends[0]
-            .capabilities
-            .contains(&BackendCapability::IdentitylessLoopbackProxy));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn tier_precedence_prefers_the_strongest_reachable_rung() {
-        use crate::process_container_common::fallback_detector::IsolationTier;
-        // BaseContainer wins whenever usable, regardless of tier2_bfs.
-        assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
-        assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);
-        // The ceiling is BFS on any tier2_bfs build (a no-policy request reaches
-        // it without bfscfg.exe); bfscfg gating lives in request-time dispatch.
-        assert_eq!(select_tier(false, true), IsolationTier::AppContainerBfs);
-        assert_eq!(select_tier(false, false), IsolationTier::AppContainerDacl);
+    fn windows_omits_unavailable_processcontainer() {
+        let backends = windows_backends(false, ProcessContainerCapabilities::default());
+        assert!(backends
+            .iter()
+            .all(|backend| backend.backend != "processcontainer"));
     }
 
     #[cfg(not(target_os = "windows"))]

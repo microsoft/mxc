@@ -8,6 +8,9 @@ them in-process through the native engine. The versioned public API is under
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
+On Windows, ProcessContainer requires an enabled native PSEC contract. MXC
+does not fall back to AppContainer filesystem brokering or host-DACL mutation.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

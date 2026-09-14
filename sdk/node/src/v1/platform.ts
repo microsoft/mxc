@@ -29,7 +29,7 @@ const discoveryCapabilities: readonly BackendCapability[] = [
   'identitylessLoopbackProxy',
 ];
 const discoveryTiers: readonly IsolationTier[] = [
-  'base-container', 'appcontainer-bfs', 'appcontainer-dacl',
+  'base-container',
 ];
 
 function isStringArray(value: unknown): value is string[] {
@@ -212,7 +212,7 @@ function defaultProbeRunner(): string {
 }
 
 function isValidTier(s: unknown): s is IsolationTier {
-  return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
+  return s === 'base-container';
 }
 
 const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
@@ -260,6 +260,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
       }
       const facts = probe.probes;
       if (facts && typeof facts === 'object') {
+        if (facts.baseContainerApiPresent === true) {
+          support.availableMethods.push('processcontainer');
+        }
         if (isUiCapabilitySupport(facts.uiCapabilities)) {
           support.uiCapabilities = facts.uiCapabilities;
         }
@@ -475,12 +478,15 @@ function computeSupport(): PlatformSupport {
     return support;
   }
 
-  support.isSupported = true;
-  support.availableMethods = ['processcontainer'];
   if (isWindowsSandboxAvailable()) {
     support.availableMethods.push('windows_sandbox');
   }
   populateIsolationFromProbe(support);
+  support.isSupported = support.availableMethods.length > 0;
+  if (!support.isSupported) {
+    support.reason =
+      'No supported Windows containment backend is available; ProcessContainer requires PSEC';
+  }
   return support;
 }
 

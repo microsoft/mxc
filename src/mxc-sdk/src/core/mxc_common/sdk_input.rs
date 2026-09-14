@@ -175,7 +175,6 @@ impl SdkStateAwareInput {
                 readonly_paths: Some(filesystem.readonly_paths),
                 denied_paths: Some(filesystem.denied_paths),
             }),
-            fallback: None,
             network: self.network.map(map_network),
             runtime_config: self.runtime_config.map(|runtime| wire::RuntimeConfig {
                 network_proxy: runtime.network_proxy,

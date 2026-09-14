@@ -44,19 +44,10 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src
-        # Explicit feature set (no --all-features): tier2_bfs must NOT ship
-        # on Win 11 25H2 (bfscfg.exe risks an OS hang).
-        ${{ if eq(item.arch, 'x64') }}:
-          # Generate the C# P/Invoke source once. The dotnetsdk feature only
-          # enables csbindgen; it does not alter the native runtime surface.
-          cargoFeatures: hyperlight isolation_session microvm wslc dotnetsdk
-          dotnetTestSupportTargetDir: c:/t/dotnet-test-support
-        ${{ else }}:
-          cargoFeatures: hyperlight isolation_session microvm wslc
+        cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
             plm.exe
-            wxc-host-prep.exe
             winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe

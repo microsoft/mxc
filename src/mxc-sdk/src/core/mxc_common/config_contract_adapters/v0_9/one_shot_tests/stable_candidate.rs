@@ -366,7 +366,6 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.process_container.is_none());
     assert!(wire.lxc.is_none());
     assert!(wire.filesystem.is_none());
-    assert!(wire.fallback.is_none());
     assert!(wire.network.is_none());
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
@@ -421,9 +420,6 @@ fn process_container_request_maps_expected_wire_fields() {
         filesystem.denied_paths.unwrap().as_slice(),
         &["/path/to/denied"]
     );
-
-    let fallback = wire.fallback.expect("fallback should be populated");
-    assert_eq!(fallback.allow_dacl_mutation, Some(true));
 
     let network = wire.network.expect("network should be populated");
     assert!(matches!(
@@ -625,9 +621,6 @@ fn empty_optional_sections_map_to_present_empty_wire_sections() {
     assert!(filesystem.readwrite_paths.is_none());
     assert!(filesystem.readonly_paths.is_none());
     assert!(filesystem.denied_paths.is_none());
-
-    let fallback = wire.fallback.expect("fallback should be populated");
-    assert!(fallback.allow_dacl_mutation.is_none());
 
     let network = wire.network.expect("network should be populated");
     assert!(network.egress.is_none());

@@ -1495,13 +1495,6 @@ fn normalize_common_request_ir(
     validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
 
-    // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
-        if let Some(v) = fbcfg.allow_dacl_mutation {
-            policy.fallback.allow_dacl_mutation = v;
-        }
-    }
-
     parse_network_policy(
         &mut policy,
         NetworkSections {

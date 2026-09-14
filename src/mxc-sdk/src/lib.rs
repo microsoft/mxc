@@ -38,7 +38,7 @@
 //! | Bubblewrap | Linux | [`v1::Containment::Process`] or [`v1::Containment::Bubblewrap`] |
 //! | LXC | Linux | [`v1::Containment::Lxc`] |
 //! | Seatbelt | macOS | [`v1::Containment::Process`] or [`v1::Containment::Seatbelt`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`v1::Containment::Process`] |
+//! | ProcessContainer (PSEC) | Windows | [`v1::Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`v1::Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`v1::Containment::Wslc`] |
 //! | IsolationSession | Windows | [`v1::Containment::IsolationSession`] |

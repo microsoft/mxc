@@ -7,9 +7,16 @@ pub(crate) use mxc_sdk::mxc_contract::published::v0_9_0_alpha::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
     StartRequest, StopRequest,
 };
-pub(crate) const OPTIONAL_EMPTY_OBJECT_ADDITIONS: &[&str] =
-    &[r#""processContainer": {"filesystem": {}}"#];
+pub(crate) const OPTIONAL_EMPTY_OBJECT_ADDITIONS: &[&str] = &[
+    r#""fallback": {}"#,
+    r#""processContainer": {"filesystem": {}}"#,
+];
 pub(crate) const OPTIONAL_NULL_FIELD_ADDITIONS: &[(&str, &str)] = &[
+    ("fallback", r#""fallback": null"#),
+    (
+        "fallback.allowDaclMutation",
+        r#""fallback": {"allowDaclMutation": null}"#,
+    ),
     (
         "processContainer.filesystem",
         r#""processContainer": {"filesystem": null}"#,

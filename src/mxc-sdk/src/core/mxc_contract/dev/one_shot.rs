@@ -5,8 +5,7 @@ use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, TestFeature}
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
-    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
-    Telemetry, Ui,
+    Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt, Telemetry, Ui,
 };
 use super::wslc::OneShotWslc;
 use crate::mxc_contract::dev::Version;
@@ -73,9 +72,6 @@ pub struct Request {
     /// Optional filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<Filesystem>,
-    /// Optional fallback consent.
-    #[serde(default)]
-    pub fallback: OptionalField<Fallback>,
     /// Optional network policy.
     #[serde(default)]
     pub network: OptionalField<Network>,

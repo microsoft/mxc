@@ -104,9 +104,9 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
     let entries = match request.env.as_deref() {
         None => {
             let mut entries =
-                crate::process_container_common::appcontainer_runner::create_default_env_entries()?;
+                crate::process_container_common::environment::create_default_env_entries()?;
             if let Some(address) = proxy_address {
-                crate::process_container_common::appcontainer_runner::inject_proxy_vars(
+                crate::process_container_common::environment::inject_proxy_vars(
                     &mut entries,
                     address,
                 );
@@ -114,20 +114,18 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
             entries
         }
         Some(supplied) if request.inherit_default_env => {
-            crate::process_container_common::appcontainer_runner::build_inherited_entries(
+            crate::process_container_common::environment::build_inherited_entries(
                 supplied,
                 proxy_address,
             )?
         }
-        Some(supplied) => {
-            crate::process_container_common::appcontainer_runner::build_explicit_entries(
-                supplied,
-                proxy_address,
-            )
-        }
+        Some(supplied) => crate::process_container_common::environment::build_explicit_entries(
+            supplied,
+            proxy_address,
+        ),
     };
     Ok(Some(
-        crate::process_container_common::appcontainer_runner::encode_env_block(&entries),
+        crate::process_container_common::environment::encode_env_block(&entries),
     ))
 }
 
@@ -155,8 +153,7 @@ fn log_base_network_policy_audit(
             crate::process_container_common::network_policy_helpers::network_policy_applied_record(
                 &request.policy,
                 sanitize_identity(identity),
-                crate::process_container_common::fallback_detector::IsolationTier::BaseContainer
-                    .as_str(),
+                "base-container",
                 request.policy.network_proxy.address.as_ref(),
                 status,
             );
@@ -488,7 +485,7 @@ impl BaseContainerRunner {
         // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
         // Emit per-capability diagnostics (informational for `learningModeLogging`,
         // a security warning for `permissiveLearningMode`).
-        crate::process_container_common::appcontainer_runner::log_learning_mode_capability_diagnostics(
+        crate::process_container_common::environment::log_learning_mode_capability_diagnostics(
             &request.policy.capabilities,
             logger,
         );
@@ -1360,11 +1357,7 @@ impl BaseContainerSandboxProcess {
         AuditEvent::new(name)
             .str("backend", ContainmentBackend::ProcessContainer.wire_name())
             .str("identity", &self.identity)
-            .str(
-                "tier",
-                crate::process_container_common::fallback_detector::IsolationTier::BaseContainer
-                    .as_str(),
-            )
+            .str("tier", "base-container")
             .u64("pid", self.pid as u64)
     }
 
@@ -2009,7 +2002,7 @@ fn promote_capture_for_retention(
     let retained_root = capture_root
         .join(crate::process_container_common::capture_output::RETAINED_CAPTURE_DIR_NAME);
     std::fs::create_dir_all(&retained_root)?;
-    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
+    crate::mxc_common::filesystem_security::set_owner_only_dacl(&retained_root, true)
         .map_err(std::io::Error::other)?;
     let directory_name = directory.file_name().ok_or_else(|| {
         std::io::Error::other("captureDenials working directory has no file name")
@@ -2043,12 +2036,14 @@ fn managed_capture_output_path_in(
                 root.display()
             ))
         })?;
-        crate::mxc_common::filesystem_dacl::set_owner_only_dacl(root, true).map_err(|error| {
-            ScriptResponse::error(&format!(
-                "captureDenials failed to secure ETL root {}: {error}",
-                root.display()
-            ))
-        })?;
+        crate::mxc_common::filesystem_security::set_owner_only_dacl(root, true).map_err(
+            |error| {
+                ScriptResponse::error(&format!(
+                    "captureDenials failed to secure ETL root {}: {error}",
+                    root.display()
+                ))
+            },
+        )?;
     }
 
     for _ in 0..8 {
@@ -2058,7 +2053,7 @@ fn managed_capture_output_path_in(
         match std::fs::create_dir(&directory) {
             Ok(()) => {
                 if let Err(error) =
-                    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&directory, true)
+                    crate::mxc_common::filesystem_security::set_owner_only_dacl(&directory, true)
                 {
                     let _ = std::fs::remove_dir(&directory);
                     return Err(ScriptResponse::error(&format!(
@@ -2285,7 +2280,7 @@ mod tests {
             Some("etl")
         );
         assert!(
-            crate::mxc_common::filesystem_dacl::owner_is_self(&first.directory)
+            crate::mxc_common::filesystem_security::owner_is_self(&first.directory)
                 .expect("read managed directory owner")
         );
         drop(first);
@@ -3004,7 +2999,8 @@ mod tests {
 
     #[test]
     fn identityless_loopback_proxy_requires_base_container_api() {
-        let _guard = crate::process_container_common::test_env::BcUsableGuard::set(false);
+        let _guard =
+            crate::process_container_common::test_env::CaptureCapabilityGuard::set(false, false);
         assert!(!BaseContainerRunner::supports_identityless_loopback_proxy().unwrap());
     }
 
@@ -3586,8 +3582,4 @@ mod tests {
             assert!(runner.validate(&request).is_ok());
         }
     }
-
-    // ETL-retention capability validation (the retainEtl gate, including the
-    // BaseContainer native-PSEC exception) is exercised as a consolidated
-    // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
 }

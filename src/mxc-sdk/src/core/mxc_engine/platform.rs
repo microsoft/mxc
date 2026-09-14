@@ -126,11 +126,10 @@ where
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
 /// `mxc-sdk` library can actually run. On Linux both `bubblewrap` and `lxc` are
 /// reported when present, and either one alone makes the host supported. On
-/// Windows the isolation tier and UI capabilities come from the in-process
-/// fallback probe rather than a `wxc-exec --probe` subprocess, and `wslc` is
-/// reported when the host has the WSL Container runtime (requires the `wslc`
-/// feature). The broader host-capability set (backends the host can run but the
-/// SDK cannot launch) is reported separately by
+/// Windows the native capability probe supplies isolation and UI capabilities,
+/// and `wslc` is reported when the host has the WSL Container runtime (requires
+/// the `wslc` feature). The broader host-capability set (backends the host can
+/// run but the SDK cannot launch) is reported separately by
 /// [`available_backends`](crate::available_backends).
 ///
 /// Every probe here answers "is the tooling usable", not "may this process use
