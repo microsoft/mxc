@@ -419,6 +419,7 @@ jobs:
       if ($probeExitCode -ne 2 -or ($probeOutput -join "`n") -notmatch 'unknown mode: invalid') {
           throw "Packaged STA probe launch validation failed with exit code $probeExitCode"
       }
+      $global:LASTEXITCODE = 0
     displayName: 'Validate packaged in-process tests'
 
   - powershell: |
