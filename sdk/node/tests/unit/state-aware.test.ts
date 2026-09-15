@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
+import { EventEmitter } from 'node:events';
 import {
   deprovisionSandbox,
   execInSandboxAsync,
@@ -16,9 +17,55 @@ import {
   buildStateAwareEnvelope,
   parseNonExecResponse,
 } from '../../src/state-aware-helper.js';
+import {
+  _setBindingStateAwareWorkerFactory,
+  type BindingStateAwareWorkerLike,
+  type BindingStateAwareWorkerMessage,
+} from '../../src/bindings/state-aware-worker.js';
+import type { BindingStateAwareRequest } from '../../src/bindings/state-aware.js';
 import { MxcError } from '../../src/errors.js';
 import { SandboxId } from '../../src/state-aware-types.js';
-import { fakeSpawn, testOptions, platformSkip } from './test-helpers.js';
+import { fakeSpawn, ffiTestOptions, testOptions, platformSkip } from './test-helpers.js';
+
+class FakeStateAwareWorker extends EventEmitter implements BindingStateAwareWorkerLike {
+  reply(message: BindingStateAwareWorkerMessage): void {
+    queueMicrotask(() => this.emit('message', message));
+  }
+
+  fail(error: Error): void {
+    queueMicrotask(() => this.emit('error', error));
+  }
+}
+
+function requestEnvelope(request: BindingStateAwareRequest): Record<string, unknown> {
+  return JSON.parse(request.requestJson) as Record<string, unknown>;
+}
+
+function installStateAwareReply(responseJson: string): () => BindingStateAwareRequest {
+  let request: BindingStateAwareRequest | undefined;
+  _setBindingStateAwareWorkerFactory((data) => {
+    request = data.request;
+    const worker = new FakeStateAwareWorker();
+    worker.reply({ ok: true, responseJson });
+    return worker;
+  });
+  return () => {
+    assert.ok(request, 'expected a state-aware request');
+    return request;
+  };
+}
+
+function installStateAwareError(
+  error: NonNullable<Extract<BindingStateAwareWorkerMessage, { ok: false }>['error']>,
+): void {
+  _setBindingStateAwareWorkerFactory(() => {
+    const worker = new FakeStateAwareWorker();
+    worker.reply({ ok: false, error });
+    return worker;
+  });
+}
+
+afterEach(() => _setBindingStateAwareWorkerFactory());
 
 describe('buildStateAwareEnvelope', () => {
   it('lifts telemetry to the top-level envelope', () => {
@@ -321,8 +368,6 @@ describe('parseNonExecResponse', () => {
 });
 
 describe('provisionSandbox', { skip: platformSkip }, () => {
-  let activeFake: ReturnType<typeof fakeSpawn> | null = null;
-
   // The unrestricted-network posture is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
@@ -334,16 +379,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     },
   } as const;
 
-  beforeEach(() => { activeFake = null; });
-  afterEach(() => { _resetSpawnImpl(); activeFake = null; });
-
   it('builds a provision envelope and unwraps the SandboxId from the response', async () => {
-    const fake = fakeSpawn({
-      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1","agentUserSid":"S-1-5-21-1001","ephemeralWorkspacePath":"C:\\\\ProgramData\\\\ws"}}}',
-      exitCode: 0,
-    });
-    activeFake = fake;
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply(
+      '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1","agentUserSid":"S-1-5-21-1001","ephemeralWorkspacePath":"C:\\\\ProgramData\\\\ws"}}}',
+    );
     const result = await provisionSandbox(
       'isolation_session',
       {
@@ -353,67 +392,85 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
         },
         appId: 'example.app.id',
       },
-      testOptions(),
+      ffiTestOptions(),
     );
     assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
     assert.strictEqual(result.metadata?.agentUserName, 'agent\\u1');
     assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
-    assert.strictEqual(fake.captured.envelope?.phase, 'provision');
-    assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
+    const envelope = requestEnvelope(request());
+    assert.strictEqual(envelope.phase, 'provision');
+    assert.strictEqual(envelope.containment, 'isolation_session');
     // An unpackaged app may pass any string; it reaches the wire config verbatim.
-    const provisionConfig = (fake.captured.envelope?.experimental as {
+    const provisionConfig = (envelope.experimental as {
       isolation_session?: { provision?: { appId?: string } };
     })?.isolation_session?.provision;
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
-    assert.deepStrictEqual(fake.captured.envelope?.network, {
+    assert.deepStrictEqual(envelope.network, {
       egress: { default: 'allow' },
       ingress: { default: 'allow', hostLoopback: 'allow' },
     });
-    assert.ok(fake.captured.args?.includes('--experimental'));
   });
 
-  it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
-    const fake = fakeSpawn({
-      stdout: '{"error":{"code":"backend_unavailable","message":"isolation session API not available on this host"}}',
-      exitCode: 1,
+  it('throws an MxcError carrying backend_unavailable when mxc_state_aware reports it', async () => {
+    installStateAwareError({
+      code: 'backend_unavailable',
+      message: 'isolation session API not available on this host',
     });
-    activeFake = fake;
-    _setSpawnImpl(fake.spawn);
     await assert.rejects(
-      () => provisionSandbox('isolation_session', ACK, testOptions()),
+      () => provisionSandbox('isolation_session', ACK, ffiTestOptions()),
       (err: unknown) => err instanceof MxcError && err.code === 'backend_unavailable',
     );
   });
 
-  it('rejects when AbortSignal fires before close', async () => {
+  it('rejects executor-only options instead of falling back', async () => {
+    await assert.rejects(
+      () => provisionSandbox('isolation_session', ACK, {
+        ...ffiTestOptions(),
+        executablePath: 'wxc-exec.exe',
+      }),
+      (err: unknown) => err instanceof MxcError && err.message.includes('executor-only option'),
+    );
+  });
+
+  it('rejects on abort and deprovisions a late provision result', async () => {
     const ac = new AbortController();
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    activeFake = fake;
-    _setSpawnImpl(fake.spawn);
+    const requests: BindingStateAwareRequest[] = [];
+    let firstWorker: FakeStateAwareWorker | undefined;
+    _setBindingStateAwareWorkerFactory((data) => {
+      requests.push(data.request);
+      const worker = new FakeStateAwareWorker();
+      if (!firstWorker) {
+        firstWorker = worker;
+      } else {
+        worker.reply({ ok: true, responseJson: '{"result":{}}' });
+      }
+      return worker;
+    });
     const promise = provisionSandbox(
       'isolation_session',
       ACK,
-      testOptions({ signal: ac.signal }),
+      ffiTestOptions({ signal: ac.signal }),
     );
     ac.abort();
     await assert.rejects(promise);
-    assert.ok(activeFake.killCount() >= 1, 'expected child.kill() to fire on abort');
+    firstWorker!.reply({ ok: true, responseJson: '{"result":{"sandboxId":"iso:cleanup-me"}}' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(requests.length, 2);
+    assert.strictEqual(requestEnvelope(requests[1]!).phase, 'deprovision');
+    assert.strictEqual(requestEnvelope(requests[1]!).sandboxId, 'iso:cleanup-me');
   });
 });
 
 describe('startSandbox', { skip: platformSkip }, () => {
-  afterEach(() => { _resetSpawnImpl(); });
-
   it('infers backend from sandboxId prefix and sends no per-phase start config', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.phase, 'start');
-    assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:reg-abc:prov-1');
-    const wire = JSON.parse(JSON.stringify(fake.captured.envelope));
+    await startSandbox(id, undefined, ffiTestOptions());
+    const wire = requestEnvelope(request());
+    assert.strictEqual(wire.phase, 'start');
+    assert.strictEqual(wire.sandboxId, 'iso:reg-abc:prov-1');
     assert.strictEqual(
       wire.experimental,
       undefined,
@@ -422,36 +479,33 @@ describe('startSandbox', { skip: platformSkip }, () => {
   });
 
   it('does not serialize correlationVector onto the start envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+    await startSandbox(id, undefined, ffiTestOptions());
+    assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 
   it('relays stable telemetry from phase config onto the start envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, { telemetry: { enabled: false } }, testOptions());
-    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: false });
-    assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
-    assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+    await startSandbox(id, { telemetry: { enabled: false } }, ffiTestOptions());
+    const envelope = requestEnvelope(request());
+    assert.deepStrictEqual(envelope.telemetry, { enabled: false });
+    assert.strictEqual(envelope.version, '0.9.0-alpha');
+    assert.strictEqual(envelope.experimental, undefined);
   });
 
 });
 
 describe('stopSandbox', { skip: platformSkip }, () => {
-  afterEach(() => { _resetSpawnImpl(); });
-
   it('builds a minimal stop envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await stopSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.phase, 'stop');
-    assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
-    assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+    await stopSandbox(id, undefined, ffiTestOptions());
+    const envelope = requestEnvelope(request());
+    assert.strictEqual(envelope.phase, 'stop');
+    assert.strictEqual(envelope.sandboxId, 'iso:abc');
+    assert.strictEqual(envelope.experimental, undefined);
   });
 
   it('rejects with malformed_id when sandboxId has no recognised prefix', async () => {
@@ -466,32 +520,28 @@ describe('stopSandbox', { skip: platformSkip }, () => {
   });
 
   it('does not serialize correlationVector onto the stop envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await stopSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+    await stopSandbox(id, undefined, ffiTestOptions());
+    assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 });
 
 describe('deprovisionSandbox', { skip: platformSkip }, () => {
-  afterEach(() => { _resetSpawnImpl(); });
-
   it('builds a minimal deprovision envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await deprovisionSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.phase, 'deprovision');
-    assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
+    await deprovisionSandbox(id, undefined, ffiTestOptions());
+    const envelope = requestEnvelope(request());
+    assert.strictEqual(envelope.phase, 'deprovision');
+    assert.strictEqual(envelope.sandboxId, 'iso:abc');
   });
 
   it('does not serialize correlationVector onto the deprovision envelope', async () => {
-    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await deprovisionSandbox(id, undefined, testOptions());
-    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+    await deprovisionSandbox(id, undefined, ffiTestOptions());
+    assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 });
 
@@ -593,28 +643,28 @@ describe('windows_sandbox state-aware lifecycle', () => {
     afterEach(() => { _resetSpawnImpl(); });
 
     it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
-      const fake = fakeSpawn({ stdout: '{"result":{"sandboxId":"wsb:prov-1"}}', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const request = installStateAwareReply('{"result":{"sandboxId":"wsb:prov-1"}}');
       const result = await provisionSandbox(
         'windows_sandbox',
         { filesystem: { readonlyPaths: ['C:\\inputs'] } },
-        testOptions(),
+        ffiTestOptions(),
       );
       assert.strictEqual(result.sandboxId, 'wsb:prov-1');
-      assert.strictEqual(fake.captured.envelope?.phase, 'provision');
-      assert.strictEqual(fake.captured.envelope?.containment, 'windows_sandbox');
-      assert.deepStrictEqual(fake.captured.envelope?.filesystem, { readonlyPaths: ['C:\\inputs'] });
-      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+      const envelope = requestEnvelope(request());
+      assert.strictEqual(envelope.phase, 'provision');
+      assert.strictEqual(envelope.containment, 'windows_sandbox');
+      assert.deepStrictEqual(envelope.filesystem, { readonlyPaths: ['C:\\inputs'] });
+      assert.strictEqual(envelope.experimental, undefined);
     });
 
     it('startSandbox infers windows_sandbox from the wsb: prefix', async () => {
-      const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const request = installStateAwareReply('{"result":{}}');
       const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await startSandbox(id, undefined, testOptions());
-      assert.strictEqual(fake.captured.envelope?.phase, 'start');
-      assert.strictEqual(fake.captured.envelope?.sandboxId, 'wsb:prov-1');
-      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+      await startSandbox(id, undefined, ffiTestOptions());
+      const envelope = requestEnvelope(request());
+      assert.strictEqual(envelope.phase, 'start');
+      assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
+      assert.strictEqual(envelope.experimental, undefined);
     });
 
     it('execInSandboxAsync places process at top-level for a wsb: id', async () => {
@@ -632,14 +682,13 @@ describe('windows_sandbox state-aware lifecycle', () => {
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
       for (const phase of ['stop', 'deprovision'] as const) {
-        const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-        _setSpawnImpl(fake.spawn);
+        const request = installStateAwareReply('{"result":{}}');
         const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
         const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
-        await call(id, undefined, testOptions());
-        assert.strictEqual(fake.captured.envelope?.phase, phase);
-        assert.strictEqual(fake.captured.envelope?.sandboxId, 'wsb:prov-1');
-        _resetSpawnImpl();
+        await call(id, undefined, ffiTestOptions());
+        const envelope = requestEnvelope(request());
+        assert.strictEqual(envelope.phase, phase);
+        assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
       }
     });
   });
@@ -737,8 +786,7 @@ describe('wslc state-aware lifecycle', () => {
     afterEach(() => { _resetSpawnImpl(); });
 
     it('provisionSandbox builds a wslc envelope and routes back via the wslc: prefix', async () => {
-      const fake = fakeSpawn({ stdout: '{"result":{"sandboxId":"wslc:0123abcd"}}', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const request = installStateAwareReply('{"result":{"sandboxId":"wslc:0123abcd"}}');
       const result = await provisionSandbox(
         'wslc',
         {
@@ -748,22 +796,23 @@ describe('wslc state-aware lifecycle', () => {
             ingress: { default: 'deny', hostLoopback: 'deny' },
           },
         },
-        testOptions(),
+        ffiTestOptions(),
       );
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
-      assert.strictEqual(fake.captured.envelope?.phase, 'provision');
-      assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+      const envelope = requestEnvelope(request());
+      assert.strictEqual(envelope.phase, 'provision');
+      assert.strictEqual(envelope.containment, 'wslc');
+      assert.strictEqual(envelope.version, '0.9.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {
-      const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const request = installStateAwareReply('{"result":{}}');
       const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      await startSandbox(id, undefined, testOptions());
-      assert.strictEqual(fake.captured.envelope?.phase, 'start');
-      assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
-      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+      await startSandbox(id, undefined, ffiTestOptions());
+      const envelope = requestEnvelope(request());
+      assert.strictEqual(envelope.phase, 'start');
+      assert.strictEqual(envelope.sandboxId, 'wslc:0123abcd');
+      assert.strictEqual(envelope.experimental, undefined);
     });
 
     it('execInSandboxAsync places process at top-level for a wslc: id', async () => {
@@ -781,14 +830,13 @@ describe('wslc state-aware lifecycle', () => {
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {
       for (const phase of ['stop', 'deprovision'] as const) {
-        const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
-        _setSpawnImpl(fake.spawn);
+        const request = installStateAwareReply('{"result":{}}');
         const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
         const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
-        await call(id, undefined, testOptions());
-        assert.strictEqual(fake.captured.envelope?.phase, phase);
-        assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
-        _resetSpawnImpl();
+        await call(id, undefined, ffiTestOptions());
+        const envelope = requestEnvelope(request());
+        assert.strictEqual(envelope.phase, phase);
+        assert.strictEqual(envelope.sandboxId, 'wslc:0123abcd');
       }
     });
   });
