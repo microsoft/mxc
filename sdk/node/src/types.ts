@@ -365,16 +365,6 @@ export interface WslcConfig {
   portMappings?: PortMapping[];
 }
 
-/** One-shot containment selection accepted by the in-process SDK. */
-export type SandboxContainment =
-  | { type: 'process' }
-  | ({ type: 'processContainer' } & Omit<ProcessContainerConfig, 'name'>)
-  | ({
-      type: 'wslc';
-    } & Omit<WslcConfig, 'targetOs' | 'portMappings'> & {
-      portMappings?: Array<Pick<PortMapping, 'windowsPort' | 'containerPort'>>;
-    });
-
 /**
  * Port mapping for host↔container port forwarding.
  */

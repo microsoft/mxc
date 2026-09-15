@@ -1,34 +1,63 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { SandboxContainment, SandboxPolicy } from '../types.js';
+// Adapts the public ContainerConfig model to the private request accepted by
+// the native Node binding.
 
-export interface BindingRunInput {
-  script: string;
-  policy: SandboxPolicy;
+import type {
+  ContainerConfig,
+  NetworkConfig,
+  PortMapping,
+  ProcessContainerConfig,
+  WslcConfig,
+} from '../types.js';
+import { LegacyContainmentAliases } from '../types.js';
+
+export interface BindingRequestOptions {
   workingDirectory?: string;
-  containerName?: string;
   environment?: { [key: string]: string | undefined };
   experimental?: boolean;
-  containment?: SandboxContainment;
 }
 
 /**
  * Policy projection accepted by the current `mxc_ffi::RequestSpec`.
- * Runtime network values move under `network`; backend-specific policy moves
- * onto the tagged containment value instead of remaining on shared policy.
+ * This private shape is derived from the public ContainerConfig at the native
+ * transport boundary.
  */
-export type BindingPolicy = Omit<SandboxPolicy, 'runtimeConfig' | 'processContainer'> & {
-  network?: NonNullable<SandboxPolicy['network']> & {
-    runtimeConfig?: SandboxPolicy['runtimeConfig'];
+export interface BindingPolicy {
+  version: string;
+  filesystem?: ContainerConfig['filesystem'];
+  network?: {
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
+    allowedHosts?: string[];
+    blockedHosts?: string[];
+    proxy?: NetworkConfig['proxy'];
+    egress?: NetworkConfig['egress'];
+    ingress?: NetworkConfig['ingress'];
+    runtimeConfig?: ContainerConfig['runtimeConfig'];
   };
+  ui?: {
+    allowWindows: boolean;
+    clipboard: NonNullable<ContainerConfig['ui']>['clipboard'];
+    allowInputInjection: boolean;
+  };
+  timeoutMs?: number;
+  telemetry?: ContainerConfig['telemetry'];
 };
 
 /**
- * Containment variants currently reachable from the one-shot Node API.
+ * Containment variants currently reachable through the native one-shot API.
  * This mirrors the tagged JSON contract consumed by `mxc_ffi::RequestSpec`.
  */
-export type BindingContainment = SandboxContainment;
+export type BindingContainment =
+  | { type: 'process' }
+  | ({ type: 'processContainer' } & Omit<ProcessContainerConfig, 'name'>)
+  | ({
+      type: 'wslc';
+    } & Omit<WslcConfig, 'targetOs' | 'portMappings'> & {
+      portMappings?: Array<Pick<PortMapping, 'windowsPort' | 'containerPort'>>;
+    });
 
 export interface BindingSandboxRequest {
   policy: BindingPolicy;
@@ -40,50 +69,171 @@ export interface BindingSandboxRequest {
   experimental: boolean;
 }
 
-export function bindingRequestUnsupportedReason(policy: SandboxPolicy): string | null {
-  if (policy.network?.proxy !== undefined && 'builtinTestServer' in policy.network.proxy) {
-    return 'network.proxy.builtinTestServer requires the executor testing-feature gate';
+function hasExplicitProcessContainerSettings(
+  config: ProcessContainerConfig,
+): boolean {
+  const ui = config.ui;
+  const hasCustomUi = ui !== undefined && (
+    ui.isolation !== 'container'
+    || ui.desktopSystemControl !== false
+    || ui.systemSettings !== 'none'
+    || ui.ime !== false
+  );
+  const hasCustomCapabilities = config.capabilities?.some(
+    (capability) => capability !== 'internetClient'
+      && capability !== 'privateNetworkClientServer',
+  ) ?? false;
+  return config.name !== undefined
+    || config.leastPrivilege === true
+    || config.learningMode === true
+    || config.captureDenials !== undefined
+    || config.network?.allowedProxyPeer !== undefined
+    || hasCustomUi
+    || hasCustomCapabilities;
+}
+
+export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
+  if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
+    return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
+  }
+  const rawContainment = config.containment ?? (config.processContainer || config.appContainer
+    ? 'processcontainer'
+    : 'process');
+  const containment = LegacyContainmentAliases[rawContainment] ?? rawContainment;
+  if (
+    containment !== 'process'
+    && containment !== 'processcontainer'
+    && containment !== 'wslc'
+    && containment !== 'bubblewrap'
+    && containment !== 'seatbelt'
+  ) {
+    return `containment '${containment}' is not supported by the in-process Node SDK; use the portable 'process' intent`;
+  }
+  if (config.processContainer !== undefined && config.appContainer !== undefined) {
+    return 'processContainer and its legacy appContainer alias cannot both be specified';
+  }
+  if (config.lifecycle?.destroyOnExit === false) {
+    return 'lifecycle.destroyOnExit=false is not supported by one-shot in-process execution';
+  }
+  if (
+    containment === 'process'
+    && config.processContainer !== undefined
+    && hasExplicitProcessContainerSettings(config.processContainer)
+  ) {
+    return "ProcessContainer-specific settings require containment 'processcontainer'";
+  }
+  if (config.seatbelt !== undefined && Object.keys(config.seatbelt).length > 0) {
+    return 'custom seatbelt settings are not supported by the in-process Node SDK';
   }
   return null;
 }
 
 /**
- * Builds the private, co-versioned request object consumed by `mxc_ffi`.
+ * Converts the public ContainerConfig into the private, co-versioned request
+ * consumed by the native binding.
  * JSON serialization belongs in the Koffi binding, mirroring the .NET SDK.
  */
 export function prepareBindingSandboxRequest(
-  input: BindingRunInput,
+  config: ContainerConfig,
+  options: BindingRequestOptions = {},
 ): BindingSandboxRequest {
-  const unsupported = bindingRequestUnsupportedReason(input.policy);
+  const unsupported = bindingRequestUnsupportedReason(config);
   if (unsupported !== null) {
     throw new Error(unsupported);
   }
 
-  const { runtimeConfig, processContainer, ...sharedPolicy } = input.policy;
-  const policy: BindingPolicy = runtimeConfig === undefined
-    ? sharedPolicy
+  if (!config.process?.commandLine) {
+    throw new Error(
+      'script is required. Set process.commandLine on the config or pass a script to a spawn function.',
+    );
+  }
+
+  const network = config.network === undefined && config.runtimeConfig === undefined
+    ? undefined
     : {
-        ...sharedPolicy,
-        network: { ...sharedPolicy.network, runtimeConfig },
+        allowOutbound: config.network?.defaultPolicy === undefined
+          ? undefined
+          : config.network.defaultPolicy === 'allow',
+        allowLocalNetwork: config.network?.allowLocalNetwork,
+        allowedHosts: config.network?.allowedHosts,
+        blockedHosts: config.network?.blockedHosts,
+        proxy: config.network?.proxy,
+        egress: config.network?.egress,
+        ingress: config.network?.ingress,
+        runtimeConfig: config.runtimeConfig,
       };
+  const clearPolicyOnExit = config.filesystem?.clearPolicyOnExit
+    ?? config.network?.removeRulesOnExit
+    ?? (config.lifecycle?.preservePolicy === undefined
+      ? undefined
+      : !config.lifecycle.preservePolicy);
+  const filesystem = config.filesystem === undefined && clearPolicyOnExit === undefined
+    ? undefined
+    : {
+        ...(config.filesystem ?? {}),
+        clearPolicyOnExit,
+      };
+  const policy: BindingPolicy = {
+    version: config.version,
+    filesystem,
+    network,
+    ui: config.ui === undefined
+      ? undefined
+      : {
+          allowWindows: config.ui.disable === false,
+          clipboard: config.ui.clipboard,
+          allowInputInjection: config.ui.injection,
+        },
+    timeoutMs: config.process.timeout,
+    telemetry: config.telemetry,
+  };
   const environment = Object.fromEntries(
-    Object.entries(input.environment ?? {}).filter((entry): entry is [string, string] =>
-      entry[1] !== undefined),
+    [
+      ...(config.process.env ?? []).map((entry): [string, string] => {
+        const separator = entry.indexOf('=');
+        return separator === -1
+          ? [entry, '']
+          : [entry.slice(0, separator), entry.slice(separator + 1)];
+      }),
+      ...Object.entries(options.environment ?? {})
+        .filter((entry): entry is [string, string] => entry[1] !== undefined),
+    ],
   );
 
-  const { name: _legacyName, ...processContainerContainment } = processContainer ?? {};
-  const containment: BindingContainment = input.containment
-    ?? (processContainer === undefined
-      ? { type: 'process' }
-      : { type: 'processContainer', ...processContainerContainment });
+  const processContainer = config.processContainer ?? config.appContainer;
+  const rawContainment = config.containment ?? (processContainer === undefined
+    ? 'process'
+    : 'processcontainer');
+  const containmentName = LegacyContainmentAliases[rawContainment] ?? rawContainment;
+  let containment: BindingContainment;
+  if (containmentName === 'wslc') {
+    const {
+      targetOs: _targetOs,
+      portMappings,
+      ...wslc
+    } = config.experimental?.wslc ?? {};
+    containment = {
+      type: 'wslc',
+      ...wslc,
+      portMappings: portMappings?.map(({ windowsPort, containerPort }) => ({
+        windowsPort,
+        containerPort,
+      })),
+    };
+  } else if (containmentName === 'processcontainer') {
+    const { name: _legacyName, ...processContainerContainment } = processContainer ?? {};
+    containment = { type: 'processContainer', ...processContainerContainment };
+  } else {
+    containment = { type: 'process' };
+  }
 
   return {
     policy,
-    command: input.script,
+    command: config.process.commandLine,
     containment,
-    containerName: input.containerName,
-    workingDirectory: input.workingDirectory,
+    containerName: config.containerId,
+    workingDirectory: options.workingDirectory ?? config.process.cwd,
     environment,
-    experimental: input.experimental ?? false,
+    experimental: options.experimental ?? false,
   };
 }
