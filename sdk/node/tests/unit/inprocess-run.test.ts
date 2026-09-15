@@ -4,7 +4,7 @@
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, it } from 'node:test';
-import { spawnSandboxAsync } from '../../src/sandbox.js';
+import { spawnSandboxAsync, type SandboxSpawnOptions } from '../../src/sandbox.js';
 import {
   _setBindingRunWorkerFactory,
   type BindingRunWorkerLike,
@@ -60,13 +60,13 @@ describe('in-process async run routing', () => {
   it('rejects executor-only options instead of falling back', async () => {
     const policy = { version: '0.9.0-alpha' };
     for (const options of [
-      { usePty: true },
-      { dryRun: true },
-      { executablePath: 'wxc-exec.exe' },
+      { usePty: true } as unknown as SandboxSpawnOptions,
+      { dryRun: true } as unknown as SandboxSpawnOptions,
+      { executablePath: 'wxc-exec.exe' } as unknown as SandboxSpawnOptions,
     ]) {
       await assert.rejects(
         spawnSandboxAsync('echo hello', policy, options),
-        /does not support executor-only option/,
+        /no longer supports legacy option/,
       );
     }
   });
@@ -76,7 +76,7 @@ describe('in-process async run routing', () => {
       spawnSandboxAsync('echo hello', {
         version: '0.9.0-alpha',
         network: { proxy: { builtinTestServer: true } },
-      }),
+      } as unknown as { version: string }),
       /not supported by the in-process Node SDK/,
     );
   });
