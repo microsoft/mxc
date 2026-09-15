@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 import { spawn, ChildProcess, execSync } from 'child_process';
-import assert from 'node:assert';
 import type { TestContext } from 'node:test';
 import path from 'path';
 import fs from 'fs';
@@ -52,24 +51,25 @@ export function getSdkBinDir(): string {
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'mxc_ffi.dll',
-  'wxc-exec.exe',
   'plm.exe',
   'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
-  'mxc-diagnostic-console.exe',
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
   'libmxc_ffi.so',
-  'lxc-exec',
-  'unix-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
   'libmxc_ffi.dylib',
+];
+
+export const FORBIDDEN_PACKAGE_BINARIES = [
+  'wxc-exec.exe',
+  'lxc-exec',
   'mxc-exec-mac',
   'unix-test-proxy',
 ];
@@ -82,8 +82,7 @@ const OPTIONAL_BINARIES = [
   'nanvixd.exe',           // Only built with --with-microvm
   'nanvix_rootfs.img',     // Only built with --with-microvm
   'python3.initrd',        // Only built with --with-microvm
-  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
-                   // only when the plm crate is included in the build.
+  'mxc-diagnostic-console.exe', // Product diagnostic tool from Windows artifacts.
   // Test-only binaries. The GitHub build artifact carries them so the
   // validation matrix can run the Windows suites from a downloaded artifact,
   // and the npm packager copies that whole artifact into bin/ — so they show
@@ -108,24 +107,14 @@ export const ALL_KNOWN_BINARIES = [
 
 /** Return a human-friendly OS name for test descriptions. */
 export function platformName(): string {
-  return os.platform() === 'win32' ? 'Windows' : 'Linux';
-}
-
-/**
- * Assert that a dry-run completed successfully (exit 0 + validation-passed banner).
- *
- * Dry-run failure paths aren't asserted here — the dispatcher's tier-fallback
- * chain (BaseContainer → AppContainer+BFS → AppContainer+DACL) finds a viable
- * runner on every supported host, so a failing dry-run from the test harness
- * is a real regression, not an expected outcome.
- */
-export function assertDryRunResult(
-  stdout: string,
-  exitCode: number,
-  version: string,
-): void {
-  assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
-  assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
+  switch (os.platform()) {
+    case 'win32':
+      return 'Windows';
+    case 'darwin':
+      return 'macOS';
+    default:
+      return 'Linux';
+  }
 }
 
 // Environment / skip helpers
@@ -156,35 +145,10 @@ export const isLinuxBubblewrap = (() => {
   return false;
 })();
 
-// When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
-// so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
-const debugMode = process.env.MXC_DEBUG === 'true';
-const experimentalMode = os.platform() === 'darwin';
-export const debugSpawnOptions = {
-  ...(debugMode ? { debug: true } : {}),
-  ...(experimentalMode ? { experimental: true } : {}),
-};
-
 // Network test endpoint reachable from both CI (Azure DevOps agents block
 // external traffic but allow Azure Artifacts feeds) and local builds.
 export const NETWORK_TEST_URL =
   'https://pkgs.dev.azure.com/shine-oss/mxc/_packaging/MxcDependencies/npm/registry/@types/json-schema';
-
-// Set MXC_SKIP_LXC_NETWORK_TESTS=1 to skip network-dependent LXC tests
-// (e.g. environments without an `lxcbr0` bridge / IP forwarding /
-// outbound network access). Both CI lanes currently set this env var:
-// GHA sets it in `.github/workflows/SDK.Integration.Test.Job.yml`
-// because the alpine download template doesn't acquire a DHCP-issued
-// IPv4 lease within the test window on the runner images, so
-// container-side DNS lookups fail; ADO sets it in
-// `.azure-pipelines/templates/SDK.Integration.Test.Job.yml` because
-// the 1ES Hosted Pool's egress firewall blocks lxcbr0-NAT'd traffic.
-// Both CIs still run the non-network LXC paths
-// (create/start/attach/mount/exit-code/multi-command) end-to-end.
-const skipLxcNetworkTests = process.env.MXC_SKIP_LXC_NETWORK_TESTS === '1';
-export const lxcNetworkSkipReason = skipLxcNetworkTests
-  ? 'Skipped: LXC network not available in this environment (MXC_SKIP_LXC_NETWORK_TESTS)'
-  : undefined;
 
 // State-aware lifecycle helpers
 
@@ -473,68 +437,6 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
   const port = parseInt(portStr, 10);
   if (isNaN(port) || port <= 0) {
     proxyProcess.kill();
-    throw new Error(`Invalid port in ready file: ${portStr}`);
-  }
-
-  return { port, proxyProcess };
-}
-
-// unix-test-proxy helpers (currently only exercised by the Linux Bubblewrap test)
-
-/** Locate unix-test-proxy in the SDK package bin directory. */
-function findUnixTestProxyBinary(): string {
-  const binDir = getSdkBinDir();
-  const proxyPath = path.join(binDir, 'unix-test-proxy');
-  if (fs.existsSync(proxyPath)) {
-    return proxyPath;
-  }
-  throw new Error(`unix-test-proxy not found at expected SDK package location: ${proxyPath}`);
-}
-
-/**
- * Start unix-test-proxy in a child process.
- *
- * Binds to an OS-assigned port on `127.0.0.1` and writes it atomically to a
- * ready file. The proxy watches its stdin for EOF as a cross-platform
- * parent-death signal, so it must be spawned with a piped stdin that this
- * process keeps open: when the test process exits the pipe closes, the proxy
- * reads EOF and shuts down. An ignored/inherited `/dev/null` stdin would
- * signal EOF immediately and make the proxy exit right after binding.
- */
-export function startUnixTestProxy(
-  dir: string,
-  opts: { allowHosts?: string[]; blockHosts?: string[] } = {},
-): { port: number; proxyProcess: ChildProcess } {
-  const proxyPath = findUnixTestProxyBinary();
-  const readyFile = path.join(dir, 'unix-proxy-ready.txt');
-
-  const args: string[] = ['--ready-file', readyFile, '--bind-address', '127.0.0.1'];
-  for (const host of opts.allowHosts ?? []) {
-    args.push('--allow-host', host);
-  }
-  for (const host of opts.blockHosts ?? []) {
-    args.push('--block-host', host);
-  }
-
-  // stdin must stay open (piped, held by this process) so the proxy's
-  // stdin-EOF parent-death watcher only fires when the test process exits;
-  // `stdio: 'ignore'` would give it a `/dev/null` stdin that EOFs instantly.
-  const proxyProcess = spawn(proxyPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
-
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(readyFile) && Date.now() < deadline) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-  }
-
-  if (!fs.existsSync(readyFile)) {
-    proxyProcess.kill('SIGTERM');
-    throw new Error('unix-test-proxy did not write ready file within 15 seconds');
-  }
-
-  const portStr = fs.readFileSync(readyFile, 'utf-8').trim();
-  const port = parseInt(portStr, 10);
-  if (isNaN(port) || port <= 0) {
-    proxyProcess.kill('SIGTERM');
     throw new Error(`Invalid port in ready file: ${portStr}`);
   }
 

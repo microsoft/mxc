@@ -100,7 +100,7 @@ cargo clippy "${LXC_PACKAGES[@]}" --all-targets "${CARGO_FEATURES[@]}" -- -D war
 
 echo "Rust build complete."
 
-# Copy binaries to SDK bin directory
+# Copy runtime libraries to SDK bin directory
 ARCH=$(uname -m)
 case $ARCH in
     x86_64)
@@ -121,22 +121,7 @@ esac
 if [ -n "$TARGET_TRIPLE" ]; then
     BIN_DIR="$SDK_DIR/bin/$SDK_ARCH"
     mkdir -p "$BIN_DIR"
-
-    if [ "$BUILD_TYPE" = "release" ]; then
-        cp "$SRC_DIR/target/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/release/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find unix-test-proxy binary to copy"
-    else
-        cp "$SRC_DIR/target/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/debug/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find unix-test-proxy binary to copy"
-    fi
+    rm -f "$BIN_DIR/wxc-exec.exe" "$BIN_DIR/lxc-exec" "$BIN_DIR/mxc-exec-mac" "$BIN_DIR/unix-test-proxy"
 
     cp "$SRC_DIR/target/$BUILD_TYPE/libmxc_ffi.so" "$BIN_DIR/" 2>/dev/null || \
     cp "$SRC_DIR/target/$TARGET_TRIPLE/$BUILD_TYPE/libmxc_ffi.so" "$BIN_DIR/" 2>/dev/null || \

@@ -19,9 +19,9 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/node/package-lock.json
 
-      # Download all five build artifacts into the sdk/node/bin layout the SDK
-      # packager expects. Windows-x64 + Linux-x64 both land under bin/x64
-      # but the binaries have disjoint filenames so they don't collide.
+      # Download the per-target build artifacts into the sdk/node/bin layout
+      # the SDK packager expects, then prune executor-only payloads so the npm
+      # package keeps only the in-process runtime libraries and sidecars.
       - name: Download wxc-binaries x64
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -48,15 +48,16 @@ jobs:
           name: mxc-binaries-aarch64-apple-darwin
           path: sdk/node/bin/arm64
 
-      # Artifact downloads strip Unix execute permissions. Restore +x.
-      # Path is `bin` (not `sdk/node/bin`) because of the job's working-directory default.
-      - name: Restore execute permissions
+      # Pipeline artifacts contain the full backend build outputs. The Node SDK
+      # package no longer ships the standalone executors or unix-test-proxy.
+      - name: Prune executor-only package payloads
         shell: bash
         run: |
           set -euo pipefail
-          for name in lxc-exec unix-test-proxy mxc-exec-mac; do
-            find bin -name "$name" -exec chmod +x {} +
+          for name in wxc-exec.exe lxc-exec mxc-exec-mac unix-test-proxy; do
+            find bin -name "$name" -type f -delete
           done
+          find bin -type d -name symbols -prune -exec rm -rf {} +
 
       - run: npm ci
       - run: npm run build

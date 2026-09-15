@@ -96,9 +96,9 @@ echo ""
 echo "=== Building mxc-exec-mac ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-# mxc-exec-mac is the seatbelt executor. unix-test-proxy is the bundled,
-# testing-only HTTP proxy that backs `network.proxy.builtinTestServer`; it is
-# spawned as a sibling of mxc-exec-mac by the proxy coordinator.
+# Build the native library alongside the macOS executor so repository build
+# artifacts remain complete even though the npm package now stages only the
+# in-process runtime.
 CARGO_FLAGS=("-p" "mxc_darwin" "-p" "unix_test_proxy" "-p" "mxc_ffi")
 if [ "$BUILD_TYPE" = "release" ]; then
     CARGO_FLAGS+=("--release")
@@ -111,7 +111,7 @@ done
 
 echo "Rust build complete."
 
-# Copy binaries to SDK bin directory.
+# Copy runtime libraries to the SDK bin directory.
 copy_binary_for_target() {
     local triple="$1"
     local sdk_arch
@@ -123,15 +123,7 @@ copy_binary_for_target() {
 
     local bin_dir="$SDK_DIR/bin/$sdk_arch"
     mkdir -p "$bin_dir"
-
-    local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
-    if [ -f "$src" ]; then
-        cp "$src" "$bin_dir/mxc-exec-mac"
-        chmod +x "$bin_dir/mxc-exec-mac"
-        echo "Copied $src -> $bin_dir/mxc-exec-mac"
-    else
-        echo "Warning: $src not found, skipping copy"
-    fi
+    rm -f "$bin_dir/wxc-exec.exe" "$bin_dir/lxc-exec" "$bin_dir/mxc-exec-mac" "$bin_dir/unix-test-proxy"
 
     local ffi_src="$SRC_DIR/target/$triple/$BUILD_TYPE/libmxc_ffi.dylib"
     if [ -f "$ffi_src" ]; then
@@ -139,17 +131,6 @@ copy_binary_for_target() {
         echo "Copied $ffi_src -> $bin_dir/libmxc_ffi.dylib"
     else
         echo "Warning: $ffi_src not found, skipping copy"
-    fi
-
-    # unix-test-proxy backs network.proxy.builtinTestServer (testing only).
-    # It must sit next to mxc-exec-mac so the proxy coordinator can resolve it.
-    local proxy_src="$SRC_DIR/target/$triple/$BUILD_TYPE/unix-test-proxy"
-    if [ -f "$proxy_src" ]; then
-        cp "$proxy_src" "$bin_dir/unix-test-proxy"
-        chmod +x "$bin_dir/unix-test-proxy"
-        echo "Copied $proxy_src -> $bin_dir/unix-test-proxy"
-    else
-        echo "Warning: $proxy_src not found, skipping copy"
     fi
 }
 

@@ -94,72 +94,53 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     set "COPY_WSLC_RUNTIME=0"
     if "%BUILD_ALL%"=="1" set "COPY_WSLC_RUNTIME=1"
     if "%%T"=="%BUILD_ARCH%" set "COPY_WSLC_RUNTIME=1"
-    if exist "!BIN_DIR!\wxc-exec.exe" (
-        if not exist "sdk\node\bin\!SDK_ARCH!" mkdir "sdk\node\bin\!SDK_ARCH!"
-        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-        echo   Copied !SDK_ARCH!\wxc-exec.exe
-        if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-guest.exe
+    if not exist "sdk\node\bin\!SDK_ARCH!" mkdir "sdk\node\bin\!SDK_ARCH!"
+    for %%B in (wxc-exec.exe lxc-exec mxc-exec-mac unix-test-proxy) do (
+        if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+    )
+    if exist "!BIN_DIR!\mxc_ffi.dll" (
+        copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
+        echo   Copied !SDK_ARCH!\mxc_ffi.dll
+    )
+    for %%B in (wxc-windows-sandbox-guest.exe wxc-windows-sandbox-daemon.exe winhttp-proxy-shim.exe wxc-test-proxy.exe wxc-host-prep.exe plm.exe) do (
+        if exist "!BIN_DIR!\%%B" (
+            copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\%%B
         )
-        if exist "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-daemon.exe
+    )
+    if "%WITH_NANVIX%"=="1" (
+        for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
+            if exist "!BIN_DIR!\%%B" (
+                copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+                echo   Copied !SDK_ARCH!\%%B
+            )
         )
-        if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
-            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\winhttp-proxy-shim.exe
+        if exist "!BIN_DIR!\bin\kernel.elf" (
+            if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
+            copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
+            echo   Copied !SDK_ARCH!\bin\kernel.elf
         )
-        if exist "!BIN_DIR!\wxc-test-proxy.exe" (
-            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
+        for %%S in (kernel.vmem kernel.whp.cbor) do (
+            if exist "!BIN_DIR!\snapshots\%%S" (
+                if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
+                copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
+                echo   Copied !SDK_ARCH!\snapshots\%%S
+            )
         )
-        if exist "!BIN_DIR!\wxc-host-prep.exe" (
-            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-host-prep.exe
-        )
-        if exist "!BIN_DIR!\plm.exe" (
-            copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\plm.exe
-        )
-        if exist "!BIN_DIR!\mxc_ffi.dll" (
-            copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\mxc_ffi.dll
-        )
-        if "%WITH_NANVIX%"=="1" (
-            for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
-                if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
-                    echo   Copied !SDK_ARCH!\%%B
+    )
+    if "!COPY_WSLC_RUNTIME!"=="1" (
+        if "%WITH_WSLC%"=="1" (
+            for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
+                if not exist "!BIN_DIR!\%%B" (
+                    echo ERROR: WSLC-enabled Node runtime is missing !BIN_DIR!\%%B
+                    exit /b 1
                 )
+                copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+                echo   Copied !SDK_ARCH!\%%B
             )
-            if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
-                echo   Copied !SDK_ARCH!\bin\kernel.elf
-            )
-            for %%S in (kernel.vmem kernel.whp.cbor) do (
-                if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
-                    echo   Copied !SDK_ARCH!\snapshots\%%S
-                )
-            )
-        )
-        if "!COPY_WSLC_RUNTIME!"=="1" (
-            if "%WITH_WSLC%"=="1" (
-                for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
-                    if not exist "!BIN_DIR!\%%B" (
-                        echo ERROR: WSLC-enabled Node runtime is missing !BIN_DIR!\%%B
-                        exit /b 1
-                    )
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
-                    echo   Copied !SDK_ARCH!\%%B
-                )
-            ) else (
-                if exist "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe" del /Q "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe"
-                if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
-            )
+        ) else (
+            if exist "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe" del /Q "sdk\node\bin\!SDK_ARCH!\wxc-wslc-daemon.exe"
+            if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
         )
     )
 

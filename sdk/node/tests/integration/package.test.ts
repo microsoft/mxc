@@ -11,6 +11,7 @@ import {
   EXPECTED_WINDOWS_BINARIES,
   EXPECTED_LINUX_BINARIES,
   EXPECTED_MACOS_BINARIES,
+  FORBIDDEN_PACKAGE_BINARIES,
   ALL_KNOWN_BINARIES,
   platformName,
 } from './test-helpers.js';
@@ -55,6 +56,16 @@ describe('SDK package binaries', () => {
       `Missing binaries in ${binDir}: ${missing.join(', ')}`,
     );
   });
+
+  for (const binary of FORBIDDEN_PACKAGE_BINARIES) {
+    it(`should not include ${binary}`, () => {
+      const fullPath = path.join(binDir, binary);
+      assert.ok(
+        !fs.existsSync(fullPath),
+        `Forbidden executor payload should not be packaged: ${fullPath}`,
+      );
+    });
+  }
 
   it('should not contain unexpected binaries', () => {
     if (!fs.existsSync(binDir)) {
