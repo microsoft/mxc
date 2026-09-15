@@ -235,11 +235,15 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
     }
 
     // `Rejected` so the SDK surfaces this as `policy_validation`, matching what
-    // state-aware `exec` returns for the same cwd.
+    // state-aware `exec` returns for the same cwd. Only `error_message` is set:
+    // the CLI prints `standard_err` and then the error envelope, so populating
+    // both would report the same rejection twice.
     validate_working_directory(request, WorkingDirectoryScope::OneShot).map_err(|message| {
         ScriptResponse {
+            exit_code: -1,
             failure_phase: FailurePhase::Rejected,
-            ..ScriptResponse::error(&message)
+            error_message: message,
+            ..Default::default()
         }
     })?;
 
