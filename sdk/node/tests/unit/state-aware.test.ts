@@ -3,7 +3,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import {
   deprovisionSandbox,
   execInSandboxProcess,
@@ -733,6 +733,24 @@ describe('execInSandboxProcess', { skip: platformSkip }, () => {
       () => execInSandboxProcess(id, { process: { commandLine: 'echo live' } }, ffiTestOptions({ dryRun: true })),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
     );
+  });
+
+  it('removes the abort listener after terminal completion', async () => {
+    const controller = new AbortController();
+    installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(23, '', '', 0),
+    );
+    const proc = execInSandboxProcess(
+      'iso:abc' as SandboxId<'isolation_session'>,
+      { process: { commandLine: 'echo done' } },
+      ffiTestOptions({ signal: controller.signal }),
+    );
+    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
+
+    await proc.wait();
+
+    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
+    proc.dispose();
   });
 });
 
