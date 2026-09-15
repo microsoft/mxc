@@ -397,7 +397,15 @@ mod tests {
             ContainmentBackend::Vm,
         ];
         for backend in backends {
-            for cwd in ["sub", ".", "..\\sibling", "./sub", "C:relative"] {
+            for cwd in [
+                "sub",
+                ".",
+                "..\\sibling",
+                "./sub",
+                "C:relative",
+                "~",
+                "~/sub",
+            ] {
                 let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
                 let resp = validate_common(&req)
                     .expect_err(&format!("{} accepted '{cwd}'", backend.wire_name()));
@@ -425,77 +433,98 @@ mod tests {
         assert!(message.contains("\\n") && message.contains("\\u{202e}"));
     }
 
-    /// Gated on Windows: Linux and macOS narrow every backend to their own
-    /// (see `ContainmentBackend::effective_on_host`), which
+    /// Assert `backend` accepts exactly the expected absolute shape on `scope`,
+    /// and rejects the other one — an absolute path in the wrong style is
+    /// relative on the target, so both directions must be checked.
+    #[cfg(target_os = "windows")]
+    fn assert_cwd_shape(backend: &ContainmentBackend, scope: WorkingDirectoryScope, windows: bool) {
+        let (accepted, rejected) = if windows {
+            ("C:\\workspace", "/workspace")
+        } else {
+            ("/workspace", "C:\\workspace")
+        };
+        let validate = |cwd: &str| {
+            let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
+            match scope {
+                WorkingDirectoryScope::OneShot => {
+                    validate_common(&req).map_err(|e| e.error_message)
+                }
+                WorkingDirectoryScope::Exec => validate_exec_common(&req).map_err(|e| e.message),
+            }
+        };
+
+        let name = backend.wire_name();
+        assert!(
+            validate(accepted).is_ok(),
+            "{name} rejected '{accepted}' on {scope:?}"
+        );
+        assert!(
+            validate(rejected).is_err(),
+            "{name} accepted '{rejected}' on {scope:?}"
+        );
+    }
+
+    /// Pins every entry of `ContainmentBackend::working_directory_style`. The
+    /// `match` is exhaustive, so a new backend fails to compile until it is
+    /// covered here rather than silently inheriting someone else's shape.
+    ///
+    /// Gated on Windows: Linux and macOS narrow every backend to their own (see
+    /// `ContainmentBackend::effective_on_host`), which
     /// `a_foreign_backend_is_validated_against_the_one_the_host_runs` covers.
     #[cfg(target_os = "windows")]
     #[test]
-    fn only_seatbelt_accepts_a_tilde_cwd() {
-        // Everything else hands the path to `cd -- "$1"` or `--chdir`, which
-        // treat `~` as an ordinary relative name.
-        for backend in [ContainmentBackend::Lxc, ContainmentBackend::Bubblewrap] {
-            for cwd in ["~", "~/workspace"] {
-                let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
-                assert!(
-                    validate_common(&req).is_err(),
-                    "{} accepted '{cwd}'",
-                    backend.wire_name()
-                );
-            }
-        }
+    fn every_backend_accepts_only_its_own_absolute_cwd_shape() {
+        for backend in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Seatbelt,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+            ContainmentBackend::Vm,
+        ] {
+            let (one_shot_windows, exec_windows) = match &backend {
+                ContainmentBackend::ProcessContainer
+                | ContainmentBackend::WindowsSandbox
+                | ContainmentBackend::IsolationSession => (true, true),
 
-        let exec = request_with_cwd("0.9.0-alpha", ContainmentBackend::Wslc, "~/workspace");
-        assert!(validate_exec_common(&exec).is_err());
+                ContainmentBackend::Lxc
+                | ContainmentBackend::Bubblewrap
+                | ContainmentBackend::Seatbelt
+                | ContainmentBackend::MicroVm
+                | ContainmentBackend::Hyperlight
+                | ContainmentBackend::Vm => (false, false),
 
-        let seatbelt = request_with_cwd("0.9.0-alpha", ContainmentBackend::Seatbelt, "~/workspace");
-        assert!(validate_common(&seatbelt).is_ok());
-    }
+                // One-shot takes the Windows host path and translates it into
+                // the container; exec takes the in-container path.
+                ContainmentBackend::Wslc => (true, false),
+            };
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn accepts_absolute_cwd_in_the_backend_path_style() {
-        let cases = [
-            (ContainmentBackend::ProcessContainer, "C:\\workspace"),
-            (ContainmentBackend::ProcessContainer, "C:/workspace"),
-            (ContainmentBackend::ProcessContainer, "\\\\server\\share"),
-            (ContainmentBackend::Seatbelt, "/workspace"),
-            (ContainmentBackend::Seatbelt, "~/workspace"),
-            (ContainmentBackend::Bubblewrap, "/workspace"),
-            (ContainmentBackend::Wslc, "C:\\workspace"),
-        ];
-        for (backend, cwd) in cases {
-            let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
-            assert!(
-                validate_common(&req).is_ok(),
-                "{} rejected '{cwd}'",
-                backend.wire_name()
-            );
+            assert_cwd_shape(&backend, WorkingDirectoryScope::OneShot, one_shot_windows);
+            assert_cwd_shape(&backend, WorkingDirectoryScope::Exec, exec_windows);
         }
     }
 
+    /// The Windows spellings that are absolute beyond the plain `C:\dir` the
+    /// matrix above uses, and the drive-relative one that looks absolute.
     #[cfg(target_os = "windows")]
     #[test]
-    fn rejects_a_unix_cwd_on_a_windows_backend_and_the_reverse() {
-        // `/tmp` on Windows is relative to the launching process's drive.
-        let windows = request_with_cwd("0.9.0-alpha", ContainmentBackend::ProcessContainer, "/tmp");
-        assert!(validate_common(&windows).is_err());
+    fn windows_absoluteness_covers_forward_slashes_and_unc_but_not_drive_relative() {
+        for cwd in ["C:/workspace", "\\\\server\\share", "\\\\?\\C:\\workspace"] {
+            let req = request_with_cwd("0.9.0-alpha", ContainmentBackend::ProcessContainer, cwd);
+            assert!(validate_common(&req).is_ok(), "rejected '{cwd}'");
+        }
 
-        let unix = request_with_cwd("0.9.0-alpha", ContainmentBackend::Seatbelt, "C:\\tmp");
-        assert!(validate_common(&unix).is_err());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn wslc_reads_cwd_against_a_different_target_per_phase() {
-        // One-shot takes a Windows host path; exec takes the in-container path.
-        let host_path = request_with_cwd("0.9.0-alpha", ContainmentBackend::Wslc, "C:\\workspace");
-        assert!(validate_common(&host_path).is_ok());
-        assert!(validate_exec_common(&host_path).is_err());
-
-        let container_path =
-            request_with_cwd("0.9.0-alpha", ContainmentBackend::Wslc, "/workspace");
-        assert!(validate_common(&container_path).is_err());
-        assert!(validate_exec_common(&container_path).is_ok());
+        // `\workspace` is relative to the launcher's current drive.
+        let drive_relative = request_with_cwd(
+            "0.9.0-alpha",
+            ContainmentBackend::ProcessContainer,
+            "\\workspace",
+        );
+        assert!(validate_common(&drive_relative).is_err());
     }
 
     /// The engine falls an unsupported request back to LXC on Linux and

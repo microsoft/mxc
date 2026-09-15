@@ -223,7 +223,7 @@ public class StateAwarePhaseOptions
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
 public class StateAwareExecOptions : StateAwarePhaseOptions
 {
-    /// <summary>Working directory inside the sandbox.</summary>
+    /// <summary>Working directory inside the sandbox. Must be absolute.</summary>
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>

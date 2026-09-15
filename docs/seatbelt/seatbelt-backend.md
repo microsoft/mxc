@@ -407,8 +407,12 @@ paths are. `PWD` is exported to the resolved directory.
 
 Both launch methods apply it: `exec` sets it on the child process, while `open`
 performs the `cd` and the `PWD` export inside the generated helper script,
-since Terminal would otherwise start the workload in its own directory. A
-relative `cwd` is resolved against the MXC process's directory on both paths.
+since Terminal would otherwise start the workload in its own directory.
+
+From schema `0.9.0-alpha` on, a set `cwd` must be absolute. A `~` path is
+rejected too — it is expanded from the launching host's `HOME`, and an unset
+`HOME` leaves a literal `~` that `chdir`s against the launcher. Earlier
+versions resolve a relative value against the MXC process's directory.
 
 **Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
 out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's

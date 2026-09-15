@@ -171,11 +171,11 @@ pub struct Process {
     ///
     /// From schema 0.9 on, a supplied value must be absolute for the target the
     /// path reaches — `C:\workspace` or a UNC path for the Windows backends,
-    /// `/workspace` (or a `~` path on Seatbelt) for the Unix ones. WSL
-    /// Container reads it as a Windows host path one-shot and as an
-    /// in-container path on a state-aware `exec`. A relative path is rejected
-    /// because it would resolve against the launching process's working
-    /// directory.
+    /// `/workspace` for the Unix ones. WSL Container reads it as a Windows host
+    /// path one-shot and as an in-container path on a state-aware `exec`. A
+    /// relative path — including a `~` path, which MXC would have to expand from
+    /// the launching host's environment — is rejected because it would resolve
+    /// against the launching process's working directory.
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
     ///

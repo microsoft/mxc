@@ -91,10 +91,7 @@ impl ContainmentBackend {
     /// Linux falls an unsupported request back to LXC and macOS overrides every
     /// request to Seatbelt.
     pub fn working_directory_style(&self, scope: WorkingDirectoryScope) -> WorkingDirectoryStyle {
-        if cfg!(target_os = "macos") {
-            return WorkingDirectoryStyle::MacOs;
-        }
-        if cfg!(target_os = "linux") {
+        if !cfg!(target_os = "windows") {
             return WorkingDirectoryStyle::Unix;
         }
         match self {
@@ -104,11 +101,10 @@ impl ContainmentBackend {
 
             ContainmentBackend::Lxc
             | ContainmentBackend::Bubblewrap
+            | ContainmentBackend::Seatbelt
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight
             | ContainmentBackend::Vm => WorkingDirectoryStyle::Unix,
-            // Seatbelt is the only backend that expands `~` itself.
-            ContainmentBackend::Seatbelt => WorkingDirectoryStyle::MacOs,
             // One-shot WSLc takes a Windows *host* path and translates it into
             // the container; state-aware exec takes the in-container path.
             ContainmentBackend::Wslc => match scope {
@@ -134,12 +130,10 @@ pub enum WorkingDirectoryScope {
 pub enum WorkingDirectoryStyle {
     /// Windows paths: `C:\dir`, `C:/dir`, or a UNC/device path.
     Windows,
-    /// POSIX paths: `/dir` only. LXC and Bubblewrap hand the value to
-    /// `cd -- "$1"` and `--chdir` respectively, neither of which expands `~`.
+    /// POSIX paths: `/dir` only. `~` is excluded — it expands from the
+    /// launching host's `HOME`, the ambient state an absolute `cwd` exists to
+    /// remove, and no backend can resolve it inside the sandbox.
     Unix,
-    /// POSIX paths plus the home-anchored `~` forms, which the Seatbelt
-    /// profile expands before use.
-    MacOs,
 }
 
 impl WorkingDirectoryStyle {
@@ -148,10 +142,7 @@ impl WorkingDirectoryStyle {
     pub fn is_absolute(self, path: &str) -> bool {
         match self {
             WorkingDirectoryStyle::Windows => is_windows_absolute(path),
-            WorkingDirectoryStyle::Unix => is_unix_absolute(path),
-            WorkingDirectoryStyle::MacOs => {
-                is_unix_absolute(path) || path == "~" || path.starts_with("~/")
-            }
+            WorkingDirectoryStyle::Unix => path.starts_with('/'),
         }
     }
 
@@ -159,13 +150,13 @@ impl WorkingDirectoryStyle {
     pub fn example(self) -> &'static str {
         match self {
             WorkingDirectoryStyle::Windows => "C:\\workspace",
-            WorkingDirectoryStyle::Unix | WorkingDirectoryStyle::MacOs => "/workspace",
+            WorkingDirectoryStyle::Unix => "/workspace",
         }
     }
 }
 
-/// These deliberately do not use `std::path::Path::is_absolute`, which answers
-/// for the *host* MXC was compiled for rather than for the target backend.
+/// Deliberately does not use `std::path::Path::is_absolute`, which answers for
+/// the *host* MXC was compiled for rather than for the target backend.
 fn is_windows_absolute(path: &str) -> bool {
     let bytes = path.as_bytes();
     let is_sep = |b: u8| b == b'\\' || b == b'/';
@@ -177,10 +168,6 @@ fn is_windows_absolute(path: &str) -> bool {
     // relative to that drive's current directory, and `\dir` to its current
     // drive.
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && is_sep(bytes[2])
-}
-
-fn is_unix_absolute(path: &str) -> bool {
-    path.starts_with('/')
 }
 
 impl From<crate::wire::Containment> for ContainmentBackend {

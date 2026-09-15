@@ -216,7 +216,8 @@ versions and stating that the bindings must be regenerated.
   gated by `--experimental`.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
-- `process.cwd` (working directory inside the session).
+- `process.cwd` (working directory inside the session; must be an absolute
+  Windows path).
 - `process.env` (environment variables forwarded via the OS-side
   `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
@@ -244,7 +245,7 @@ the rationale for each disposition, and the error mapping live in
 | Field | one-shot disposition |
 |---|---|
 | `process.commandLine` | **honored** (required) |
-| `process.cwd` / `process.env` / `process.timeout` | **honored** |
+| `process.cwd` / `process.env` / `process.timeout` | **honored** — `cwd` must be an absolute Windows path |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
 | `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** |
 | `network` — legacy fields, absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
