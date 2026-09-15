@@ -6,6 +6,10 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Worker, type WorkerOptions } from 'node:worker_threads';
+import {
+  readPlatformSupportSnapshotJson,
+  type PlatformSupportSnapshotJson,
+} from './bindings/platform-support.js';
 import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
 import { diagLog } from './diagnostic.js';
 
@@ -35,52 +39,33 @@ const bwrapProbeScriptDirectory = fs.existsSync(
 )
   ? __dirname
   : path.join(getSdkPackageRoot(), 'dist');
-let windowsSandboxAvailableCache: boolean | undefined;
 let wxcExecutableCache: { binDir: string | undefined; executable: string } | undefined;
 let wxcExecutableVerifier = verifyWxcExecutable;
 
-/**
- * Check if Windows Sandbox feature is enabled via DISM.
- * @returns true if the Containers-DisposableClientVM feature is enabled
- */
-function isWindowsSandboxAvailable(): boolean {
-  if (windowsSandboxAvailableCache !== undefined) {
-    return windowsSandboxAvailableCache;
-  }
-
-  try {
-    const output = execSync(
-      'dism /online /get-featureinfo /featurename:Containers-DisposableClientVM',
-      { encoding: 'utf-8', stdio: 'pipe', timeout: 10000 },
-    );
-    windowsSandboxAvailableCache = /State\s*:\s*Enabled/i.test(output);
-  } catch {
-    // `dism /online` typically requires elevation, so a non-elevated session
-    // throws here and we can't distinguish "disabled" from "no permission".
-    // Fall back to checking for the sandbox executable — Windows installs it
-    // under System32 only when the Containers-DisposableClientVM feature is
-    // enabled, and the path is readable without admin.
-    const sandboxExe = path.join(
-      process.env.SystemRoot || 'C:\\Windows',
-      'System32',
-      'WindowsSandbox.exe',
-    );
-    windowsSandboxAvailableCache = fs.existsSync(sandboxExe);
-  }
-
-  return windowsSandboxAvailableCache;
-}
+const KNOWN_BACKENDS: readonly ContainmentBackend[] = [
+  'processcontainer',
+  'windows_sandbox',
+  'wslc',
+  'lxc',
+  'microvm',
+  'hyperlight',
+  'seatbelt',
+  'isolation_session',
+  'bubblewrap',
+];
+const KNOWN_TIERS: readonly IsolationTier[] = ['base-container', 'appcontainer-bfs', 'appcontainer-dacl'];
 
 /**
  * Get platform support information.
  *
- * On Windows, this also invokes `wxc-exec --probe` to populate
- * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
- * capability facts. Linux and macOS currently do not expose native probe data,
- * so `uiCapabilities` is omitted on those platforms. On Linux,
- * `unavailableReasons` contains per-backend diagnostics for unavailable LXC
- * or Bubblewrap backends. The result is cached for the lifetime of the SDK
- * module — the underlying machine state is not expected to change at runtime.
+ * This projects the native host-services exports onto the SDK's existing
+ * `PlatformSupport` shape. `availableMethods`, Linux
+ * `unavailableReasons`, and the Windows `isolationTier` are preserved; the
+ * narrower FFI surface does not currently expose `isolationWarnings` or
+ * `uiCapabilities`, so those fields stay omitted.
+ *
+ * The result is cached for the lifetime of the SDK module — the underlying
+ * machine state is not expected to change at runtime.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -100,162 +85,150 @@ export function _resetPlatformSupportCache(): void {
   cachedSupport = null;
 }
 
-/**
- * Probe runner injection seam. Spawns `wxc-exec --probe` and returns
- * its stdout. Replaceable in unit tests via {@link _setProbeRunner}.
- */
-type ProbeRunner = () => string;
+type PlatformSupportSnapshotReader = () => PlatformSupportSnapshotJson;
 
-let probeRunner: ProbeRunner = defaultProbeRunner;
+let platformSupportSnapshotReader: PlatformSupportSnapshotReader = readPlatformSupportSnapshotJson;
 
-/** @internal Test-only: override the probe runner. */
-export function _setProbeRunner(runner: ProbeRunner | null): void {
-  probeRunner = runner ?? defaultProbeRunner;
+/** @internal Test-only: override native host-services reads. */
+export function _setPlatformSupportSnapshotReader(reader: PlatformSupportSnapshotReader | null): void {
+  platformSupportSnapshotReader = reader ?? readPlatformSupportSnapshotJson;
 }
 
-function defaultProbeRunner(): string {
-  const wxcPath = findWxcExecutable();
-  if (!wxcPath) {
-    throw new Error('wxc-exec not found');
+interface NativePlatformSupportPayload {
+  isSupported: boolean;
+  reason?: string;
+  availableMethods: string[];
+}
+
+interface NativeAvailableBackendPayload {
+  backend: string;
+  tier?: string;
+}
+
+function isContainmentBackend(value: unknown): value is ContainmentBackend {
+  return typeof value === 'string' && (KNOWN_BACKENDS as readonly string[]).includes(value);
+}
+
+function isIsolationTier(value: unknown): value is IsolationTier {
+  return typeof value === 'string' && (KNOWN_TIERS as readonly string[]).includes(value);
+}
+
+function parsePlatformSupportPayload(json: string): NativePlatformSupportPayload {
+  const parsed: unknown = JSON.parse(json);
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
   }
-  return execFileSync(wxcPath, ['--probe'], {
-    timeout: 5000,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const value = parsed as Record<string, unknown>;
+  if (
+    typeof value.isSupported !== 'boolean'
+    || !Array.isArray(value.availableMethods)
+    || value.availableMethods.some((method) => typeof method !== 'string')
+  ) {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
+  }
+  return {
+    isSupported: value.isSupported,
+    reason: typeof value.reason === 'string' ? value.reason : undefined,
+    availableMethods: value.availableMethods,
+  };
+}
+
+function parseAvailableBackendsPayload(json: string): NativeAvailableBackendPayload[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed)) {
+    throw new Error('mxc_available_backends_json returned malformed JSON');
+  }
+  return parsed.map((entry) => {
+    if (entry === null || typeof entry !== 'object') {
+      throw new Error('mxc_available_backends_json returned malformed JSON');
+    }
+    const value = entry as Record<string, unknown>;
+    if (typeof value.backend !== 'string') {
+      throw new Error('mxc_available_backends_json returned malformed JSON');
+    }
+    if (value.tier !== undefined && !isIsolationTier(value.tier)) {
+      throw new Error('mxc_available_backends_json returned malformed JSON');
+    }
+    return {
+      backend: value.backend,
+      tier: value.tier,
+    };
   });
 }
 
-function isValidTier(s: unknown): s is IsolationTier {
-  return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
-}
-
-const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
-  'canBlockClipboardRead',
-  'canBlockClipboardWrite',
-  'canBlockInputInjection',
-  'canBlockInputMethodChanges',
-  'canBlockExternalUiObjects',
-  'canBlockGlobalUiNamespace',
-  'canBlockDesktopSwitching',
-  'canBlockLogoffOrShutdown',
-  'canBlockSystemParameterChanges',
-  'canBlockDisplaySettingsChanges',
-];
-
-function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const capabilities = value as Record<keyof UiCapabilitySupport, unknown>;
-  return UI_CAPABILITY_FIELDS.every((field) => typeof capabilities[field] === 'boolean');
-}
-
-/**
- * Run the probe binary and merge its results into `support`: the isolation
- * tier, any warnings, portable UI capabilities, and the `isolation_session`
- * and `hyperlight` methods when the probe reports them available. On any
- * failure (binary missing, timeout, malformed JSON), the function
- * silently leaves those fields unset, so callers see the same contract as
- * pre-probe SDKs.
- */
-function populateIsolationFromProbe(support: PlatformSupport): void {
-  try {
-    const stdout = probeRunner();
-    const probe = JSON.parse(stdout);
-    if (probe && typeof probe === 'object') {
-      if (isValidTier(probe.tier)) {
-        support.isolationTier = probe.tier;
-      }
-      if (Array.isArray(probe.warnings) && probe.warnings.length > 0) {
-        const warnings = probe.warnings.filter((w: unknown): w is string => typeof w === 'string');
-        if (warnings.length > 0) {
-          support.isolationWarnings = warnings;
-        }
-      }
-      const facts = probe.probes;
-      if (facts && typeof facts === 'object') {
-        if (isUiCapabilitySupport(facts.uiCapabilities)) {
-          support.uiCapabilities = facts.uiCapabilities;
-        }
-        if (facts.isolationSessionAvailable === true) {
-          support.availableMethods.push('isolation_session');
-        }
-        if (facts.hyperlightAvailable === true) {
-          support.availableMethods.push('hyperlight');
-        }
-      }
+function mergeAvailableMethods(
+  platformSupportMethods: readonly string[],
+  availableBackends: readonly NativeAvailableBackendPayload[],
+): ContainmentBackend[] {
+  const methods: ContainmentBackend[] = [];
+  for (const method of [
+    ...availableBackends.map((entry) => entry.backend),
+    ...platformSupportMethods,
+  ]) {
+    if (isContainmentBackend(method) && !methods.includes(method)) {
+      methods.push(method);
     }
-  } catch {
-    // Graceful degradation: leave isolation fields unset.
   }
+  return methods;
+}
+
+function linuxUnavailableReasons(
+  availableMethods: readonly ContainmentBackend[],
+  bubblewrapReason?: string,
+): Partial<Record<ContainmentBackend, string>> | undefined {
+  const reasons: Partial<Record<ContainmentBackend, string>> = {};
+  if (!availableMethods.includes('lxc')) {
+    reasons.lxc = 'LXC is not installed or not available on this system.';
+  }
+  if (!availableMethods.includes('bubblewrap')) {
+    reasons.bubblewrap = bubblewrapReason
+      ?? 'Bubblewrap (bwrap) is not installed or not available on this system.';
+  }
+  return Object.keys(reasons).length === 0 ? undefined : reasons;
+}
+
+function adaptPlatformSupport(snapshot: PlatformSupportSnapshotJson): PlatformSupport {
+  const nativeSupport = parsePlatformSupportPayload(snapshot.platformSupportJson);
+  const availableBackends = parseAvailableBackendsPayload(snapshot.availableBackendsJson);
+  const availableMethods = mergeAvailableMethods(nativeSupport.availableMethods, availableBackends);
+  const support: PlatformSupport = {
+    isSupported: nativeSupport.isSupported || availableMethods.length > 0,
+    availableMethods,
+  };
+
+  if (os.platform() === 'linux') {
+    const unavailableReasons = linuxUnavailableReasons(availableMethods, nativeSupport.reason);
+    if (unavailableReasons) {
+      support.unavailableReasons = unavailableReasons;
+    }
+    if (!support.isSupported) {
+      support.reason = nativeSupport.reason
+        ? `Neither LXC nor Bubblewrap is available on this system (${nativeSupport.reason})`
+        : 'Neither LXC nor Bubblewrap is available on this system.';
+    }
+  } else if (!support.isSupported) {
+    support.reason = nativeSupport.reason ?? 'MXC is not supported on this platform';
+  }
+
+  const processContainer = availableBackends.find((entry) => entry.backend === 'processcontainer');
+  if (isIsolationTier(processContainer?.tier)) {
+    support.isolationTier = processContainer.tier;
+  }
+  return support;
 }
 
 function computeSupport(): PlatformSupport {
-  const platform = os.platform();
-  const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
-
-  // Non-Windows platforms do not currently have native probes, so fields that
-  // depend on probe data (including uiCapabilities) stay omitted.
-  if (platform === 'darwin') {
-    // seatbelt is the only containment backend on macOS.
-    // /usr/bin/sandbox-exec ships with every release of macOS so the check
-    // is effectively just confirming we're on a supported OS.
-    if (isSeatbeltAvailable()) {
-      support.isSupported = true;
-      support.availableMethods = ['seatbelt'];
-    } else {
-      support.reason = '/usr/bin/sandbox-exec not found; macOS install is incomplete';
-    }
-    return support;
+  try {
+    return adaptPlatformSupport(platformSupportSnapshotReader());
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    platformDiagnosticLogger(`getPlatformSupport: native host-services probe failed — ${detail}`);
+    return {
+      isSupported: false,
+      reason: detail,
+      availableMethods: [],
+    };
   }
-
-  if (platform === 'linux') {
-    // LXC and Bubblewrap are both supported on Linux. Report whichever
-    // are installed; callers pick via the containment field.
-    const methods: ContainmentBackend[] = [];
-    if (lxcAvailabilityProbe()) {
-      methods.push('lxc');
-    } else {
-      support.unavailableReasons = {
-        lxc: 'LXC is not installed or not available on this system.',
-      };
-    }
-    const bubblewrap = _probeBubblewrap();
-    if (bubblewrap.available) {
-      methods.push('bubblewrap');
-    } else {
-      support.unavailableReasons = {
-        ...support.unavailableReasons,
-        bubblewrap: bubblewrap.reason,
-      };
-      // Always surface why bwrap is unavailable. When LXC is present the
-      // platform is still supported, so `reason` — documented as why the
-      // platform is *not* supported — must stay unset, and the detail would
-      // otherwise be dropped without the per-backend reason above.
-      platformDiagnosticLogger(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
-      if (methods.length === 0) {
-        support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
-      }
-    }
-    if (methods.length > 0) {
-      support.isSupported = true;
-      support.availableMethods = methods;
-    }
-    return support;
-  }
-
-  if (platform !== 'win32') {
-    support.reason = 'MXC is not supported on this platform';
-    return support;
-  }
-
-  support.isSupported = true;
-  support.availableMethods = ['processcontainer'];
-  if (isWindowsSandboxAvailable()) {
-    support.availableMethods.push('windows_sandbox');
-  }
-  populateIsolationFromProbe(support);
-  return support;
 }
 
 /**
