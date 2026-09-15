@@ -289,8 +289,13 @@ Seatbelt has the caveat described below.
   Seatbelt maps `ingress.default` to its existing
   `(allow network-inbound (local ip))` behavior and enforces `hostLoopback` on
   the container-to-host direction with a `localhost`-scoped `network-outbound`
-  rule. The inbound half is not expressible in a Seatbelt profile, so
-  `hostLoopback` must equal `ingress.default` there. That rule is scoped to the
+  rule. The inbound half is not expressible in a Seatbelt profile, so Seatbelt
+  refuses `hostLoopback: "allow"` under `ingress.default: "deny"` — an inbound
+  promise no rule can carry. It accepts `hostLoopback: "deny"` under
+  `ingress.default: "allow"`, enforcing the container-to-host half while the
+  blanket inbound grant over-permits the host-to-container half; that pair is
+  the only way Seatbelt can offer a listener without surrendering the
+  container-to-host direction, which is what a model-2 proxy depends on. That rule is scoped to the
   host, not to loopback: SBPL's `localhost` means *this machine*, so it covers
   every address bound to the host (loopback, LAN, and any public address) in
   both the `deny` and `allow` cases. Other machines are unaffected — they
@@ -533,7 +538,7 @@ Model 2 permits only the proxy endpoint.
 | Proxy routing (HTTP/S) | `HTTP_PROXY`/`HTTPS_PROXY` set to the loopback proxy; cooperating clients route there. | A minority of clients ignore the variables; their traffic is dropped by the egress restriction, not bypassed. |
 | IP/CIDR / port / protocol allow-lists | Not supported. | |
 | Per-sandbox scoping | Seatbelt profile per sandbox-exec invocation | |
-| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`; differing `default` and `hostLoopback` values are rejected with `policy_validation`. |
+| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`. `hostLoopback: "allow"` under `default: "deny"` is rejected with `policy_validation`; `hostLoopback: "deny"` under `default: "allow"` is accepted, enforcing only the container-to-host half. |
 | DNS | Direct outbound DNS to an external resolver is blocked (egress confined to the proxy port); cooperating clients pass hostnames to the proxy, which resolves them. All others would be blocked. | |
 | Bypass resistance | Medium. Egress is profile-restricted to the proxy port, so raw-socket and direct-DNS attempts are denied. Weaker than a separate network namespace (Seatbelt shares the host network stack) and depends on a correct profile. | |
 

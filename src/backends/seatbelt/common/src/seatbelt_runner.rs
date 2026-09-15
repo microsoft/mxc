@@ -1147,7 +1147,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_ingress_default_and_host_loopback() {
+    fn rejects_host_loopback_allow_under_an_ingress_default_deny() {
+        // The inexpressible pair: `hostLoopback: allow` promises inbound host
+        // loopback, and the rule that would carry it is the blanket
+        // `network-inbound` grant that `default: deny` withholds.
         let mut request = base_request();
         request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
@@ -1156,11 +1159,74 @@ mod tests {
         });
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
-        assert!(response.error_message.contains("hostLoopback"));
-        // Names both values so the caller can see which pair was rejected.
-        assert!(response.error_message.contains("('allow')"));
-        assert!(response.error_message.contains("('deny')"));
+        assert!(response.error_message.contains("hostLoopback='allow'"));
+        assert!(response.error_message.contains("default='deny'"));
         assert!(!response.error_message.contains("inherit 'default'"));
+    }
+
+    /// The other divergent pair is expressible and must be accepted: it is the
+    /// only way to ask for a listener while keeping the container-to-host
+    /// direction closed, which is what a runtime proxy's egress confinement
+    /// rests on.
+    #[test]
+    fn accepts_host_loopback_deny_under_an_ingress_default_allow() {
+        let mut request = base_request();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            host_loopback: wxc_common::models::NetworkAction::Deny,
+        });
+        let runner = SeatbeltScriptRunner::new();
+        assert!(runner.validate(&request).is_ok());
+    }
+
+    /// The two divergent-pair decisions must survive the exact-contract parse,
+    /// not just a hand-built `ContainerPolicy`. The v0.9 cutover rebuilt the
+    /// network adapter, and an adapter that dropped `ingress` (or folded it
+    /// into the legacy `allowLocalNetwork` flag) would leave every other test
+    /// in this module green while the backend silently stopped seeing the
+    /// posture the caller asked for.
+    fn validate_parsed(json: &str) -> Result<(), String> {
+        use wxc_common::config_parser::load_mxc_request_from_json;
+        use wxc_common::logger::Mode;
+        use wxc_common::state_aware_request::MxcRequest;
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let parsed = load_mxc_request_from_json(json, &mut logger).expect("config parses");
+        let mut request = match parsed {
+            MxcRequest::OneShot(request) => request,
+            _ => panic!("expected a one-shot request"),
+        };
+        request.seatbelt.get_or_insert_with(SeatbeltConfig::default);
+        SeatbeltScriptRunner::new()
+            .validate(&request)
+            .map_err(|response| response.error_message)
+    }
+
+    fn v09_ingress_config(default: &str, host_loopback: &str) -> String {
+        format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "containment": "seatbelt",
+                "process": {{"commandLine": "echo hi"}},
+                "network": {{
+                    "egress": {{"default": "deny"}},
+                    "ingress": {{"default": "{default}", "hostLoopback": "{host_loopback}"}}
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn schema_v09_host_loopback_deny_under_ingress_default_allow_is_accepted() {
+        assert!(validate_parsed(&v09_ingress_config("allow", "deny")).is_ok());
+    }
+
+    #[test]
+    fn schema_v09_host_loopback_allow_under_ingress_default_deny_is_rejected() {
+        let message = validate_parsed(&v09_ingress_config("deny", "allow")).unwrap_err();
+        assert!(message.contains("hostLoopback='allow'"));
+        assert!(message.contains("default='deny'"));
     }
 
     #[test]
