@@ -1920,7 +1920,7 @@ fn convert_wire_config(
             }
             config.storage_path = cc.storage_path;
             if let Some(mappings) = cc.port_mappings {
-                config.port_mappings = crate::models::validate_wslc_port_mappings(
+                config.port_mappings = crate::validator::validate_wslc_port_mappings(
                     &mappings,
                     "experimental.wslc.portMappings",
                 )

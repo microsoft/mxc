@@ -13,8 +13,7 @@ pub enum ProvisionRequest {
     IsolationSession(IsolationSessionProvisionRequest),
     /// A Windows Sandbox provision request.
     WindowsSandbox(WindowsSandboxProvisionRequest),
-    /// A WSLC provision request. Boxed: its port-mapping list makes it much
-    /// larger than its siblings.
+    /// A WSLC provision request. Boxed to keep the enum small.
     Wslc(Box<WslcProvisionRequest>),
 }
 

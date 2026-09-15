@@ -666,14 +666,14 @@ pub struct Wslc {
 /// host -> container port forwards.
 ///
 /// Filesystem mounts and network mode derive from the top-level `policy`
-/// section (readwrite / readonly paths, network), not from here. The
-/// one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`)
-/// are deliberately absent: the daemon shares a single session across sandboxes
-/// and does not apply per-sandbox sizing. `portMappings`, by contrast, is
-/// per-container (not per-session) so it is honored here, matching the one-shot
-/// surface. start / exec / stop / deprovision carry no backend-specific config
-/// (the exec command flows through the top-level `process` section), so they
-/// have no phase struct.
+/// section (readwrite / readonly paths, network), not from here. The one-shot
+/// fields `cpuCount` / `memoryMb` / `gpu` / `storagePath` are deliberately
+/// absent: they are properties of the WSLC session, and the daemon shares one
+/// session across every sandbox, so no phase caller can set them per sandbox.
+/// `portMappings`, by contrast, is per-container, so it is honored here,
+/// matching the one-shot surface. start / exec / stop / deprovision carry no
+/// backend-specific config (the exec command flows through the top-level
+/// `process` section), so they have no phase struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]

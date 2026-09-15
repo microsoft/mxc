@@ -18,15 +18,15 @@ use std::io::Write;
 use wxc_common::logger::{Logger, Mode};
 #[cfg(test)]
 use wxc_common::models::NetworkPolicy;
-use wxc_common::models::{
-    validate_wslc_port_mappings, ContainerPolicy, ExecutionRequest, WslcProvisionConfig,
-};
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
-use wxc_common::validator::validate_state_aware_network_policy_support;
+use wxc_common::validator::{
+    validate_state_aware_network_policy_support, validate_wslc_port_mappings,
+};
 
 use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
