@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Worker-thread entry point for blocking telemetry persistence operations.
+
 import { parentPort, workerData } from 'node:worker_threads';
 import { MxcError } from '../errors.js';
 import {
