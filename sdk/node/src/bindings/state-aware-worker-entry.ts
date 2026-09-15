@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Worker-thread entry point for a blocking state-aware lifecycle call. It
+// returns the native response or a serialized error to the main thread.
+
 import { parentPort, workerData } from 'node:worker_threads';
 import { MxcError } from '../errors.js';
 import { runBindingStateAwareRequest } from './state-aware.js';
