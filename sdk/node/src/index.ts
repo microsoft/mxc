@@ -61,6 +61,7 @@ export {
   NetworkIngressConfig,
   DirectionalNetworkConfig,
   RuntimeConfig,
+  SandboxContainment,
   PlatformSupport,
   UiCapabilitySupport,
   BubblewrapNetworkSupport,

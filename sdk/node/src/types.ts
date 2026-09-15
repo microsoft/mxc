@@ -186,6 +186,15 @@ export interface ProcessContainerConfig {
    * The reserved learning-mode capability names must not be supplied directly.
    */
   capabilities?: string[];
+  /** Optional denial-capture configuration. */
+  captureDenials?: {
+    /** Whether denied accesses remain blocked or are temporarily allowed. */
+    mode?: 'block' | 'allow';
+    /** Optional destination for the generated denial report. */
+    outputPath?: string;
+    /** Preserve the captured ETL trace after analysis. */
+    retainEtl?: boolean;
+  };
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
   /** ProcessContainer-specific networking settings. */
@@ -356,6 +365,16 @@ export interface WslcConfig {
   portMappings?: PortMapping[];
 }
 
+/** One-shot containment selection accepted by the in-process SDK. */
+export type SandboxContainment =
+  | { type: 'process' }
+  | ({ type: 'processContainer' } & Omit<ProcessContainerConfig, 'name'>)
+  | ({
+      type: 'wslc';
+    } & Omit<WslcConfig, 'targetOs' | 'portMappings'> & {
+      portMappings?: Array<Pick<PortMapping, 'windowsPort' | 'containerPort'>>;
+    });
+
 /**
  * Port mapping for host↔container port forwarding.
  */
@@ -487,14 +506,8 @@ export type SandboxPolicy = {
   runtimeConfig?: RuntimeConfig;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
-  /** Schema 0.8 ProcessContainer-specific policy. */
-  processContainer?: {
-      /** ProcessContainer-specific networking settings. */
-      network?: {
-          /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
-          allowedProxyPeer?: string;
-      };
-  };
+  /** ProcessContainer-specific one-shot settings. */
+  processContainer?: ProcessContainerConfig;
   /** UI access restrictions. All flags default to denied. */
   ui?: {
       /** Whether the sandbox may create visible windows. (default: false) */

@@ -67,6 +67,64 @@ describe('mxc_ffi binding request', () => {
       },
     });
 
+    it('preserves the complete ProcessContainer containment shape', () => {
+      const request = prepareBindingSandboxRequest({
+        script: 'echo hello',
+        policy: {
+          version: '0.9.0-alpha',
+          processContainer: {
+            leastPrivilege: true,
+            learningMode: true,
+            capabilities: ['internetClient'],
+            captureDenials: { mode: 'block', outputPath: 'C:\\denials.json', retainEtl: true },
+            ui: {
+              isolation: 'atoms',
+              desktopSystemControl: false,
+              systemSettings: 'none',
+              ime: false,
+            },
+            network: { allowedProxyPeer: 'proxy' },
+          },
+        },
+      });
+
+      assert.deepStrictEqual(request.containment, {
+        type: 'processContainer',
+        leastPrivilege: true,
+        learningMode: true,
+        capabilities: ['internetClient'],
+        captureDenials: { mode: 'block', outputPath: 'C:\\denials.json', retainEtl: true },
+        ui: {
+          isolation: 'atoms',
+          desktopSystemControl: false,
+          systemSettings: 'none',
+          ime: false,
+        },
+        network: { allowedProxyPeer: 'proxy' },
+      });
+    });
+
+    it('accepts explicit WSLC containment', () => {
+      const request = prepareBindingSandboxRequest({
+        script: 'echo hello',
+        policy: { version: '0.9.0-alpha' },
+        containment: {
+          type: 'wslc',
+          image: 'alpine:latest',
+          cpuCount: 2,
+          portMappings: [{ windowsPort: 8080, containerPort: 80 }],
+        },
+        experimental: true,
+      });
+
+      assert.deepStrictEqual(request.containment, {
+        type: 'wslc',
+        image: 'alpine:latest',
+        cpuCount: 2,
+        portMappings: [{ windowsPort: 8080, containerPort: 80 }],
+      });
+    });
+
     assert.deepStrictEqual(request.containment, {
       type: 'processContainer',
       network: { allowedProxyPeer: 'proxy' },
