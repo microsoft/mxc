@@ -6,6 +6,7 @@ import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
 import {
   deprovisionSandbox,
+  execInSandboxProcess,
   execInSandboxAsync,
   provisionSandbox,
   startSandbox,
@@ -177,6 +178,20 @@ function installStateAwareExecBinding(
     },
     timeout: () => timeoutMs,
   };
+}
+
+function readStreamText(stream: NodeJS.ReadableStream | null): Promise<string> {
+  if (stream === null) {
+    return Promise.resolve('');
+  }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    stream.once('error', reject);
+  });
 }
 
 afterEach(() => _setBindingStateAwareWorkerFactory());
@@ -746,6 +761,39 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
         executablePath: 'wxc-exec.exe',
       }),
       (err: unknown) => err instanceof MxcError && err.message.includes('executor-only option'),
+    );
+  });
+});
+
+describe('execInSandboxProcess', { skip: platformSkip }, () => {
+  it('returns a live MxcSandboxProcess backed by the shared FFI controller', async () => {
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(22, 'live\n', '', 0, { exitCode: 0, timedOut: false }, ['warning']),
+    );
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    const proc = execInSandboxProcess(
+      id,
+      { process: { commandLine: 'echo live', timeout: 123 } },
+      ffiTestOptions(),
+    );
+
+    try {
+      assert.strictEqual(proc.id, 22);
+      assert.deepStrictEqual(proc.warnings, ['warning']);
+      assert.strictEqual(await readStreamText(proc.stdout), 'live\n');
+      assert.deepStrictEqual(await proc.wait(), { exitCode: 0, timedOut: false });
+      assert.deepStrictEqual(exec.request().process, { commandLine: 'echo live', timeout: 123 });
+      assert.strictEqual(exec.timeout(), 123);
+    } finally {
+      proc.dispose();
+    }
+  });
+
+  it('rejects dryRun because no live process exists', () => {
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    assert.throws(
+      () => execInSandboxProcess(id, { process: { commandLine: 'echo live' } }, ffiTestOptions({ dryRun: true })),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
     );
   });
 });
