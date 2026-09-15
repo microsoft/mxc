@@ -444,10 +444,12 @@ const policy: SandboxPolicy = {
     },
 };
 
-// On macOS this resolves to mxc-exec-mac and builds a seatbelt config.
-const pty = spawnSandbox('echo hello', policy);
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit:', e.exitCode));
+// On macOS the portable process intent resolves to Seatbelt.
+const sandbox = spawnSandbox('echo hello', policy);
+sandbox.stdout?.on('data', (data) => console.log(data.toString()));
+const result = await sandbox.wait();
+console.log('Exit:', result.exitCode);
+sandbox.dispose();
 ```
 
 `version` is required and must fall in the supported range. The SDK rejects a

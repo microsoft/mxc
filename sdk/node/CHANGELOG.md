@@ -9,26 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠️ Breaking changes
 
-- The Node SDK now exposes **only in-process `mxc_ffi` execution surfaces**.
+- The Node SDK now exposes only in-process native execution surfaces.
   Removed APIs:
-  - `spawnSandbox`
-  - `spawnSandboxFromConfig`
   - `execInSandbox`
 - The Node-only `IPty` contract and `node-pty` dependency are removed. Use
-  `spawnSandboxProcess` or `execInSandboxProcess` for separate stdin, stdout,
-  and stderr pipes. Terminal resize and terminal-mode behavior are no longer
-  available through the Node SDK.
+  `spawnSandbox`, `spawnSandboxFromConfig`, `spawnSandboxProcess`, or
+  `execInSandboxProcess` for separate stdin, stdout, and stderr pipes.
+  `spawnSandbox` and `spawnSandboxFromConfig` now return `MxcSandboxProcess`.
+  Terminal resize and terminal-mode behavior are no longer available.
 - Removed executor-only options from the public Node execution surfaces:
   `debug`, `logDir`, `executablePath`, `ptyOptions`, `usePty`,
   `allowTestingFeatures`, `skipPlatformCheck`, and one-shot/state-aware
   `dryRun`. Use `spawnSandboxAsync`, `spawnSandboxProcess`,
   `execInSandboxAsync`, or `execInSandboxProcess` directly.
-- `createConfigFromPolicy` and `buildSandboxPayload` remain available as
-  explicit conversion utilities, but the Node SDK no longer implies that it
-  can execute arbitrary executor JSON / `ContainerConfig` payloads.
+- Existing `ContainerConfig` workflows remain supported:
+  `spawnSandboxFromConfig` converts the public config into the private native
+  request at the binding boundary.
 - `network.proxy.builtinTestServer` is no longer part of the supported Node
   surface. Use `network.proxy.localhost`, `network.proxy.url`, or
   `runtimeConfig.networkProxy`.
+- The npm package no longer ships `wxc-exec.exe`, `lxc-exec`,
+  `mxc-exec-mac`, or `unix-test-proxy`. It packages `mxc_ffi` and required
+  backend runtime dependencies instead. The standalone executors remain in
+  `mxc-release-binaries`.
 
 ## [0.7.0]
 

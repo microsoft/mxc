@@ -18,6 +18,7 @@
     "README.md"
   ],
   "scripts": {
+    "prebuild": "npm run clean",
     "build": "tsc",
     "build:test-unit": "cd tests/unit && npx tsc",
     "watch": "tsc --watch",

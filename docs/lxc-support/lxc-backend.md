@@ -376,10 +376,12 @@ const policy: SandboxPolicy = {
     },
 };
 
-// On Linux, this automatically uses lxc-exec
-const pty = spawnSandbox('echo hello', policy);
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit:', e.exitCode));
+// On Linux, the portable process intent resolves to Bubblewrap.
+const sandbox = spawnSandbox('echo hello', policy);
+sandbox.stdout?.on('data', (data) => console.log(data.toString()));
+const result = await sandbox.wait();
+console.log('Exit:', result.exitCode);
+sandbox.dispose();
 ```
 
 ## Building
