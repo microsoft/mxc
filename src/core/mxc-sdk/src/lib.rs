@@ -90,7 +90,7 @@
 //! };
 //!
 //! # let policy = SandboxPolicy {
-//! #     version: "0.7.0-alpha".to_string(),
+//! #     version: "0.9.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
@@ -153,10 +153,10 @@ pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, PlatformSupport, RuntimeConfigSection, SandboxPolicy,
-    SandboxRequest, WslcSection,
+    BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode,
+    FilesystemPolicyResult, NetworkAction, NetworkEgressSection, NetworkIngressSection,
+    NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
+    ProxyEnforcement, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{

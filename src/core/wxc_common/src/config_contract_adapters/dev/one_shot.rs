@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config,
+    convert_telemetry, convert_version,
 };
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -115,13 +116,6 @@ fn convert_process_container_network(
     let contract::ProcessContainerNetwork { allowed_proxy_peer } = value;
     wire::ProcessContainerNetwork {
         allowed_proxy_peer: allowed_proxy_peer.into_option(),
-    }
-}
-
-fn convert_runtime_config(value: contract::RuntimeConfig) -> wire::RuntimeConfig {
-    let contract::RuntimeConfig { network_proxy } = value;
-    wire::RuntimeConfig {
-        network_proxy: network_proxy.into_option(),
     }
 }
 

@@ -60,11 +60,13 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
 | `0.8.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
-| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-dev.json) |
+| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-alpha.json) |
 
-Pick `0.8.0-alpha` for new code on any supported platform.
+Pick `0.8.0-alpha` for new code using stable backends. Experimental backends
+and state-aware lifecycle require `0.9.0-alpha`; Seatbelt requires
+`0.7.0-alpha` or later.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle are defined by the registered exact `0.9.0-alpha` development contract. State-aware SDK calls stamp and require that exact version. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` parser remains only for differential characterization. `--experimental` is still required to activate experimental backends.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -147,6 +149,20 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
 `getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
+
+On Linux, when Bubblewrap is available, `getPlatformSupport()` also reports `bubblewrapNetwork`: whether this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode, which runs the sandbox in a private network namespace and default-drops everything except the proxy). That mode has no fallback — a policy the host cannot satisfy fails rather than silently degrading — so check it before spawning:
+
+```typescript
+const network = getPlatformSupport().bubblewrapNetwork;
+if (!network) {
+  throw new Error('Bubblewrap is not available on this host');
+}
+if (network.proxyEnforcement !== 'supported') {
+  throw new Error(`proxy mode unavailable: ${network.warnings.join('; ')}`);
+}
+```
+
+It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
 
 **Node.js:** ≥ 18.
 
@@ -268,16 +284,21 @@ console.log(result.stdout);
 
 `SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, `"microvm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
 
-| Backend | Intent | Platforms | Stable? | Guide |
-| --- | --- | --- | --- | --- |
-| `processcontainer` | `process` | Windows | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
-| `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
-| `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
-| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
-| `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
-| `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
-| `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
+| Backend | Intent | Platforms | Minimum schema | Stable? | Guide |
+| --- | --- | --- | --- | --- | --- |
+| `processcontainer` | `process` | Windows | `0.6.0-alpha` | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
+| `bubblewrap` | `process` | Linux | `0.6.0-alpha` | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
+| `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
+| `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
+| `windows_sandbox` | `vm` | Windows | `0.9.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
+| `microvm` | `microvm` | Windows | `0.9.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.9.0-alpha` | Experimental | No dedicated guide |
+| `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
+| `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
+
+The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
+where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
+and Linux. The abstract `vm` intent requires `0.9.0-alpha`.
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -286,6 +307,29 @@ const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on W
 config.process!.commandLine = 'cmd /c whoami';
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
+
+IsolationSession one-shot execution uses the explicit configuration path and
+requires the standard directional all-allow network posture:
+
+```typescript
+import { ContainerConfig, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const config: ContainerConfig = {
+  version: '0.9.0-alpha',
+  containment: 'isolation_session',
+  process: { commandLine: 'cmd /c whoami' },
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+};
+
+const pty = spawnSandboxFromConfig(config, { experimental: true });
+```
+
+Legacy network fields are rejected. Selecting the backend or passing
+`experimental: true` never supplies an unrestricted network posture
+automatically.
 
 Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 
@@ -319,11 +363,15 @@ import {
 
 // Every call takes a single options object (3rd arg). Experimental backends
 // must pass `experimental: true`.
-// isolation_session provision requires the unrestricted-network acknowledgment:
-// the container's network cannot be filtered or denied, so you must opt in.
+// isolation_session provision requires its actual unrestricted network posture.
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+  {
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  },
   { experimental: true },
 );
 const opts = { experimental: true };
@@ -337,9 +385,42 @@ await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
+`IsolationSessionProvisionConfig.network` requires the standard directional
+all-allow shape shown above; legacy fields are rejected. Rules,
+proxies, mixed postures, and omission are rejected. The shared lifecycle
+signatures and other backends are unchanged.
+
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
-`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests normally default to schema `0.8.0-alpha`; requests that include `telemetry` or `process.inheritDefaultEnv` default to `0.9.0-alpha`. An explicitly older version is rejected for either field. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
+`wslc` needs no provision config (it defaults to an `alpine:latest`
+container with no network). A bridged container uses the directional all-allow
+posture:
+
+```typescript
+const provisioned = await provisionSandbox('wslc', {
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+});
+```
+
+Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
+(mounted for the sandbox's lifetime) and a backend-specific `image` /
+`imageTarPath`. Inject a cooperative proxy during exec with
+`runtimeConfig.networkProxy`:
+
+```typescript
+await execInSandboxAsync(provisioned.sandboxId, {
+  process: { commandLine: 'curl https://example.com' },
+  runtimeConfig: { networkProxy: 'http://proxy.example:8080' },
+});
+```
+
+All state-aware requests default to the exact development schema
+`0.9.0-alpha`. See
+[`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
+for the per-phase config matrix.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 
@@ -451,7 +532,9 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); state-aware and development-only requests require `0.9.0-alpha`. |
+| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; experimental backends require `0.9.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 
@@ -475,7 +558,7 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
-// has a required member (isolation_session: the network acknowledgment) and
+// has a required member (isolation_session: unrestricted network) and
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
@@ -496,7 +579,7 @@ requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
 // Capability types
-UiCapabilitySupport
+UiCapabilitySupport, BubblewrapNetworkSupport
 
 // Errors (typed wire-format errors from wxc-exec)
 ErrorCode, MxcError, MxcErrorFields

@@ -55,6 +55,7 @@ use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported,
     diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
+    validate_required_child_env,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
@@ -606,6 +607,20 @@ impl BaseContainerRunner {
         })
     }
 
+    /// Whether the native PSEC plus Learning Mode API set is available.
+    ///
+    /// This does not start a Learning Mode trace. It also does not evaluate
+    /// whether a particular request is compatible with PSEC.
+    pub fn is_native_capture_available() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
+            return forced == "1";
+        }
+
+        Self::is_process_security_environment_usable()
+            && RealCapturePlatformSupport.check_apis(true).is_ok()
+    }
+
     /// Whether this host can create a PSEC environment and start a Learning Mode trace.
     ///
     /// The successful probe session is dropped immediately, which closes and discards the trace.
@@ -656,6 +671,31 @@ impl BaseContainerRunner {
     pub fn base_container_supports_deny_paths() -> bool {
         Self::query_sandbox_capabilities()
             .is_some_and(|capabilities| Self::decode_deny_capability(1, capabilities))
+    }
+
+    /// Whether a BaseContainer contract can enforce `filesystem.deniedPaths`.
+    pub fn supports_native_denied_paths() -> bool {
+        let psec_supported = Self::is_process_security_environment_usable()
+            && SecurityEnvironmentApi::load()
+                .and_then(|api| api.supports_deny_paths())
+                .unwrap_or(false);
+        let sbox_capabilities = Self::query_sandbox_capabilities();
+        Self::native_denied_paths_supported(psec_supported, sbox_capabilities)
+    }
+
+    fn native_denied_paths_supported(psec_supported: bool, sbox_capabilities: Option<u64>) -> bool {
+        psec_supported
+            || sbox_capabilities.is_some_and(|capabilities| {
+                Self::decode_create_capability(1, capabilities)
+                    && Self::decode_deny_capability(1, capabilities)
+            })
+    }
+
+    /// Whether BaseContainer can enforce
+    /// `network.ingress.hostLoopback = "allow"`.
+    pub fn supports_ingress_host_loopback_allow() -> bool {
+        Self::is_process_security_environment_usable()
+            && Self::query_psec_ingress_support().unwrap_or(false)
     }
 
     /// Decode a `QuerySandboxSupport` result for the deny-paths capability.
@@ -734,15 +774,8 @@ impl BaseContainerRunner {
 
         // PSEC 1.1 is usable only when the OS reports both the contract version
         // and the ingress capability bit.
-        let psec_ingress_contract_supported = SecurityEnvironmentApi::load()
-            .and_then(|api| {
-                if api.supports_version(1, 1)? {
-                    api.supports_network_ingress()
-                } else {
-                    Ok(false)
-                }
-            })
-            .map_err(|error| ScriptResponse {
+        let psec_ingress_contract_supported =
+            Self::query_psec_ingress_support().map_err(|error| ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
                 ..ScriptResponse::error(&format!(
                     "failed to query Process Security Environment ingress support: {error}"
@@ -758,6 +791,14 @@ impl BaseContainerRunner {
                  contract version 1.1 with ingress support",
             )
         })
+    }
+
+    fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
+        let api = SecurityEnvironmentApi::load()?;
+        if !api.supports_version(1, 1)? {
+            return Ok(false);
+        }
+        api.supports_network_ingress()
     }
 
     /// Transitional guard for the legacy SBOX fallback. Remove it with the
@@ -2194,6 +2235,7 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -3841,11 +3883,10 @@ mod tests {
 
     #[test]
     fn decode_deny_capability_table() {
-        // create bit alone does not imply deny support, and vice versa.
         let cap = SANDBOX_CAP_FS_DENY;
-        assert!(!BaseContainerRunner::decode_deny_capability(0, cap)); // FALSE return
-        assert!(!BaseContainerRunner::decode_deny_capability(1, 0)); // bit clear
-        assert!(BaseContainerRunner::decode_deny_capability(1, cap)); // enabled
+        assert!(!BaseContainerRunner::decode_deny_capability(0, cap));
+        assert!(!BaseContainerRunner::decode_deny_capability(1, 0));
+        assert!(BaseContainerRunner::decode_deny_capability(1, cap));
         assert!(!BaseContainerRunner::decode_deny_capability(
             1,
             SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
@@ -3853,6 +3894,23 @@ mod tests {
         assert!(BaseContainerRunner::decode_deny_capability(
             1,
             cap | SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+        ));
+    }
+
+    #[test]
+    fn native_denied_paths_include_usable_sbox_support() {
+        let sbox_capabilities = SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_FS_DENY;
+
+        assert!(BaseContainerRunner::native_denied_paths_supported(
+            false,
+            Some(sbox_capabilities)
+        ));
+        assert!(BaseContainerRunner::native_denied_paths_supported(
+            true, None
+        ));
+        assert!(!BaseContainerRunner::native_denied_paths_supported(
+            false,
+            Some(SANDBOX_CAP_FS_DENY)
         ));
     }
 
@@ -3929,6 +3987,21 @@ mod tests {
         let request = ExecutionRequest::default();
 
         assert!(BaseContainerRunner::validate_legacy_sbox_network_contract(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_sparse_verbatim_environment_before_host_probes() {
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest {
+            env: Some(vec!["SystemRoot=C:\\Windows".to_string()]),
+            ..Default::default()
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("BaseContainer must reject the environment before launch");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("LOCALAPPDATA"));
     }
 
     #[test]

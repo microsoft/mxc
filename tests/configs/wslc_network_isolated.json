@@ -1,12 +1,12 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-network-isolated",
   "containment": "wslc",
   "process": {
     "commandLine": "command -v wget >/dev/null 2>&1 || { echo 'wget not found in image' >&2; exit 1; }; wget -q -O /dev/null http://example.com && echo 'Network accessible' || echo 'Network blocked (expected)'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

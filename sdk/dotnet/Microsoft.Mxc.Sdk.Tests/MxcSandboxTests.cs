@@ -10,6 +10,268 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class MxcSandboxTests
 {
+    [Theory]
+    [InlineData("allowOutbound")]
+    [InlineData("allowLocalNetwork")]
+    [InlineData("allowedHosts")]
+    [InlineData("blockedHosts")]
+    [InlineData("proxy")]
+    public void Serialization_LegacyNetworkRequiresPublishedVersion(string field)
+    {
+        var network = new NetworkPolicy();
+        switch (field)
+        {
+            case "allowOutbound": network.AllowOutbound = false; break;
+            case "allowLocalNetwork": network.AllowLocalNetwork = false; break;
+            case "allowedHosts": network.AllowedHosts = []; break;
+            case "blockedHosts": network.BlockedHosts = []; break;
+            case "proxy": network.Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"); break;
+        }
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha", Network = network };
+        var error = Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(policy));
+        Assert.Contains("Network.Egress/Ingress", error.Message);
+        Assert.Throws<ArgumentException>(() =>
+            MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo test")));
+
+        foreach (var version in new[] { "0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha" })
+        {
+            policy.Version = version;
+            using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+            Assert.Equal(version, document.RootElement.GetProperty("version").GetString());
+            Assert.True(document.RootElement.GetProperty("network").TryGetProperty(field, out _));
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("0.9.0")]
+    [InlineData("0.10.0-alpha")]
+    [InlineData("invalid")]
+    public void Serialization_LegacyNetworkRejectsUnsupportedVersion(string version)
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = version,
+            Network = new NetworkPolicy { AllowOutbound = true },
+        };
+
+        var policyError = Assert.Throws<ArgumentException>(
+            () => MxcSandbox.SerializePolicy(policy));
+        Assert.Contains("is not supported", policyError.Message);
+
+        var requestError = Assert.Throws<ArgumentException>(
+            () => MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo test")));
+        Assert.Contains("is not supported", requestError.Message);
+    }
+
+    [Fact]
+    public void Serialization_V09PreservesDirectionalAndRuntimeAuthoring()
+    {
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha" };
+        using var absent = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.False(absent.RootElement.TryGetProperty("network", out _));
+        policy.Network = new NetworkPolicy();
+        using var empty = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.Equal("{}", empty.RootElement.GetProperty("network").GetRawText());
+
+        policy.Network.Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny };
+        policy.Network.Ingress = new NetworkIngressPolicy { HostLoopback = NetworkAction.Deny };
+        policy.Network.RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8080" };
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var network = document.RootElement.GetProperty("network");
+        Assert.Equal(
+            new[] { "egress", "ingress", "runtimeConfig" },
+            network.EnumerateObject().Select(property => property.Name).Order().ToArray());
+        Assert.Equal("deny", network.GetProperty("egress").GetProperty("default").GetString());
+        Assert.False(network.GetProperty("ingress").TryGetProperty("default", out _));
+        Assert.Equal("http://127.0.0.1:8080",
+            network.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString());
+    }
+
+    [Theory]
+    [InlineData("allowOutbound", "null")]
+    [InlineData("allowLocalNetwork", "null")]
+    [InlineData("allowedHosts", "null")]
+    [InlineData("blockedHosts", "null")]
+    [InlineData("proxy", "null")]
+    [InlineData("allowOutbound", "false")]
+    [InlineData("allowLocalNetwork", "false")]
+    [InlineData("allowedHosts", "[]")]
+    [InlineData("blockedHosts", "[]")]
+    public void Serialization_V09RejectsDeserializedLegacyPresence(string field, string value)
+    {
+        if (value == "null" && field != "proxy")
+        {
+            foreach (var version in new[] { "0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha" })
+            {
+                var invalid = $"{{\"version\":\"{version}\",\"network\":{{\"{field}\":null}}}}";
+                var parseError = Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<SandboxPolicy>(invalid));
+                Assert.Contains(field, parseError.Message);
+            }
+            return;
+        }
+        var json = $"{{\"version\":\"0.9.0-alpha\",\"network\":{{\"{field}\":{value}}}}}";
+        var policy = JsonSerializer.Deserialize<SandboxPolicy>(json)!;
+        var error = Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(policy));
+        Assert.Contains($"network.{field}", error.Message);
+        Assert.Throws<ArgumentException>(() =>
+            MxcSandbox.SerializeRequest(new SandboxRequest(policy, "echo test")));
+    }
+
+    [Fact]
+    public void Serialization_PublicLegacyAccessorsRemainSourceCompatible()
+    {
+        var network = new NetworkPolicy();
+        bool outbound = network.AllowOutbound;
+        bool local = network.AllowLocalNetwork;
+        List<string> allowed = network.AllowedHosts;
+        List<string> blocked = network.BlockedHosts;
+        Assert.False(outbound);
+        Assert.False(local);
+        Assert.Empty(allowed);
+        Assert.Empty(blocked);
+        if (network.AllowOutbound || network.AllowLocalNetwork)
+        {
+            Assert.Fail("Default legacy flags must be false.");
+        }
+
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha", Network = network };
+        using var omitted = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.Equal("{}", omitted.RootElement.GetProperty("network").GetRawText());
+
+        allowed.Add("example.com");
+        blocked.Add("blocked.example");
+        Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(policy));
+        foreach (var version in new[] { "0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha" })
+        {
+            policy.Version = version;
+            using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+            var serialized = document.RootElement.GetProperty("network");
+            Assert.Equal("example.com", serialized.GetProperty("allowedHosts")[0].GetString());
+            Assert.Equal("blocked.example", serialized.GetProperty("blockedHosts")[0].GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData("proxy")]
+    public void Serialization_NetworkConverterPreservesExplicitNull(string field)
+    {
+        var json = $"{{\"{field}\":null}}";
+        var network = JsonSerializer.Deserialize<NetworkPolicy>(json)!;
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(
+            network,
+            new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }));
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty(field).ValueKind);
+    }
+
+    [Theory]
+    [InlineData("egress", "egress")]
+    [InlineData("ingress", "ingress")]
+    [InlineData("InGrEsS", "ingress")]
+    public void Serialization_NetworkConverterRejectsExplicitNullDirectionalSection(
+        string authoredField,
+        string canonicalField)
+    {
+        var error = Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<NetworkPolicy>(
+                $"{{\"{authoredField}\":null}}",
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }));
+
+        Assert.Contains($"network.{canonicalField}", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Serialization_NonnullableHostListsRejectNullAssignments()
+    {
+        var network = new NetworkPolicy();
+        Assert.Throws<ArgumentNullException>(() => network.AllowedHosts = null!);
+        Assert.Throws<ArgumentNullException>(() => network.BlockedHosts = null!);
+        Assert.Empty(network.AllowedHosts);
+        Assert.Empty(network.BlockedHosts);
+    }
+
+    [Theory]
+    [InlineData("defaultPolicy", "null")]
+    [InlineData("defaultPolicy", "false")]
+    [InlineData("enforcementMode", "null")]
+    [InlineData("enforcementMode", "[]")]
+    public void Serialization_RetainsRemovedRawFieldsForV09RejectionOnly(string field, string value)
+    {
+        var network = JsonSerializer.Deserialize<NetworkPolicy>($"{{\"{field}\":{value}}}")!;
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha", Network = network };
+        var error = Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(policy));
+        Assert.Contains(field, error.Message);
+        foreach (var version in new[] { "0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha" })
+        {
+            policy.Version = version;
+            using var published = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+            Assert.False(published.RootElement.GetProperty("network").TryGetProperty(field, out _));
+        }
+    }
+
+    [Fact]
+    public void Serialization_NetworkConverterPreservesUnmappedMemberHandling()
+    {
+        const string json = """{"futureProperty":{"value":false}}""";
+        var network = JsonSerializer.Deserialize<NetworkPolicy>(json)!;
+        Assert.Equal("{}", JsonSerializer.Serialize(network));
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<NetworkPolicy>(
+            json,
+            new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow }));
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<NetworkPolicy>(
+            """{"defaultPolicy":null}""",
+            new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow }));
+    }
+
+    [Fact]
+    public void Serialization_NetworkConverterHonorsCaseInsensitiveInput()
+    {
+        var network = JsonSerializer.Deserialize<NetworkPolicy>(
+            """{"ALLOWOUTBOUND":false,"AllowedHosts":[]}""",
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        Assert.False(network.AllowOutbound);
+        Assert.Empty(network.AllowedHosts);
+        Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(
+            new SandboxPolicy { Version = "0.9.0-alpha", Network = network }));
+    }
+
+    [Theory]
+    [InlineData("0.6.0-alpha")]
+    [InlineData("0.7.0-alpha")]
+    [InlineData("0.8.0-alpha")]
+    public void Serialization_PublishedVersionsKeepOriginalDefaultsWithoutMutatingIntent(string version)
+    {
+        var policy = new SandboxPolicy { Version = version, Network = new NetworkPolicy() };
+        using var published = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var network = published.RootElement.GetProperty("network");
+        Assert.Equal(4, network.EnumerateObject().Count());
+        Assert.False(network.GetProperty("allowOutbound").GetBoolean());
+        Assert.False(network.GetProperty("allowLocalNetwork").GetBoolean());
+        Assert.Empty(network.GetProperty("allowedHosts").EnumerateArray());
+        Assert.Empty(network.GetProperty("blockedHosts").EnumerateArray());
+
+        policy.Version = "0.9.0-alpha";
+        using var development = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.Equal("{}", development.RootElement.GetProperty("network").GetRawText());
+    }
+
+    [Theory]
+    [InlineData("0.6.0-alpha")]
+    [InlineData("0.7.0-alpha")]
+    [InlineData("0.8.0-alpha")]
+    public void Serialization_PublishedVersionsKeepNullProxyOmission(string version)
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = version,
+            Network = new NetworkPolicy { Proxy = null },
+        };
+        using var published = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        Assert.False(published.RootElement.GetProperty("network").TryGetProperty("proxy", out _));
+        policy.Version = "0.9.0-alpha";
+        Assert.Throws<ArgumentException>(() => MxcSandbox.SerializePolicy(policy));
+    }
+
     [Fact]
     public void FullRequestSerialization_MatchesCrossLanguageGoldens()
     {
@@ -115,7 +377,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment
@@ -206,12 +468,16 @@ public class MxcSandboxTests
         Assert.Equal(expected, MxcSandbox.ParseIsolationTier(wireName));
     }
 
-    [Fact]
-    public void Discovery_MapsEveryNativeCapability()
+    [Theory]
+    [InlineData("captureDenials", BackendCapability.CaptureDenials)]
+    [InlineData("filesystemDeniedPaths", BackendCapability.FilesystemDeniedPaths)]
+    [InlineData("ingressHostLoopbackAllow", BackendCapability.IngressHostLoopbackAllow)]
+    [InlineData("proxyEnforcement", BackendCapability.ProxyEnforcement)]
+    public void Discovery_MapsEveryNativeCapability(
+        string wireName,
+        BackendCapability expected)
     {
-        Assert.Equal(
-            BackendCapability.CaptureDenials,
-            MxcSandbox.ParseBackendCapability("captureDenials"));
+        Assert.Equal(expected, MxcSandbox.ParseBackendCapability(wireName));
     }
 
     [Theory]
@@ -224,6 +490,55 @@ public class MxcSandboxTests
         Assert.Equal(
             BackendCapability.Unknown,
             MxcSandbox.ParseBackendCapability(wireName));
+    }
+
+    /// <summary>
+    /// The payload a Linux host emits when it has bubblewrap but cannot enforce
+    /// proxy-only egress. Dropping the warning would leave callers with an
+    /// absent capability and no way to learn why.
+    /// </summary>
+    [Fact]
+    public void Discovery_CarriesWarningsFromAnUnsupportedCapability()
+    {
+        const string json = """
+            [
+              {
+                "backend": "bubblewrap",
+                "warnings": ["Bubblewrap: network.proxy requires 'slirp4netns' on PATH"]
+              },
+              { "backend": "lxc" }
+            ]
+            """;
+
+        var backends = MxcSandbox.ParseAvailableBackends(json);
+
+        var bubblewrap = Assert.Single(
+            backends,
+            backend => backend.Backend == ContainmentBackend.Bubblewrap);
+        Assert.Empty(bubblewrap.Capabilities);
+        Assert.Equal(
+            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH",
+            Assert.Single(bubblewrap.Warnings));
+
+        // An entry the native side omitted `warnings` from must still project
+        // an empty collection rather than null.
+        var lxc = Assert.Single(backends, backend => backend.Backend == ContainmentBackend.Lxc);
+        Assert.Empty(lxc.Warnings);
+    }
+
+    [Fact]
+    public void Discovery_CarriesProxyEnforcementCapabilityWithoutWarnings()
+    {
+        const string json =
+            """[{ "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] }]""";
+
+        var bubblewrap = Assert.Single(MxcSandbox.ParseAvailableBackends(json));
+
+        Assert.Equal(ContainmentBackend.Bubblewrap, bubblewrap.Backend);
+        Assert.Equal(
+            BackendCapability.ProxyEnforcement,
+            Assert.Single(bubblewrap.Capabilities));
+        Assert.Empty(bubblewrap.Warnings);
     }
 
     [Fact]
@@ -582,6 +897,53 @@ public class MxcSandboxTests
             containment.GetProperty("portMappings")[0].GetProperty("windowsPort").GetInt32());
         Assert.Equal(80,
             containment.GetProperty("portMappings")[0].GetProperty("containerPort").GetInt32());
+    }
+
+    [Fact]
+    public void SandboxRequest_SerializesIsolationSessionContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Experimental = true,
+            Containment = new IsolationSessionContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        // The native side derives this spelling from a serde attribute while the
+        // managed side names it in an attribute of its own.
+        Assert.Equal("isolationSession", containment.GetProperty("type").GetString());
+
+        // The backend takes no configuration, so the discriminator is the whole
+        // object.
+        Assert.Single(containment.EnumerateObject());
+    }
+
+    [Fact]
+    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            @"cmd.exe /c echo hi")
+        {
+            Containment = new IsolationSessionContainment(),
+        };
+
+        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+
+        // Both refusals name the backend. Which of the two fires depends on
+        // whether the native library was built with the backend.
+        Assert.Contains(
+            nameof(ContainmentBackend.IsolationSession),
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.True(
+            exception.Code is ErrorCode.MalformedRequest
+                or ErrorCode.UnsupportedContainment,
+            $"unexpected refusal: {exception.Code}: {exception.Message}");
     }
 
     [Fact]

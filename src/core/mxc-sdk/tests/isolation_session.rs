@@ -8,11 +8,14 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::policy::{NetworkSection, SandboxPolicy};
-use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
+use mxc_sdk::{
+    build_request_with_containment, Containment, ErrorCode, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection,
+};
 
-/// The network acknowledgment this backend requires; an absent policy is
-/// refused.
+/// The public one-shot API reaches IsolationSession with its required
+/// directional all-allow network posture.
 fn iso_policy() -> SandboxPolicy {
     iso_policy_with_deadline(None)
 }
@@ -21,12 +24,17 @@ fn iso_policy() -> SandboxPolicy {
 /// the harness: if the handshake never lands, the deadline is what ends the run
 /// instead of the test waiting on a process that will not exit.
 fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Allow);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Allow);
+    ingress.host_loopback = Some(NetworkAction::Allow);
     let mut network = NetworkSection::default();
-    network.allow_outbound = true;
-    network.allow_local_network = true;
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
 
     SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
+        version: "0.9.0-alpha".to_string(),
         filesystem: None,
         network: Some(network),
         ui: None,
@@ -89,8 +97,8 @@ macro_rules! skip_unless_supported {
 fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
     enter_sta();
 
-    let provision = r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let err = mxc_sdk::run_state_aware_json(provision, false, true)
         .expect_err("a single-threaded apartment must be refused");
 
@@ -160,16 +168,13 @@ fn one_shot_requires_the_experimental_optin() {
 /// caller-fixable refusal into an opaque backend error.
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        // The backend cannot filter the container's network, so it accepts only
-        // an explicit acknowledgment; an absent policy reads as a deny it has no
-        // way to enforce.
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = iso_policy();
+    policy.filesystem = Some(FilesystemSection {
+        readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
     let mut request = build_request_with_containment(
         &policy,
         &Containment::IsolationSession,
@@ -628,8 +633,8 @@ fn one_shot_kill_stops_the_workload() {
         "the workload must be running before the kill, or this test cannot fail"
     );
 
-    // Bounded, because teardown has been seen to block on a platform call that
-    // never returns. The handle comes back so this test, not the worker, decides
+    // Bounded so a kill that never returns fails this test rather than hanging
+    // the suite. The handle comes back so this test, not the worker, decides
     // when it drops.
     let (killed_tx, killed_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -675,9 +680,10 @@ impl Drop for Teardown {
         if id.is_empty() {
             return;
         }
-        let stop = format!(r#"{{"phase":"stop","sandboxId":"{id}"}}"#);
+        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
         let _ = mxc_sdk::run_state_aware_json(&stop, false, true);
-        let deprovision = format!(r#"{{"phase":"deprovision","sandboxId":"{id}"}}"#);
+        let deprovision =
+            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
         if let Err(e) = mxc_sdk::run_state_aware_json(&deprovision, false, true) {
             eprintln!("WARNING: deprovision of {id} failed, the agent account may leak: {e:?}");
         }
@@ -688,8 +694,8 @@ impl Drop for Teardown {
 fn state_aware_lifecycle_runs_end_to_end() {
     skip_unless_supported!();
 
-    let provision = r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response = mxc_sdk::run_state_aware_json(provision, false, true)
         .expect("provision must succeed on a supported host");
     let parsed: serde_json::Value =
@@ -709,7 +715,8 @@ fn state_aware_lifecycle_runs_end_to_end() {
     );
     let _teardown = Teardown(sandbox_id.clone());
 
-    let start = format!(r#"{{"phase":"start","sandboxId":"{sandbox_id}"}}"#);
+    let start =
+        format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
     mxc_sdk::run_state_aware_json(&start, false, true).expect("start must succeed");
 
     let captured = exec_capture_stdout(&sandbox_id, "cmd.exe /c echo state-aware-marker");
@@ -730,8 +737,8 @@ struct Started {
 }
 
 fn provision_and_start() -> Started {
-    let provision = r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response =
         mxc_sdk::run_state_aware_json(provision, false, true).expect("provision must succeed");
     let parsed: serde_json::Value =
@@ -754,7 +761,8 @@ fn provision_and_start() -> Started {
         })
         .to_string();
 
-    let start = format!(r#"{{"phase":"start","sandboxId":"{sandbox_id}"}}"#);
+    let start =
+        format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
     mxc_sdk::run_state_aware_json(&start, false, true).expect("start must succeed");
     Started {
         sandbox_id,
@@ -766,6 +774,7 @@ fn provision_and_start() -> Started {
 
 fn exec_capture_stdout(sandbox_id: &str, command: &str) -> String {
     let request = serde_json::json!({
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": sandbox_id,
         "process": { "commandLine": command, "timeout": 30000 }
@@ -850,10 +859,13 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
         "the workspace was written by an unexpected account, got: {produced:?}"
     );
 
-    let stop = format!(r#"{{"phase":"stop","sandboxId":"{}"}}"#, started.sandbox_id);
+    let stop = format!(
+        r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
+        started.sandbox_id
+    );
     mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
     let deprovision = format!(
-        r#"{{"phase":"deprovision","sandboxId":"{}"}}"#,
+        r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
         started.sandbox_id
     );
     mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
@@ -869,8 +881,8 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
 fn exec_attached_rejects_a_non_exec_phase() {
     // `provision` is a real phase, so this exercises the guard rather than the
     // parser's unknown-phase rejection.
-    let provision = r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let err = mxc_sdk::exec_attached(provision, true)
         .expect_err("an attached exec must reject a non-exec phase");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
@@ -887,7 +899,7 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
     let started = provision_and_start();
 
     let exec = format!(
-        r#"{{"phase":"exec","sandboxId":"{}",
+        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c exit 42","timeout":30000}}}}"#,
         started.sandbox_id
     );
@@ -909,7 +921,7 @@ fn state_aware_exec_can_be_killed() {
     // Long enough that a prompt `wait` proves the kill worked rather than
     // racing a process that was about to exit.
     let exec = format!(
-        r#"{{"phase":"exec","sandboxId":"{}",
+        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c ping -n 300 127.0.0.1","timeout":600000}}}}"#,
         started.sandbox_id
     );
@@ -948,7 +960,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     // `more` reads stdin to EOF and exits. Without EOF it runs until the
     // deadline, so the timeout below is the failure signal, not the pass.
     let exec = format!(
-        r#"{{"phase":"exec","sandboxId":"{}",
+        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c more","timeout":60000}}}}"#,
         started.sandbox_id
     );
@@ -988,7 +1000,7 @@ fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
     // The foreground command exits at once; the spawned child outlives it by
     // ~30s while holding the inherited stdout/stderr write ends.
     let exec = format!(
-        r#"{{"phase":"exec","sandboxId":"{}",
+        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c start /b ping -n 31 127.0.0.1 > nul & echo done","timeout":120000}}}}"#,
         started.sandbox_id
     );

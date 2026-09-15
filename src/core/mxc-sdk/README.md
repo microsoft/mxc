@@ -39,10 +39,10 @@ Ok(())
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
 [`build_request`] resolves the host's default containment backend (see
-[Supported backends](#supported-backends)), builds the wire config, and runs it
-through the shared parser. The command is supplied to [`build_request`], so the
-returned [`SandboxRequest`] is complete; optionally adjust its working directory
-or environment before spawning.
+[Supported backends](#supported-backends)), builds the rolling wire config, and
+runs it through the shared production parser. The command is supplied to
+[`build_request`], so the returned [`SandboxRequest`] is complete; optionally
+adjust its working directory or environment before spawning.
 
 Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
 called. Enabling that per-invocation switch still requires persisted user
@@ -169,9 +169,17 @@ for backend in available_backends() {
     let capture_denials = backend
         .capabilities
         .contains(&BackendCapability::CaptureDenials);
+    let native_denied_paths = backend
+        .capabilities
+        .contains(&BackendCapability::FilesystemDeniedPaths);
+    let ingress_host_loopback_allow = backend
+        .capabilities
+        .contains(&BackendCapability::IngressHostLoopbackAllow);
     match backend.tier {
         Some(tier) => println!(
-            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            "{} (tier: {tier}, captureDenials: {capture_denials}, \
+             filesystemDeniedPaths: {native_denied_paths}, \
+             ingressHostLoopbackAllow: {ingress_host_loopback_allow})",
             backend.backend
         ),
         None => println!("{}", backend.backend),
@@ -181,12 +189,35 @@ for backend in available_backends() {
 
 The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
-`capabilities` reports optional features that passed the host probe, including
-the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
-handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+`capabilities` lists optional features supported by that tier.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
+or could not be detected. Use `wxc-exec --probe` for detailed machine facts.
+Callers must still handle `ErrorCode::BackendUnavailable` if availability
+changes before launch.
 And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
+
+On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
+this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+which runs the sandbox in a private network namespace). That mode has no
+fallback, so check it before building a proxy request:
+
+```rust,no_run
+use mxc_sdk::{platform_support, ProxyEnforcement};
+
+if let Some(network) = platform_support().bubblewrap_network {
+    if network.proxy_enforcement != ProxyEnforcement::Supported {
+        println!("proxy mode unavailable: {:?}", network.warnings);
+    }
+}
+```
+
+Reported fail-closed: when the probe cannot run, the result is `Unsupported`
+with the reason in `warnings`. The field is absent only when Bubblewrap itself
+is unavailable, which [`PlatformSupport::reason`] explains.
 
 ## Denial capture (Windows)
 
@@ -348,11 +379,11 @@ use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. IsolationSession accepts only the canonical unrestricted-network
-// acknowledgment; an absent policy defaults to `block`, which it refuses.
+// Provision. Describe the backend's unrestricted network posture explicitly.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{"egress":{"default":"allow"},
+          "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     false, // dry_run
     true,  // experimental
 )?;
@@ -360,14 +391,14 @@ let provisioned = run_state_aware_json(
 
 // Start. The exec phase runs against a started session.
 run_state_aware_json(
-    r#"{"phase":"start","sandboxId":"..."}"#,
+    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
     false, // dry_run
     true,  // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = exec_attached(
-    r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
+    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
 let _ = outcome;
@@ -428,8 +459,9 @@ opt-in on two axes: build this crate with its **`wslc` feature**, and call
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
 memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
-go through the same parser the executor uses — so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at build time, not at spawn.
+go through the same production parser as the executor, so a rejected value
+(e.g. a port mapping with a zero or duplicated host port) fails at build time,
+not at spawn.
 
 ```rust,no_run
 use std::error::Error;
@@ -439,7 +471,7 @@ use mxc_sdk::{
 
 fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
+    version: "0.9.0-alpha".to_string(),
     filesystem: None, network: None, ui: None, timeout_ms: None,
 };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };

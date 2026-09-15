@@ -156,6 +156,7 @@ enum RequestContainment {
         #[serde(default, rename = "portMappings")]
         port_mappings: Vec<WslcPortMappingSpec>,
     },
+    IsolationSession {},
 }
 
 #[derive(serde::Deserialize)]
@@ -271,6 +272,7 @@ impl RequestContainment {
                     .collect();
                 Containment::Wslc(wslc)
             }
+            Self::IsolationSession {} => Containment::IsolationSession,
         }
     }
 }
@@ -315,7 +317,16 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    if let Some(path) = ignored_paths.first() {
+    // The SDK authoring model recognizes these wire-only legacy names only to
+    // preserve their presence for the version-specific migration diagnostic.
+    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
+    if let Some(path) = ignored_paths.iter().find(|path| {
+        !(accepts_wire_legacy_names
+            && matches!(
+                path.as_str(),
+                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
+            ))
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),
@@ -661,6 +672,55 @@ mod tests {
     }
 
     #[test]
+    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""capabilities""#),
+            ] {
+                let request_json = format!(
+                    r#"{{
+                        "policy": {{
+                            "version": "{version}",
+                            "network": {{ "{field}": {value} }}
+                        }},
+                        "command": "echo hi"
+                    }}"#
+                );
+                let error = build_request_from_json(&request_json)
+                    .expect_err("wire-only network names must remain unknown before v0.9");
+                assert!(
+                    error.message.contains(&format!("policy.network.{field}")),
+                    "unexpected error for {version} {field}: {error}"
+                );
+            }
+        }
+
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha",
+                        "network": {{ "{field}": {value} }}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let error = build_request_from_json(&request_json)
+                .expect_err("v0.9 wire-only network names must reach migration validation");
+            assert!(
+                error
+                    .message
+                    .contains("no longer accepts legacy network authoring"),
+                "unexpected error for v0.9 {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_nested_policy_fields_are_rejected() {
         for (request_json, expected_path) in [
             (
@@ -846,6 +906,39 @@ mod tests {
         assert!(config.gpu);
         assert_eq!(config.storage_path.as_deref(), Some(r"C:\wslc"));
         assert_eq!(config.port_mappings, [(8080, 80)]);
+    }
+
+    /// The discriminator is derived from the enum's `rename_all`, not written by
+    /// hand, and the managed binding spells it independently.
+    #[test]
+    fn isolation_session_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment =
+            serde_json::from_str(r#"{ "type": "isolationSession" }"#)
+                .expect("request containment parses");
+
+        assert!(matches!(
+            containment.into_sdk(),
+            Containment::IsolationSession
+        ));
+    }
+
+    /// `deny_unknown_fields` does not reach an internally tagged unit variant,
+    /// so the empty-struct form is what closes this one.
+    #[test]
+    fn isolation_session_rejects_a_member_it_does_not_define() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "containment": { "type": "isolationSession", "unexpected": true }
+            }"#,
+        )
+        .expect_err("an undefined member must not be discarded");
+
+        assert!(
+            error.message.contains("unexpected"),
+            "the error must name the member: {error}"
+        );
     }
 
     #[test]

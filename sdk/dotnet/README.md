@@ -72,11 +72,11 @@ or the configured output directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
-to the host's stderr, so inspecting `Warnings` is the only way to learn that
-containment was relaxed.
+to the host's stderr, so inspecting `Warnings` is the only way to see them.
 
-Streaming callers receive the same warnings immediately from
-`MxcSandboxProcess.Warnings`. They do not need to wait for the process to exit.
+Streaming callers read warnings from `MxcSandboxProcess.Warnings` without
+waiting for the process to exit. Cleanup failures are added during teardown,
+so read it again after `Wait`, `WaitAsync` or `Kill` to see them.
 
 ### Dependency injection and testing
 
@@ -123,6 +123,12 @@ if (!support.IsSupported)
 foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
 {
     Console.WriteLine($"{backend.Backend}: tier={backend.Tier}");
+    bool canUseDeniedPaths = backend.Capabilities.Contains(
+        BackendCapability.FilesystemDeniedPaths);
+    bool canAllowHostLoopback = backend.Capabilities.Contains(
+        BackendCapability.IngressHostLoopbackAllow);
+    Console.WriteLine(
+        $"  deniedPaths={canUseDeniedPaths}, hostLoopback.allow={canAllowHostLoopback}");
 }
 ```
 
@@ -132,12 +138,56 @@ every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
-`BackendCapability.CaptureDenials`.
+`BackendCapability.CaptureDenials` and `BackendCapability.ProxyEnforcement`.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`.
+`Warnings` carries diagnostics for a capability the host cannot offer — but not
+for every absent one: only checks that produce a reason contribute. Bubblewrap's
+`ProxyEnforcement` does (see below); Windows omits `CaptureDenials` without a
+warning. Missing capabilities otherwise are unavailable or could not be detected.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
 Cross-check `GetPlatformSupport()` and continue handling
 `ErrorCode.BackendUnavailable`.
+
+#### Bubblewrap proxy-only egress (Linux)
+
+Schema `0.8.0-alpha`+ `network.proxy` needs host tooling and kernel permissions
+that not every Linux host grants. Bubblewrap reports whether this host can
+enforce it as the `ProxyEnforcement` capability, and names what is missing in
+`Warnings` when it cannot. The TypeScript and Rust SDKs surface the same answer
+as a `bubblewrapNetwork` field; the C# SDK reports it through the backend array:
+
+```csharp
+AvailableBackend? bubblewrap = MxcSandbox.GetAvailableBackends()
+    .FirstOrDefault(backend => backend.Backend == ContainmentBackend.Bubblewrap);
+
+if (bubblewrap is null)
+{
+    Console.Error.WriteLine("Bubblewrap is not available on this host.");
+}
+else if (bubblewrap.Capabilities.Contains(BackendCapability.ProxyEnforcement))
+{
+    // Safe to send a 0.8 network.proxy policy.
+}
+else
+{
+    // Warnings name the dependency that is missing or unusable.
+    Console.Error.WriteLine(string.Join(Environment.NewLine, bubblewrap.Warnings));
+}
+```
+
+The capability is **fail closed** — a probe that cannot run leaves it absent
+with a warning rather than reporting support — and advisory, since the runner
+probes again at launch. A request the host cannot satisfy fails rather than
+degrading to weaker isolation.
+
+Host requirements are in
+[`docs/bwrap-support/bubblewrap-backend.md`](../../docs/bwrap-support/bubblewrap-backend.md);
+the discovery API is in
+[`docs/backend-support-probe-api-plan.md`](../../docs/backend-support-probe-api-plan.md).
 
 ### Full requests and explicit containment
 
@@ -258,7 +308,7 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.8.0-alpha",
+        Version = "0.9.0-alpha",
         Network = new NetworkPolicy { AllowOutbound = true },
     },
     "python3 -c 'print(42)'")
@@ -283,7 +333,46 @@ var request = new SandboxRequest(
 The image must already be cached unless `ImageTarPath` is supplied. The image
 store wins over the tar when both identify an already-cached image. WSLC is
 experimental, so `Experimental` is required; the native unit must also be built
-with WSLC support or execution returns `BackendUnavailable`.
+with WSLC support or execution returns `UnsupportedContainment`.
+
+#### Isolation session options
+
+`IsolationSessionContainment` selects the experimental IsolationSession backend,
+which runs the workload under an isolated agent user account. It carries no
+configuration of its own:
+
+```csharp
+var request = new SandboxRequest(
+    new SandboxPolicy
+    {
+        Version = "0.9.0-alpha",
+        Network = new NetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        },
+    },
+    "echo hello")
+{
+    Experimental = true,
+    Containment = new IsolationSessionContainment(),
+};
+```
+
+The network policy is not optional here. The backend cannot restrict the
+container's network, so it accepts only an explicit acknowledgment of that and
+refuses an absent policy, whose default is a deny it could not enforce. It also
+refuses filesystem paths and any `Ui`: supplying either is an error rather than
+a no-op, so the policy shown under Usage does not carry over to this backend.
+
+IsolationSession is experimental, so `Experimental` is required; the native unit
+must also be built with isolation-session support or execution returns
+`UnsupportedContainment`. It is refused from a single-threaded apartment, so a
+GUI caller must reach it from an MTA thread.
 
 ### Network proxy
 
@@ -584,7 +673,7 @@ exception messages and stack traces. See
   judged by whoever runs them; each states what to look for.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
   need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
-  The isolation-session lifecycle tests skip unless `GetAvailableBackends()`
+  The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
   reports that backend, which needs both a build with
   `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
   `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
@@ -611,9 +700,10 @@ other Windows RID for a multi-RID package.
 Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`Spawn` → `MxcSandboxProcess`), and the **state-aware lifecycle**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
-ProcessContainer, Linux Bubblewrap, macOS Seatbelt for run/stream; the
-state-aware lifecycle supports IsolationSession, Windows Sandbox, and WSLC on
-Windows; all three are experimental).
+ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
+IsolationSession and WSLC for run/stream; the state-aware lifecycle supports
+IsolationSession, Windows Sandbox, and WSLC on Windows; all three are
+experimental).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
@@ -626,18 +716,24 @@ the Rust parser and TypeScript SDK constants.
 deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
+IsolationSession requires a `StateAwareNetworkPolicy` describing its actual
+unrestricted posture, with directional allow defaults for egress, ingress, and
+host loopback. Legacy fields are rejected. Empty, restrictive, mixed,
+rule-bearing, or proxy-bearing policies are also rejected.
+
 ```csharp
-// IsolationSession accepts only the unrestricted-network posture, and refuses
-// an absent policy: its container runs on a network MXC can neither filter nor
-// deny, so the caller states that posture.
 var provisioned = MxcLifecycle.ProvisionSandbox(
     StateAwareContainment.IsolationSession,
     new IsolationSessionProvisionOptions(
-    new StateAwareNetworkPolicy
-    {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
-        AllowLocalNetwork = true,
-    }));
+        new StateAwareNetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        }));
 SandboxId id = provisioned.SandboxId;   // opaque — carry it forward, never parse it
 
 // Provision mints host-side resources, so deprovision has to run even when a
@@ -696,17 +792,21 @@ var wslc = new WslcProvisionOptions
     ImageTarPath = @"C:\images\alpine.tar", // optional local import
     Network = new StateAwareNetworkPolicy
     {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
+        Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+        Ingress = new NetworkIngressPolicy
+        {
+            Default = NetworkAction.Allow,
+            HostLoopback = NetworkAction.Allow,
+        },
     },
 };
 ```
 
-IsolationSession and Windows Sandbox default to schema `0.6.0-alpha`; WSLC
-defaults to `0.8.0-alpha`. Set `Version` on provision or phase options to
-override the inferred version. State-aware exec options expose working
-directory, `KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and
-timeout. When `InheritDefaultEnvironment` is supplied without an explicit
-version, the SDK selects `0.9.0-alpha`; an explicitly older version is rejected.
+All state-aware backends use the exact development schema `0.9.0-alpha`.
+`Version` may be omitted or explicitly set to that registered value; the SDK
+rejects other values rather than emitting an envelope for an unregistered
+state-aware contract. State-aware exec options expose working directory,
+`KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and timeout.
 WSLC also accepts a proxy-only per-exec override:
 
 ```csharp

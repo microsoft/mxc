@@ -3,11 +3,33 @@
   "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
   "title": "MXC Configuration 0.9.0-alpha",
   "description": "Exact mutable MXC development configuration contract.",
-  "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json. This exact contract is not enforced by the runtime parser until Phase 9. Request roots are selected by phase and provision containment.",
+  "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json. This exact contract is authoritative for declared 0.9.0-alpha requests. Request roots are selected by phase and provision containment.",
   "allOf": [
     {
       "else": {
-        "$ref": "#/definitions/OneShotRequest"
+        "allOf": [
+          {
+            "$ref": "#/definitions/OneShotRequest"
+          },
+          {
+            "else": true,
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "isolation_session"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "required": [
+                "network"
+              ]
+            }
+          }
+        ]
       },
       "if": {
         "required": [
@@ -173,24 +195,6 @@
         }
       ]
     },
-    "DefaultNetworkPolicy": {
-      "oneOf": [
-        {
-          "description": "Allow",
-          "enum": [
-            "allow"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Block",
-          "enum": [
-            "block"
-          ],
-          "type": "string"
-        }
-      ]
-    },
     "DeprovisionExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `deprovision` phase.",
@@ -279,6 +283,10 @@
           "$ref": "#/definitions/Process",
           "description": "Process to execute in the sandbox."
         },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional per-execution runtime values, including the cooperative proxy URL."
+        },
         "sandboxId": {
           "description": "Identifier of the sandbox to execute in.",
           "type": "string"
@@ -347,28 +355,61 @@
     },
     "IsolationSessionNetwork": {
       "additionalProperties": false,
-      "description": "The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.",
+      "description": "The canonical unrestricted-network posture.",
       "properties": {
-        "allowLocalNetwork": {
-          "$ref": "#/definitions/True",
-          "description": "Required acknowledgment that local network access is allowed."
+        "egress": {
+          "$ref": "#/definitions/IsolationSessionNetworkEgress",
+          "description": "Required unrestricted outbound posture."
         },
-        "defaultPolicy": {
-          "$ref": "#/definitions/IsolationSessionNetworkDefaultPolicy",
-          "description": "Exact `allow` default network policy marker."
+        "ingress": {
+          "$ref": "#/definitions/IsolationSessionNetworkIngress",
+          "description": "Required unrestricted inbound and host-loopback posture."
         }
       },
       "required": [
-        "allowLocalNetwork",
-        "defaultPolicy"
+        "egress",
+        "ingress"
       ],
       "type": "object"
     },
-    "IsolationSessionNetworkDefaultPolicy": {
+    "IsolationSessionNetworkAllow": {
       "enum": [
         "allow"
       ],
       "type": "string"
+    },
+    "IsolationSessionNetworkEgress": {
+      "additionalProperties": false,
+      "description": "Unrestricted outbound posture.",
+      "properties": {
+        "default": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow outbound traffic by default."
+        }
+      },
+      "required": [
+        "default"
+      ],
+      "type": "object"
+    },
+    "IsolationSessionNetworkIngress": {
+      "additionalProperties": false,
+      "description": "Unrestricted inbound and host-loopback posture.",
+      "properties": {
+        "default": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow private-network inbound traffic by default."
+        },
+        "hostLoopback": {
+          "$ref": "#/definitions/IsolationSessionNetworkAllow",
+          "description": "Allow bidirectional host-loopback connectivity."
+        }
+      },
+      "required": [
+        "default",
+        "hostLoopback"
+      ],
+      "type": "object"
     },
     "IsolationSessionProvision": {
       "additionalProperties": false,
@@ -394,7 +435,7 @@
     },
     "IsolationSessionProvisionRequest": {
       "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for isolation_session",
+      "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.",
       "properties": {
         "$schema": {
           "description": "Optional JSON Schema reference for editor validation.",
@@ -409,11 +450,11 @@
         },
         "experimental": {
           "$ref": "#/definitions/IsolationSessionProvisionExperimental",
-          "description": "Optional closed experimental settings."
+          "description": "Optional closed experimental settings containing only `appId`."
         },
         "network": {
           "$ref": "#/definitions/IsolationSessionNetwork",
-          "description": "Required unrestricted-network acknowledgment."
+          "description": "Required unrestricted network posture."
         },
         "phase": {
           "$ref": "#/definitions/ProvisionPhase",
@@ -474,43 +515,13 @@
       "additionalProperties": false,
       "description": "Network access policy shared by the stable containment backends.",
       "properties": {
-        "allowLocalNetwork": {
-          "description": "Optional permission to bind and accept local network connections.",
-          "type": "boolean"
-        },
-        "allowedHosts": {
-          "description": "Optional hosts allowed when the default policy blocks access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "blockedHosts": {
-          "description": "Optional hosts blocked when the default policy allows access.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "defaultPolicy": {
-          "$ref": "#/definitions/DefaultNetworkPolicy",
-          "description": "Optional default network posture."
-        },
         "egress": {
           "$ref": "#/definitions/NetworkEgress",
           "description": "Optional outbound network rules."
         },
-        "enforcementMode": {
-          "$ref": "#/definitions/NetworkEnforcementMode",
-          "description": "Optional network enforcement mechanism."
-        },
         "ingress": {
           "$ref": "#/definitions/NetworkIngress",
           "description": "Optional inbound and host-loopback network rules."
-        },
-        "proxy": {
-          "$ref": "#/definitions/NetworkProxy",
-          "description": "Optional proxy configuration."
         }
       },
       "type": "object"
@@ -557,31 +568,6 @@
         }
       },
       "type": "object"
-    },
-    "NetworkEnforcementMode": {
-      "oneOf": [
-        {
-          "description": "Capabilities",
-          "enum": [
-            "capabilities"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Firewall",
-          "enum": [
-            "firewall"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Both",
-          "enum": [
-            "both"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "NetworkIngress": {
       "additionalProperties": false,
@@ -671,52 +657,6 @@
             "any"
           ],
           "type": "string"
-        }
-      ]
-    },
-    "NetworkProxy": {
-      "description": "One of the proxy configurations accepted by the `0.9.0-alpha` contract.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "Connect to an existing proxy on a non-zero localhost TCP port.",
-          "properties": {
-            "localhost": {
-              "maximum": 65535,
-              "minimum": 1.0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "localhost"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Start and use MXC's built-in test proxy.",
-          "properties": {
-            "builtinTestServer": {
-              "$ref": "#/definitions/True"
-            }
-          },
-          "required": [
-            "builtinTestServer"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Connect through the supplied proxy URL.",
-          "properties": {
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "url"
-          ],
-          "type": "object"
         }
       ]
     },
@@ -1211,7 +1151,7 @@
       "description": "Runtime configuration supplied alongside the sandbox policy.",
       "properties": {
         "networkProxy": {
-          "description": "Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.",
+          "description": "Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.",
           "type": "string"
         }
       },
@@ -1401,12 +1341,6 @@
           "type": "string"
         }
       ]
-    },
-    "True": {
-      "enum": [
-        true
-      ],
-      "type": "boolean"
     },
     "Ui": {
       "additionalProperties": false,

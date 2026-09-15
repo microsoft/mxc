@@ -4,7 +4,7 @@
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.9.0-dev.json`](../schemas/dev/mxc-config.schema.0.9.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](../schemas/dev/mxc-config.schema.0.9.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -16,7 +16,7 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -80,6 +80,31 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+### IsolationSession unrestricted networking (0.9)
+
+IsolationSession cannot restrict networking. Exact v0.9 requests must describe
+that actual posture through the standard directional network fields:
+
+```json
+{
+    "version": "0.9.0-alpha",
+    "phase": "provision",
+    "containment": "isolation_session",
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": {
+            "default": "allow",
+            "hostLoopback": "allow"
+        }
+    }
+}
+```
+
+All three directional values must be explicitly `allow`; omission defaults to
+deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
+An absent or empty `network` object is rejected. The existing experimental
+execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
+unchanged by this addition.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
@@ -373,21 +398,21 @@ a config that also carries an unrelated backend's section is **rejected** with a
 
 ### State-aware lifecycle envelope
 
-The dev schema additionally documents a multi-phase envelope shape for the
+The exact development schema documents a multi-phase envelope shape for the
 state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`). Where the one-shot config above is a self-contained
 `ExecutionRequest` to run once, a state-aware envelope identifies which
 phase is being driven against an existing provisioned sandbox.
 
-The envelope follows the same supported version range as one-shot requests:
-`>=0.6, <=0.9`. The example uses `0.6.0-alpha`, which is accepted throughout
-that range. The state-aware field shape is documented by the current dev
-schema:
+State-aware envelopes currently require the exact `0.9.0-alpha` development
+contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
+contracts contain only one-shot request roots. The state-aware field shape is
+documented by the exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json",
-    "version": "0.6.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+    "version": "0.9.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,

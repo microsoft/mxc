@@ -13,17 +13,29 @@ use crate::models::{
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-use crate::network_parser::{
-    directional_network_version_error, host_is_any_loopback, parse_network_policy,
-    supports_directional_network, NetworkSections,
-};
+#[cfg(test)]
+use crate::network_parser::{directional_network_version_error, supports_directional_network};
+use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
+use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use crate::state_aware_wire::StateAwareWireInput;
+use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
+use mxc_config_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::{borrow::Cow, fs};
+#[cfg(test)]
+use std::borrow::Cow;
+use std::fs;
+
+#[cfg(test)]
+pub(crate) mod legacy_payload_reference;
+#[cfg(test)]
+pub(crate) mod legacy_state_aware_request;
+#[cfg(test)]
+use legacy_state_aware_request::{
+    LegacyMxcRequest, LegacyStateAwareRequest, LegacyStateAwareWireInput,
+};
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -34,6 +46,9 @@ pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
     /// not be discriminated as state-aware vs one-shot.
     Decode(WxcError),
+    /// A missing, invalid, or unsupported version declaration, rejected before
+    /// one-shot vs state-aware selection.
+    Version(WxcError),
     /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
     /// Discriminated as one-shot, but the JSON payload was malformed.
@@ -52,16 +67,19 @@ enum ErrorOutput {
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
-            Self::Decode(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => ErrorOutput::Primary,
+            Self::Decode(_) | Self::Version(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => {
+                ErrorOutput::Primary
+            }
             Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Self::Decode(error) | Self::OneShot(error) | Self::OneShotMalformed(error) => {
-                error.to_string()
-            }
+            Self::Decode(error)
+            | Self::Version(error)
+            | Self::OneShot(error)
+            | Self::OneShotMalformed(error) => error.to_string(),
             Self::StateAware(error) => error.to_string(),
         }
     }
@@ -70,6 +88,8 @@ impl ParseError {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(expecting = "a configuration object")]
 struct RequestDiscriminator<'a> {
+    // Exact dispatch uses the contract's phase probe instead.
+    #[cfg(test)]
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
@@ -102,6 +122,7 @@ fn reject_legacy_telemetry_raw(experimental: Option<&str>) -> Result<(), WxcErro
     Ok(())
 }
 
+#[cfg(test)]
 fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcError> {
     if config
         .get("experimental")
@@ -137,6 +158,7 @@ pub struct LoadOptions<'a> {
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
 /// Otherwise `input` is treated as a file path.
+#[cfg(test)]
 pub fn load_request(
     input: &str,
     logger: &mut Logger,
@@ -160,11 +182,8 @@ pub fn load_request(
     result
 }
 
-/// Parse a one-shot request from a **raw JSON string** (already decoded — not
-/// a file path or base64). For executors that decode the request once and
-/// thread the JSON string through both the maintenance-probe check and this
-/// loader, avoiding the double-read that would otherwise drain named pipes,
-/// `/dev/stdin`, and process-substitution paths.
+/// Rolling one-shot raw-JSON loader retained only for characterization tests.
+#[cfg(test)]
 pub fn load_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -179,9 +198,8 @@ pub fn load_request_from_json(
     )
 }
 
-/// Options-aware variant of [`load_request_from_json`]. It remains
-/// crate-private because the options are only needed by the executor's
-/// request-loading paths.
+/// Options-aware rolling loader retained only for characterization tests.
+#[cfg(test)]
 pub(crate) fn load_request_from_json_with_options(
     json_str: &str,
     logger: &mut Logger,
@@ -220,6 +238,7 @@ pub(crate) fn load_request_from_json_with_options(
 /// serialise → base64 → decode → re-parse it.
 ///
 /// [`Value`]: serde_json::Value
+#[cfg(test)]
 pub fn load_request_from_value(
     config: serde_json::Value,
     logger: &mut Logger,
@@ -236,6 +255,291 @@ pub fn load_request_from_value(
     log_one_shot_error(logger, &result);
     result
 }
+
+/// Workspace-internal exact one-shot contract selected by a trusted typed
+/// producer.
+///
+/// This is not a stable external API.
+#[doc(hidden)]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ExactOneShotContract {
+    V0_6(Box<mxc_config_contract::published::v0_6_0_alpha::Request>),
+    V0_7(Box<mxc_config_contract::published::v0_7_0_alpha::Request>),
+    V0_8(Box<mxc_config_contract::published::v0_8_0_alpha::Request>),
+    Dev(Box<mxc_config_contract::dev::OneShotRequest>),
+}
+
+/// Convert a typed exact one-shot contract through its existing adapter and
+/// shared semantic validation.
+///
+/// This workspace-internal bridge exists for `mxc_engine` policy builders.
+#[doc(hidden)]
+pub fn load_one_shot_request_from_contract(
+    request: ExactOneShotContract,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError> {
+    let config = match request {
+        ExactOneShotContract::V0_6(request) => {
+            crate::config_contract_adapters::v0_6::into_wire(*request)
+        }
+        ExactOneShotContract::V0_7(request) => {
+            crate::config_contract_adapters::v0_7::into_wire(*request)
+        }
+        ExactOneShotContract::V0_8(request) => {
+            crate::config_contract_adapters::v0_8::into_wire(*request)
+        }
+        ExactOneShotContract::Dev(request) => {
+            mxc_config_contract::dev::validate_one_shot_request(&request)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+            crate::config_contract_adapters::dev::one_shot_into_wire(*request)
+        }
+    };
+
+    let result = convert_wire_config(config, logger, true, false);
+    log_one_shot_error(logger, &result);
+    result
+}
+
+fn exact_version_error(error: VersionProbeError) -> ParseError {
+    use serde_json::error::Category;
+
+    match error {
+        VersionProbeError::InvalidDeclaration(source) => {
+            let category = source.classify();
+            let error = WxcError::ConfigParse(format!("Invalid version declaration: {source}"));
+            match category {
+                Category::Data => ParseError::Version(error),
+                Category::Syntax | Category::Eof | Category::Io => ParseError::Decode(error),
+            }
+        }
+        VersionProbeError::UnsupportedVersion(_) => {
+            let supported = supported_versions()
+                .iter()
+                .map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ParseError::Version(WxcError::ConfigParse(format!(
+                "Unsupported contract version. \
+                 Registered versions are: {supported}"
+            )))
+        }
+    }
+}
+
+fn parse_exact_published_one_shot<T>(
+    json: &str,
+    logger: &mut Logger,
+    adapt: fn(T) -> wire::MxcConfig,
+) -> Result<MxcRequest, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let request = config_deserialize::from_str(json)
+        .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+    convert_wire_config(adapt(request), logger, true, false)
+        .map(MxcRequest::OneShot)
+        .map_err(ParseError::OneShot)
+}
+
+fn exact_phase_error(error: mxc_config_contract::dev::PhaseProbeError) -> ParseError {
+    let message = match error {
+        mxc_config_contract::dev::PhaseProbeError::InvalidDeclaration(source) => {
+            format!("Invalid phase declaration: {source}")
+        }
+        mxc_config_contract::dev::PhaseProbeError::UnsupportedPhase(_) => {
+            "Unsupported phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn exact_containment_error(error: mxc_config_contract::dev::ContainmentProbeError) -> ParseError {
+    let message = match error {
+        mxc_config_contract::dev::ContainmentProbeError::InvalidDeclaration(source) => {
+            format!("Invalid provision containment declaration: {source}")
+        }
+        mxc_config_contract::dev::ContainmentProbeError::UnsupportedContainment(_) => {
+            "Unsupported containment for provision phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&'static str> {
+    match (contract, path) {
+        ("IsolationSession provision", Some("network.proxy")) => Some(
+            "IsolationSession requires network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback all set to 'allow'; it does not support proxy \
+             configuration",
+        ),
+        (
+            "IsolationSession provision",
+            Some(
+                "network.defaultPolicy"
+                | "network.enforcementMode"
+                | "network.allowedHosts"
+                | "network.blockedHosts"
+                | "network.allowLocalNetwork",
+            ),
+        ) => Some(
+            "IsolationSession requires network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback all set to 'allow'; it does not support network \
+             filtering",
+        ),
+        ("WSLC provision", Some("network.proxy")) => {
+            Some("move the proxy URL to top-level runtimeConfig.networkProxy on the exec phase")
+        }
+        ("WSLC provision", Some("network.defaultPolicy" | "network.allowLocalNetwork")) => Some(
+            "set network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback consistently to 'allow' or 'deny'",
+        ),
+        ("WSLC provision", Some("network.enforcementMode")) => Some(
+            "remove network.enforcementMode; WSLc selects its all-or-nothing network mechanism",
+        ),
+        ("WSLC provision", Some("network.allowedHosts" | "network.blockedHosts")) => Some(
+            "WSLc does not support hostname or destination filtering; use an all-'allow' or \
+             all-'deny' directional posture",
+        ),
+        (_, Some("network.defaultPolicy")) => {
+            Some("use network.egress.default ('allow' or 'deny')")
+        }
+        (_, Some("network.enforcementMode")) => {
+            Some("use directional network policy; enforcement is selected by the backend")
+        }
+        (_, Some("network.allowedHosts" | "network.blockedHosts")) => Some(
+            "use network.egress.allow/deny CIDR rules; hostnames cannot be losslessly converted",
+        ),
+        (_, Some("network.allowLocalNetwork")) => {
+            Some("use network.ingress.default and network.ingress.hostLoopback")
+        }
+        (_, Some("network.proxy")) => Some("use runtimeConfig.networkProxy with a proxy URL"),
+        ("IsolationSession provision", Some("network")) => Some(
+            "set network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback to 'allow'",
+        ),
+        _ => None,
+    }
+}
+
+fn deserialize_development_root<T>(
+    json: &str,
+    contract: &'static str,
+    state_aware: bool,
+) -> Result<T, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    config_deserialize::from_str(json).map_err(|error| {
+        let mut message = format!("Invalid {contract} request: {error}");
+        if let Some(migration) = development_network_migration(contract, error.path()) {
+            message.push_str(&format!("; schema 0.9 migration: {migration}"));
+        }
+        if state_aware {
+            ParseError::StateAware(MxcError::malformed_request(message))
+        } else {
+            ParseError::OneShot(WxcError::ConfigParse(message))
+        }
+    })
+}
+
+fn deserialize_development_request(
+    json: &str,
+    phase: Option<mxc_config_contract::dev::Phase>,
+) -> Result<mxc_config_contract::dev::Request, ParseError> {
+    use mxc_config_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
+
+    match phase {
+        None => {
+            let request: mxc_config_contract::dev::OneShotRequest =
+                deserialize_development_root(json, "one-shot", false)?;
+            dev::validate_one_shot_request(&request)
+                .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
+        Some(Phase::Provision) => {
+            let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
+                Containment::WindowsSandbox => {
+                    deserialize_development_root(json, "Windows Sandbox provision", true)
+                        .map(ProvisionRequest::WindowsSandbox)
+                }
+                Containment::IsolationSession => {
+                    deserialize_development_root(json, "IsolationSession provision", true)
+                        .map(ProvisionRequest::IsolationSession)
+                }
+                Containment::Wslc => deserialize_development_root(json, "WSLC provision", true)
+                    .map(ProvisionRequest::Wslc),
+            }?;
+            Ok(Request::Provision(request))
+        }
+        Some(Phase::Start) => deserialize_development_root(json, "start", true).map(Request::Start),
+        Some(Phase::Exec) => deserialize_development_root(json, "exec", true).map(Request::Exec),
+        Some(Phase::Stop) => deserialize_development_root(json, "stop", true).map(Request::Stop),
+        Some(Phase::Deprovision) => {
+            deserialize_development_root(json, "deprovision", true).map(Request::Deprovision)
+        }
+    }
+}
+
+fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
+    let discriminator: RequestDiscriminator<'_> =
+        config_deserialize::from_str(json).map_err(|error| {
+            let message = error.to_string();
+            if phase.is_some() {
+                ParseError::StateAware(MxcError::malformed_request(message))
+            } else {
+                ParseError::OneShot(WxcError::ConfigParse(message))
+            }
+        })?;
+    if let Err(error) = reject_legacy_telemetry_raw(discriminator.experimental.map(RawValue::get)) {
+        return Err(if phase.is_some() {
+            ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+        } else {
+            ParseError::OneShot(error)
+        });
+    }
+    let request = deserialize_development_request(json, phase)?;
+    let adapted = crate::config_contract_adapters::dev::adapt_request(request)
+        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+
+    match adapted {
+        crate::config_contract_adapters::dev::AdaptedWireRequest::OneShot(config) => {
+            convert_wire_config(config, logger, true, false)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
+        crate::config_contract_adapters::dev::AdaptedWireRequest::StateAware(input) => {
+            normalize_state_aware(input, logger)
+                .map(MxcRequest::StateAware)
+                .map_err(|error| {
+                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+                })
+        }
+    }
+}
+
+fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    match probe_version(json).map_err(exact_version_error)? {
+        ContractVersion::V0_6_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_6::into_wire,
+        ),
+        ContractVersion::V0_7_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_7::into_wire,
+        ),
+        ContractVersion::V0_8_0Alpha => parse_exact_published_one_shot(
+            json,
+            logger,
+            crate::config_contract_adapters::v0_8::into_wire,
+        ),
+        ContractVersion::V0_9_0Alpha => parse_exact_development(json, logger),
+    }
+}
+
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
 /// failures).
@@ -252,6 +556,35 @@ pub fn load_mxc_request(
             cli_command: &[],
         },
     )
+}
+
+/// Loads an exact-versioned one-shot request from a file or base64 input.
+///
+/// State-aware lifecycle documents are rejected because this entry point is
+/// intended for executors that only support run-to-completion requests.
+pub fn load_one_shot_request(
+    input: &str,
+    logger: &mut Logger,
+    is_base64: bool,
+) -> Result<ExecutionRequest, WxcError> {
+    let result = (|| {
+        let json = decode_request_input(input, is_base64)?;
+        match parse_exact_mxc_request_json(&json, logger) {
+            Ok(MxcRequest::OneShot(request)) => Ok(request),
+            Ok(MxcRequest::StateAware(_)) => Err(WxcError::ConfigParse(
+                "expected a one-shot request, got a state-aware lifecycle request".to_string(),
+            )),
+            Err(
+                ParseError::Decode(error)
+                | ParseError::Version(error)
+                | ParseError::OneShot(error)
+                | ParseError::OneShotMalformed(error),
+            ) => Err(error),
+            Err(ParseError::StateAware(error)) => Err(WxcError::ConfigParse(error.to_string())),
+        }
+    })();
+    log_one_shot_error(logger, &result);
+    result
 }
 
 /// Options-aware variant of [`load_mxc_request`]. When
@@ -276,9 +609,18 @@ pub fn load_mxc_request_with_options(
 }
 
 /// Parse an MXC request from a **raw JSON string** (already decoded — not a file
-/// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
-/// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
-/// in-memory JSON string can be parsed directly.
+/// path or base64). The exact registered version is selected first. Published
+/// versions use their one-shot request contract; the v0.9 development contract
+/// then uses `phase` to select its one-shot or state-aware request root. This
+/// skips the file/base64 decode step so an in-memory JSON string can be parsed
+/// directly.
+///
+/// This loader enforces exact registered contracts. The legacy rolling raw-JSON
+/// loader is not available in production builds:
+///
+/// ```compile_fail
+/// use wxc_common::config_parser::load_request_from_json;
+/// ```
 pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
@@ -320,11 +662,11 @@ fn parse_mxc_request_json_with_cli(
     cli_command: &[String],
 ) -> Result<MxcRequest, ParseError> {
     if cli_command.is_empty() {
-        return parse_mxc_request_json(json_str, logger);
+        return parse_exact_mxc_request_json(json_str, logger);
     }
 
     let (json_str, override_log) = apply_cli_command(json_str, cli_command)?;
-    let request = parse_mxc_request_json(&json_str, logger)?;
+    let request = parse_exact_mxc_request_json(&json_str, logger)?;
     if let Some(message) = override_log {
         logger.log_line(&message);
     }
@@ -339,18 +681,29 @@ fn parse_mxc_request_json_with_cli(
 /// text and output routing rather than inheriting a probe's stricter, and
 /// differently routed, diagnostic.
 ///
-/// Probing the phase first is load-bearing: it selects which [`ParseError`]
-/// variant a later failure uses, and that selects the stdout envelope versus
-/// the stderr diagnostic.
+/// The exact version is resolved before the lifecycle discriminator. Published
+/// contracts do not define `phase`, so a stray phase field must remain a
+/// published one-shot contract error even when a CLI command is supplied.
 ///
 /// [`load_mxc_request_with_options`] calls this only after confirming that
 /// `LoadOptions::cli_command` is non-empty. The explicit empty-command
 /// rejection remains defensive for direct internal callers and future call
 /// sites rather than relying solely on that upstream guard.
 fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<String>), ParseError> {
-    // An unreadable phase declaration is the parser's to report.
-    let Ok(phase) = probe_phase(json) else {
+    // An unreadable or unsupported version declaration is the parser's to
+    // report without the CLI path reclassifying the request.
+    let Ok(version) = probe_version(json) else {
         return Ok((json.to_string(), None));
+    };
+    let phase = if version == ContractVersion::V0_9_0Alpha {
+        // An unreadable phase declaration is likewise the exact parser's to
+        // report through the development contract.
+        let Ok(phase) = probe_phase(json) else {
+            return Ok((json.to_string(), None));
+        };
+        phase
+    } else {
+        None
     };
 
     let Some(command_source) = crate::splice::CommandSource::parse(json) else {
@@ -411,7 +764,11 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
 /// Borrows only the discriminator and the raw state-aware backend block, then
 /// deserialises the typed model directly from source text so policy errors
 /// retain line and column information (`serde_json::Value` would discard it).
-fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+#[cfg(test)]
+fn parse_mxc_request_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<LegacyMxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
     if discriminator.phase.is_some() {
@@ -421,7 +778,7 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
         convert_wire_state_aware(json_str, discriminator.experimental, logger)
-            .map(MxcRequest::StateAware)
+            .map(LegacyMxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
@@ -439,11 +796,12 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, false)
-            .map(MxcRequest::OneShot)
+            .map(LegacyMxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
 }
 
+#[cfg(test)]
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
     validate_seatbelt_launch_method_version(config)?;
@@ -451,6 +809,7 @@ fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError>
     validate_inherit_default_env_field_version(config)
 }
 
+#[cfg(test)]
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -508,6 +867,7 @@ fn validate_seatbelt_launch_method_version(config: &serde_json::Value) -> Result
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -531,6 +891,7 @@ fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), Wx
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_inherit_default_env_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
@@ -618,6 +979,7 @@ const CURRENT_SCHEMA_VERSION: &str = "0.9.0-alpha";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
+#[cfg(test)]
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
 /// Validate that the schema version (semver) is supported by this binary.
@@ -842,6 +1204,7 @@ fn validate_single_backend_section(
 /// `containment`. When `containment` is `None` (state-aware non-provision
 /// phases can resolve the backend from `sandboxId`), a single key is
 /// allowed; two or more is unambiguously wrong.
+#[cfg(test)]
 fn validate_experimental_backend_keys(
     containment: Option<&ContainmentBackend>,
     experimental_raw: Option<&serde_json::Value>,
@@ -1649,10 +2012,11 @@ fn convert_wire_config(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_rolling_state_aware_wire_input(
     json: &str,
     experimental: Option<&RawValue>,
-) -> Result<StateAwareWireInput, WxcError> {
+) -> Result<LegacyStateAwareWireInput, WxcError> {
     let experimental = experimental.map(RawValue::get);
     let experimental_span = experimental
         .map(|raw| experimental_source_span(json, raw))
@@ -1679,29 +2043,57 @@ pub(crate) fn parse_rolling_state_aware_wire_input(
     // The raw value above is authoritative for state-aware experimental data.
     config.experimental = None;
 
-    Ok(StateAwareWireInput {
+    Ok(LegacyStateAwareWireInput {
         config,
         experimental_raw,
         source_text: json.into(),
     })
 }
 
+#[cfg(test)]
 fn convert_wire_state_aware(
     json: &str,
     experimental: Option<&RawValue>,
     logger: &mut Logger,
-) -> Result<ParsedStateAwareRequest, WxcError> {
+) -> Result<LegacyStateAwareRequest, WxcError> {
     let input = parse_rolling_state_aware_wire_input(json, experimental)?;
-    normalize_state_aware(input, logger)
+    normalize_legacy_state_aware(input, logger)
 }
 
-/// Apply the state-aware validation and runtime normalization shared by the
-/// rolling and exact-contract parser paths.
+/// Normalize checked exact input without retaining source or backend JSON.
 fn normalize_state_aware(
-    input: StateAwareWireInput,
+    input: StateAwareInput,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    let StateAwareWireInput {
+    let (common, operation) = input.into_parts();
+    let request = normalize_state_aware_common(
+        common,
+        NormalizationContext {
+            phase: operation.phase(),
+            containment: match &operation {
+                StateAwareOperation::Provision(provision) => Some(match provision {
+                    StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
+                    StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
+                    StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
+                }),
+                StateAwareOperation::Start { .. }
+                | StateAwareOperation::Exec { .. }
+                | StateAwareOperation::Stop { .. }
+                | StateAwareOperation::Deprovision { .. } => None,
+            },
+            sandbox_id: operation.sandbox_id(),
+        },
+        logger,
+    )?;
+    Ok(ParsedStateAwareRequest::new(request, operation))
+}
+
+#[cfg(test)]
+fn normalize_legacy_state_aware(
+    input: LegacyStateAwareWireInput,
+    logger: &mut Logger,
+) -> Result<LegacyStateAwareRequest, WxcError> {
+    let LegacyStateAwareWireInput {
         config: mut cfg,
         experimental_raw,
         source_text,
@@ -1766,7 +2158,6 @@ fn normalize_state_aware(
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
 
     let sandbox_id = cfg.sandbox_id.clone();
-    let network_supplied = cfg.network.is_some();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -1805,35 +2196,59 @@ fn normalize_state_aware(
     cfg.process_container = None;
     cfg.lxc = None;
     cfg.lifecycle = None;
-    if phase != Phase::Provision {
-        cfg.containment = sandbox_id
-            .as_deref()
-            .and_then(state_aware_containment_from_id);
-    }
+    let provision_containment = cfg.containment.take();
+    let request = normalize_state_aware_common(
+        cfg,
+        NormalizationContext {
+            phase,
+            containment: provision_containment,
+            sandbox_id: sandbox_id.as_deref(),
+        },
+        logger,
+    )?;
 
-    let require_process = phase == Phase::Exec;
-    let state_aware_wslc_exec = phase == Phase::Exec
-        && cfg
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request = convert_wire_config(cfg, logger, require_process, state_aware_wslc_exec)?;
-    if phase != Phase::Provision && !network_supplied {
-        request.policy.network_egress = None;
-        request.policy.network_ingress = None;
-    }
-
-    Ok(ParsedStateAwareRequest {
+    Ok(LegacyStateAwareRequest {
         request,
         phase,
         containment,
         sandbox_id,
         experimental_raw,
-        // Retain the decoded request text so the dispatcher can deserialize each
-        // `experimental.<backend>.<phase>` sub-slice positionally and report
-        // typed errors with whole-file line/column (parity with base config).
+        // Only the legacy diagnostic reference retains source for positional
+        // phase-fragment errors; production dispatch consumes typed operations.
         source_text: Some(source_text),
     })
+}
+
+/// Temporary routing view; production derives it exclusively from the operation.
+struct NormalizationContext<'a> {
+    phase: Phase,
+    containment: Option<wire::Containment>,
+    sandbox_id: Option<&'a str>,
+}
+
+fn normalize_state_aware_common(
+    mut common: wire::MxcConfig,
+    context: NormalizationContext<'_>,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, WxcError> {
+    let network_supplied = common.network.is_some();
+    common.containment = if context.phase == Phase::Provision {
+        context.containment
+    } else {
+        context.sandbox_id.and_then(state_aware_containment_from_id)
+    };
+    let require_process = context.phase == Phase::Exec;
+    let state_aware_wslc_exec = require_process
+        && common
+            .containment
+            .as_ref()
+            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
+    let mut request = convert_wire_config(common, logger, require_process, state_aware_wslc_exec)?;
+    if context.phase != Phase::Provision && !network_supplied {
+        request.policy.network_egress = None;
+        request.policy.network_ingress = None;
+    }
+    Ok(request)
 }
 
 /// Byte range `[start, end)` of the borrowed `experimental` value within the
@@ -1845,6 +2260,7 @@ fn normalize_state_aware(
 /// checks below make that invariant explicit and fail closed if a future caller
 /// ever passes a `raw` not borrowed from `json` (unreachable on the normal
 /// parser path).
+#[cfg(test)]
 fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), WxcError> {
     let locate_err = || {
         WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
@@ -1871,6 +2287,7 @@ fn mask_state_aware_experimental<'a>(
     mask_state_aware_experimental_with_span(json, experimental, span)
 }
 
+#[cfg(test)]
 fn mask_state_aware_experimental_with_span<'a>(
     json: &'a str,
     experimental: Option<&str>,
@@ -1921,6 +2338,7 @@ mod tests {
     use crate::logger::Mode;
     use crate::models::{ClipboardPolicy, NetworkAction, ProxyAddress};
     use crate::mxc_error::MxcErrorCode;
+    use std::path::{Path, PathBuf};
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -1930,12 +2348,3313 @@ mod tests {
         Logger::new(Mode::Buffer)
     }
 
+    fn assert_exact_contract_bridge(request: ExactOneShotContract, expected_version: &str) {
+        let mut logger = test_logger();
+        let execution = load_one_shot_request_from_contract(request, &mut logger).unwrap();
+
+        assert_eq!(execution.schema_version, expected_version);
+        assert_eq!(execution.script_code, "echo hello");
+    }
+
+    #[test]
+    fn private_exact_parser_path_compiles_and_accepts_a_published_request() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+
+        let parsed = parse_exact_mxc_request_json(json, &mut test_logger()).unwrap();
+        assert!(matches!(parsed, MxcRequest::OneShot(_)));
+    }
+
+    fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
+        parse_exact_mxc_request_json(json, &mut test_logger())
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct ProxySnapshot {
+        address: Option<String>,
+        port: Option<u16>,
+        original_url: Option<String>,
+        builtin_test_server: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct ExecutionSnapshot {
+        serialized: serde_json::Value,
+        network_proxy: ProxySnapshot,
+        network_specified: bool,
+        network_mode_specified: bool,
+        runtime_network_proxy_specified: bool,
+        ui_specified: bool,
+        requested_sandbox_kind: Option<&'static str>,
+    }
+
+    impl From<&ExecutionRequest> for ExecutionSnapshot {
+        fn from(request: &ExecutionRequest) -> Self {
+            let proxy = request.policy.network_proxy.address.as_ref();
+            Self {
+                serialized: serde_json::to_value(request).unwrap(),
+                network_proxy: ProxySnapshot {
+                    address: proxy.map(|address| address.address.clone()),
+                    port: proxy.map(|address| address.port),
+                    original_url: proxy.and_then(|address| address.original_url.clone()),
+                    builtin_test_server: request.policy.network_proxy.builtin_test_server,
+                },
+                // These are the complete set of ExecutionRequest model fields hidden by
+                // `#[serde(skip)]`; compare them explicitly so serialization cannot mask
+                // parser drift.
+                network_specified: request.policy.network_specified,
+                network_mode_specified: request.policy.network_mode_specified,
+                runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
+                ui_specified: request.policy.ui_specified,
+                requested_sandbox_kind: request
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            }
+        }
+    }
+
+    #[test]
+    fn execution_snapshot_detects_requested_sandbox_kind_drift() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "process",
+            "process": {"commandLine": "echo hello"},
+            "telemetry": {"enabled": true}
+        }"#;
+        let MxcRequest::OneShot(mut request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected a one-shot request");
+        };
+        let original = ExecutionSnapshot::from(&request);
+        assert_eq!(original.requested_sandbox_kind, Some("process"));
+
+        for requested_kind in [Some("processcontainer"), None] {
+            request.telemetry.as_mut().unwrap().requested_sandbox_kind = requested_kind;
+            let changed = ExecutionSnapshot::from(&request);
+            assert_eq!(original.serialized, changed.serialized);
+            assert_ne!(original, changed);
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum RequestSnapshot {
+        OneShot(ExecutionSnapshot),
+        StateAware {
+            request: ExecutionSnapshot,
+            phase: Phase,
+            containment: Option<ContainmentBackend>,
+            sandbox_id: Option<String>,
+            provision: Option<ProvisionSnapshot>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum ProvisionSnapshot {
+        IsolationSession(Option<Option<String>>),
+        WindowsSandbox,
+        Wslc(Option<(Option<String>, Option<String>)>),
+        InvalidLegacyPayload(String),
+    }
+
+    /// Frozen mirror of the legacy runtime IsolationSession provision config.
+    ///
+    /// The legacy payload path is the independent *baseline* the exact parser is
+    /// characterized against. Pointing it at the live runtime type would let it
+    /// silently learn every field added to that type afterwards, so the baseline
+    /// would grow with later contract additions and stop being independent.
+    /// Freezing the shape here keeps the reference
+    /// describing the old parser, which is its only job.
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct FrozenLegacyIsolationSessionProvisionConfig {
+        app_id: Option<String>,
+    }
+
+    impl From<&MxcRequest> for RequestSnapshot {
+        fn from(request: &MxcRequest) -> Self {
+            match request {
+                MxcRequest::OneShot(request) => Self::OneShot(request.into()),
+                MxcRequest::StateAware(request) => Self::StateAware {
+                    request: request.request().into(),
+                    phase: request.phase(),
+                    containment: request.containment(),
+                    sandbox_id: request.sandbox_id().map(str::to_owned),
+                    provision: match request.operation() {
+                        StateAwareOperation::Provision(provision) => Some(match provision {
+                            StateAwareProvision::IsolationSession(config) => {
+                                ProvisionSnapshot::IsolationSession(
+                                    config.as_ref().map(|config| config.app_id.clone()),
+                                )
+                            }
+                            StateAwareProvision::WindowsSandbox => {
+                                ProvisionSnapshot::WindowsSandbox
+                            }
+                            StateAwareProvision::Wslc(config) => {
+                                ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
+                                    (config.image.clone(), config.image_tar_path.clone())
+                                }))
+                            }
+                        }),
+                        _ => None,
+                    },
+                },
+            }
+        }
+    }
+
+    impl From<&LegacyMxcRequest> for RequestSnapshot {
+        fn from(request: &LegacyMxcRequest) -> Self {
+            match request {
+                LegacyMxcRequest::OneShot(request) => Self::OneShot(request.into()),
+                LegacyMxcRequest::StateAware(request) => Self::StateAware {
+                    request: (&request.request).into(),
+                    phase: request.phase,
+                    containment: request.containment.clone(),
+                    sandbox_id: request.sandbox_id.clone(),
+                    provision: if request.phase == Phase::Provision {
+                        match request.containment {
+                            Some(ContainmentBackend::IsolationSession) => Some(
+                                request.deserialize_config::<FrozenLegacyIsolationSessionProvisionConfig>("isolation_session", "provision")
+                                    .map(|config| ProvisionSnapshot::IsolationSession(config.map(|config| config.app_id)))
+                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
+                            ),
+                            Some(ContainmentBackend::WindowsSandbox) => Some(ProvisionSnapshot::WindowsSandbox),
+                            Some(ContainmentBackend::Wslc) => Some(
+                                request.deserialize_config::<wire::WslcProvisionPhase>("wslc", "provision")
+                                    .map(|config| ProvisionSnapshot::Wslc(config.map(|config| (config.image, config.image_tar_path))))
+                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
+                            ),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    },
+                },
+            }
+        }
+    }
+
+    fn assert_exact_published_requests_equivalent(
+        case: &str,
+        expected_version: &str,
+        canonical_json: &str,
+        alias_json: &str,
+    ) {
+        let canonical = parse_exact_for_test(canonical_json)
+            .unwrap_or_else(|error| panic!("{case}: canonical request failed: {error:?}"));
+        let alias = parse_exact_for_test(alias_json)
+            .unwrap_or_else(|error| panic!("{case}: alias request failed: {error:?}"));
+
+        for request in [&canonical, &alias] {
+            match request {
+                MxcRequest::OneShot(request) => {
+                    assert_eq!(request.schema_version, expected_version, "{case}");
+                }
+                MxcRequest::StateAware(_) => {
+                    panic!("{case}: expected one-shot request");
+                }
+            }
+        }
+
+        assert_eq!(
+            RequestSnapshot::from(&canonical),
+            RequestSnapshot::from(&alias),
+            "{case}: alias changed the runtime request"
+        );
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorRoute {
+        Decode,
+        Version,
+        OneShot,
+        OneShotMalformed,
+        StateAware,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorCategory {
+        Syntax,
+        TypedStructure,
+        Semantic,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DiagnosticSnapshot {
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<String>,
+        line: Option<usize>,
+        column: Option<usize>,
+        message: String,
+    }
+
+    fn number_after(message: &str, marker: &str) -> Option<usize> {
+        let suffix = message.split_once(marker)?.1;
+        suffix
+            .split(|character: char| !character.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    impl From<&ParseError> for DiagnosticSnapshot {
+        fn from(error: &ParseError) -> Self {
+            let route = match error {
+                ParseError::Decode(_) => ErrorRoute::Decode,
+                ParseError::Version(_) => ErrorRoute::Version,
+                ParseError::OneShot(_) => ErrorRoute::OneShot,
+                ParseError::OneShotMalformed(_) => ErrorRoute::OneShotMalformed,
+                ParseError::StateAware(_) => ErrorRoute::StateAware,
+            };
+            let message = error.message();
+            let category = if message.contains("Invalid JSON syntax") {
+                ErrorCategory::Syntax
+            } else if message.contains("Invalid configuration at `")
+                || message.contains("unknown field")
+                || message.contains("missing field")
+                || message.contains("invalid type")
+            {
+                ErrorCategory::TypedStructure
+            } else {
+                ErrorCategory::Semantic
+            };
+            let path = message
+                .split_once("Invalid configuration at `")
+                .and_then(|(_, suffix)| suffix.split_once('`'))
+                .map(|(path, _)| path.to_string());
+
+            Self {
+                route,
+                category,
+                path,
+                line: number_after(&message, "line "),
+                column: number_after(&message, "column "),
+                message,
+            }
+        }
+    }
+
+    #[test]
+    fn differential_snapshot_preserves_one_shot_malformed_variant() {
+        let error = || WxcError::ConfigParse("same diagnostic".to_string());
+        let one_shot = DiagnosticSnapshot::from(&ParseError::OneShot(error()));
+        let malformed = DiagnosticSnapshot::from(&ParseError::OneShotMalformed(error()));
+
+        assert_eq!(one_shot.message, malformed.message);
+        assert_eq!(one_shot.category, malformed.category);
+        assert_eq!(one_shot.route, ErrorRoute::OneShot);
+        assert_eq!(malformed.route, ErrorRoute::OneShotMalformed);
+        assert_ne!(one_shot, malformed);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LoggerSnapshot {
+        primary_buffer: String,
+        warnings: Vec<String>,
+    }
+
+    impl From<&Logger> for LoggerSnapshot {
+        fn from(logger: &Logger) -> Self {
+            Self {
+                primary_buffer: logger.get_buffer().to_string(),
+                warnings: logger.warnings().to_vec(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct AcceptedSnapshot {
+        request: RequestSnapshot,
+        logger: LoggerSnapshot,
+    }
+
+    impl std::ops::Deref for AcceptedSnapshot {
+        type Target = RequestSnapshot;
+
+        fn deref(&self) -> &Self::Target {
+            &self.request
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct RejectedSnapshot {
+        diagnostic: DiagnosticSnapshot,
+        logger: LoggerSnapshot,
+    }
+
+    impl std::ops::Deref for RejectedSnapshot {
+        type Target = DiagnosticSnapshot;
+
+        fn deref(&self) -> &Self::Target {
+            &self.diagnostic
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum ParserSnapshot {
+        Accepted(AcceptedSnapshot),
+        Rejected(RejectedSnapshot),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DivergenceDirection {
+        ExactStricter,
+        DiagnosticOnly,
+    }
+
+    struct DivergenceCase {
+        name: &'static str,
+        input: &'static str,
+        direction: DivergenceDirection,
+        rolling_diagnostic: Option<DiagnosticExpectation>,
+        exact_diagnostic: DiagnosticExpectation,
+        rolling_logger: LoggerExpectation,
+        exact_logger: LoggerExpectation,
+        reason: &'static str,
+    }
+
+    fn snapshot<T>(result: Result<T, ParseError>, logger: &Logger) -> ParserSnapshot
+    where
+        for<'a> RequestSnapshot: From<&'a T>,
+    {
+        let logger = logger.into();
+        match result {
+            Ok(request) => ParserSnapshot::Accepted(AcceptedSnapshot {
+                request: (&request).into(),
+                logger,
+            }),
+            Err(error) => ParserSnapshot::Rejected(RejectedSnapshot {
+                diagnostic: (&error).into(),
+                logger,
+            }),
+        }
+    }
+
+    fn same_parse_outcome(left: &ParserSnapshot, right: &ParserSnapshot) -> bool {
+        match (left, right) {
+            (ParserSnapshot::Accepted(left), ParserSnapshot::Accepted(right)) => {
+                left.request == right.request
+            }
+            (ParserSnapshot::Rejected(left), ParserSnapshot::Rejected(right)) => {
+                left.diagnostic == right.diagnostic
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_both(json: &str) -> (ParserSnapshot, ParserSnapshot) {
+        let mut rolling_logger = test_logger();
+        let rolling_result = parse_mxc_request_json(json, &mut rolling_logger);
+        let rolling = snapshot(rolling_result, &rolling_logger);
+
+        let mut exact_logger = test_logger();
+        let exact_result = parse_exact_mxc_request_json(json, &mut exact_logger);
+        let exact = snapshot(exact_result, &exact_logger);
+        (rolling, exact)
+    }
+
+    #[test]
+    fn differential_snapshot_retains_caller_visible_logger_channels() {
+        let mut logger = test_logger();
+        logger.log_line("primary diagnostic");
+        logger.warning_line("caller warning");
+
+        assert_eq!(
+            LoggerSnapshot::from(&logger),
+            LoggerSnapshot {
+                primary_buffer: "primary diagnostic\n".to_string(),
+                warnings: vec!["caller warning".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn differential_success_compares_logger_output() {
+        let existing_path = repository_root().to_string_lossy().replace('\\', "\\\\");
+        let json = format!(
+            r#"{{
+                "version":"0.9.0-alpha",
+                "process":{{"commandLine":"echo logger parity"}},
+                "filesystem":{{
+                    "readwritePaths":["{existing_path}"],
+                    "readonlyPaths":["{existing_path}"]
+                }}
+            }}"#
+        );
+
+        let (rolling, exact) = parse_both(&json);
+        let (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) =
+            (&rolling, &exact)
+        else {
+            panic!("both parsers must accept the logger parity fixture");
+        };
+
+        assert_eq!(rolling, exact);
+        assert!(rolling
+            .logger
+            .primary_buffer
+            .contains("applying most-restrictive intent (readonly)"));
+        assert!(rolling.logger.warnings.is_empty());
+    }
+
+    fn assert_accepted_models_converge(case: &str, json: &str) {
+        let (rolling, exact) = parse_both(json);
+        match (&rolling, &exact) {
+            (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
+                assert_eq!(rolling, exact, "{case}: runtime models diverged");
+            }
+            _ => panic!(
+                "{case}: expected both parsers to accept; rolling={rolling:?}, exact={exact:?}"
+            ),
+        }
+    }
+
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn collect_json_files(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_json_files(&path, files);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                files.push(path);
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum CorpusDivergenceKind {
+        MissingVersion,
+        PublishedComment,
+        PublishedDevelopmentContainment,
+        PublishedExperimental,
+        PublishedStateAware,
+        DevelopmentContractTightening,
+        RemovedDevelopmentNetworkField,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ExpectedCorpusDivergence {
+        kind: CorpusDivergenceKind,
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<&'static str>,
+        message_fragment: &'static str,
+    }
+
+    impl ExpectedCorpusDivergence {
+        fn matches(self, actual: &DiagnosticSnapshot) -> bool {
+            actual.route == self.route
+                && actual.category == self.category
+                && actual.path.as_deref() == self.path
+                && actual.message.contains(self.message_fragment)
+        }
+    }
+
+    impl CorpusDivergenceKind {
+        fn reason(self) -> &'static str {
+            match self {
+                Self::MissingVersion => {
+                    "The rolling parser supports legacy omitted versions; exact contracts require a registered declaration."
+                }
+                Self::PublishedComment => {
+                    "The rolling parser accepts the comment extension, but this published contract rejects it before later fields."
+                }
+                Self::PublishedDevelopmentContainment => {
+                    "The rolling parser exposes development backends under an older declaration; the published contract freezes its original containment enum."
+                }
+                Self::PublishedExperimental => {
+                    "Published one-shot contracts are closed and do not contain the rolling experimental extension."
+                }
+                Self::PublishedStateAware => {
+                    "Published 0.6-0.8 contracts are one-shot only; state-aware roots exist in the development contract."
+                }
+                Self::DevelopmentContractTightening => {
+                    "The migrated 0.9 contract intentionally rejects a parse-and-ignore one-shot extension or a phase/backend policy that the rolling parser defers to backend validation."
+                }
+                Self::RemovedDevelopmentNetworkField => {
+                    "The exact 0.9 contract removes legacy network fields; the rolling parser remains an independent legacy-input oracle."
+                }
+            }
+        }
+    }
+
+    fn expected_corpus_divergences(
+    ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
+        let entries = [
+            (
+                "tests/configs/hyperlight_networking.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
+            (
+                "tests/configs/hyperlight_networking_blocked.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_configid_rejected.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session"),
+                    message_fragment: "unknown field `isolation_session`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_one_shot_stray_config_rejected.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session"),
+                    message_fragment: "unknown field `isolation_session`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_denied.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    message_fragment: "unknown field `filesystem`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_network.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.egress.default"),
+                    message_fragment: "expected `allow`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_rejected_ui.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("ui"),
+                    message_fragment: "unknown field `ui`",
+                },
+            ),
+            (
+                "tests/configs/isolation_session_state_aware_provision_with_filesystem.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    message_fragment: "unknown field `filesystem`",
+                },
+            ),
+            (
+                "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    message_fragment: "unknown field `filesystem`",
+                },
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("runtimeConfig"),
+                    message_fragment: "unknown field `runtimeConfig`",
+                },
+            ),
+        ];
+        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
+        assert_eq!(
+            divergences.len(),
+            entries.len(),
+            "expected corpus divergence paths must be unique"
+        );
+        divergences
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct DiagnosticExpectation {
+        route: ErrorRoute,
+        category: ErrorCategory,
+        path: Option<&'static str>,
+        line: Option<usize>,
+        column: Option<usize>,
+        message_contains: &'static [&'static str],
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LoggerExpectation {
+        // One stable fragment per message; channel, order, and counts are exact.
+        primary_lines: &'static [&'static str],
+        warnings: &'static [&'static str],
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct CorpusDiagnosticDivergence {
+        rolling: DiagnosticExpectation,
+        exact: DiagnosticExpectation,
+        reason: &'static str,
+    }
+
+    fn policy_document_diagnostic_divergence(exact_line: usize) -> CorpusDiagnosticDivergence {
+        CorpusDiagnosticDivergence {
+            rolling: DiagnosticExpectation {
+                route: ErrorRoute::OneShot,
+                category: ErrorCategory::TypedStructure,
+                path: Some("policy"),
+                line: Some(2),
+                column: Some(10),
+                message_contains: &["unknown field `policy`"],
+            },
+            exact: DiagnosticExpectation {
+                route: ErrorRoute::Version,
+                category: ErrorCategory::TypedStructure,
+                path: None,
+                line: Some(exact_line),
+                column: Some(1),
+                message_contains: &["Invalid version declaration", "missing field `version`"],
+            },
+            reason: "These policy documents are not executor requests: rolling decoding reaches the wrapper field, while exact routing first requires a version declaration.",
+        }
+    }
+
+    fn expected_corpus_diagnostic_divergences(
+    ) -> std::collections::BTreeMap<&'static str, CorpusDiagnosticDivergence> {
+        let entries = [
+            (
+                "tests/configs/bubblewrap_network_directional_pre08_rejected.json",
+                CorpusDiagnosticDivergence {
+                    rolling: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &[
+                            "network.egress",
+                            "require schema version 0.8 or later",
+                        ],
+                    },
+                    exact: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::TypedStructure,
+                        path: Some("network.egress"),
+                        line: Some(9),
+                        column: Some(12),
+                        message_contains: &["unknown field `egress`"],
+                    },
+                    reason: "The published pre-0.8 contract rejects the directional field structurally before the rolling semantic version gate.",
+                },
+            ),
+            (
+                "tests/configs/rejected_version_too_old.json",
+                CorpusDiagnosticDivergence {
+                    rolling: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &["older than supported"],
+                    },
+                    exact: DiagnosticExpectation {
+                        route: ErrorRoute::Version,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &["Unsupported contract version"],
+                    },
+                    reason: "Exact routing rejects an unregistered declaration before the rolling parser formats its supported-range diagnostic.",
+                },
+            ),
+            (
+                "tests/configs/seatbelt_reject_directional_pre08.json",
+                CorpusDiagnosticDivergence {
+                    rolling: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::Semantic,
+                        path: None,
+                        line: None,
+                        column: None,
+                        message_contains: &[
+                            "network.egress",
+                            "require schema version 0.8 or later",
+                        ],
+                    },
+                    exact: DiagnosticExpectation {
+                        route: ErrorRoute::OneShot,
+                        category: ErrorCategory::TypedStructure,
+                        path: Some("network.egress"),
+                        line: Some(9),
+                        column: Some(25),
+                        message_contains: &["unknown field `egress`"],
+                    },
+                    reason: "The published pre-0.8 contract rejects the directional field structurally before the rolling semantic version gate.",
+                },
+            ),
+            (
+                "tests/policy/request-directional-network.json",
+                policy_document_diagnostic_divergence(40),
+            ),
+            (
+                "tests/policy/request-process-container.json",
+                policy_document_diagnostic_divergence(60),
+            ),
+            (
+                "tests/policy/request-wslc.json",
+                policy_document_diagnostic_divergence(23),
+            ),
+        ];
+        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
+        assert_eq!(
+            divergences.len(),
+            entries.len(),
+            "expected corpus diagnostic divergence paths must be unique"
+        );
+        divergences
+    }
+
+    fn diagnostic_expectation_mismatches(
+        expected: DiagnosticExpectation,
+        actual: &DiagnosticSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if actual.route != expected.route {
+            mismatches.push(format!(
+                "route: expected {:?}, observed {:?}",
+                expected.route, actual.route
+            ));
+        }
+        if actual.category != expected.category {
+            mismatches.push(format!(
+                "category: expected {:?}, observed {:?}",
+                expected.category, actual.category
+            ));
+        }
+        if actual.path.as_deref() != expected.path {
+            mismatches.push(format!(
+                "path: expected {:?}, observed {:?}",
+                expected.path, actual.path
+            ));
+        }
+        if actual.line != expected.line {
+            mismatches.push(format!(
+                "line: expected {:?}, observed {:?}",
+                expected.line, actual.line
+            ));
+        }
+        if actual.column != expected.column {
+            mismatches.push(format!(
+                "column: expected {:?}, observed {:?}",
+                expected.column, actual.column
+            ));
+        }
+        for fragment in expected.message_contains {
+            if !actual.message.contains(fragment) {
+                mismatches.push(format!("message does not contain {fragment:?}"));
+            }
+        }
+        mismatches
+    }
+
+    fn logger_expectation_mismatches(
+        expected: LoggerExpectation,
+        actual: &LoggerSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        for (channel, messages, fragments) in [
+            (
+                "primary_buffer",
+                actual.primary_buffer.lines().collect::<Vec<_>>(),
+                expected.primary_lines,
+            ),
+            (
+                "warnings",
+                actual
+                    .warnings
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected.warnings,
+            ),
+        ] {
+            if messages.len() != fragments.len() {
+                mismatches.push(format!(
+                    "{channel}: expected {} messages, observed {}",
+                    fragments.len(),
+                    messages.len()
+                ));
+            }
+            for (index, (message, fragment)) in messages.iter().zip(fragments).enumerate() {
+                if !message.contains(fragment) {
+                    mismatches.push(format!(
+                        "{channel}[{index}]: message does not contain {fragment:?}"
+                    ));
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn corpus_divergence_counts(
+        divergences: impl Iterator<Item = CorpusDivergenceKind>,
+    ) -> std::collections::BTreeMap<CorpusDivergenceKind, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for kind in divergences {
+            *counts.entry(kind).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn classify_corpus_exact_stricter(
+        root: &serde_json::Value,
+        exact: &DiagnosticSnapshot,
+    ) -> Option<CorpusDivergenceKind> {
+        let object = root.as_object()?;
+        if !object.contains_key("version")
+            && exact.route == ErrorRoute::Version
+            && exact.category == ErrorCategory::TypedStructure
+            && exact.path.is_none()
+            && exact
+                .message
+                .contains("Invalid version declaration: missing field `version`")
+        {
+            return Some(CorpusDivergenceKind::MissingVersion);
+        }
+
+        let version = object.get("version")?.as_str()?;
+        if version == "0.9.0-alpha" {
+            if exact.category == ErrorCategory::TypedStructure {
+                if let Some(field) = exact
+                    .path
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix("network."))
+                {
+                    if matches!(
+                        field,
+                        "defaultPolicy"
+                            | "enforcementMode"
+                            | "allowedHosts"
+                            | "blockedHosts"
+                            | "allowLocalNetwork"
+                            | "proxy"
+                    ) && object
+                        .get("network")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|network| network.contains_key(field))
+                        && exact.message.contains(&format!("unknown field `{field}`"))
+                    {
+                        return Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField);
+                    }
+                }
+                let removed_phase_field = object.get("phase").and_then(serde_json::Value::as_str)
+                    == Some("provision")
+                    && match object
+                        .get("containment")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("isolation_session") => {
+                            exact.path.as_deref().is_some_and(|path| {
+                                path == "network" || path.starts_with("network.")
+                            }) && object.contains_key("network")
+                        }
+                        Some("wslc") => {
+                            exact.path.as_deref() == Some("runtimeConfig")
+                                && object.contains_key("runtimeConfig")
+                                && exact.message.contains("unknown field `runtimeConfig`")
+                        }
+                        _ => false,
+                    };
+                if removed_phase_field {
+                    return Some(CorpusDivergenceKind::DevelopmentContractTightening);
+                }
+            }
+            // The one-shot IsolationSession section is closed. The rolling
+            // parser stores unknown members there and lets the backend decide;
+            // the exact contract refuses them outright. Matching on the
+            // section's own path keeps this specific to that surface.
+            let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
+                && exact.category == ErrorCategory::TypedStructure
+                && exact
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with("experimental.isolation_session"))
+                && exact.message.contains("unknown field");
+            let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
+                && matches!(
+                    exact.category,
+                    ErrorCategory::TypedStructure | ErrorCategory::Semantic
+                )
+                && (object.contains_key("filesystem")
+                    || object.contains_key("ui")
+                    || object
+                        .get("network")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|network| network.get("defaultPolicy"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("block"));
+            return (is_closed_one_shot_extension || is_state_aware_policy_tightening)
+                .then_some(CorpusDivergenceKind::DevelopmentContractTightening);
+        }
+
+        if !matches!(version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
+            || exact.route != ErrorRoute::OneShot
+            || exact.category != ErrorCategory::TypedStructure
+        {
+            return None;
+        }
+
+        match exact.path.as_deref() {
+            Some("_comment")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `_comment`: unknown field `_comment`") =>
+            {
+                Some(CorpusDivergenceKind::PublishedComment)
+            }
+            Some("phase")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `phase`: unknown field `phase`") =>
+            {
+                Some(CorpusDivergenceKind::PublishedStateAware)
+            }
+            Some("containment")
+                if exact
+                    .message
+                    .contains("Invalid configuration at `containment`: unknown variant") =>
+            {
+                Some(CorpusDivergenceKind::PublishedDevelopmentContainment)
+            }
+            Some("experimental")
+                if exact.message.contains(
+                    "Invalid configuration at `experimental`: unknown field `experimental`",
+                ) =>
+            {
+                Some(CorpusDivergenceKind::PublishedExperimental)
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn corpus_divergence_classification_requires_exact_diagnostic() {
+        let diagnostic = |route, path: Option<&str>, message: &str| DiagnosticSnapshot {
+            route,
+            category: ErrorCategory::TypedStructure,
+            path: path.map(str::to_string),
+            line: None,
+            column: None,
+            message: message.to_string(),
+        };
+        let missing_version = diagnostic(
+            ErrorRoute::Version,
+            None,
+            "Invalid version declaration: missing field `version`",
+        );
+        assert_eq!(
+            classify_corpus_exact_stricter(&serde_json::json!({}), &missing_version),
+            Some(CorpusDivergenceKind::MissingVersion)
+        );
+        assert_eq!(
+            classify_corpus_exact_stricter(&serde_json::json!({"version": 8}), &missing_version),
+            None,
+            "a present non-string version is not a missing version"
+        );
+
+        let published = serde_json::json!({"version": "0.8.0-alpha"});
+        for (path, message, kind) in [
+            (
+                "_comment",
+                "Invalid configuration at `_comment`: unknown field `_comment`",
+                CorpusDivergenceKind::PublishedComment,
+            ),
+            (
+                "phase",
+                "Invalid configuration at `phase`: unknown field `phase`",
+                CorpusDivergenceKind::PublishedStateAware,
+            ),
+            (
+                "containment",
+                "Invalid configuration at `containment`: unknown variant `wslc`",
+                CorpusDivergenceKind::PublishedDevelopmentContainment,
+            ),
+            (
+                "experimental",
+                "Invalid configuration at `experimental`: unknown field `experimental`",
+                CorpusDivergenceKind::PublishedExperimental,
+            ),
+        ] {
+            let exact = diagnostic(ErrorRoute::OneShot, Some(path), message);
+            assert_eq!(
+                classify_corpus_exact_stricter(&published, &exact),
+                Some(kind),
+                "{path}"
+            );
+
+            let wrong_route = diagnostic(ErrorRoute::StateAware, Some(path), message);
+            assert_eq!(
+                classify_corpus_exact_stricter(&published, &wrong_route),
+                None,
+                "{path}: the exact diagnostic route is part of the classification"
+            );
+        }
+    }
+
+    fn classified_divergence_mismatches(
+        case: &DivergenceCase,
+        rolling: &ParserSnapshot,
+        exact: &ParserSnapshot,
+    ) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if case.reason.is_empty() {
+            mismatches.push("missing classification reason".to_string());
+        }
+        if case.rolling_diagnostic.is_some()
+            != (case.direction == DivergenceDirection::DiagnosticOnly)
+        {
+            mismatches.push("rolling expectation contradicts the divergence direction".to_string());
+        }
+        for (side, actual, diagnostic, logger) in [
+            (
+                "rolling",
+                rolling,
+                case.rolling_diagnostic,
+                case.rolling_logger,
+            ),
+            (
+                "exact",
+                exact,
+                Some(case.exact_diagnostic),
+                case.exact_logger,
+            ),
+        ] {
+            let actual_logger = match (actual, diagnostic) {
+                (ParserSnapshot::Accepted(actual), None) => &actual.logger,
+                (ParserSnapshot::Rejected(actual), Some(expected)) => {
+                    mismatches.extend(
+                        diagnostic_expectation_mismatches(expected, &actual.diagnostic)
+                            .into_iter()
+                            .map(|message| format!("{side}: {message}")),
+                    );
+                    &actual.logger
+                }
+                (ParserSnapshot::Accepted(actual), Some(_)) => {
+                    mismatches.push(format!("{side}: expected rejection, observed acceptance"));
+                    &actual.logger
+                }
+                (ParserSnapshot::Rejected(actual), None) => {
+                    mismatches.push(format!("{side}: expected acceptance, observed rejection"));
+                    &actual.logger
+                }
+            };
+            mismatches.extend(
+                logger_expectation_mismatches(logger, actual_logger)
+                    .into_iter()
+                    .map(|message| format!("{side}: logger.{message}")),
+            );
+        }
+        if case.direction == DivergenceDirection::DiagnosticOnly {
+            if let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            {
+                if rolling.message == exact.message {
+                    mismatches.push("classified diagnostic unexpectedly converged".to_string());
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn assert_classified_divergence(case: &DivergenceCase) {
+        let (rolling, exact) = parse_both(case.input);
+        let mismatches = classified_divergence_mismatches(case, &rolling, &exact);
+        assert!(
+            mismatches.is_empty(),
+            "{}: {}\nrolling={rolling:?}\nexact={exact:?}",
+            case.name,
+            mismatches.join("\n")
+        );
+    }
+
+    #[test]
+    fn differential_one_shot_matrix_converges_across_registered_versions() {
+        for (case, json) in [
+            (
+                "v0.6 stable policy",
+                r#"{
+                    "version":"0.6.0-alpha",
+                    "containerId":"differential-v06",
+                    "containment":"processcontainer",
+                    "process":{
+                        "commandLine":"echo v06",
+                        "cwd":"C:\\work",
+                        "env":["A=1"],
+                        "timeout":1234
+                    },
+                    "filesystem":{
+                        "readwritePaths":["C:\\work"],
+                        "readonlyPaths":["C:\\input"],
+                        "deniedPaths":["C:\\secret"]
+                    },
+                    "network":{
+                        "defaultPolicy":"block",
+                        "enforcementMode":"capabilities",
+                        "allowedHosts":["example.com"],
+                        "allowLocalNetwork":false
+                    },
+                    "ui":{"disable":false,"clipboard":"read","injection":true},
+                    "processContainer":{
+                        "leastPrivilege":true,
+                        "capabilities":["internetClient"],
+                        "ui":{"isolation":"desktop","ime":true}
+                    }
+                }"#,
+            ),
+            (
+                "v0.7 stable policy",
+                r#"{
+                    "$schema":"https://example.invalid/v07",
+                    "_comment":{"purpose":"differential"},
+                    "version":"0.7.0-alpha",
+                    "containerId":"differential-v07",
+                    "containment":"processcontainer",
+                    "lifecycle":{"destroyOnExit":false,"preservePolicy":true},
+                    "process":{"commandLine":"echo v07","env":["B=2"]},
+                    "filesystem":{"readonlyPaths":["C:\\input"]},
+                    "fallback":{"allowDaclMutation":false},
+                    "network":{
+                        "defaultPolicy":"allow",
+                        "enforcementMode":"capabilities",
+                        "blockedHosts":["blocked.example"],
+                        "allowLocalNetwork":true
+                    },
+                    "ui":{"disable":true,"clipboard":"write","injection":false},
+                    "processContainer":{"capabilities":["internetClient"]}
+                }"#,
+            ),
+            (
+                "v0.8 directional policy",
+                r#"{
+                    "version":"0.8.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo v08"},
+                    "filesystem":{"readwritePaths":["C:\\work"]},
+                    "network":{
+                        "egress":{"default":"deny","allow":[{"to":[{"cidr":"203.0.113.0/24"}]}]},
+                        "ingress":{"default":"deny","hostLoopback":"deny"}
+                    },
+                    "ui":{"disable":false,"clipboard":"all","injection":true},
+                    "processContainer":{"capabilities":["internetClient"]}
+                }"#,
+            ),
+            (
+                "v0.9 development policy",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo v09","timeout":5678},
+                    "filesystem":{"deniedPaths":["C:\\secret"]},
+                    "network":{
+                        "egress":{"default":"deny"},
+                        "ingress":{"default":"deny","hostLoopback":"deny"}
+                    },
+                    "ui":{"disable":true,"clipboard":"none","injection":false},
+                    "processContainer":{
+                        "capabilities":["internetClient"],
+                        "captureDenials":{"mode":"block","retainEtl":true}
+                    },
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+        ] {
+            assert_accepted_models_converge(case, json);
+        }
+    }
+
+    #[test]
+    fn differential_state_aware_matrix_converges_for_every_phase_and_backend() {
+        for (case, json) in [
+            (
+                "Windows Sandbox provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"windows_sandbox",
+                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "IsolationSession provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "telemetry":{"enabled":false},
+                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+                    "experimental":{
+                        "isolation_session":{"provision":{"appId":"Contoso.App"}}
+                    }
+                }"#,
+            ),
+            (
+                "WSLC provision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"wslc",
+                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
+                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+                    "telemetry":{"enabled":true},
+                    "experimental":{
+                        "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
+                    }
+                }"#,
+            ),
+            (
+                "start",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"start",
+                    "sandboxId":"wsb:abcd1234",
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "exec with immutable network presence",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"exec",
+                    "sandboxId":"wslc:abcd1234",
+                    "process":{"commandLine":"echo exec","cwd":"/work","env":["C=3"],"timeout":42},
+                    "runtimeConfig":{"networkProxy":"http://proxy.example.com:8080"},
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+            (
+                "stop",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"stop",
+                    "sandboxId":"iso:abcd1234",
+                    "telemetry":{"enabled":true}
+                }"#,
+            ),
+            (
+                "deprovision",
+                r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"deprovision",
+                    "sandboxId":"wslc:abcd1234",
+                    "telemetry":{"enabled":false}
+                }"#,
+            ),
+        ] {
+            assert_accepted_models_converge(case, json);
+        }
+    }
+
+    #[test]
+    fn differential_source_aware_diagnostics_converge_when_contracts_share_the_shape() {
+        for (version, route) in [
+            ("0.6.0-alpha", ErrorRoute::OneShot),
+            ("0.7.0-alpha", ErrorRoute::OneShot),
+            ("0.8.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::OneShot),
+            ("0.9.0-alpha", ErrorRoute::StateAware),
+        ] {
+            let phase_fields = if route == ErrorRoute::StateAware {
+                "  \"phase\": \"exec\",\n  \"sandboxId\": \"wslc:abcd1234\",\n"
+            } else {
+                ""
+            };
+            let json = format!(
+                "{{\n  \"version\": \"{version}\",\n{phase_fields}  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
+            );
+            let (rolling, exact) = parse_both(&json);
+            let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
+                (rolling, exact)
+            else {
+                panic!("{version} {route:?}: both parsers must reject the typed cwd error");
+            };
+
+            assert_eq!(rolling.route, route);
+            assert_eq!(rolling.route, exact.route);
+            assert_eq!(rolling.category, exact.category);
+            assert_eq!(rolling.path.as_deref(), Some("process.cwd"));
+            assert_eq!(rolling.path, exact.path);
+            assert_eq!(rolling.line, exact.line);
+            assert_eq!(rolling.column, exact.column);
+        }
+
+        let malformed = "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":";
+        let (rolling, exact) = parse_both(malformed);
+        let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) = (rolling, exact)
+        else {
+            panic!("both parsers must reject invalid JSON syntax");
+        };
+        assert_eq!(rolling.route, ErrorRoute::Decode);
+        assert_eq!(exact.route, ErrorRoute::Decode);
+        assert_eq!(rolling.category, ErrorCategory::Syntax);
+        assert_eq!(exact.category, ErrorCategory::Semantic);
+        assert_eq!(rolling.path, None);
+        assert_eq!(exact.path, None);
+        assert_eq!(rolling.line, exact.line);
+        assert_eq!(rolling.column, exact.column);
+    }
+
+    #[test]
+    fn differential_effective_document_covers_loader_modes_and_command_splice() {
+        let root = repository_root();
+        let path = root
+            .join("tests")
+            .join("examples")
+            .join("01_hello_world.json");
+        let json = fs::read_to_string(&path).unwrap();
+
+        let file_loaded = load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let encoded = base64_encode(json.as_bytes());
+        let base64_loaded = load_mxc_request(&encoded, &mut test_logger(), true)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let raw_loaded = load_mxc_request_from_json(&json, &mut test_logger())
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        let exact = parse_exact_for_test(&json)
+            .map(|request| RequestSnapshot::from(&request))
+            .unwrap();
+        assert_eq!(file_loaded, base64_loaded);
+        assert_eq!(file_loaded, raw_loaded);
+        assert_eq!(file_loaded, exact);
+
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rolling_value = load_request_from_value(value.clone(), &mut test_logger()).unwrap();
+        let serialized_value = serde_json::to_string(&value).unwrap();
+        let exact_value = parse_exact_for_test(&serialized_value).unwrap();
+        assert_eq!(
+            ExecutionSnapshot::from(&rolling_value),
+            match RequestSnapshot::from(&exact_value) {
+                RequestSnapshot::OneShot(request) => request,
+                RequestSnapshot::StateAware { .. } => panic!("value was one-shot"),
+            }
+        );
+
+        let wrong_type = r#"{
+            "version":"0.9.0-alpha",
+            "containment":"processcontainer",
+            "process":{"commandLine":42}
+        }"#;
+        assert!(parse_mxc_request_json(wrong_type, &mut test_logger()).is_err());
+        assert!(parse_exact_for_test(wrong_type).is_err());
+
+        let command = argv(&["echo", "from splice"]);
+        let (effective, _) = apply_cli_command(wrong_type, &command).unwrap();
+        assert_eq!(
+            effective, wrong_type,
+            "command splicing deliberately leaves invalid existing commandLine types for typed parsing"
+        );
+        let (rolling, exact) = parse_both(&effective);
+        assert!(matches!(rolling, ParserSnapshot::Rejected(_)));
+        assert!(matches!(exact, ParserSnapshot::Rejected(_)));
+
+        let null_command = wrong_type.replace("42", "null");
+        let (effective, _) = apply_cli_command(&null_command, &command).unwrap();
+        assert_ne!(effective, null_command);
+        assert_accepted_models_converge("command-spliced effective one-shot", &effective);
+
+        let state_aware = r#"{
+            "version":"0.9.0-alpha",
+            "phase":"exec",
+            "sandboxId":"wslc:abcd1234",
+            "process":{"commandLine":"old"}
+        }"#;
+        let (effective, override_log) = apply_cli_command(state_aware, &command).unwrap();
+        assert!(override_log.is_some());
+        assert_accepted_models_converge("command-spliced effective state-aware exec", &effective);
+
+        let one_shot = parse_both(r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"}}"#);
+        let state_aware =
+            parse_both(r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#);
+        assert!(matches!(
+            one_shot,
+            (
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::OneShot(_),
+                    ..
+                }),
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::OneShot(_),
+                    ..
+                })
+            )
+        ));
+        assert!(matches!(
+            state_aware,
+            (
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::StateAware { .. },
+                    ..
+                }),
+                ParserSnapshot::Accepted(AcceptedSnapshot {
+                    request: RequestSnapshot::StateAware { .. },
+                    ..
+                })
+            )
+        ));
+    }
+
+    #[test]
+    fn load_mxc_request_uses_exact_dispatch_for_file_and_base64_inputs() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hello"},
+            "experimental": {}
+        }"#;
+        assert!(
+            parse_mxc_request_json(json, &mut test_logger()).is_ok(),
+            "the route-proof input must remain valid under the rolling parser"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact-route-proof.json");
+        fs::write(&path, json).unwrap();
+
+        let file_error =
+            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err();
+        let encoded = base64_encode(json.as_bytes());
+        let base64_error = load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err();
+        let exact_error = parse_exact_for_test(json).unwrap_err();
+
+        let file_diagnostic = DiagnosticSnapshot::from(&file_error);
+        let base64_diagnostic = DiagnosticSnapshot::from(&base64_error);
+        let exact_diagnostic = DiagnosticSnapshot::from(&exact_error);
+
+        assert_eq!(file_diagnostic, exact_diagnostic);
+        assert_eq!(base64_diagnostic, exact_diagnostic);
+        assert_eq!(exact_diagnostic.route, ErrorRoute::OneShot);
+        assert!(exact_diagnostic
+            .message
+            .contains("unknown field `experimental`"));
+    }
+
+    #[test]
+    fn one_shot_loader_uses_exact_dispatch_and_rejects_lifecycle_requests() {
+        let one_shot = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let encoded = base64_encode(one_shot.as_bytes());
+        let request = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap();
+        assert_eq!(request.schema_version, "0.8.0-alpha");
+        assert_eq!(request.script_code, "echo hello");
+
+        let state_aware = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "start",
+            "sandboxId": "wsb:abcd1234"
+        }"#;
+        let encoded = base64_encode(state_aware.as_bytes());
+        let error = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("expected a one-shot request, got a state-aware lifecycle request"));
+    }
+
+    fn classified_divergence_cases() -> [DivergenceCase; 14] {
+        [
+            DivergenceCase {
+                name: "published-v06-experimental",
+                input: r#"{
+                    "version":"0.6.0-alpha",
+                    "process":{"commandLine":"echo x"},
+                    "experimental":{"test":{"message":"rolling-only"}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental"),
+                    line: Some(4),
+                    column: Some(34),
+                    message_contains: &["unknown field `experimental`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Published 0.6 is closed; rolling compatibility still accepts experimental.",
+            },
+            DivergenceCase {
+                name: "explicit-null-optional-container-id",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "containerId":null,
+                    "process":{"commandLine":"echo x"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("containerId"),
+                    line: Some(3),
+                    column: Some(38),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "OptionalField distinguishes omission from explicit null.",
+            },
+            DivergenceCase {
+                name: "isolation-session-app-id-null",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "_comment":null,
+                    "experimental":{"isolation_session":{"provision":{"appId":null}}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.appId"),
+                    line: Some(6),
+                    column: Some(82),
+                    message_contains: &["invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact OptionalField rejects null while the temporary backend payload treats it as absent.",
+            },
+            DivergenceCase {
+                name: "unknown-isolation-session-payload-field",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "_comment":null,
+                    "experimental":{"isolation_session":{"provision":{"futureField":true}}}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("experimental.isolation_session.provision.futureField"),
+                    line: Some(6),
+                    column: Some(83),
+                    message_contains: &["unknown field `futureField`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Exact backend payloads are closed while the temporary runtime payload type ignores unknown fields.",
+            },
+            DivergenceCase {
+                name: "stray-provision-sandbox-id",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"windows_sandbox",
+                    "sandboxId":"wsb:abcd1234"
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("sandboxId"),
+                    line: Some(5),
+                    column: Some(31),
+                    message_contains: &["unknown field `sandboxId`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Provision roots do not carry an already-created sandbox identifier.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-start",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"start",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision; only exec has a runtime network surface.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-stop",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"stop",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision and cannot be changed while stopping.",
+            },
+            DivergenceCase {
+                name: "immutable-network-on-deprovision",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"deprovision",
+                    "sandboxId":"wslc:abcd1234",
+                    "network":{"defaultPolicy":"allow"}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network"),
+                    line: Some(5),
+                    column: Some(29),
+                    message_contains: &["unknown field `network`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Network posture is fixed at provision and cannot be changed while deprovisioning.",
+            },
+            DivergenceCase {
+                name: "null-phase-declaration",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":null,
+                    "process":{"commandLine":"echo x"}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["Missing required field: phase"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: None,
+                    line: Some(3),
+                    column: Some(32),
+                    message_contains: &["Invalid phase declaration", "invalid type: null"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact phase probe rejects null structurally before rolling normalization reports a missing phase.",
+            },
+            DivergenceCase {
+                name: "malformed-json-version-probe-diagnostic",
+                input: "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":",
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Syntax,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid JSON syntax"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::Decode,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: Some(3),
+                    column: Some(12),
+                    message_contains: &["Invalid version declaration"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "The exact path first probes the version declaration, so malformed trailing JSON is attributed to that probe.",
+            },
+            DivergenceCase {
+                name: "isolation-session-filesystem-curated-vs-structural",
+                // An existing path avoids host-dependent existence warnings.
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "filesystem":{"readwritePaths":["."]},
+                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("filesystem"),
+                    line: Some(5),
+                    column: Some(32),
+                    message_contains: &["unknown field `filesystem`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
+            },
+            DivergenceCase {
+                name: "isolation-session-ui-curated-vs-structural",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "phase":"provision",
+                    "containment":"isolation_session",
+                    "_comment":null,
+                    "ui":{"disable":true}
+                }"#,
+                direction: DivergenceDirection::ExactStricter,
+                rolling_diagnostic: None,
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("ui"),
+                    line: Some(6),
+                    column: Some(24),
+                    message_contains: &["unknown field `ui`"],
+                },
+                rolling_logger: LoggerExpectation::default(),
+                exact_logger: LoggerExpectation::default(),
+                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
+            },
+            DivergenceCase {
+                name: "v0.8-comma-capability-structural-vs-semantic",
+                input: r#"{
+                    "version":"0.8.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo x"},
+                    "processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["processContainer.capabilities entry"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(100),
+                    message_contains: &["capability must not contain a comma"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["processContainer.capabilities entry"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
+                reason: "Published v0.8 validates capability names in its newtype; rolling validation occurs during model conversion.",
+            },
+            DivergenceCase {
+                name: "v0.9-reserved-capability-structural-vs-semantic",
+                input: r#"{
+                    "version":"0.9.0-alpha",
+                    "containment":"processcontainer",
+                    "process":{"commandLine":"echo x"},
+                    "processContainer":{"capabilities":["LearningModeLogging"]}
+                }"#,
+                direction: DivergenceDirection::DiagnosticOnly,
+                rolling_diagnostic: Some(DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::Semantic,
+                    path: None,
+                    line: None,
+                    column: None,
+                    message_contains: &["reserved learning-mode capability"],
+                }),
+                exact_diagnostic: DiagnosticExpectation {
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("processContainer.capabilities[0]"),
+                    line: Some(5),
+                    column: Some(78),
+                    message_contains: &["learningModeLogging and permissiveLearningMode are reserved"],
+                },
+                rolling_logger: LoggerExpectation {
+                    primary_lines: &["reserved learning-mode capability"],
+                    warnings: &[],
+                },
+                exact_logger: LoggerExpectation::default(),
+                reason: "Development validates capability names in its newtype; rolling validation occurs during model conversion.",
+            },
+        ]
+    }
+
+    #[test]
+    fn differential_exact_stricter_and_diagnostic_divergences_are_explicit() {
+        for case in classified_divergence_cases() {
+            assert_classified_divergence(&case);
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_detect_diagnostic_and_logger_drift() {
+        type DiagnosticMutation = fn(&mut DiagnosticSnapshot);
+        let mutations: [(&str, DiagnosticMutation); 6] = [
+            ("route", |value| {
+                value.route = match value.route {
+                    ErrorRoute::Decode => ErrorRoute::Version,
+                    ErrorRoute::Version => ErrorRoute::Decode,
+                    ErrorRoute::OneShot => ErrorRoute::OneShotMalformed,
+                    ErrorRoute::OneShotMalformed => ErrorRoute::OneShot,
+                    ErrorRoute::StateAware => ErrorRoute::Decode,
+                };
+            }),
+            ("category", |value| {
+                value.category = if value.category == ErrorCategory::Semantic {
+                    ErrorCategory::Syntax
+                } else {
+                    ErrorCategory::Semantic
+                };
+            }),
+            ("path", |value| {
+                value.path = if value.path.is_some() {
+                    None
+                } else {
+                    Some("unexpected.path".to_string())
+                };
+            }),
+            ("line", |value| {
+                value.line = Some(value.line.unwrap_or(0) + 1)
+            }),
+            ("column", |value| {
+                value.column = Some(value.column.unwrap_or(0) + 1)
+            }),
+            ("message", |value| value.message.clear()),
+        ];
+
+        for case in classified_divergence_cases() {
+            let (rolling, exact) = parse_both(case.input);
+            let baseline = [rolling, exact];
+            assert!(
+                classified_divergence_mismatches(&case, &baseline[0], &baseline[1]).is_empty(),
+                "{}: baseline must match before injecting drift",
+                case.name
+            );
+            for (side, name) in ["rolling", "exact"].into_iter().enumerate() {
+                if matches!(&baseline[side], ParserSnapshot::Rejected(_)) {
+                    for (field, mutate) in mutations {
+                        let mut changed = baseline.clone();
+                        let ParserSnapshot::Rejected(rejected) = &mut changed[side] else {
+                            panic!("cloning a rejection must preserve its outcome");
+                        };
+                        mutate(&mut rejected.diagnostic);
+                        let mismatches =
+                            classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                        assert!(
+                            mismatches.iter().any(|mismatch| {
+                                mismatch.starts_with(&format!("{name}: {field}"))
+                            }),
+                            "{}: {name} {field} drift was not detected: {mismatches:?}",
+                            case.name
+                        );
+                    }
+                }
+                for channel in ["primary_buffer", "warnings"] {
+                    let mut changed = baseline.clone();
+                    let logger = match &mut changed[side] {
+                        ParserSnapshot::Accepted(value) => &mut value.logger,
+                        ParserSnapshot::Rejected(value) => &mut value.logger,
+                    };
+                    if channel == "primary_buffer" {
+                        logger.primary_buffer.push_str("unexpected caller output\n");
+                    } else {
+                        logger
+                            .warnings
+                            .push("unexpected caller warning".to_string());
+                    }
+                    let mismatches =
+                        classified_divergence_mismatches(&case, &changed[0], &changed[1]);
+                    assert!(
+                        mismatches.iter().any(|mismatch| {
+                            mismatch.starts_with(&format!("{name}: logger.{channel}"))
+                        }),
+                        "{}: {name} {channel} drift was not detected: {mismatches:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn differential_curated_cases_allow_nonessential_message_wording() {
+        for case in classified_divergence_cases() {
+            let (mut rolling, mut exact) = parse_both(case.input);
+            for snapshot in [&mut rolling, &mut exact] {
+                let logger = match snapshot {
+                    ParserSnapshot::Accepted(value) => &mut value.logger,
+                    ParserSnapshot::Rejected(value) => {
+                        value.diagnostic.message.push_str(" (additional context)");
+                        &mut value.logger
+                    }
+                };
+                logger.primary_buffer = logger
+                    .primary_buffer
+                    .lines()
+                    .map(|line| format!("{line} (additional context)\n"))
+                    .collect();
+                for warning in &mut logger.warnings {
+                    warning.push_str(" (additional context)");
+                }
+            }
+            let mismatches = classified_divergence_mismatches(&case, &rolling, &exact);
+            assert!(
+                mismatches.is_empty(),
+                "{}: wording outside required fragments is not frozen: {mismatches:?}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn differential_logger_expectations_pin_channels_order_and_counts() {
+        let expected = LoggerExpectation {
+            primary_lines: &["first primary", "second primary"],
+            warnings: &["first warning", "second warning"],
+        };
+        let baseline = LoggerSnapshot {
+            primary_buffer: "first primary detail\nsecond primary detail\n".to_string(),
+            warnings: vec![
+                "first warning detail".to_string(),
+                "second warning detail".to_string(),
+            ],
+        };
+        assert!(logger_expectation_mismatches(expected, &baseline).is_empty());
+
+        type LoggerMutation = fn(&mut LoggerSnapshot);
+        let mutations: [(&str, LoggerMutation); 6] = [
+            ("primary_buffer", |value| {
+                value.primary_buffer = "second primary detail\nfirst primary detail\n".to_string();
+            }),
+            ("primary_buffer", |value| value.primary_buffer.clear()),
+            ("primary_buffer", |value| {
+                value.primary_buffer = "unexpected primary\nsecond primary detail\n".to_string();
+            }),
+            ("warnings", |value| value.warnings.swap(0, 1)),
+            ("warnings", |value| value.warnings.clear()),
+            ("warnings", |value| {
+                value.warnings[0] = "unexpected warning".to_string()
+            }),
+        ];
+        for (channel, mutate) in mutations {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            let mismatches = logger_expectation_mismatches(expected, &changed);
+            assert!(
+                mismatches
+                    .iter()
+                    .any(|mismatch| mismatch.starts_with(channel)),
+                "{channel} drift was not detected: {mismatches:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn differential_exact_path_preserves_all_rolling_value_rule_rejections() {
+        for (case, json) in [
+            (
+                "v0.6 comma capability",
+                r#"{"version":"0.6.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
+            ),
+            (
+                "v0.7 reserved capability",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["PERMISSIVElearningMODE"]}}"#,
+            ),
+            (
+                "v0.8 comma capability",
+                r#"{"version":"0.8.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
+            ),
+            (
+                "v0.9 reserved capability",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["LearningModeLogging"]}}"#,
+            ),
+            (
+                "empty filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readwritePaths":[" "]}}"#,
+            ),
+            (
+                "quoted filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readonlyPaths":["C:\\bad\"path"]}}"#,
+            ),
+            (
+                "embedded NUL filesystem path",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"deniedPaths":["C:\\bad\u0000path"]}}"#,
+            ),
+            (
+                "proxy with capabilities enforcement",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#,
+            ),
+            (
+                "foreign backend section",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"processContainer":{"leastPrivilege":true}}"#,
+            ),
+            (
+                "relative captureDenials output",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"captureDenials":{"outputPath":"relative.json"}}}"#,
+            ),
+        ] {
+            let (rolling, exact) = parse_both(json);
+            assert!(
+                matches!(rolling, ParserSnapshot::Rejected(_)),
+                "{case}: rolling value rule unexpectedly accepted: {rolling:?}"
+            );
+            assert!(
+                matches!(exact, ParserSnapshot::Rejected(_)),
+                "{case}: exact path is looser than rolling: {exact:?}"
+            );
+
+            if case.starts_with("v0.6") || case.starts_with("v0.7") {
+                assert_eq!(
+                    rolling, exact,
+                    "{case}: published contracts without capability newtypes should retain the shared semantic diagnostic"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_removed_network_field_is_a_precise_exact_stricter_divergence() {
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+            ("allowedHosts", "[]"),
+            ("blockedHosts", "[]"),
+            ("allowLocalNetwork", "false"),
+            ("proxy", r#"{"url":"http://localhost:8080"}"#),
+        ] {
+            for root in [
+                r#""containment":"processcontainer","process":{"commandLine":"echo"}"#,
+                r#""phase":"provision","containment":"wslc""#,
+                r#""phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"}"#,
+            ] {
+                let compatible_proxy_posture =
+                    if field == "proxy" && !root.contains("\"phase\":\"exec\"") {
+                        r#","defaultPolicy":"allow""#
+                    } else {
+                        ""
+                    };
+                let source = format!(
+                    r#"{{"version":"0.9.0-alpha",{root},"network":{{"{field}":{value}{compatible_proxy_posture}}}}}"#
+                );
+                let (rolling, exact) = parse_both(&source);
+                assert!(
+                    matches!(rolling, ParserSnapshot::Accepted(_)),
+                    "{source}: {rolling:?}"
+                );
+                let ParserSnapshot::Rejected(exact) = exact else {
+                    panic!("removed field accepted: {source}");
+                };
+                assert_eq!(
+                    exact.diagnostic.path.as_deref(),
+                    Some(format!("network.{field}").as_str())
+                );
+                assert_eq!(
+                    classify_corpus_exact_stricter(
+                        &serde_json::from_str(&source).unwrap(),
+                        &exact.diagnostic
+                    ),
+                    Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField),
+                    "{source}"
+                );
+                assert!(exact.diagnostic.message.contains("schema 0.9 migration"));
+            }
+        }
+    }
+
+    #[test]
+    fn differential_repository_corpus_has_no_unclassified_or_exact_looser_results() {
+        let root = repository_root();
+        let mut files = Vec::new();
+        collect_json_files(&root.join("tests").join("configs"), &mut files);
+        collect_json_files(&root.join("tests").join("examples"), &mut files);
+        collect_json_files(&root.join("tests").join("policy"), &mut files);
+        files.sort();
+
+        let expected = expected_corpus_divergences();
+        let expected_diagnostics = expected_corpus_diagnostic_divergences();
+        let expected_counts =
+            corpus_divergence_counts(expected.values().map(|expected| expected.kind));
+        let mut observed = std::collections::BTreeMap::new();
+        let mut observed_diagnostics = std::collections::BTreeSet::new();
+        let mut seen_files = std::collections::BTreeSet::new();
+        let mut classified = Vec::new();
+        let mut blockers = Vec::new();
+        let mut equivalent_accepts = 0;
+        let mut shared_rejections = 0;
+        let mut shared_rejection_files = Vec::new();
+
+        for path in &files {
+            let relative = path
+                .strip_prefix(&root)
+                .unwrap()
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            seen_files.insert(relative.clone());
+            let json = fs::read_to_string(path).unwrap();
+            let root_value: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or_else(|error| {
+                    panic!("{relative}: corpus JSON must be syntactically valid: {error}")
+                });
+
+            let (rolling, exact) = parse_both(&json);
+            let mut public_logger = test_logger();
+            let public_result = load_mxc_request_from_json(&json, &mut public_logger);
+            if relative == "tests/configs/wslc_state_aware_exec_proxy.json" {
+                let retains_proxy_only_wslc_context = match &public_result {
+                    Ok(MxcRequest::StateAware(parsed)) => {
+                        let request = parsed.request();
+                        request.containment == ContainmentBackend::Wslc
+                            && !request.policy.network_specified
+                            && !request.policy.network_mode_specified
+                            && request.policy.runtime_network_proxy_specified
+                            && request.policy.network_proxy.is_enabled()
+                            && request.policy.network_egress.is_none()
+                            && request.policy.network_ingress.is_none()
+                    }
+                    _ => false,
+                };
+                if !retains_proxy_only_wslc_context {
+                    blockers.push(format!(
+                        "{relative}: valid proxy-only template must preserve the WSLC ID prefix \
+                         and inherit network mode; it must not become a shared rejection"
+                    ));
+                }
+            }
+            let public = snapshot(public_result, &public_logger);
+            if !same_parse_outcome(&public, &exact) {
+                blockers.push(format!(
+                    "{relative}: public exact dispatch differs from the exact parser oracle\npublic={public:?}\nexact={exact:?}"
+                ));
+            }
+            match (&rolling, &exact) {
+                (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
+                    equivalent_accepts += 1;
+                    if let Some(expected) = expected.get(relative.as_str()) {
+                        blockers.push(format!(
+                            "{relative}: expected {:?} exact-stricter divergence, but both parsers accepted",
+                            expected.kind
+                        ));
+                    }
+                    if rolling != exact {
+                        blockers.push(format!(
+                            "{relative}: both accepted but runtime models differ\nrolling={rolling:?}\nexact={exact:?}"
+                        ));
+                    }
+                }
+                (
+                    ParserSnapshot::Rejected(rolling_diagnostic),
+                    ParserSnapshot::Rejected(exact_diagnostic),
+                ) => {
+                    shared_rejections += 1;
+                    shared_rejection_files.push(relative.clone());
+                    if let Some(expected) = expected.get(relative.as_str()) {
+                        blockers.push(format!(
+                            "{relative}: expected {:?} exact-stricter divergence, but both parsers rejected",
+                            expected.kind
+                        ));
+                    }
+                    match expected_diagnostics.get(relative.as_str()) {
+                        Some(expected) => {
+                            observed_diagnostics.insert(relative.clone());
+                            if rolling_diagnostic == exact_diagnostic {
+                                blockers.push(format!(
+                                    "{relative}: expected a diagnostic-only divergence, but both parsers produced the same rejection"
+                                ));
+                                continue;
+                            }
+
+                            let rolling_mismatches = diagnostic_expectation_mismatches(
+                                expected.rolling,
+                                rolling_diagnostic,
+                            );
+                            let exact_mismatches =
+                                diagnostic_expectation_mismatches(expected.exact, exact_diagnostic);
+                            if !rolling_mismatches.is_empty() || !exact_mismatches.is_empty() {
+                                blockers.push(format!(
+                                    "{relative}: classified diagnostic-only divergence changed\nreason={}\nrolling mismatches={rolling_mismatches:?}\nexact mismatches={exact_mismatches:?}\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}",
+                                    expected.reason
+                                ));
+                            }
+                        }
+                        None if rolling_diagnostic != exact_diagnostic => {
+                            blockers.push(format!(
+                                "{relative}: unclassified shared-rejection diagnostic difference\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}"
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                (ParserSnapshot::Accepted(_), ParserSnapshot::Rejected(exact_diagnostic)) => {
+                    if let Some(kind) =
+                        classify_corpus_exact_stricter(&root_value, exact_diagnostic)
+                    {
+                        classified.push(format!(
+                            "{relative}: rolling=accepted; exact=rejected ({}) at {:?}; \
+                             direction=exact-stricter; reason={}",
+                            exact_diagnostic.message,
+                            exact_diagnostic.path,
+                            kind.reason()
+                        ));
+                        match expected.get(relative.as_str()) {
+                            Some(expected)
+                                if expected.kind == kind
+                                    && expected.matches(exact_diagnostic) =>
+                            {
+                                observed.insert(relative.clone(), expected.kind);
+                            }
+                            Some(expected) => blockers.push(format!(
+                                "{relative}: expected {expected:?}, observed kind={kind:?}\nexact={exact_diagnostic:?}"
+                            )),
+                            None => blockers.push(format!(
+                                "{relative}: newly divergent corpus file requires explicit classification as {kind:?}\nexact={exact_diagnostic:?}"
+                            )),
+                        }
+                    } else {
+                        blockers.push(format!(
+                            "{relative}: unclassified exact-stricter result\nexact={exact_diagnostic:?}"
+                        ));
+                    }
+                }
+                (ParserSnapshot::Rejected(rolling_diagnostic), ParserSnapshot::Accepted(_)) => {
+                    blockers.push(format!(
+                        "{relative}: exact is looser than rolling\nrolling={rolling_diagnostic:?}"
+                    ));
+                }
+            }
+        }
+
+        for (relative, expected) in &expected {
+            if !seen_files.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected {:?} divergence fixture is missing from the corpus",
+                    expected.kind
+                ));
+            }
+        }
+        for relative in expected_diagnostics.keys() {
+            if !seen_files.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected diagnostic-divergence fixture is missing from the corpus"
+                ));
+            } else if !observed_diagnostics.contains(*relative) {
+                blockers.push(format!(
+                    "{relative}: expected diagnostic-only divergence was not observed"
+                ));
+            }
+        }
+
+        let observed_counts = corpus_divergence_counts(observed.values().copied());
+        assert!(
+            blockers.is_empty(),
+            "differential corpus blockers:\n{}\n\nexpected category counts: \
+             {expected_counts:?}\nobserved category counts: {observed_counts:?}\n\n\
+             classified exact-stricter inputs:\n{}",
+            blockers.join("\n\n"),
+            classified.join("\n")
+        );
+        assert_eq!(
+            observed_counts, expected_counts,
+            "explicit divergence inventory and observed category totals differ"
+        );
+        let expected_inventory = (354, 330, 14);
+        assert_eq!(
+            (files.len(), equivalent_accepts, shared_rejections),
+            expected_inventory,
+            "the migration corpus inventory changed; regenerate the migration report and explain the delta\nshared rejections:\n{}",
+            shared_rejection_files.join("\n"),
+        );
+    }
+
+    #[test]
+    fn exact_parser_accepts_every_published_one_shot_version() {
+        for (version, command) in [
+            ("0.6.0-alpha", "echo v06"),
+            ("0.7.0-alpha", "echo v07"),
+            ("0.8.0-alpha", "echo v08"),
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "process": {{"commandLine": "{command}"}}
+                }}"#
+            );
+
+            match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::OneShot(request) => {
+                    assert_eq!(request.schema_version, version);
+                    assert_eq!(request.script_code, command);
+                }
+                MxcRequest::StateAware(_) => {
+                    panic!("{version}: expected one-shot request")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_published_parser_preserves_compatibility_alias_equivalence() {
+        for (
+            case,
+            version,
+            canonical_containment,
+            canonical_fields,
+            alias_containment,
+            alias_fields,
+        ) in [
+            (
+                "v0.6 ProcessContainer containment",
+                "0.6.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.6 ProcessContainer section",
+                "0.6.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.7 ProcessContainer containment",
+                "0.7.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.7 ProcessContainer section",
+                "0.7.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.7 Seatbelt containment",
+                "0.7.0-alpha",
+                "seatbelt",
+                "",
+                "macos_sandbox",
+                "",
+            ),
+            (
+                "v0.7 Seatbelt section",
+                "0.7.0-alpha",
+                "seatbelt",
+                r#",
+                    "seatbelt": {
+                        "guiAccess": true
+                    }"#,
+                "seatbelt",
+                r#",
+                    "macos_sandbox": {
+                        "guiAccess": true
+                    }"#,
+            ),
+            (
+                "v0.8 ProcessContainer containment",
+                "0.8.0-alpha",
+                "processcontainer",
+                "",
+                "appcontainer",
+                "",
+            ),
+            (
+                "v0.8 ProcessContainer section",
+                "0.8.0-alpha",
+                "processcontainer",
+                r#",
+                    "processContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+                "processcontainer",
+                r#",
+                    "appContainer": {
+                        "leastPrivilege": true,
+                        "capabilities": ["internetClient"]
+                    }"#,
+            ),
+            (
+                "v0.8 Seatbelt containment",
+                "0.8.0-alpha",
+                "seatbelt",
+                "",
+                "macos_sandbox",
+                "",
+            ),
+            (
+                "v0.8 Seatbelt section",
+                "0.8.0-alpha",
+                "seatbelt",
+                r#",
+                    "seatbelt": {
+                        "guiAccess": true
+                    }"#,
+                "seatbelt",
+                r#",
+                    "macos_sandbox": {
+                        "guiAccess": true
+                    }"#,
+            ),
+        ] {
+            let canonical_json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "containment": "{canonical_containment}",
+                    "process": {{"commandLine": "echo hello"}}{canonical_fields}
+                }}"#
+            );
+            let alias_json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "containment": "{alias_containment}",
+                    "process": {{"commandLine": "echo hello"}}{alias_fields}
+                }}"#
+            );
+
+            assert_exact_published_requests_equivalent(case, version, &canonical_json, &alias_json);
+        }
+    }
+
+    #[test]
+    fn exact_parser_rejects_unregistered_nearby_versions_without_fallback() {
+        for version in [
+            "0.6.0",
+            "0.6.1-alpha",
+            "0.8.0-dev",
+            "0.9.0",
+            "0.9.1-alpha",
+            "0.10.0-alpha",
+        ] {
+            let json = format!(
+                r#"{{
+                "version": "{version}",
+                "process": {{"commandLine": "echo hello"}}
+            }}"#
+            );
+
+            let error = parse_exact_for_test(&json).unwrap_err();
+            assert!(
+                matches!(error, ParseError::Version(_)),
+                "{version}: got {error:?}"
+            );
+            assert!(
+                error.message().contains("Unsupported contract version"),
+                "{version}: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_parser_does_not_fallback_to_later_contracts() {
+        for (case, json, expected_message) in [
+            (
+                "v0.6 rejects a v0.7 annotation",
+                r#"{
+                    "version": "0.6.0-alpha",
+                    "_comment": "introduced in v0.7",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+                "unknown field `_comment`",
+            ),
+            (
+                "v0.7 rejects v0.8 directional networking",
+                r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"},
+                    "network": {"egress": {"default": "deny"}}
+                }"#,
+                "unknown field `egress`",
+            ),
+            (
+                "v0.8 rejects the v0.9 experimental block",
+                r#"{
+                    "version": "0.8.0-alpha",
+                    "process": {"commandLine": "echo hello"},
+                    "experimental": {}
+                }"#,
+                "unknown field `experimental`",
+            ),
+        ] {
+            let error = parse_exact_for_test(json).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{case}: {error:?}");
+            assert!(
+                error.message().contains(expected_message),
+                "{case}: expected {expected_message:?}, got {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_parser_accepts_the_development_one_shot_contract() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "process": {"commandLine": "echo dev"}
+        }"#;
+
+        match parse_exact_for_test(json).unwrap() {
+            MxcRequest::OneShot(request) => {
+                assert_eq!(request.schema_version, "0.9.0-alpha");
+                assert_eq!(request.script_code, "echo dev");
+            }
+            MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+        }
+    }
+
+    struct DevelopmentStateAwareRootCase {
+        name: &'static str,
+        json: &'static str,
+        expected_phase: Phase,
+        expected_declared_containment: Option<ContainmentBackend>,
+        expected_runtime_containment: ContainmentBackend,
+        expected_sandbox_id: Option<&'static str>,
+        expected_script: &'static str,
+    }
+
+    const DEVELOPMENT_STATE_AWARE_ROOT_CASES: &[DevelopmentStateAwareRootCase] = &[
+        DevelopmentStateAwareRootCase {
+            name: "Windows Sandbox provision",
+            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            expected_phase: Phase::Provision,
+            expected_declared_containment: Some(ContainmentBackend::WindowsSandbox),
+            expected_runtime_containment: ContainmentBackend::WindowsSandbox,
+            expected_sandbox_id: None,
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "IsolationSession provision",
+            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+            expected_phase: Phase::Provision,
+            expected_declared_containment: Some(ContainmentBackend::IsolationSession),
+            expected_runtime_containment: ContainmentBackend::IsolationSession,
+            expected_sandbox_id: None,
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "WSLC provision",
+            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+            expected_phase: Phase::Provision,
+            expected_declared_containment: Some(ContainmentBackend::Wslc),
+            expected_runtime_containment: ContainmentBackend::Wslc,
+            expected_sandbox_id: None,
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "start",
+            json: r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            expected_phase: Phase::Start,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::WindowsSandbox,
+            expected_sandbox_id: Some("wsb:abcd1234"),
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "exec",
+            json: r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo state-aware"}}"#,
+            expected_phase: Phase::Exec,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::Wslc,
+            expected_sandbox_id: Some("wslc:abcd1234"),
+            expected_script: "echo state-aware",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "stop",
+            json: r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+            expected_phase: Phase::Stop,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::IsolationSession,
+            expected_sandbox_id: Some("iso:abcd1234"),
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "deprovision",
+            json: r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+            expected_phase: Phase::Deprovision,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::Wslc,
+            expected_sandbox_id: Some("wslc:abcd1234"),
+            expected_script: "",
+        },
+    ];
+
+    fn assert_development_state_aware_root(
+        parsed: &ParsedStateAwareRequest,
+        case: &DevelopmentStateAwareRootCase,
+    ) {
+        assert_eq!(parsed.phase(), case.expected_phase, "{}", case.name);
+        assert_eq!(
+            parsed.containment(),
+            case.expected_declared_containment,
+            "{}: declared containment",
+            case.name
+        );
+        assert_eq!(
+            parsed.request().containment,
+            case.expected_runtime_containment,
+            "{}: runtime containment",
+            case.name
+        );
+        assert_eq!(
+            parsed.sandbox_id(),
+            case.expected_sandbox_id,
+            "{}: sandbox id",
+            case.name
+        );
+        assert_eq!(
+            parsed.request().script_code,
+            case.expected_script,
+            "{}",
+            case.name
+        );
+    }
+
+    #[test]
+    fn exact_parser_accepts_every_development_state_aware_root() {
+        for case in DEVELOPMENT_STATE_AWARE_ROOT_CASES {
+            let parsed = match parse_exact_for_test(case.json).unwrap() {
+                MxcRequest::StateAware(parsed) => parsed,
+                MxcRequest::OneShot(_) => {
+                    panic!("{}: expected state-aware request", case.name)
+                }
+            };
+            assert_development_state_aware_root(&parsed, case);
+        }
+    }
+
+    fn development_configuration_json(telemetry_enabled: bool) -> String {
+        format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "phase": "provision",
+                "containment": "isolation_session",
+                "telemetry": {{"enabled": {telemetry_enabled}}},
+                "network": {{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}},
+                "experimental": {{
+                    "isolation_session": {{
+                        "provision": {{
+                            "appId": "Contoso.App"
+                        }}
+                    }}
+                }}
+            }}"#
+        )
+    }
+
+    fn assert_development_configuration(parsed: &ParsedStateAwareRequest, telemetry_enabled: bool) {
+        assert_eq!(
+            parsed.operation(),
+            &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
+                crate::models::IsolationSessionProvisionConfig {
+                    app_id: Some("Contoso.App".into()),
+                },
+            )))
+        );
+        assert_eq!(
+            parsed
+                .request()
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(telemetry_enabled)
+        );
+    }
+
+    #[test]
+    fn exact_parser_preserves_development_configuration_and_telemetry() {
+        for telemetry_enabled in [false, true] {
+            let json = development_configuration_json(telemetry_enabled);
+            let parsed = match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::StateAware(parsed) => parsed,
+                MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+            };
+            assert_development_configuration(&parsed, telemetry_enabled);
+        }
+    }
+
+    #[test]
+    fn exact_parser_routes_version_declaration_failures_separately_from_decode_errors() {
+        for (case, json) in [
+            ("missing", r#"{"process":{"commandLine":"echo hello"}}"#),
+            (
+                "null",
+                r#"{"version":null,"process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "wrong type",
+                r#"{"version":42,"process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "duplicate",
+                r#"{"version":"0.8.0-alpha","version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "unsupported",
+                r#"{"version":"99.99.99-secret","process":{"commandLine":"echo hello"}}"#,
+            ),
+            (
+                "unsupported state-aware",
+                r#"{"version":"0.6.1-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            ),
+        ] {
+            let mut logger = test_logger();
+            let error = load_mxc_request_from_json(json, &mut logger).unwrap_err();
+            assert!(
+                matches!(error, ParseError::Version(_)),
+                "{case}: got {error:?}"
+            );
+            assert!(matches!(error.output(), ErrorOutput::Primary));
+            assert!(logger.get_buffer().contains(&error.message()), "{case}");
+            if case == "unsupported" {
+                assert!(
+                    !error.message().contains("99.99.99-secret"),
+                    "unsupported user input must not be rendered"
+                );
+                for version in supported_versions() {
+                    assert!(
+                        error.message().contains(version.as_str()),
+                        "missing registered version {}: {}",
+                        version.as_str(),
+                        error.message()
+                    );
+                }
+                assert!(!error.message().contains("older than supported"));
+                assert!(!error.message().contains("newer than supported"));
+            }
+        }
+    }
+
+    #[test]
+    fn public_loader_keeps_syntax_and_input_failures_as_decode_errors() {
+        for json in [
+            "{ not json",
+            r#"{"version":"0.9.0-alpha","process":"#,
+            r#"{"version":"0.9.0-alpha"} {}"#,
+        ] {
+            let error = load_mxc_request_from_json(json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::Decode(_)), "{error:?}");
+            assert!(matches!(error.output(), ErrorOutput::Primary));
+        }
+        let error = load_mxc_request("!!!", &mut test_logger(), true).unwrap_err();
+        assert!(matches!(error, ParseError::Decode(_)));
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        let error =
+            load_mxc_request(missing.to_str().unwrap(), &mut test_logger(), false).unwrap_err();
+        assert!(matches!(error, ParseError::Decode(_)));
+    }
+
+    #[test]
+    fn public_preflight_duplicate_experimental_fields_follow_the_selected_request_kind() {
+        for (fields, state_aware) in [
+            (r#""process":{"commandLine":"echo hello"}"#, false),
+            (
+                r#""phase":"provision","containment":"windows_sandbox""#,
+                true,
+            ),
+            (r#""phase":"start","sandboxId":"wsb:abcd1234""#, true),
+            (
+                r#""phase":"exec","sandboxId":"wsb:abcd1234","process":{"commandLine":"echo hello"}"#,
+                true,
+            ),
+            (r#""phase":"stop","sandboxId":"wsb:abcd1234""#, true),
+            (r#""phase":"deprovision","sandboxId":"wsb:abcd1234""#, true),
+        ] {
+            let valid = format!(r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}}}}"#);
+            load_mxc_request_from_json(&valid, &mut test_logger()).unwrap();
+            let duplicate = format!(
+                r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}},"experimental":{{}}}}"#
+            );
+            let mut logger = test_logger();
+            let error = load_mxc_request_from_json(&duplicate, &mut logger).unwrap_err();
+            assert!(
+                error.message().contains("duplicate field `experimental`"),
+                "{error:?}"
+            );
+            if state_aware {
+                assert!(matches!(error, ParseError::StateAware(_)), "{error:?}");
+                assert!(matches!(error.output(), ErrorOutput::DiagnosticOnly));
+                assert!(logger.get_buffer().is_empty());
+            } else {
+                assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+                assert!(matches!(error.output(), ErrorOutput::Primary));
+                assert!(logger.get_buffer().contains(&error.message()));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_parser_routes_contract_failures_by_request_kind() {
+        for (case, json, state_aware) in [
+            (
+                "published experimental field",
+                r#"{"version":"0.6.0-alpha","process":{"commandLine":"echo hello"},"experimental":{}}"#,
+                false,
+            ),
+            (
+                "v0.7 directional network field",
+                r#"{"version":"0.7.0-alpha","process":{"commandLine":"echo hello"},"network":{"egress":{"default":"deny"}}}"#,
+                false,
+            ),
+            (
+                "published state-aware field",
+                r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
+                false,
+            ),
+            (
+                "development one-shot unknown field",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"},"unknown":true}"#,
+                false,
+            ),
+            (
+                "development state-aware unknown field",
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234","unknown":true}"#,
+                true,
+            ),
+            (
+                "development unknown phase",
+                r#"{"version":"0.9.0-alpha","phase":"teleport"}"#,
+                true,
+            ),
+        ] {
+            let error = parse_exact_for_test(json).unwrap_err();
+            assert_eq!(
+                matches!(error, ParseError::StateAware(_)),
+                state_aware,
+                "{case}: got {error:?}"
+            );
+            if !state_aware {
+                assert!(
+                    matches!(error, ParseError::OneShot(_)),
+                    "{case}: got {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_one_shot_parser_preserves_typed_error_path_and_location() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
+            let json = format!(
+                "{{\n  \"version\": \"{version}\",\n  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
+            );
+            assert_exact_typed_error(&json, "process.cwd", "42", false);
+        }
+    }
+
+    fn assert_exact_typed_error(json: &str, path: &str, invalid_value: &str, state_aware: bool) {
+        let error = parse_exact_for_test(json).unwrap_err();
+        assert_eq!(matches!(error, ParseError::StateAware(_)), state_aware);
+        if !state_aware {
+            assert!(matches!(error, ParseError::OneShot(_)));
+        }
+        let message = error.message();
+        assert!(
+            message.contains(&format!("Invalid configuration at `{path}`")),
+            "{message}"
+        );
+        let (line, source_line) = json
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(invalid_value))
+            .unwrap();
+        let column = source_line.find(invalid_value).unwrap() + invalid_value.len();
+        assert!(
+            message.contains(&format!("line {} column {column}", line + 1)),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn exact_development_parser_preserves_nested_diagnostics_for_every_root() {
+        for (root, json, state_aware) in [
+            (
+                "one-shot",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+                false,
+            ),
+            (
+                "Windows Sandbox provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                true,
+            ),
+            (
+                "IsolationSession provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+                true,
+            ),
+            (
+                "WSLC provision",
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+                true,
+            ),
+            (
+                "start",
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                true,
+            ),
+            (
+                "exec",
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
+                true,
+            ),
+            (
+                "stop",
+                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                true,
+            ),
+            (
+                "deprovision",
+                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                true,
+            ),
+        ] {
+            parse_exact_for_test(json).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["telemetry"] = serde_json::json!({"enabled": "invalid-telemetry-flag"});
+            let json = serde_json::to_string_pretty(&value).unwrap();
+            assert_exact_typed_error(
+                &json,
+                "telemetry.enabled",
+                "\"invalid-telemetry-flag\"",
+                state_aware,
+            );
+            assert!(
+                parse_exact_for_test(&json)
+                    .unwrap_err()
+                    .message()
+                    .contains(&format!("Invalid {root} request:")),
+                "{root}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_preserves_nested_backend_payload_paths() {
+        for (json, path) in [
+            (
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
+                "process.cwd",
+            ),
+            (
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","experimental":{"wslc":{"provision":{"image":42}}}}"#,
+                "experimental.wslc.provision.image",
+            ),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            let json = serde_json::to_string_pretty(&value).unwrap();
+            assert_exact_typed_error(&json, path, "42", true);
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_uses_shared_diagnostic_escaping_and_redaction() {
+        for json in [
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+        ] {
+            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+            value["telemetry"] =
+                serde_json::json!({"unexpected\n\u{1b}[31m\u{202e}": "do-not-log"});
+            let message = parse_exact_for_test(&serde_json::to_string(&value).unwrap())
+                .unwrap_err()
+                .message();
+            for character in ['\n', '\u{1b}', '\u{202e}'] {
+                assert!(!message.contains(character), "{message:?}");
+            }
+            for escaped in ["\\n", "\\u{1b}", "\\u{202e}"] {
+                assert!(message.contains(escaped), "{message}");
+            }
+
+            // No credential field is currently accepted here, but the shared
+            // renderer must still recognize a secret-bearing error path.
+            value["telemetry"] = serde_json::json!({"apiToken": "do-not-log"});
+            let message = parse_exact_for_test(&serde_json::to_string(&value).unwrap())
+                .unwrap_err()
+                .message();
+            assert!(message.contains("`telemetry.apiToken`"), "{message}");
+            assert!(message.contains("invalid secret value"), "{message}");
+            assert!(!message.contains("do-not-log"), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_preserves_typed_error_path_and_sanitizes_diagnostics() {
+        let json = "{\n  \"version\": \"0.9.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
+
+        let error = parse_exact_for_test(json).unwrap_err();
+        assert!(matches!(error, ParseError::StateAware(_)));
+        let message = error.message();
+        assert!(message.contains("`network.defaultPolicy`"), "{message}");
+        assert!(message.contains("line 5"), "{message}");
+
+        let spoofed =
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo"},"bad\u202ename":true}"#;
+        let error = parse_exact_for_test(spoofed).unwrap_err();
+        let message = error.message();
+        assert!(message.contains(r"bad\u{202e}name"), "{message}");
+    }
+
+    #[test]
+    fn exact_development_network_migration_guidance_is_contract_aware() {
+        for (json, expected, rejected) in [
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "wslc",
+                    "network": {"proxy": {"url": "http://proxy.example:8080"}}
+                }"#,
+                "top-level runtimeConfig.networkProxy on the exec phase",
+                "use runtimeConfig.networkProxy with a proxy URL",
+            ),
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "isolation_session",
+                    "network": {"allowedHosts": ["example.com"]}
+                }"#,
+                "IsolationSession requires network.egress.default, network.ingress.default, and network.ingress.hostLoopback all set to 'allow'",
+                "CIDR rules",
+            ),
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "isolation_session",
+                    "network": {"defaultPolicy": "allow"}
+                }"#,
+                "IsolationSession requires network.egress.default, network.ingress.default, and network.ingress.hostLoopback all set to 'allow'",
+                "('allow' or 'deny')",
+            ),
+        ] {
+            let message = parse_exact_for_test(json).unwrap_err().message();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains(rejected), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_development_production_parser_requires_isolation_session_network() {
+        let missing_network = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let error = parse_exact_for_test(missing_network).unwrap_err();
+        assert!(matches!(error, ParseError::OneShot(_)));
+        assert!(
+            error
+                .message()
+                .contains("IsolationSession requires an explicit network policy"),
+            "{}",
+            error.message()
+        );
+
+        let directional = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "echo hello"},
+            "network": {
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            }
+        }"#;
+        assert!(matches!(
+            parse_exact_for_test(directional).unwrap(),
+            MxcRequest::OneShot(_)
+        ));
+    }
+
+    #[test]
+    fn exact_contract_bridge_accepts_every_registered_one_shot_version() {
+        let v0_6 = serde_json::from_str::<mxc_config_contract::published::v0_6_0_alpha::Request>(
+            r#"{
+                    "version": "0.6.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_6(Box::new(v0_6)), "0.6.0-alpha");
+
+        let v0_7 = serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
+            r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_7(Box::new(v0_7)), "0.7.0-alpha");
+
+        let v0_8 = serde_json::from_str::<mxc_config_contract::published::v0_8_0_alpha::Request>(
+            r#"{
+                    "version": "0.8.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_8(Box::new(v0_8)), "0.8.0-alpha");
+
+        let dev = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#"{
+                "version": "0.9.0-alpha",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::Dev(Box::new(dev)), "0.9.0-alpha");
+    }
+
+    #[test]
+    fn exact_contract_bridge_runs_shared_semantic_validation() {
+        let request =
+            serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
+                r#"{
+                    "version": "0.7.0-alpha",
+                    "containment": "processcontainer",
+                    "process": {"commandLine": "echo hello"},
+                    "processContainer": {
+                        "capabilities": [
+                            "internetClient,privateNetworkClientServer"
+                        ]
+                    }
+                }"#,
+            )
+            .unwrap();
+        let mut logger = test_logger();
+
+        let error = load_one_shot_request_from_contract(
+            ExactOneShotContract::V0_7(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("must not contain a comma"),
+            "unexpected semantic error: {error}"
+        );
+        assert!(
+            logger.get_buffer().contains("must not contain a comma"),
+            "semantic failure should be logged"
+        );
+    }
+
+    #[test]
+    fn exact_development_contract_bridge_requires_isolation_session_network() {
+        let request = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#"{
+                "version": "0.9.0-alpha",
+                "containment": "isolation_session",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        )
+        .unwrap();
+        let mut logger = test_logger();
+
+        let error = load_one_shot_request_from_contract(
+            ExactOneShotContract::Dev(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("IsolationSession requires an explicit network policy"),
+            "unexpected semantic error: {error}"
+        );
+    }
+
     fn neutral_state_aware_input(
         config_json: &str,
         experimental_raw: Option<serde_json::Value>,
         source_text: &str,
-    ) -> StateAwareWireInput {
-        StateAwareWireInput {
+    ) -> LegacyStateAwareWireInput {
+        LegacyStateAwareWireInput {
             config: config_deserialize::from_str(config_json).unwrap(),
             experimental_raw,
             source_text: source_text.into(),
@@ -1943,7 +5662,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_owns_config_and_raw_validations() {
+    fn legacy_normalizer_owns_config_and_raw_validations() {
         let config_input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -1953,7 +5672,7 @@ mod tests {
             None,
             "config validation source",
         );
-        let config_error = match normalize_state_aware(config_input, &mut test_logger()) {
+        let config_error = match normalize_legacy_state_aware(config_input, &mut test_logger()) {
             Ok(_) => panic!("containment on start should be rejected"),
             Err(error) => error,
         };
@@ -1972,7 +5691,7 @@ mod tests {
             Some(serde_json::json!({"seatbelt": {}})),
             "raw validation source",
         );
-        let raw_error = match normalize_state_aware(raw_input, &mut test_logger()) {
+        let raw_error = match normalize_legacy_state_aware(raw_input, &mut test_logger()) {
             Ok(_) => panic!("moved experimental Seatbelt config should be rejected"),
             Err(error) => error,
         };
@@ -1985,7 +5704,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_populates_telemetry_from_neutral_input() {
+    fn legacy_normalizer_populates_telemetry_from_neutral_input() {
         let input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -1996,7 +5715,7 @@ mod tests {
             "telemetry source",
         );
 
-        let parsed = normalize_state_aware(input, &mut test_logger()).unwrap();
+        let parsed = normalize_legacy_state_aware(input, &mut test_logger()).unwrap();
 
         assert_eq!(parsed.phase, Phase::Start);
         assert_eq!(
@@ -2012,7 +5731,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_state_aware_rejects_moved_experimental_telemetry() {
+    fn legacy_normalizer_rejects_moved_experimental_telemetry() {
         let input = neutral_state_aware_input(
             r#"{
                 "phase": "start",
@@ -2022,7 +5741,7 @@ mod tests {
             "malformed telemetry source",
         );
 
-        let error = match normalize_state_aware(input, &mut test_logger()) {
+        let error = match normalize_legacy_state_aware(input, &mut test_logger()) {
             Ok(_) => panic!("moved experimental telemetry should be rejected"),
             Err(error) => error,
         };
@@ -2035,7 +5754,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_preserves_rolling_only_validation_diagnostics() {
+    fn rolling_parser_preserves_legacy_state_aware_validation_diagnostics() {
         for (case, json, expected) in [
             (
                 "containment on a non-provision phase",
@@ -2077,7 +5796,7 @@ mod tests {
                 "Multiple containment backends configured",
             ),
         ] {
-            let error = match load_mxc(json) {
+            let error = match parse_mxc_request_json(json, &mut test_logger()) {
                 Err(ParseError::StateAware(error)) => error,
                 other => panic!("{case}: expected state-aware error, got {other:?}"),
             };
@@ -2121,14 +5840,47 @@ mod tests {
         assert!(probe_phase(r#"{"phase":"nope"}"#).is_err());
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wslc_proxy_template_migration_keeps_backend_context() {
+        let legacy = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "network":{"proxy":{"url":"http://127.0.0.1:8888"}}
+        }"#;
+        assert!(parse_mxc_request_json(legacy, &mut test_logger()).is_ok());
+
+        let unprefixed = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "runtimeConfig":{"networkProxy":"http://127.0.0.1:8888"}
+        }"#;
+        assert!(parse_mxc_request_json(unprefixed, &mut test_logger()).is_err());
+        let error = parse_exact_for_test(unprefixed).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("ProcessContainer runtimeConfig.networkProxy requires"),
+            "{}",
+            error.message()
+        );
+        println!(
+            "unprefixed WSLC proxy-template rejection: {}",
+            error.message()
+        );
+
+        let prefixed = unprefixed.replace("{{SANDBOX_ID}}", "wslc:{{SANDBOX_ID}}");
+        assert_accepted_models_converge("prefixed WSLC proxy template", &prefixed);
+    }
+
     #[test]
     fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
             "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
         }"#;
         let mut logger = test_logger();
 
@@ -2136,10 +5888,10 @@ mod tests {
         let MxcRequest::StateAware(parsed) = parsed else {
             panic!("expected a state-aware request");
         };
-        assert!(parsed.request.policy.network_proxy.is_enabled());
-        assert!(!parsed.request.policy.network_mode_specified);
-        assert!(parsed.request.policy.allowed_hosts.is_empty());
-        assert!(parsed.request.policy.blocked_hosts.is_empty());
+        assert!(parsed.request().policy.network_proxy.is_enabled());
+        assert!(!parsed.request().policy.network_mode_specified);
+        assert!(parsed.request().policy.allowed_hosts.is_empty());
+        assert!(parsed.request().policy.blocked_hosts.is_empty());
     }
 
     fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {
@@ -2169,186 +5921,185 @@ mod tests {
     }
 
     #[test]
-    fn phase_7_2_characterizes_every_state_aware_phase_and_provision_backend() {
-        for (
-            case,
-            json,
-            expected_phase,
-            expected_declared_containment,
-            expected_runtime_containment,
-            expected_sandbox_id,
-            expected_script,
-        ) in [
+    fn state_aware_public_loaders_deliver_expected_provision_configuration() {
+        for (fixture, expected) in [
             (
-                "windows sandbox provision",
-                r#"{"phase":"provision","containment":"windows_sandbox"}"#,
-                Phase::Provision,
-                Some(ContainmentBackend::WindowsSandbox),
-                ContainmentBackend::WindowsSandbox,
-                None,
-                "",
+                "isolation_session_state_aware_provision_appid.json",
+                StateAwareProvision::IsolationSession(Some(
+                    crate::models::IsolationSessionProvisionConfig {
+                        app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".into()),
+                    },
+                )),
             ),
             (
-                "isolation session provision",
-                r#"{"phase":"provision","containment":"isolation_session"}"#,
-                Phase::Provision,
-                Some(ContainmentBackend::IsolationSession),
-                ContainmentBackend::IsolationSession,
-                None,
-                "",
+                "isolation_session_state_aware_provision_appid_empty.json",
+                StateAwareProvision::IsolationSession(Some(
+                    crate::models::IsolationSessionProvisionConfig {
+                        app_id: Some(String::new()),
+                    },
+                )),
             ),
             (
-                "wslc provision",
-                r#"{"phase":"provision","containment":"wslc"}"#,
-                Phase::Provision,
-                Some(ContainmentBackend::Wslc),
-                ContainmentBackend::Wslc,
-                None,
-                "",
-            ),
-            (
-                "start",
-                r#"{"phase":"start","sandboxId":"wsb:abcd1234"}"#,
-                Phase::Start,
-                None,
-                ContainmentBackend::WindowsSandbox,
-                Some("wsb:abcd1234"),
-                "",
-            ),
-            (
-                "exec",
-                r#"{"phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hi"}}"#,
-                Phase::Exec,
-                None,
-                ContainmentBackend::Wslc,
-                Some("wslc:abcd1234"),
-                "echo hi",
-            ),
-            (
-                "stop",
-                r#"{"phase":"stop","sandboxId":"iso:abcd1234"}"#,
-                Phase::Stop,
-                None,
-                ContainmentBackend::IsolationSession,
-                Some("iso:abcd1234"),
-                "",
-            ),
-            (
-                "deprovision",
-                r#"{"phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
-                Phase::Deprovision,
-                None,
-                ContainmentBackend::Wslc,
-                Some("wslc:abcd1234"),
-                "",
+                "wslc_state_aware_provision.json",
+                StateAwareProvision::Wslc(Some(crate::models::WslcProvisionConfig {
+                    image: Some("alpine:latest".into()),
+                    image_tar_path: None,
+                })),
             ),
         ] {
-            let parsed = load_state_aware(json);
-
-            assert_eq!(parsed.phase, expected_phase, "{case}");
-            assert_eq!(
-                parsed.containment, expected_declared_containment,
-                "{case}: declared containment"
-            );
-            assert_eq!(
-                parsed.request.containment, expected_runtime_containment,
-                "{case}: runtime containment"
-            );
-            assert_eq!(
-                parsed.sandbox_id.as_deref(),
-                expected_sandbox_id,
-                "{case}: sandbox id"
-            );
-            assert_eq!(parsed.request.script_code, expected_script, "{case}");
-            assert!(parsed.experimental_raw.is_none(), "{case}");
-            assert_eq!(parsed.source_text.as_deref(), Some(json), "{case}");
+            let path = repository_root()
+                .join("tests")
+                .join("configs")
+                .join(fixture);
+            let json = fs::read_to_string(&path).unwrap();
+            let encoded = base64_encode(json.as_bytes());
+            let requests = [
+                load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap(),
+                load_mxc_request(&encoded, &mut test_logger(), true).unwrap(),
+                load_mxc_request_from_json(&json, &mut test_logger()).unwrap(),
+            ];
+            let reference = RequestSnapshot::from(&requests[0]);
+            for request in &requests {
+                assert_eq!(RequestSnapshot::from(request), reference, "{fixture}");
+                let MxcRequest::StateAware(parsed) = request else {
+                    panic!("{fixture}: expected state-aware request");
+                };
+                assert_eq!(
+                    parsed.operation(),
+                    &StateAwareOperation::Provision(expected.clone())
+                );
+                assert_eq!(parsed.phase(), Phase::Provision);
+                assert_eq!(parsed.containment(), Some(expected.containment()));
+                assert!(parsed.sandbox_id().is_none());
+                assert!(!parsed.request().experimental_enabled);
+                assert!(!parsed.request().dry_run);
+                assert!(!parsed.request().policy.ui_specified);
+            }
         }
     }
 
     #[test]
-    fn phase_7_2_characterizes_raw_experimental_and_stable_telemetry() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "isolation_session",
-            "telemetry": {
-                "enabled": true
-            },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.App"
-                    }
+    fn public_non_provision_loaders_preserve_routing_policy_presence_and_telemetry() {
+        for (id, backend) in [
+            ("iso:example", ContainmentBackend::IsolationSession),
+            ("wsb:example", ContainmentBackend::WindowsSandbox),
+            ("wslc:example", ContainmentBackend::Wslc),
+        ] {
+            for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+                let process = if phase == Phase::Exec {
+                    r#","process":{"commandLine":"echo typed","env":["KEY=value"],"timeout":12}"#
+                } else {
+                    ""
+                };
+                let json = format!(
+                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}},"experimental":{{}}{process}}}"#
+                );
+                let encoded = base64_encode(json.as_bytes());
+                for parsed in [
+                    load_mxc_request_from_json(&json, &mut test_logger()).unwrap(),
+                    load_mxc_request(&encoded, &mut test_logger(), true).unwrap(),
+                ] {
+                    let MxcRequest::StateAware(parsed) = parsed else {
+                        panic!("expected state-aware request");
+                    };
+                    assert_eq!(parsed.phase(), phase);
+                    assert_eq!(parsed.sandbox_id(), Some(id));
+                    assert!(parsed.containment().is_none());
+                    assert_eq!(parsed.request().containment, backend);
+                    assert!(!parsed.request().policy.network_specified);
+                    assert!(!parsed.request().policy.network_mode_specified);
+                    assert!(!parsed.request().policy.ui_specified);
+                    assert!(parsed.request().policy.network_egress.is_none());
+                    assert!(parsed.request().policy.network_ingress.is_none());
+                    assert_eq!(
+                        parsed.request().telemetry.as_ref().unwrap().enabled,
+                        Some(false)
+                    );
+                    assert_eq!(
+                        parsed.request().script_code,
+                        if phase == Phase::Exec {
+                            "echo typed"
+                        } else {
+                            ""
+                        }
+                    );
                 }
             }
-        }"#;
-
-        let parsed = load_state_aware(json);
-
-        assert_eq!(
-            parsed.experimental_raw,
-            Some(serde_json::json!({
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.App"
-                    }
-                }
-            }))
-        );
-        assert_eq!(
-            parsed
-                .request
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
-        assert!(parsed.request.experimental.test.is_none());
-        assert!(parsed.request.experimental.windows_sandbox.is_none());
-        assert!(parsed.request.experimental.wslc.is_none());
-        assert_eq!(parsed.source_text.as_deref(), Some(json));
+        }
     }
 
     #[test]
-    fn phase_7_2_characterizes_post_provision_network_presence() {
-        let omitted = load_state_aware(r#"{"phase":"start","sandboxId":"wslc:abcd1234"}"#);
-        assert!(!omitted.request.policy.network_specified);
-        assert!(!omitted.request.policy.network_mode_specified);
-        assert!(omitted.request.policy.network_egress.is_none());
-        assert!(omitted.request.policy.network_ingress.is_none());
-        assert!(!omitted.request.policy.network_proxy.is_enabled());
+    fn exact_loader_accepts_every_development_state_aware_root() {
+        for case in DEVELOPMENT_STATE_AWARE_ROOT_CASES {
+            let parsed = load_state_aware(case.json);
+            assert_development_state_aware_root(&parsed, case);
+        }
+    }
+
+    #[test]
+    fn exact_loader_preserves_development_configuration_and_telemetry() {
+        for telemetry_enabled in [false, true] {
+            let json = development_configuration_json(telemetry_enabled);
+            let parsed = load_state_aware(&json);
+
+            assert_development_configuration(&parsed, telemetry_enabled);
+            assert!(parsed.request().experimental.test.is_none());
+            assert!(parsed.request().experimental.windows_sandbox.is_none());
+            assert!(parsed.request().experimental.wslc.is_none());
+        }
+    }
+
+    #[test]
+    fn exact_loader_preserves_post_provision_network_presence() {
+        let omitted = load_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wslc:abcd1234"}"#,
+        );
+        assert!(!omitted.request().policy.network_specified);
+        assert!(!omitted.request().policy.network_mode_specified);
+        assert!(omitted.request().policy.network_egress.is_none());
+        assert!(omitted.request().policy.network_ingress.is_none());
+        assert!(!omitted.request().policy.network_proxy.is_enabled());
 
         let proxy_only = load_state_aware(
             r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"proxy": {"url": "http://proxy.example:8080"}}
+                "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
             }"#,
         );
-        assert!(proxy_only.request.policy.network_specified);
-        assert!(!proxy_only.request.policy.network_mode_specified);
-        assert!(proxy_only.request.policy.network_proxy.is_enabled());
+        assert!(!proxy_only.request().policy.network_specified);
+        assert!(proxy_only.request().policy.runtime_network_proxy_specified);
+        assert!(!proxy_only.request().policy.network_mode_specified);
+        assert!(proxy_only.request().policy.network_proxy.is_enabled());
 
         let mode = load_state_aware(
             r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"defaultPolicy": "allow"}
+                "network": {"egress": {"default": "allow"}}
             }"#,
         );
-        assert!(mode.request.policy.network_specified);
-        assert!(mode.request.policy.network_mode_specified);
+        assert!(mode.request().policy.network_specified);
+        assert!(mode.request().policy.network_mode_specified);
         assert_eq!(
-            mode.request.policy.default_network_policy,
-            NetworkPolicy::Allow
+            mode.request()
+                .policy
+                .network_egress
+                .as_ref()
+                .unwrap()
+                .default,
+            crate::models::NetworkAction::Allow
         );
-        assert!(!mode.request.policy.network_proxy.is_enabled());
+        assert!(!mode.request().policy.network_proxy.is_enabled());
     }
 
     #[test]
     fn cli_command_supplies_a_missing_one_shot_command_line() {
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"cwd":"C:\\tmp"}}"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => {
                 assert_eq!(req.script_code, "app.exe --flag");
@@ -2360,7 +6111,7 @@ mod tests {
 
     #[test]
     fn cli_command_supplies_an_absent_one_shot_process_block() {
-        let json = r#"{"containment": "processcontainer"}"#;
+        let json = r#"{"version":"0.9.0-alpha","containment":"processcontainer"}"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => assert_eq!(req.script_code, "app.exe --flag"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -2370,15 +6121,16 @@ mod tests {
     #[test]
     fn cli_command_supplies_a_missing_state_aware_exec_command_line() {
         let json = r#"{
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "iso:abcd1234",
         "process": {"cwd": "C:\\tmp"}
     }"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "app.exe --flag");
-                assert_eq!(p.request.working_directory, "C:\\tmp");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "app.exe --flag");
+                assert_eq!(p.request().working_directory, "C:\\tmp");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -2387,15 +6139,16 @@ mod tests {
     #[test]
     fn cli_command_replaces_a_state_aware_exec_command_line() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"commandLine": "policy.exe", "cwd": "C:\\tmp"}
         }"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "app.exe --flag");
-                assert_eq!(p.request.working_directory, "C:\\tmp");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "app.exe --flag");
+                assert_eq!(p.request().working_directory, "C:\\tmp");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -2407,6 +6160,7 @@ mod tests {
             (
                 "process",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {"commandLine": "first.exe"},
@@ -2416,6 +6170,7 @@ mod tests {
             (
                 "commandLine",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {
@@ -2427,6 +6182,7 @@ mod tests {
             (
                 "_comment",
                 r#"{
+                "version": "0.9.0-alpha",
                 "phase": "exec",
                 "sandboxId": "iso:abcd1234",
                 "process": {"commandLine": "policy.exe"},
@@ -2456,6 +6212,7 @@ mod tests {
             (
                 "replacement",
                 r#"{
+                "version":"0.9.0-alpha",
                 "phase":"exec",
                 "sandboxId":"iso:abcd1234",
                 "process":{"commandLine":"x","cwd":42}
@@ -2465,6 +6222,7 @@ mod tests {
             (
                 "insertion",
                 r#"{
+                "version":"0.9.0-alpha",
                 "phase":"exec",
                 "sandboxId":"iso:abcd1234",
                 "process":{"cwd":42}
@@ -2527,7 +6285,8 @@ mod tests {
     #[test]
     fn cli_command_preserves_invalid_command_line_type_errors() {
         for value in ["42", "true", "[]", "{}"] {
-            let json = format!(r#"{{"process":{{"commandLine":{value}}}}}"#);
+            let json =
+                format!(r#"{{"version":"0.9.0-alpha","process":{{"commandLine":{value}}}}}"#);
 
             assert!(load_mxc(&json).is_err(), "sanity: commandLine={value}");
             assert!(
@@ -2542,15 +6301,19 @@ mod tests {
         for (case, json, command) in [
             (
                 "longer replacement",
-                r#"{"process":{"commandLine":"x","cwd":42}}"#,
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x","cwd":42}}"#,
                 argv(&["a-much-longer-command.exe"]),
             ),
             (
                 "shorter replacement",
-                r#"{"process":{"commandLine":"a-much-longer-policy-command.exe","cwd":42}}"#,
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"a-much-longer-policy-command.exe","cwd":42}}"#,
                 argv(&["x"]),
             ),
-            ("insertion", r#"{"process":{"cwd":42}}"#, argv(&["cli.exe"])),
+            (
+                "insertion",
+                r#"{"version":"0.9.0-alpha","process":{"cwd":42}}"#,
+                argv(&["cli.exe"]),
+            ),
         ] {
             let (effective_json, _) =
                 apply_cli_command(json, &command).expect("command preparation");
@@ -2567,7 +6330,7 @@ mod tests {
 
     #[test]
     fn cli_command_render_error_precedes_an_unrelated_one_shot_policy_error() {
-        let json = r#"{"process":{"commandLine":"policy.exe","cwd":42}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe","cwd":42}}"#;
         let error = load_mxc_with_cli(json, &argv(&["cli.exe", "hidden\0payload"]))
             .expect_err("command rendering should fail before typed policy validation");
 
@@ -2584,12 +6347,12 @@ mod tests {
         for (case, json, expected_code) in [
             (
                 "missing sandbox id",
-                r#"{"phase":"exec","process":{"commandLine":42}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"exec","process":{"commandLine":42}}"#,
                 MxcErrorCode::MalformedRequest,
             ),
             (
                 "unsupported sandbox id",
-                r#"{"phase":"exec","sandboxId":"zzz:abcd","process":{"commandLine":42}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"zzz:abcd","process":{"commandLine":42}}"#,
                 MxcErrorCode::UnsupportedContainment,
             ),
         ] {
@@ -2609,14 +6372,14 @@ mod tests {
     fn missing_command_line_is_rejected_without_a_cli_command() {
         // Sanity: without the flag, the legacy contract holds — missing
         // commandLine is a hard parse error.
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process": {"cwd": "C:\\tmp"}}"#;
         assert!(load_mxc_with_cli(json, &[]).is_err());
     }
 
     #[test]
     fn apply_cli_command_returns_override_log_for_a_one_shot_replacement() {
         let (out, override_log) = apply_cli_command(
-            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap();
@@ -2632,7 +6395,7 @@ mod tests {
     #[test]
     fn apply_cli_command_returns_no_override_log_when_the_policy_had_no_command() {
         let (out, override_log) = apply_cli_command(
-            r#"{"process":{"cwd":"/usr/tmp"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"cwd":"/usr/tmp"}}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap();
@@ -2645,6 +6408,7 @@ mod tests {
     #[test]
     fn cli_command_does_not_log_override_when_the_effective_policy_is_invalid() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy.exe",
                 "cwd": 42
@@ -2682,7 +6446,8 @@ mod tests {
             // wslc -> Wslc -> PosixShell
             ("wslc:abcd1234", "app.exe 'a&b'"),
         ] {
-            let json = format!(r#"{{"phase":"exec","sandboxId":"{sandbox_id}"}}"#);
+            let json =
+                format!(r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}"}}"#);
             let (out, override_log) = apply_cli_command(&json, &argv(&["app.exe", "a&b"])).unwrap();
 
             let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -2697,7 +6462,7 @@ mod tests {
     #[test]
     fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
         let err = apply_cli_command(
-            r#"{"phase":"start","sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
             &argv(&["echo", "hi"]),
         )
         .unwrap_err();
@@ -2705,9 +6470,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_command_does_not_reclassify_a_published_contract_as_state_aware() {
+        let json = r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#;
+
+        let without_cli = load_mxc(json).unwrap_err();
+        let with_cli = load_mxc_with_cli(json, &argv(&["echo", "hi"])).unwrap_err();
+
+        assert!(matches!(without_cli, ParseError::OneShot(_)));
+        assert!(matches!(with_cli, ParseError::OneShot(_)));
+        assert_eq!(with_cli.message(), without_cli.message());
+    }
+
+    #[test]
     fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
         let err = apply_cli_command(
-            r#"{"phase":"exec","sandboxId":"zzz:abcd"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"zzz:abcd"}"#,
             &argv(&["app.exe", "--flag"]),
         )
         .unwrap_err();
@@ -2722,9 +6499,9 @@ mod tests {
         // ({"process":42}). Assert the output is byte-identical to the input.
 
         for json in [
-            r#"{"phase":null,"sandboxId":"iso:abcd1234"}"#,
-            r#"{"containment":"nope"}"#,
-            r#"{"process":42}"#,
+            r#"{"version":"0.9.0-alpha","phase":null,"sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","containment":"nope"}"#,
+            r#"{"version":"0.9.0-alpha","process":42}"#,
         ] {
             let (out, override_log) =
                 apply_cli_command(json, &argv(&["app.exe", "--flag"])).unwrap();
@@ -2735,8 +6512,11 @@ mod tests {
 
     #[test]
     fn apply_cli_command_rejects_an_empty_argv() {
-        let err =
-            apply_cli_command(r#"{"process":{"commandLine":"policy.exe"}}"#, &[]).unwrap_err();
+        let err = apply_cli_command(
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
+            &[],
+        )
+        .unwrap_err();
         assert!(matches!(err, ParseError::Decode(_)));
     }
 
@@ -2745,7 +6525,7 @@ mod tests {
         // A null byte fails argv rendering, which is an entry-point error
         // rather than a parse error: the document is never spliced.
         let err = apply_cli_command(
-            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"policy.exe"}}"#,
             &argv(&["app.exe", "hidden\0payload"]),
         )
         .unwrap_err();
@@ -2761,7 +6541,7 @@ mod tests {
     #[test]
     fn apply_cli_command_routes_an_unconvertible_state_aware_exec_command_to_an_envelope() {
         let err = apply_cli_command(
-            r#"{"phase":"exec","sandboxId":"iso:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"iso:abcd1234"}"#,
             &argv(&["app.exe", "hidden\0payload"]),
         )
         .unwrap_err();
@@ -2776,7 +6556,7 @@ mod tests {
 
     #[test]
     fn one_shot_routes_via_load_mxc_request() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#;
         match load_mxc(json).unwrap() {
             MxcRequest::OneShot(req) => assert_eq!(req.script_code, "echo hello"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -2784,14 +6564,14 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_provision_request_routes_to_state_aware_arm() {
+    fn rolling_parser_routes_isolation_session_provision_to_state_aware_arm() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
             "filesystem": {"readwritePaths": ["C:\\workspace"]}
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Provision);
                 assert_eq!(p.containment, Some(ContainmentBackend::IsolationSession));
                 assert!(p.sandbox_id.is_none());
@@ -2800,12 +6580,12 @@ mod tests {
                 // Non-exec phase: process-related fields stay default.
                 assert!(p.request.script_code.is_empty());
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
     #[test]
-    fn state_aware_start_request_carries_sandbox_id_and_experimental() {
+    fn rolling_parser_preserves_state_aware_backend_payload() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
@@ -2813,8 +6593,8 @@ mod tests {
                 "isolation_session": {"start": {"opaqueFutureField": true}}
             }
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Start);
                 assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
                 // Assert the nested experimental payload survives extraction
@@ -2828,7 +6608,7 @@ mod tests {
                     })
                 );
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -2841,21 +6621,27 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": true},
-            "experimental": {"isolation_session": {"provision": {}}}
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
-                let telem = p.request.telemetry.expect("telemetry should be populated");
+                let telem = p
+                    .request()
+                    .telemetry
+                    .as_ref()
+                    .expect("telemetry should be populated");
                 assert_eq!(telem.enabled, Some(true));
-                // The raw block is still available for per-backend dispatch.
-                assert!(p.experimental_raw.is_some());
+                assert_eq!(
+                    p.operation(),
+                    &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(None)),
+                );
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
     #[test]
-    fn state_aware_telemetry_rejects_pre_09_schema_version() {
+    fn state_aware_request_rejects_published_contract_version() {
         let error = load_mxc(
             r#"{
                 "version": "0.8.0-alpha",
@@ -2865,24 +6651,19 @@ mod tests {
             }"#,
         )
         .unwrap_err();
-        assert!(
-            error
-                .message()
-                .contains("telemetry' requires config schema version 0.9.0-alpha"),
-            "got {error:?}"
-        );
+        assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
     }
 
     #[test]
-    fn state_aware_without_telemetry_leaves_typed_field_unset() {
+    fn rolling_parser_leaves_telemetry_unset_for_backend_only_payload() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -2891,6 +6672,7 @@ mod tests {
         // A present-but-malformed telemetry block is a client error rejected at
         // parse time (surfaced as a state-aware envelope), not a silent disable.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": 42
@@ -2907,6 +6689,7 @@ mod tests {
         for phase in ["start", "exec", "stop", "deprovision"] {
             let json = format!(
                 r#"{{
+                    "version": "0.9.0-alpha",
                     "phase": "{phase}",
                     "sandboxId": "iso:abcd1234",
                     "containment": "wslc",
@@ -2937,20 +6720,23 @@ mod tests {
                     {extra}
                 }}"#
             );
-            assert!(matches!(load_mxc(&json), Err(ParseError::StateAware(_))));
+            assert!(matches!(
+                parse_mxc_request_json(&json, &mut test_logger()),
+                Err(ParseError::StateAware(_))
+            ));
         }
     }
 
     #[test]
-    fn state_aware_v08_omitted_network_remains_absent_after_parsing() {
+    fn rolling_state_aware_v08_omitted_network_remains_absent_after_parsing() {
         let json = r#"{
             "version": "0.8.0-alpha",
             "phase": "start",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
         }"#;
-        let parsed = match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(parsed) => parsed,
-            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(parsed) => parsed,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
 
         assert!(parsed.request.policy.network_egress.is_none());
@@ -2960,7 +6746,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
+    fn rolling_state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
         let json = r#"{
             "version": "0.8.0-alpha",
             "phase": "exec",
@@ -2968,9 +6754,9 @@ mod tests {
             "runtimeConfig": {"networkProxy": "http://127.0.0.1:8888"},
             "process": {"commandLine": "echo hi"}
         }"#;
-        let parsed = match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(parsed) => parsed,
-            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(parsed) => parsed,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
         };
 
         assert_eq!(parsed.request.containment, ContainmentBackend::Wslc);
@@ -2979,22 +6765,23 @@ mod tests {
     }
 
     /// Parse a provision request and return the resolved cross-cutting policy.
-    fn provision_policy(network_json: &str) -> ContainerPolicy {
+    fn rolling_provision_policy(network_json: &str) -> ContainerPolicy {
         let json = format!(
             r#"{{
+                "version": "0.9.0-alpha",
                 "phase": "provision",
                 "containment": "processcontainer",
                 "network": {network_json}
             }}"#
         );
-        match load_mxc(&json).unwrap() {
-            MxcRequest::StateAware(p) => p.request.policy,
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        match parse_mxc_request_json(&json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(p) => p.request.policy,
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
     #[test]
-    fn state_aware_network_mode_specified_true_for_each_mode_field() {
+    fn rolling_parser_sets_state_aware_network_mode_presence() {
         // Every network *mode* field (everything except `proxy`) must flip the
         // presence bit so post-provision phases can reject an immutable-posture
         // change by presence.
@@ -3005,7 +6792,7 @@ mod tests {
             r#"{"allowedHosts": ["example.com"]}"#,
             r#"{"blockedHosts": ["example.com"]}"#,
         ] {
-            let policy = provision_policy(net);
+            let policy = rolling_provision_policy(net);
             assert!(
                 policy.network_mode_specified,
                 "network {net} should set network_mode_specified"
@@ -3015,11 +6802,11 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_proxy_only_block_leaves_network_mode_unspecified() {
+    fn rolling_parser_keeps_proxy_only_network_mode_unspecified() {
         // A proxy-only block sets `network_specified` (the block is present) but
         // NOT `network_mode_specified`, so the cooperative proxy stays honourable
         // at exec while no immutable mode change is falsely detected.
-        let policy = provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
+        let policy = rolling_provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
         assert!(policy.network_specified);
         assert!(
             !policy.network_mode_specified,
@@ -3035,6 +6822,7 @@ mod tests {
         // `load_mxc_request` wrapper), never duplicated, and must never touch the
         // primary buffer/stdout that the state-aware JSON envelope owns.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": 42
@@ -3060,7 +6848,9 @@ mod tests {
 
         let logged = std::fs::read_to_string(&log_path).unwrap();
         assert_eq!(
-            logged.matches("telemetry").count(),
+            logged
+                .matches("invalid type: integer `42`, expected struct Telemetry")
+                .count(),
             1,
             "expected exactly one auxiliary diagnostic, got: {logged:?}"
         );
@@ -3069,6 +6859,7 @@ mod tests {
     #[test]
     fn state_aware_experimental_telemetry_reports_migration() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"telemetry": {"enabled": true}}
@@ -3085,7 +6876,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_non_object_experimental_is_rejected() {
+    fn rolling_parser_rejects_non_object_state_aware_experimental() {
         // A non-object `experimental` (here a bare number) is a hard parse error
         // on the one-shot path (typed `Option<Experimental>`); the state-aware
         // path peels `experimental` off before typed deserialize, so it must
@@ -3096,22 +6887,20 @@ mod tests {
             "sandboxId": "iso:abcd1234",
             "experimental": 42
         }"#;
-        let r = load_mxc(json);
+        let r = parse_mxc_request_json(json, &mut test_logger());
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
-    fn state_aware_null_experimental_is_accepted() {
-        // `null` maps to "absent" on both the one-shot and state-aware paths, so
-        // it is accepted (leaving telemetry unset), unlike a non-object value.
+    fn rolling_parser_treats_null_state_aware_experimental_as_absent() {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": null
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(parsed) => assert!(parsed.request.telemetry.is_none()),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -3186,14 +6975,15 @@ mod tests {
     #[test]
     fn state_aware_exec_request_requires_command_line() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"commandLine": "echo hello"}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Exec);
-                assert_eq!(p.request.script_code, "echo hello");
+                assert_eq!(p.phase(), Phase::Exec);
+                assert_eq!(p.request().script_code, "echo hello");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -3202,35 +6992,39 @@ mod tests {
     #[test]
     fn state_aware_exec_without_process_is_rejected() {
         // Exec phase still requires the process.commandLine wire field.
-        let json = r#"{ "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234"
+        }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
-        let json = r#"{"phase": "teleport"}"#;
+        let json = r#"{"version":"0.9.0-alpha","phase":"teleport"}"#;
         let error = match load_mxc(json) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
-        assert!(error.message.contains("Invalid configuration at `phase`"));
-        assert!(error.message.contains("unknown variant `teleport`"));
+        assert!(error.message.contains("Unsupported phase"));
     }
 
     #[test]
     fn present_null_phase_is_still_discriminated_as_state_aware() {
-        let error = match load_mxc(r#"{"phase": null}"#) {
+        let error = match load_mxc(r#"{"version":"0.9.0-alpha","phase":null}"#) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
 
-        assert!(error.message.contains("Missing required field: phase"));
+        assert!(error.message.contains("Invalid phase declaration"));
     }
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "totally_made_up"
         }"#;
@@ -3241,12 +7035,10 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("Invalid configuration at `containment`"),
+                .contains("Unsupported containment for provision phase"),
             "got: {}",
             error.message
         );
-        assert!(error.message.contains("unknown variant `totally_made_up`"));
-        assert!(error.message.contains("line 3"));
     }
 
     #[test]
@@ -3260,7 +7052,7 @@ mod tests {
             },
             "process": {"timeout": "soon"}
         }"#;
-        let error = match load_mxc(json) {
+        let error = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
@@ -3357,13 +7149,13 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_non_object_experimental_block() {
+    fn rolling_parser_rejects_non_object_state_aware_experimental_block() {
         // `null` maps to "absent" and is accepted (see
         // `state_aware_null_experimental_is_accepted`); only non-null,
         // non-object values are rejected.
         for value in [r#""oops""#, "42", "[]"] {
             let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
-            let error = match load_mxc(&json) {
+            let error = match parse_mxc_request_json(&json, &mut test_logger()) {
                 Err(ParseError::StateAware(error)) => error,
                 other => panic!("expected state-aware error for {value}, got {other:?}"),
             };
@@ -3378,16 +7170,14 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_provision_works_with_no_containment() {
-        // Containment is optional at parse time; the dispatcher enforces it
-        // (provision needs containment, non-provision uses sandbox_id prefix).
-        let json = r#"{"phase": "provision"}"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Provision);
-                assert!(p.containment.is_none());
+    fn rolling_parser_allows_provision_without_containment() {
+        let json = r#"{"phase":"provision"}"#;
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(parsed) => {
+                assert_eq!(parsed.phase, Phase::Provision);
+                assert!(parsed.containment.is_none());
             }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -3602,7 +7392,7 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"teleport"}"#);
+        let encoded = base64_encode(br#"{"version":"0.9.0-alpha","phase":"teleport"}"#);
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -3613,8 +7403,7 @@ mod tests {
 
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
-        assert!(log.contains("Invalid configuration at `phase`"));
-        assert!(log.contains("unknown variant `teleport`"));
+        assert!(log.contains("Unsupported phase"));
     }
 
     #[test]
@@ -3781,7 +7570,9 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"provision","experimental":{"seatbelt":{}}}"#);
+        let encoded = base64_encode(
+            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"seatbelt":{}}}"#,
+        );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -3793,7 +7584,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("'experimental.seatbelt' has moved").count(),
+            log.matches("unknown field `seatbelt`").count(),
             1,
             "state-aware diagnostics should reach auxiliary sinks exactly once"
         );
@@ -4391,14 +8182,14 @@ mod tests {
     }
 
     #[test]
-    fn ui_specified_true_on_state_aware_requests() {
+    fn rolling_parser_preserves_state_aware_ui_presence() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
             "ui": {"disable": true}
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
             other => panic!("expected state-aware request, got {other:?}"),
         }
     }
@@ -5998,9 +9789,9 @@ mod tests {
     #[test]
     fn state_aware_request_rejects_correlation_vector_field() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "wsb:12345678",
-            "containment": "windows_sandbox",
             "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"
         }"#;
         let mut logger = test_logger();
@@ -6009,6 +9800,7 @@ mod tests {
         let msg = match err {
             ParseError::StateAware(error) => error.to_string(),
             ParseError::Decode(error)
+            | ParseError::Version(error)
             | ParseError::OneShotMalformed(error)
             | ParseError::OneShot(error) => error.to_string(),
         };
@@ -6053,8 +9845,13 @@ mod tests {
     #[test]
     fn state_aware_unknown_top_level_field_rejected() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true
+            },
             "bogusField": true
         }"#;
         let result = load_mxc(json);
@@ -6065,7 +9862,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_seatbelt_section() {
+    fn rolling_parser_rejects_one_shot_seatbelt_section_on_state_aware_request() {
         // A state-aware request carrying a one-shot-only `seatbelt` policy must
         // be rejected, not silently discarded (the caller might believe the
         // hardening is in effect).
@@ -6074,7 +9871,7 @@ mod tests {
             "containment": "seatbelt",
             "seatbelt": {"guiAccess": true}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -6087,6 +9884,7 @@ mod tests {
     #[test]
     fn state_aware_rejects_one_shot_lifecycle_section() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "lifecycle": {"destroyOnExit": false}
@@ -6095,20 +9893,17 @@ mod tests {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("lifecycle") && err.contains("do not accept"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `lifecycle`"), "got: {err}");
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_processcontainer_section() {
+    fn rolling_parser_rejects_one_shot_processcontainer_section_on_state_aware_request() {
         let json = r#"{
             "phase": "provision",
             "containment": "processcontainer",
             "processContainer": {"leastPrivilege": true}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -6119,13 +9914,13 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_rejects_one_shot_lxc_section() {
+    fn rolling_parser_rejects_one_shot_lxc_section_on_state_aware_request() {
         let json = r#"{
             "phase": "provision",
             "containment": "lxc",
             "lxc": {"distribution": "alpine"}
         }"#;
-        let err = match load_mxc(json) {
+        let err = match parse_mxc_request_json(json, &mut test_logger()) {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
@@ -6141,6 +9936,7 @@ mod tests {
         // path must reject it with the migration message, not silently discard
         // it.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"seatbelt": {"guiAccess": true}}
@@ -6149,15 +9945,13 @@ mod tests {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("has moved to the stable section"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `seatbelt`"), "got: {err}");
     }
 
     #[test]
     fn state_aware_rejects_experimental_macos_sandbox_alias() {
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"macos_sandbox": {"guiAccess": true}}
@@ -6166,40 +9960,37 @@ mod tests {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(
-            err.contains("has moved to the stable section"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown field `macos_sandbox`"), "got: {err}");
     }
 
     #[test]
     fn state_aware_top_level_annotation_allowed() {
         let json = r#"{
-            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
+            "$schema": "../schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+            "version": "0.9.0-alpha",
             "phase": "provision",
-            "containment": "isolation_session"
+            "containment": "isolation_session",
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
         }"#;
         match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            MxcRequest::StateAware(p) => assert_eq!(p.phase(), Phase::Provision),
             _ => panic!("expected state-aware request"),
         }
     }
 
     #[test]
-    fn state_aware_forwards_container_id() {
-        // `containerId` is a documented top-level field and must be preserved
-        // into the inner ExecutionRequest for state-aware requests, not dropped.
+    fn rolling_parser_forwards_state_aware_container_id() {
         let json = r#"{
             "phase": "provision",
             "containerId": "sa-container-1",
             "containment": "isolation_session"
         }"#;
-        match load_mxc(json).unwrap() {
-            MxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Provision);
-                assert_eq!(p.request.container_id, "sa-container-1");
+        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
+            LegacyMxcRequest::StateAware(parsed) => {
+                assert_eq!(parsed.phase, Phase::Provision);
+                assert_eq!(parsed.request.container_id, "sa-container-1");
             }
-            _ => panic!("expected state-aware request"),
+            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -6605,7 +10396,7 @@ mod tests {
                 other => panic!("expected one-shot rejection, got: {other:?}"),
             };
             assert!(error.contains(expected_path), "got: {error}");
-            assert!(error.contains("must contain at least one"), "got: {error}");
+            assert!(error.contains("array must not be empty"), "got: {error}");
         }
     }
 
@@ -6647,7 +10438,8 @@ mod tests {
             Err(ParseError::OneShot(error)) => error.to_string(),
             other => panic!("expected one-shot rejection, got: {other:?}"),
         };
-        assert!(error.contains("port must be between 1 and 65535"));
+        assert!(error.contains("network.egress.allow[0].ports[0].port"));
+        assert!(error.contains("expected a nonzero u16"));
     }
 
     #[test]
@@ -6655,7 +10447,7 @@ mod tests {
         for (port, expected) in [
             (
                 r#"{"protocol": "tcp", "port": 1, "endPort": 0}"#,
-                "between 1 and 65535",
+                "expected a nonzero u16",
             ),
             (r#"{"protocol": "tcp", "endPort": 443}"#, "requires port"),
         ] {
@@ -6784,11 +10576,15 @@ mod tests {
             "network": {"egress": {"default": "deny"}}
         }"#;
         let error = match load_mxc(json) {
-            Err(ParseError::OneShot(error)) => error.to_string(),
-            other => panic!("expected one-shot rejection, got: {other:?}"),
+            Err(ParseError::Version(error)) => error.to_string(),
+            other => panic!("expected version rejection, got: {other:?}"),
         };
 
-        assert!(error.contains("Invalid schema version"));
+        assert!(error.contains("Unsupported contract version"));
+        for version in supported_versions() {
+            assert!(error.contains(version.as_str()), "got: {error}");
+        }
+        assert!(!error.contains("0.8x"));
         assert!(!error.contains("require schema version 0.8"));
     }
 
@@ -7491,11 +11287,10 @@ mod tests {
         );
     }
 
-    // State-aware path: an `experimental` block whose backend key doesn't
-    // match the resolved `containment` is rejected the same way as in the
-    // one-shot path.
+    // Rolling state-aware normalization rejects an `experimental` backend key
+    // that does not match the resolved containment.
     #[test]
-    fn state_aware_foreign_experimental_backend_rejected() {
+    fn rolling_parser_rejects_foreign_state_aware_experimental_backend() {
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
@@ -7504,9 +11299,7 @@ mod tests {
                 "wslc": {"image": "alpine:latest"}
             }
         }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = load_mxc_request(&encoded, &mut logger, true)
+        let err = parse_mxc_request_json(json, &mut test_logger())
             .expect_err("state-aware config with foreign experimental backend should be rejected");
         let msg = format!("{err:?}");
         assert!(
@@ -7800,9 +11593,20 @@ mod tests {
                 "inheritDefaultEnv": true
             }
         }"#;
+        // Under authoritative exact dispatch the declared version selects a
+        // published contract, which defines neither `phase` nor
+        // `process.inheritDefaultEnv`. The lifecycle discriminator is therefore
+        // rejected as an unknown field on the published one-shot root before the
+        // field gate is ever reached — the same divergence the differential
+        // harness classifies as `PublishedStateAware`.
         let mut logger = test_logger();
         let error = load_mxc_request_from_json(state_aware, &mut logger).unwrap_err();
-        assert!(error.message().contains(expected), "got {error:?}");
+        assert!(
+            error
+                .message()
+                .contains("Invalid configuration at `phase`: unknown field `phase`"),
+            "got {error:?}"
+        );
     }
 
     #[test]

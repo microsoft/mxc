@@ -24,7 +24,7 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 #[derive(Parser)]
-#[command(name = "wxc-exec", about = "Windows Container Executor")]
+#[command(name = "wxc-exec", version, about = "Windows Container Executor")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -421,7 +421,7 @@ fn run_state_aware_main(
     // Resolve attribution (phase + backend) and telemetry enablement BEFORE
     // dispatch consumes `parsed`. Telemetry is stable and independent of the
     // `--experimental` gate used by experimental containment backends.
-    let phase = parsed.phase.as_str();
+    let phase = parsed.phase().as_str();
     // Whether this invocation is the provision phase: its `sandbox_id` doesn't
     // exist yet, so it always seeds a fresh base rather than deriving one.
     let is_provision = phase == "provision";
@@ -431,7 +431,7 @@ fn run_state_aware_main(
     let sandbox_id = if is_provision {
         None
     } else {
-        parsed.sandbox_id.clone()
+        parsed.sandbox_id().map(str::to_string)
     };
     let resolved_backend = resolve_backend(&parsed).ok();
     let backend = resolved_backend
@@ -439,7 +439,7 @@ fn run_state_aware_main(
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
     let requested_sandbox_kind = parsed
-        .request
+        .request()
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
@@ -475,31 +475,24 @@ fn run_state_aware_main(
     let started = Instant::now();
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
-    let phase_config = parsed.experimental_raw.as_ref().and_then(|raw| {
-        resolved_backend.as_ref().and_then(|backend| {
-            raw.get(backend.wire_name())
-                .and_then(|section| section.get(phase))
-        })
-    });
     let diagnostics_active = logger.has_diagnostic_sink();
     if telemetry_active || diagnostics_active {
         let policy_hash = wxc_common::policy_identity::state_aware_policy_hash(
-            &parsed.request,
+            parsed.request(),
             backend,
-            phase,
-            phase_config,
+            parsed.operation(),
         );
-        let identity = state_aware_policy_identity(parsed.sandbox_id.as_deref());
+        let identity = state_aware_policy_identity(parsed.sandbox_id());
         wxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
-            &parsed.request.schema_version,
+            &parsed.request().schema_version,
         );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)
                 .str("policy_hash", &policy_hash)
-                .str("config_schema_version", &parsed.request.schema_version);
+                .str("config_schema_version", &parsed.request().schema_version);
             logger.log_audit_event(&record);
         }
     }
@@ -639,10 +632,54 @@ enum RequestErrorRoute<'a> {
 
 fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
     match error {
-        ParseError::Decode(_) | ParseError::OneShot(_) | ParseError::OneShotMalformed(_) => {
-            RequestErrorRoute::Diagnostic
-        }
+        ParseError::Decode(_)
+        | ParseError::Version(_)
+        | ParseError::OneShot(_)
+        | ParseError::OneShotMalformed(_) => RequestErrorRoute::Diagnostic,
         ParseError::StateAware(e) => RequestErrorRoute::Envelope(e),
+    }
+}
+
+fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
+    match error {
+        ParseError::Decode(_) => {
+            log_config_rejected(
+                logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                "",
+                "",
+            );
+        }
+        ParseError::OneShotMalformed(error) => {
+            let message = error.to_string();
+            log_config_rejected(
+                logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
+        }
+        ParseError::Version(error) | ParseError::OneShot(error) => {
+            let message = error.to_string();
+            log_config_rejected(
+                logger,
+                RejectionReason::SchemaViolation,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
+        }
+        ParseError::StateAware(error) => {
+            log_config_rejected(
+                logger,
+                rejection_reason_for(error),
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&error.message),
+                "",
+            );
+        }
     }
 }
 
@@ -933,32 +970,36 @@ fn main() {
     // (which probe doesn't need; deferring them shaves cold-start cost
     // off the SDK warm path).
     if cli.probe {
-        let policy = if let Some(decoded) = decoded_config.as_ref() {
+        let request = if let Some(decoded) = decoded_config.as_ref() {
             // Parse using the existing pipeline but route logger output to
             // an in-memory buffer that we discard — the probe must not
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
             match decoded {
-                Ok(json) => {
-                    match wxc_common::config_parser::load_request_from_json(json, &mut probe_logger)
-                    {
-                        Ok(r) => r.policy,
-                        Err(_) => {
-                            eprintln!("Error: failed to load probe config");
-                            eprint!("{}", probe_logger.get_buffer());
-                            process::exit(1);
-                        }
+                Ok(json) => match wxc_common::config_parser::load_mxc_request_from_json(
+                    json,
+                    &mut probe_logger,
+                ) {
+                    Ok(MxcRequest::OneShot(request)) => request,
+                    Ok(MxcRequest::StateAware(_)) | Err(_) => {
+                        eprintln!("Error: failed to load probe config");
+                        eprint!("{}", probe_logger.get_buffer());
+                        process::exit(1);
                     }
-                }
+                },
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
+                    eprint!("{}", probe_logger.get_buffer());
                     process::exit(1);
                 }
             }
         } else {
-            wxc_common::models::ContainerPolicy::default()
+            wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(&policy);
+        let output = appcontainer_common::probe::run_probe(
+            &request,
+            mxc_engine::guarded_capture_available(),
+        );
         // appcontainer_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
@@ -1185,7 +1226,7 @@ fn main() {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {
             let telemetry_active = parsed
-                .request
+                .request()
                 .telemetry
                 .as_ref()
                 .map(|config| telemetry::init(config, &mut logger))
@@ -1198,53 +1239,12 @@ fn main() {
             // state-aware path runs without the gate -- a phase-envelope request
             // could provision/start/exec experimental backends with no
             // `--experimental` on the CLI.
-            parsed.request.experimental_enabled = cli.experimental;
-            parsed.request.dry_run = cli.dry_run;
+            parsed.set_experimental_enabled(cli.experimental);
+            parsed.set_dry_run(cli.dry_run);
             run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
         }
         Err(error) => {
-            match &error {
-                ParseError::Decode(_) => {
-                    // The payload could not even be decoded into JSON, so no
-                    // backend or field path is known.
-                    log_config_rejected(
-                        &mut logger,
-                        RejectionReason::MalformedJson,
-                        UNKNOWN_BACKEND,
-                        "",
-                        "",
-                    );
-                }
-                ParseError::OneShotMalformed(error) => {
-                    let message = error.to_string();
-                    log_config_rejected(
-                        &mut logger,
-                        RejectionReason::MalformedJson,
-                        UNKNOWN_BACKEND,
-                        offending_field_from_message(&message),
-                        "",
-                    );
-                }
-                ParseError::OneShot(error) => {
-                    let message = error.to_string();
-                    log_config_rejected(
-                        &mut logger,
-                        RejectionReason::SchemaViolation,
-                        UNKNOWN_BACKEND,
-                        offending_field_from_message(&message),
-                        "",
-                    );
-                }
-                ParseError::StateAware(error) => {
-                    log_config_rejected(
-                        &mut logger,
-                        rejection_reason_for(error),
-                        UNKNOWN_BACKEND,
-                        offending_field_from_message(&error.message),
-                        "",
-                    );
-                }
-            }
+            log_request_parse_rejection(&mut logger, &error);
             match request_error_route(&error) {
                 RequestErrorRoute::Diagnostic => {
                     eprint!("Request error\n{}", logger.get_buffer());
@@ -1638,6 +1638,24 @@ mod tests {
             .normalize_named_config_command()
     }
 
+    #[test]
+    fn cli_version_flags_work_without_config() {
+        for flag in ["--version", "-V"] {
+            let error = match Cli::try_parse_from(["wxc-exec", flag]) {
+                Err(error) => error,
+                Ok(_) => panic!("{flag} should display the version and exit"),
+            };
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(error.exit_code(), 0);
+            assert!(!error.use_stderr());
+            assert_eq!(
+                error.to_string(),
+                format!("wxc-exec {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
+    }
+
     fn encoded_policy(json: &str) -> String {
         base64_encode(json.as_bytes())
     }
@@ -1720,6 +1738,7 @@ mod tests {
 
             let message = match e {
                 ParseError::Decode(err)
+                | ParseError::Version(err)
                 | ParseError::OneShot(err)
                 | ParseError::OneShotMalformed(err) => err.to_string(),
                 ParseError::StateAware(err) => err.to_string(),
@@ -1842,6 +1861,12 @@ mod tests {
             RequestErrorRoute::Diagnostic
         ));
 
+        let version = ParseError::Version(WxcError::ConfigParse("version".to_string()));
+        assert!(matches!(
+            request_error_route(&version),
+            RequestErrorRoute::Diagnostic
+        ));
+
         let oneshot = ParseError::OneShot(WxcError::ConfigParse("oneshot".to_string()));
         assert!(matches!(
             request_error_route(&oneshot),
@@ -1853,6 +1878,113 @@ mod tests {
             request_error_route(&stateaware),
             RequestErrorRoute::Envelope(_)
         ));
+    }
+
+    #[test]
+    fn request_parse_failures_preserve_audit_classification_and_output_route() {
+        for (case, json, reason) in [
+            (
+                "unsupported",
+                r#"{"version":"0.6.1-alpha","process":{"commandLine":"echo hello"}}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                "unsupported state-aware",
+                r#"{"version":"0.6.1-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                "missing",
+                r#"{"process":{"commandLine":"echo hello"}}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                "null",
+                r#"{"version":null}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                "wrong type",
+                r#"{"version":42}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                "duplicate",
+                r#"{"version":"0.9.0-alpha","version":"0.9.0-alpha"}"#,
+                RejectionReason::SchemaViolation,
+            ),
+            ("invalid JSON", "{ not json", RejectionReason::MalformedJson),
+            (
+                "truncated JSON",
+                r#"{"version":"0.9.0-alpha","process":"#,
+                RejectionReason::MalformedJson,
+            ),
+        ] {
+            let error =
+                wxc_common::config_parser::load_mxc_request_from_json(json, &mut test_logger())
+                    .unwrap_err();
+            assert!(
+                matches!(request_error_route(&error), RequestErrorRoute::Diagnostic),
+                "{case}: pre-discrimination failures must remain stderr diagnostics"
+            );
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("audit.log");
+            let mut logger = test_logger();
+            logger.enable_file_sink(&path).unwrap();
+            log_request_parse_rejection(&mut logger, &error);
+            drop(logger);
+            let contents = std::fs::read_to_string(path).unwrap();
+            assert!(
+                contents.contains(&format!(r#""reason":"{}""#, reason.as_str())),
+                "{case}: {contents}"
+            );
+            assert_eq!(
+                contents.matches(r#""reason":"#).count(),
+                1,
+                "{case}: {contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_preflight_duplicates_preserve_the_selected_output_route() {
+        let state_aware = r#"{
+            "version":"0.9.0-alpha",
+            "phase":"exec",
+            "sandboxId":"wsb:abcd1234",
+            "process":{"commandLine":"echo hello"},
+            "experimental":{},
+            "experimental":{}
+        }"#;
+        let mut logger = test_logger();
+        let error = wxc_common::config_parser::load_mxc_request_from_json(state_aware, &mut logger)
+            .unwrap_err();
+        let RequestErrorRoute::Envelope(error) = request_error_route(&error) else {
+            panic!("identified lifecycle requests must retain their JSON error envelope");
+        };
+        let envelope: serde_json::Value =
+            serde_json::from_str(&error_envelope_string(error)).unwrap();
+        assert_eq!(envelope["error"]["code"], "malformed_request");
+        assert!(error.message.contains("duplicate field `experimental`"));
+        assert!(logger.get_buffer().is_empty());
+
+        let one_shot = r#"{
+            "version":"0.9.0-alpha",
+            "process":{"commandLine":"echo hello"},
+            "experimental":{},
+            "experimental":{}
+        }"#;
+        let mut logger = test_logger();
+        let error = wxc_common::config_parser::load_mxc_request_from_json(one_shot, &mut logger)
+            .unwrap_err();
+        assert!(matches!(
+            request_error_route(&error),
+            RequestErrorRoute::Diagnostic
+        ));
+        assert!(logger
+            .get_buffer()
+            .contains("duplicate field `experimental`"));
     }
 
     fn resolve_with_cli(
@@ -1869,7 +2001,7 @@ mod tests {
         let result = load_mxc_request_with_options(&encoded_policy(policy_json), &mut logger, opts)
             .map(|r| match r {
                 MxcRequest::OneShot(q) => q,
-                MxcRequest::StateAware(p) => p.request,
+                MxcRequest::StateAware(p) => p.into_request(),
             })
             .map_err(ResolveError::from_parse);
         (result, logger.get_buffer().to_string())
@@ -2222,6 +2354,7 @@ mod tests {
     #[test]
     fn cli_command_overrides_policy_command_line_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy-app.exe --from-policy",
                 "cwd": "C:\\workspace"
@@ -2247,6 +2380,7 @@ mod tests {
     #[test]
     fn cli_command_fills_absent_policy_command_line_without_override_log() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "cwd": "C:\\workspace"
             },
@@ -2272,6 +2406,7 @@ mod tests {
     fn policy_command_line_survives_without_cli_command() {
         let argv = &["wxc-exec", "policy.json"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "policy-app.exe --from-policy",
                 "cwd": "C:\\workspace"
@@ -2300,6 +2435,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_windows_create_process_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "processcontainer",
             "process": {}
         }"#;
@@ -2312,6 +2448,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;
@@ -2324,6 +2461,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_posix_shell_in_resolved_request() {
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "containment": "bubblewrap",
             "process": {}
         }"#;
@@ -2337,6 +2475,7 @@ mod tests {
     fn non_object_process_section_is_rejected() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": 42
         }"#;
 
@@ -2348,8 +2487,8 @@ mod tests {
             "one-shot failures use the stderr diagnostic convention"
         );
         assert!(
-            err.message.contains("process"),
-            "error should name the offending section: {}",
+            err.message.contains("invalid type") && err.message.contains("expected struct Process"),
+            "error should identify the process type mismatch: {}",
             err.message
         );
     }
@@ -2381,12 +2520,14 @@ mod tests {
         let mut policy_logger = test_logger();
         let mut cli_logger = test_logger();
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "cli-app.exe --message \"hello world\"",
                 "cwd": "C:\\workspace"
             }
         }"#;
         let cli_policy = r#"{
+            "version": "0.9.0-alpha",
             "process": {
                 "cwd": "C:\\workspace"
             }
@@ -2458,6 +2599,7 @@ mod tests {
     fn state_aware_exec_cli_command_overrides_policy_command_line() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {
@@ -2480,6 +2622,7 @@ mod tests {
     fn state_aware_exec_cli_command_fills_absent_policy_command_line_without_override_log() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234"
         }"#;
@@ -2499,6 +2642,7 @@ mod tests {
     fn state_aware_non_exec_cli_command_error_routes_to_envelope() {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "iso:abcd1234"
         }"#;
@@ -2525,6 +2669,7 @@ mod tests {
             "hidden\0payload",
         ];
         let policy = r#"{
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "iso:abcd1234"
         }"#;
