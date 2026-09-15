@@ -61,15 +61,27 @@ const AbiReadStream = koffi.opaque('MxcNodeReadStream');
 const AbiWriteStream = koffi.opaque('MxcNodeWriteStream');
 const AbiStreamCloser = koffi.opaque('MxcNodeStreamCloser');
 
-function createStreamingApi(): StreamingApi {
-  const native = loadMxcFfi();
-  const { handle } = native;
+function bindStreamingFunctions() {
+  const { handle } = loadMxcFfi();
+  // Sandbox lifecycle and result accessors.
   const spawn = handle.func('mxc_spawn_request', 'int32_t', [
     'const char *',
     koffi.out(koffi.pointer(AbiSandbox, 2)),
     koffi.out(koffi.pointer(AbiErrorDetailType)),
   ]) as SpawnFunction;
-  const errorFree = handle.func('mxc_error_detail_free', 'void', [koffi.pointer(AbiErrorDetailType)]) as (error: AbiErrorDetail) => void;
+  const tryWait = handle.func('mxc_sandbox_try_wait', 'int32_t', [
+    koffi.pointer(AbiSandbox),
+    koffi.out(koffi.pointer('int32_t')),
+    koffi.out(koffi.pointer('int32_t')),
+    koffi.out(koffi.pointer('int32_t')),
+  ]) as (sandbox: Pointer, exitCode: number[], running: number[], timedOut: number[]) => number;
+  const wait = handle.func('mxc_sandbox_wait', 'int32_t', [
+    koffi.pointer(AbiSandbox),
+    koffi.out(koffi.pointer('int32_t')),
+    koffi.out(koffi.pointer('int32_t')),
+  ]) as (sandbox: Pointer, exitCode: number[], timedOut: number[]) => number;
+  const id = handle.func('mxc_sandbox_id', 'uint32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
+  const kill = handle.func('mxc_sandbox_kill', 'int32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
   const warningsJson = handle.func('mxc_sandbox_warnings_json', 'int32_t', [
     koffi.pointer(AbiSandbox),
     koffi.out(koffi.pointer('char', 2)),
@@ -78,9 +90,14 @@ function createStreamingApi(): StreamingApi {
     koffi.pointer(AbiSandbox),
     koffi.out(koffi.pointer('char', 2)),
   ]) as (sandbox: Pointer, out: Pointer[]) => number;
-  const stringFree = handle.func('mxc_string_free', 'void', ['char *']) as (value: Pointer) => void;
+
+  // Output closers interrupt pending reads before transferred handles are freed.
+  const takeStdin = handle.func('mxc_sandbox_take_stdin', koffi.pointer(AbiWriteStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
+  const takeStdout = handle.func('mxc_sandbox_take_stdout', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
+  const takeStderr = handle.func('mxc_sandbox_take_stderr', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const stdoutCloser = handle.func('mxc_sandbox_stdout_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const stderrCloser = handle.func('mxc_sandbox_stderr_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
+  // Stream I/O uses Koffi's async call surface so it does not block Node.
   const read = handle.func('mxc_stream_read', 'int32_t', [
     koffi.pointer(AbiReadStream),
     'uint8_t *',
@@ -95,27 +112,22 @@ function createStreamingApi(): StreamingApi {
   ]) as WriteFunction;
   const flush = handle.func('mxc_stream_flush', 'int32_t', [koffi.pointer(AbiWriteStream)]) as FlushFunction;
   const closeCloser = handle.func('mxc_stream_closer_close', 'int32_t', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => number;
-  const tryWait = handle.func('mxc_sandbox_try_wait', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-  ]) as (sandbox: Pointer, exitCode: number[], running: number[], timedOut: number[]) => number;
-  const wait = handle.func('mxc_sandbox_wait', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-  ]) as (sandbox: Pointer, exitCode: number[], timedOut: number[]) => number;
-  const takeStdout = handle.func('mxc_sandbox_take_stdout', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const takeStderr = handle.func('mxc_sandbox_take_stderr', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const takeStdin = handle.func('mxc_sandbox_take_stdin', koffi.pointer(AbiWriteStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const id = handle.func('mxc_sandbox_id', 'uint32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
-  const kill = handle.func('mxc_sandbox_kill', 'int32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
+  // Every pointer returned by the ABI has a matching explicit free function.
+  const errorFree = handle.func('mxc_error_detail_free', 'void', [koffi.pointer(AbiErrorDetailType)]) as (error: AbiErrorDetail) => void;
+  const stringFree = handle.func('mxc_string_free', 'void', ['char *']) as (value: Pointer) => void;
   const freeSandbox = handle.func('mxc_sandbox_free', 'void', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => void;
   const freeRead = handle.func('mxc_read_stream_free', 'void', [koffi.pointer(AbiReadStream)]) as (stream: Pointer) => void;
   const freeWrite = handle.func('mxc_write_stream_free', 'void', [koffi.pointer(AbiWriteStream)]) as (stream: Pointer) => void;
   const freeCloser = handle.func('mxc_stream_closer_free', 'void', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => void;
+  return {
+    spawn, tryWait, wait, id, kill, warningsJson, outputJson, takeStdin, takeStdout,
+    takeStderr, stdoutCloser, stderrCloser, read, write, flush, closeCloser, errorFree,
+    stringFree, freeSandbox, freeRead, freeWrite, freeCloser,
+  };
+}
 
+function createStreamingApi(): StreamingApi {
+  const native = bindStreamingFunctions();
   const readJson = (call: (out: Pointer[]) => number, message: string): string | undefined => {
     const out = [null] as Pointer[];
     const status = call(out);
@@ -123,60 +135,60 @@ function createStreamingApi(): StreamingApi {
     try {
       return decodeString(out[0]);
     } finally {
-      if (out[0] !== null) stringFree(out[0]);
+      if (out[0] !== null) native.stringFree(out[0]);
     }
   };
 
   return {
-    spawn,
-    freeError: errorFree,
-    takeStdin,
+    spawn: native.spawn,
+    freeError: native.errorFree,
+    takeStdin: native.takeStdin,
     takeStdout: (sandbox) => {
-      const stream = takeStdout(sandbox);
-      return stream === null ? null : { stream, closer: stdoutCloser(sandbox) };
+      const stream = native.takeStdout(sandbox);
+      return stream === null ? null : { stream, closer: native.stdoutCloser(sandbox) };
     },
     takeStderr: (sandbox) => {
-      const stream = takeStderr(sandbox);
-      return stream === null ? null : { stream, closer: stderrCloser(sandbox) };
+      const stream = native.takeStderr(sandbox);
+      return stream === null ? null : { stream, closer: native.stderrCloser(sandbox) };
     },
-    id,
+    id: native.id,
     warnings: (sandbox) => parseStringArray(
-      readJson((out) => warningsJson(sandbox, out), 'retrieving sandbox warnings failed'),
+      readJson((out) => native.warningsJson(sandbox, out), 'retrieving sandbox warnings failed'),
     ),
     outputMetadata: (sandbox) => {
-      const json = readJson((out) => outputJson(sandbox, out), 'retrieving sandbox output metadata failed');
+      const json = readJson((out) => native.outputJson(sandbox, out), 'retrieving sandbox output metadata failed');
       return json === undefined ? undefined : JSON.parse(json);
     },
     tryWait: (sandbox) => {
       const exitCode = [0];
       const running = [0];
       const timedOut = [0];
-      const status = tryWait(sandbox, exitCode, running, timedOut);
+      const status = native.tryWait(sandbox, exitCode, running, timedOut);
       if (status !== 0) throw nativeStatusError(status, {}, 'querying sandbox status failed');
       return { exitCode: exitCode[0]!, running: running[0] !== 0, timedOut: timedOut[0] !== 0 };
     },
     wait: (sandbox) => {
       const exitCode = [0];
       const timedOut = [0];
-      const status = wait(sandbox, exitCode, timedOut);
+      const status = native.wait(sandbox, exitCode, timedOut);
       if (status !== 0) throw nativeStatusError(status, {}, 'waiting on sandbox failed');
       return { exitCode: exitCode[0]!, timedOut: timedOut[0] !== 0 };
     },
     kill: (sandbox) => {
-      const status = kill(sandbox);
+      const status = native.kill(sandbox);
       if (status !== 0) throw nativeStatusError(status, {}, 'killing sandbox failed');
     },
-    freeSandbox,
-    read,
-    write,
-    flush,
+    freeSandbox: native.freeSandbox,
+    read: native.read,
+    write: native.write,
+    flush: native.flush,
     closeCloser: (closer) => {
-      const status = closeCloser(closer);
+      const status = native.closeCloser(closer);
       if (status !== 0) throw nativeStatusError(status, {}, 'closing sandbox output stream failed');
     },
-    freeRead,
-    freeWrite,
-    freeCloser,
+    freeRead: native.freeRead,
+    freeWrite: native.freeWrite,
+    freeCloser: native.freeCloser,
   };
 }
 
