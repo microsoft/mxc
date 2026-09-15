@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Main-thread bridge for state-aware lifecycle calls that block in the native
+// runtime. Running them in a worker keeps Node's event loop responsive.
+
 import { Worker } from 'node:worker_threads';
 import { MxcError, type MxcErrorFields } from '../errors.js';
 import type { BindingStateAwareRequest } from './state-aware.js';
@@ -51,7 +54,7 @@ export function runBindingStateAwareRequestAsync(
     worker.on('error', (error) => finish(() => reject(error)));
     worker.on('exit', (code) => finish(() => reject(new MxcError({
       code: 'backend_error',
-      message: `mxc_state_aware worker exited before returning a result (code ${code})`,
+      message: `state-aware worker exited before returning a result (code ${code})`,
     }))));
   });
 }
