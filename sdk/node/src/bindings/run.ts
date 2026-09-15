@@ -6,7 +6,7 @@
 
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';
-import type { BindingSandboxRequest } from './request.js';
+import type { RequestSpec } from './request.js';
 import {
   AbiErrorDetailType,
   decodeString,
@@ -50,7 +50,7 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 
 type RunFunction = KoffiFunc<(request: string, result: AbiRunResult) => number>;
 
-export function runBindingRequest(request: BindingSandboxRequest): BindingRunResult {
+export function runBindingRequest(request: RequestSpec): BindingRunResult {
   const native = loadMxcFfi();
   try {
     const run = native.handle.func(
