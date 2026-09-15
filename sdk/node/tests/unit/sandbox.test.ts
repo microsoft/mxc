@@ -819,6 +819,22 @@ describe('createConfigFromPolicy', () => {
     assert.strictEqual(config.ui!.injection, true);
   });
 
+  it('should preserve explicit ProcessContainer settings', () => {
+    const config = createConfigFromPolicy({
+      version: '0.9.0-alpha',
+      processContainer: {
+        leastPrivilege: true,
+        learningMode: true,
+        capabilities: ['internetClient'],
+      },
+    }, 'processcontainer');
+
+    assert.strictEqual(config.containment, 'processcontainer');
+    assert.strictEqual(config.processContainer!.leastPrivilege, true);
+    assert.strictEqual(config.processContainer!.learningMode, true);
+    assert.deepStrictEqual(config.processContainer!.capabilities, ['internetClient']);
+  });
+
   it('should map timeoutMs to process.timeout', () => {
     const config = createConfigFromPolicy({ version: '0.6.0-alpha', timeoutMs: 30000 });
     assert.strictEqual(config.process!.timeout, 30000);
