@@ -63,9 +63,10 @@ That denies all network access. To open it up, see
 For exact `0.9.0-alpha`, only the directional form is accepted: use
 `egress` / `ingress` and `runtimeConfig.networkProxy`. The legacy fields
 documented for published versions below are structurally rejected in v0.9.
-Seatbelt's capability limits are unchanged: in particular, inbound and
-host-loopback postures must agree, and an omitted host-loopback field remains
-deny rather than inheriting ingress allow.
+Seatbelt's capability limits are unchanged: in particular,
+`ingress.hostLoopback: "allow"` under `ingress.default: "deny"` is still
+rejected, and an omitted host-loopback field remains deny rather than
+inheriting ingress allow.
 
 ## What Seatbelt can and can't enforce
 
@@ -197,10 +198,10 @@ This is the cross-backend
 
 | Field | Behavior |
 |---|---|
-| `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
+| `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. Only the first of those three is egress. |
 | `egress.allow` / `egress.deny` | **Rejected** if non-empty — no CIDR/port/protocol primitive exists |
-| `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This is what permits `listen()` — `network-bind` alone is not enough. |
-| `ingress.hostLoopback` | Controls sandbox → host loopback. Must equal `ingress.default`. **Defaults to `"deny"`.** |
+| `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This single rule is what permits **both `bind()` and `listen()`**; `network-bind` alone grants `bind()` but not `listen()`. |
+| `ingress.hostLoopback` | Controls sandbox → host loopback. May be `"deny"` under `ingress.default: "allow"`; `"allow"` under `ingress.default: "deny"` is rejected. **Defaults to `"deny"`.** |
 | `runtimeConfig.networkProxy` | Loopback `http`/`https` URL with an explicit port |
 
 ### The `hostLoopback` trap
@@ -245,18 +246,32 @@ Two more things to know about `hostLoopback`:
 - **`deny` also cuts the sandbox off from its own loopback listeners**, since a
   Seatbelt sandbox shares the host's network stack.
 
-#### Why it must equal `ingress.default`
+#### Why only one divergent pair is allowed
 
 `hostLoopback` is bidirectional, but Seatbelt can only enforce the outbound
 half. There's no way to scope an inbound grant by peer: `(local ip)` filters on
 the sandbox's *own* bind address, and a `remote ip` inbound filter is a no-op
 because the peer isn't known at bind time.
 
-So MXC requires the two to agree rather than enforcing one direction and
-silently ignoring the other. The practical consequence: **if your sandbox needs
-to accept connections at all, you get an unscoped inbound grant.** That's an OS
-limitation, not an MXC choice — but it's a real cost, so MXC makes you write it
-down.
+**`hostLoopback: "allow"` under `ingress.default: "deny"` is rejected**, because
+the only rule that could carry the promised inbound grant is the blanket
+`(allow network-inbound (local ip))` that `default: "deny"` withholds.
+
+**`hostLoopback: "deny"` under `ingress.default: "allow"` is accepted**, because
+its container→host half *is* expressible — by the `(deny default)` baseline
+under a denied egress default, and by the explicit `localhost:*` deny under an
+allowed one. Its host→container half is not, so a host process can still reach
+the sandbox's listeners. That residual grant is strictly narrower than the
+alternative it replaces: reaching a listener through `hostLoopback: "allow"`
+gives up the container→host direction as well.
+
+> ⚠️ **The inbound grant is not scoped by address either.** Seatbelt cannot
+> express a local-address filter — a literal `(local ip "127.0.0.1:8080")` is a
+> profile syntax error, `host must be * or localhost`, exactly as for `remote`.
+> So a workload that binds `0.0.0.0` rather than `127.0.0.1` is reachable from
+> **the LAN**, not only from this host. `--bind 127.0.0.1` is a convention the
+> workload follows, not one the sandbox can enforce. Prefer a backend with a
+> private network namespace when that is not acceptable.
 
 If you only need *outbound* loopback, `egress.default: "deny"` plus a loopback
 `runtimeConfig.networkProxy` gets you there with **no** inbound exposure.
@@ -270,6 +285,7 @@ This distinction matters, and it's easy to get backwards.
 | Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
 | Will a client actually *speak to* the proxy? | Not enforced — cooperative. |
 | Is traffic transparently redirected into the proxy? | No. |
+| Can the proxy contain *inbound* traffic? | No — a proxy confines egress only. Inbound is governed solely by `ingress.default`, and Seatbelt cannot scope that grant by peer or by address. |
 
 **Egress confinement is real.** A proxy is only ever accepted alongside a deny
 egress default (proxy + `"allow"` is [rejected](#network)), so with the
@@ -286,9 +302,15 @@ the internet or any other host-local service — it simply fails to connect.
 
 > ⚠️ **`ingress.hostLoopback: "allow"` widens outbound** to *every port on this
 > host*, not just the proxy port, and the confinement claim above no longer
-> holds. Keep `ingress: {"default": "deny", "hostLoopback": "deny"}` whenever
-> the proxy is meant to be the only way out. This won't prevent the proxy's 
-> TCP responses from reaching the sandbox.
+> holds. Keep `hostLoopback: "deny"` whenever the proxy is meant to be the only
+> way out. This won't prevent the proxy's TCP responses from reaching the
+> sandbox.
+>
+> `ingress.default` is a separate decision: it grants inbound only and never
+> widens outbound, so `{"default": "allow", "hostLoopback": "deny"}` keeps
+> proxy-only egress while permitting a listener. The tradeoff is inbound — that
+> grant cannot be scoped by peer or address, so the sandbox's listeners are
+> reachable from this host and, if the workload binds `0.0.0.0`, from the LAN.
 
 **Proxy usage is cooperative.** MXC injects `HTTP_PROXY` / `HTTPS_PROXY` /
 `ALL_PROXY` (and lowercase forms) and strips any caller-supplied proxy vars.
@@ -551,6 +573,11 @@ once you can see the rules that were emitted.
 MXC refuses any config it cannot faithfully enforce, rather than quietly
 approximating it. This is the complete list.
 
+One documented exception: `ingress.hostLoopback: "deny"` under
+`ingress.default: "allow"` is accepted with the container-to-host half enforced
+and the host-to-container half left open, because Seatbelt cannot scope an
+inbound grant by peer. See [the trap](#the-hostloopback-trap).
+
 #### Network
 
 Field names below are the 0.8 shape; the legacy 0.7 equivalent is noted where
@@ -559,7 +586,7 @@ the rule applies to both.
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
 | `egress.allow` / `egress.deny` (non-empty) | No CIDR/port/protocol filtering primitive | Use `egress.default` alone |
-| `ingress.hostLoopback` ≠ `ingress.default` | Only the outbound half is expressible; see [the trap](#the-hostloopback-trap) | Set both to the same value |
+| `ingress.hostLoopback: "allow"` + `ingress.default: "deny"` | The inbound half is not expressible, so the promised host-to-container grant could not be made; see [the trap](#the-hostloopback-trap) | Set both to `"allow"` |
 | `runtimeConfig.networkProxy` + `egress.default: "allow"`<br>*(legacy: `network.proxy` + `defaultPolicy: "allow"`)* | Outbound is already open, so the proxy enforces nothing and traffic could silently bypass it | `egress.default: "deny"` + the proxy |
 | `runtimeConfig.networkProxy` with a non-loopback host<br>*(0.8 only — rejected by the shared parser, whatever `egress.default` says)* | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
 | Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the 0.8 field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
@@ -601,7 +628,7 @@ deliberate: the alternative is a rule that matches nothing, which for
 | Network Extension | Possible future | `NEFilterDataProvider` can filter per-process by hostname, but needs a signed System Extension, a special entitlement, user approval, and a separate daemon |
 
 **Inbound access is all-or-nothing.** You cannot accept loopback connections
-while refusing LAN connections — see [above](#why-it-must-equal-ingressdefault).
+while refusing LAN connections — see [above](#why-only-one-divergent-pair-is-allowed).
 
 **Proxy routing is cooperative, but egress confinement is not.** A client that
 ignores `HTTP_PROXY` cannot bypass to the internet — the kernel scopes outbound

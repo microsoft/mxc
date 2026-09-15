@@ -57,10 +57,15 @@ changes cannot accidentally weaken the exact boundary. It also compares every
 corpus document through the public loader and the exact parser oracle. After
 the development-contract cutover moved three formerly convergent documents
 into the explicit removal inventory, the retained rolling characterization now
-converges across Windows and Linux at 329 equivalent accepts and 14 shared
+converges across Windows and Linux at 331 equivalent accepts and 14 shared
 rejections. The accept count dropped by one when the 0.9 removal of
 `seatbelt.launchMethod` retired `tests/examples/27_mac_terminal_sandboxed.json`,
-the only corpus document that exercised `launchMethod: "open"`. Both retain no
+the only corpus document that exercised `launchMethod: "open"`, and rose by two
+when the Seatbelt directional-ingress fixtures
+`seatbelt_net_egress_deny_ingress_allow.json` and
+`seatbelt_net_ingress_allow_loopback_deny.json` joined the corpus. Both parsers
+accept each of those two and build identical runtime models, so they add no
+shared rejection. Both retain no
 exact-looser acceptance and no accepted-model mismatch. Assertion failures list
 the shared-rejection files so future platform-specific movement is attributable
 rather than represented only by aggregate counts.
