@@ -257,7 +257,7 @@ describe('native binding request', () => {
         undefined,
         'wslc',
       );
-      const request = prepareBindingSandboxRequest(config, { experimental: true });
+      const request = prepareRequestSpec(config, { experimental: true });
 
       assert.strictEqual(request.policy.ui, undefined);
       assert.strictEqual(request.containment.type, 'wslc');
