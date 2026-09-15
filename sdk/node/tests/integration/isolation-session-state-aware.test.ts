@@ -3,15 +3,15 @@
 
 // SDK end-to-end tests for the IsolationSession state-aware lifecycle.
 //
-// These tests invoke real wxc-exec.exe and exercise the full lifecycle:
+// These tests invoke the real in-process Node runtime and exercise the full lifecycle:
 // provision -> start -> exec -> stop -> deprovision. The whole suite skips
 // at module evaluation time when this host lacks IsolationSession runtime
-// support (or when wxc-exec was built without `--features isolation_session`),
+// support (or when the native runtime was built without `--features isolation_session`),
 // so the suite runs cleanly on any Windows host but only meaningfully on
 // a host with IsolationSession runtime support.
 //
 // Build prerequisites:
-//   - wxc-exec.exe built with `--features isolation_session`
+//   - `mxc_ffi` built with `--features isolation_session`
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
@@ -215,7 +215,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 // Policy rejections are raised by MXC's own validation, before any
 // IsolationSession API call: the dispatcher runs `validate_provision` ahead of
 // `provision`, and `IsolationSessionRunner` is a stateless marker whose
-// construction touches no WinRT. So these need a `wxc-exec.exe` built with
+// construction touches no WinRT. So these need a native runtime built with
 // `--features isolation_session` (which CI builds) but *not* a host that can
 // actually run isolation sessions.
 //
