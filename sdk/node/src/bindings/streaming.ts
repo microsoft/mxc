@@ -26,12 +26,19 @@ type Pointer = unknown;
 type TakeReadResult = { stream: Pointer; closer: Pointer | null } | null;
 
 type SpawnFunction = KoffiFunc<(request: string, handle: Pointer[], error: AbiErrorDetail) => number>;
+type StateAwareExecFunction = KoffiFunc<(
+  request: string,
+  experimental: number,
+  handle: Pointer[],
+  error: AbiErrorDetail,
+) => number>;
 type ReadFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, cap: number, outRead: number[]) => number>;
 type WriteFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, len: number, outWritten: number[]) => number>;
 type FlushFunction = KoffiFunc<(stream: Pointer) => number>;
 
 interface StreamingApi {
   spawn: SpawnFunction;
+  stateAwareExec: StateAwareExecFunction;
   freeError(error: AbiErrorDetail): void;
   takeStdin(handle: Pointer): Pointer | null;
   takeStdout(handle: Pointer): TakeReadResult;
@@ -55,6 +62,11 @@ interface StreamingApi {
 let sharedApi: StreamingApi | undefined;
 let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
   | undefined;
+let stateAwareSandboxProcessFactory: ((
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs?: number,
+) => MxcSandboxProcess) | undefined;
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
 const AbiReadStream = koffi.opaque('MxcNodeReadStream');
 const AbiWriteStream = koffi.opaque('MxcNodeWriteStream');
@@ -68,6 +80,12 @@ function bindStreamingFunctions() {
     koffi.out(koffi.pointer(AbiSandbox, 2)),
     koffi.out(koffi.pointer(AbiErrorDetailType)),
   ]) as SpawnFunction;
+  const stateAwareExec = handle.func('mxc_state_aware_exec', 'int32_t', [
+    'const char *',
+    'int32_t',
+    koffi.out(koffi.pointer(AbiSandbox, 2)),
+    koffi.out(koffi.pointer(AbiErrorDetailType)),
+  ]) as StateAwareExecFunction;
   const tryWait = handle.func('mxc_sandbox_try_wait', 'int32_t', [
     koffi.pointer(AbiSandbox),
     koffi.out(koffi.pointer('int32_t')),
@@ -119,9 +137,9 @@ function bindStreamingFunctions() {
   const freeWrite = handle.func('mxc_write_stream_free', 'void', [koffi.pointer(AbiWriteStream)]) as (stream: Pointer) => void;
   const freeCloser = handle.func('mxc_stream_closer_free', 'void', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => void;
   return {
-    spawn, tryWait, wait, id, kill, warningsJson, outputJson, takeStdin, takeStdout,
-    takeStderr, stdoutCloser, stderrCloser, read, write, flush, closeCloser, errorFree,
-    stringFree, freeSandbox, freeRead, freeWrite, freeCloser,
+    spawn, stateAwareExec, tryWait, wait, id, kill, warningsJson, outputJson,
+    takeStdin, takeStdout, takeStderr, stdoutCloser, stderrCloser, read, write,
+    flush, closeCloser, errorFree, stringFree, freeSandbox, freeRead, freeWrite, freeCloser,
   };
 }
 function createStreamingApi(): StreamingApi {
@@ -139,6 +157,7 @@ function createStreamingApi(): StreamingApi {
 
   return {
     spawn: native.spawn,
+    stateAwareExec: native.stateAwareExec,
     freeError: native.errorFree,
     takeStdin: native.takeStdin,
     takeStdout: (sandbox) => {
@@ -192,6 +211,32 @@ function createStreamingApi(): StreamingApi {
 
 function getStreamingApi(): StreamingApi {
   return sharedApi ??= createStreamingApi();
+}
+
+function spawnWithBinding(
+  invoke: (api: StreamingApi, outHandle: Pointer[], error: AbiErrorDetail) => number,
+  timeoutMs: number | undefined,
+  fallback: string,
+): MxcSandboxProcess {
+  const api = getStreamingApi();
+  const outHandle = [null] as Pointer[];
+  const error = {} as AbiErrorDetail;
+  let invoked = false;
+  try {
+    invoked = true;
+    const status = invoke(api, outHandle, error);
+    if (status !== 0 || outHandle[0] === null) {
+      throw nativeStatusError(status || 12, error, fallback);
+    }
+    const handle = outHandle[0];
+    const binding = new StreamingProcessBinding(api, handle, api.id(handle), api.warnings(handle));
+    return _createMxcSandboxProcess(binding, timeoutMs);
+  } catch (errorValue) {
+    if (outHandle[0] !== null) api.freeSandbox(outHandle[0]);
+    throw errorValue;
+  } finally {
+    if (invoked) api.freeError(error);
+  }
 }
 
 function callAsync<T>(
@@ -365,24 +410,23 @@ class StreamingProcessBinding implements SandboxProcessBinding {
 }
 
 function spawnRealBinding(request: RequestSpec, timeoutMs?: number): MxcSandboxProcess {
-  const api = getStreamingApi();
-  const outHandle = [null] as Pointer[];
-  const error = {} as AbiErrorDetail;
-  let spawned = false;
-  try {
-    spawned = true;
-    const status = api.spawn(JSON.stringify(request), outHandle, error);
-    if (status !== 0 || outHandle[0] === null) {
-      throw nativeStatusError(status || 12, error, 'spawning sandbox failed');
-    }
-    const binding = new StreamingProcessBinding(api, outHandle[0], api.id(outHandle[0]), api.warnings(outHandle[0]));
-    return _createMxcSandboxProcess(binding, timeoutMs);
-  } catch (errorValue) {
-    if (outHandle[0] !== null) api.freeSandbox(outHandle[0]);
-    throw errorValue;
-  } finally {
-    if (spawned) api.freeError(error);
-  }
+  return spawnWithBinding(
+    (api, outHandle, error) => api.spawn(JSON.stringify(request), outHandle, error),
+    timeoutMs,
+    'spawning sandbox failed',
+  );
+}
+
+function spawnRealStateAwareBinding(
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs?: number,
+): MxcSandboxProcess {
+  return spawnWithBinding(
+    (api, outHandle, error) => api.stateAwareExec(requestJson, experimental ? 1 : 0, outHandle, error),
+    timeoutMs,
+    'starting state-aware sandbox exec failed',
+  );
 }
 
 export function _setBindingSandboxProcessFactory(
@@ -391,9 +435,27 @@ export function _setBindingSandboxProcessFactory(
   sandboxProcessFactory = factory;
 }
 
+export function _setStateAwareBindingSandboxProcessFactory(
+  factory?: (requestJson: string, experimental: boolean, timeoutMs?: number) => MxcSandboxProcess,
+): void {
+  stateAwareSandboxProcessFactory = factory;
+}
+
 export function spawnBindingSandboxProcess(
   request: RequestSpec,
   timeoutMs?: number,
 ): MxcSandboxProcess {
   return (sandboxProcessFactory ?? spawnRealBinding)(request, timeoutMs);
+}
+
+export function spawnStateAwareBindingSandboxProcess(
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs?: number,
+): MxcSandboxProcess {
+  return (stateAwareSandboxProcessFactory ?? spawnRealStateAwareBinding)(
+    requestJson,
+    experimental,
+    timeoutMs,
+  );
 }
