@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { SandboxPolicy } from '../types.js';
+import type { SandboxContainment, SandboxPolicy } from '../types.js';
 
 export interface BindingRunInput {
   script: string;
@@ -10,6 +10,7 @@ export interface BindingRunInput {
   containerName?: string;
   environment?: { [key: string]: string | undefined };
   experimental?: boolean;
+  containment?: SandboxContainment;
 }
 
 /**
@@ -27,12 +28,7 @@ export type BindingPolicy = Omit<SandboxPolicy, 'runtimeConfig' | 'processContai
  * Containment variants currently reachable from the one-shot Node API.
  * This mirrors the tagged JSON contract consumed by `mxc_ffi::RequestSpec`.
  */
-export type BindingContainment =
-  | { type: 'process' }
-  | {
-      type: 'processContainer';
-      network?: NonNullable<SandboxPolicy['processContainer']>['network'];
-    };
+export type BindingContainment = SandboxContainment;
 
 export interface BindingSandboxRequest {
   policy: BindingPolicy;
@@ -75,12 +71,11 @@ export function prepareBindingSandboxRequest(
       entry[1] !== undefined),
   );
 
-  const containment: BindingContainment = processContainer === undefined
-    ? { type: 'process' }
-    : {
-        type: 'processContainer',
-        network: processContainer.network,
-      };
+  const { name: _legacyName, ...processContainerContainment } = processContainer ?? {};
+  const containment: BindingContainment = input.containment
+    ?? (processContainer === undefined
+      ? { type: 'process' }
+      : { type: 'processContainer', ...processContainerContainment });
 
   return {
     policy,

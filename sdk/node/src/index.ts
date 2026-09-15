@@ -55,6 +55,7 @@ export {
   NetworkEgressConfig,
   NetworkIngressConfig,
   RuntimeConfig,
+  SandboxContainment,
   PlatformSupport,
   UiCapabilitySupport,
 } from './types.js';
