@@ -283,6 +283,15 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
+Bubblewrap preflights an absolute `process.cwd` against the namespace it is
+about to assemble. A path that is provably outside both the backend baseline
+and the configured filesystem policy is rejected with an error naming
+`readonlyPaths` and `readwritePaths`, rather than being left to fail opaquely
+inside `bwrap`. Symlinked paths and paths containing parent traversal are
+reported as inconclusive and deferred to Bubblewrap so the preflight cannot
+reject a valid namespace path. Relative values retain the general verbatim
+behavior described above.
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:

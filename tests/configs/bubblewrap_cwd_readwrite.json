@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-ReadWrite",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd)\" = /tmp/mxc_bwrap_cwd/readwrite ]; then echo CWD_READWRITE_OK; else echo CWD_READWRITE_BAD:$(pwd); fi",
+    "cwd": "/tmp/mxc_bwrap_cwd/readwrite"
+  },
+  "filesystem": {
+    "readwritePaths": ["/tmp/mxc_bwrap_cwd/readwrite"]
+  }
+}

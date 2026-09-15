@@ -25,7 +25,7 @@
 //! the runner uses `--unshare-net` for zero-overhead full isolation
 //! without root.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -33,6 +33,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
@@ -50,6 +51,8 @@ use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
     bwrap_version, network_rules, proxy_network,
 };
+
+const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -108,6 +111,8 @@ impl SandboxBackend for BubblewrapScriptRunner {
         if let Some(plan) = egress_plan.as_ref() {
             warn_unreachable_v6_targets(plan, logger);
         }
+        let original_denied_paths: HashSet<String> =
+            request.policy.denied_paths.iter().cloned().collect();
         // Tighten aliases of the same host object to the strictest intent
         // (deny > ro > rw). Done here, close to mount, to minimize the TOCTOU
         // window; an unresolvable path with deniedPaths present fails closed.
@@ -136,7 +141,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
         // none). See docs/bwrap-support/bubblewrap-backend.md.
-        let plan = match resolve_denied_paths(&request.policy, logger) {
+        let plan = match resolve_denied_paths_with_originals(
+            &request.policy,
+            &original_denied_paths,
+            logger,
+        ) {
             Ok(plan) => plan,
             Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
@@ -153,6 +162,18 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
             None => request,
         };
+        // Keep host-dependent diagnostics on the launch path. They inspect the
+        // final mask paths so symlink rewriting cannot reverse the verdict,
+        // while `plan.originals` keeps caller-facing messages actionable.
+        if let Err(message) = preflight_working_directory(request, logger, &plan.originals) {
+            return Err(ScriptResponse::error(&message));
+        }
+        warn_if_resolver_target_is_hidden(
+            request,
+            Path::new(RESOLV_CONF_PATH),
+            logger,
+            &plan.originals,
+        );
         // The masks are built from the list above, not from the one the caller
         // wrote, so the pin conflict has to be judged against it too.
         if let Err(msg) = check_pin_against_denied_hosts(request) {
@@ -161,6 +182,274 @@ impl SandboxBackend for BubblewrapScriptRunner {
         let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
+}
+
+fn preflight_working_directory(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    originals: &HashMap<String, String>,
+) -> Result<(), String> {
+    if request.working_directory.is_empty() {
+        return Ok(());
+    }
+
+    let cwd = Path::new(&request.working_directory);
+    if !cwd.is_absolute() {
+        // Preserve the backend's existing contract: relative cwd values are
+        // passed verbatim to `bwrap --chdir`. Without a stable sandbox base
+        // directory, rejecting them here would add behavior beyond #507.
+        return Ok(());
+    }
+    let safe_cwd = wxc_common::diagnostic_text::escape(&request.working_directory);
+    match working_directory_visibility(request, cwd) {
+        PathVisibility::Visible => Ok(()),
+        PathVisibility::Denied(denied_path) => Err(denied_working_directory_error(
+            request,
+            originals
+                .get(&denied_path)
+                .map(String::as_str)
+                .unwrap_or(&denied_path),
+        )),
+        PathVisibility::Hidden => Err(format!(
+            "Bubblewrap: process.cwd '{}' is outside the deny-by-default filesystem baseline and \
+             configured filesystem policy paths. Add the working directory (or an ancestor) to \
+             filesystem.readonlyPaths or filesystem.readwritePaths.",
+            safe_cwd
+        )),
+        PathVisibility::Indeterminate(reason) => {
+            logger.warning_line(&format!(
+                "WARNING: Bubblewrap: process.cwd '{}' could not be conclusively preflighted \
+                 because {}; deferring working-directory validation to bwrap.",
+                safe_cwd, reason
+            ));
+            Ok(())
+        }
+    }
+}
+
+fn denied_working_directory_error(request: &ExecutionRequest, denied_path: &str) -> String {
+    let safe_cwd = wxc_common::diagnostic_text::escape(&request.working_directory);
+    let safe_denied_path = wxc_common::diagnostic_text::escape(denied_path);
+    format!(
+        "Bubblewrap: process.cwd '{}' is covered by filesystem.deniedPaths entry '{}'. \
+         Remove that entry or narrow it so the working directory is not denied.",
+        safe_cwd, safe_denied_path
+    )
+}
+
+#[cfg(test)]
+fn working_directory_is_visible(request: &ExecutionRequest, cwd: &Path) -> bool {
+    working_directory_visibility(request, cwd) == PathVisibility::Visible
+}
+
+fn working_directory_visibility(request: &ExecutionRequest, cwd: &Path) -> PathVisibility {
+    if cwd
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return PathVisibility::Indeterminate("it contains parent-directory traversal");
+    }
+    match contains_existing_symlink(cwd) {
+        Ok(true) => return PathVisibility::Indeterminate("it traverses a host symlink"),
+        Ok(false) => {}
+        Err(_) => {
+            return PathVisibility::Indeterminate(
+                "one or more existing path components could not be inspected",
+            )
+        }
+    }
+
+    let Some(cwd) = normalize_absolute_path(cwd) else {
+        return PathVisibility::Indeterminate("it could not be normalized");
+    };
+    let mut visible = cwd == Path::new("/")
+        || cwd == Path::new(bwrap_command::TMP_PATH)
+        || cwd == Path::new("/var")
+        || cwd.starts_with(bwrap_command::DEV_PATH)
+        || cwd.starts_with(bwrap_command::PROC_PATH);
+
+    if !visible {
+        visible = bwrap_command::BASELINE_RO_BIND_PATHS.iter().any(|mount| {
+            let mount = Path::new(mount);
+            paths_overlap(&cwd, mount) && mount.exists()
+        });
+    }
+
+    let mut denied_by = None;
+    let mut uncertain_allow = false;
+    let mut uncertain_deny = false;
+    for mount in wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+        let mount_path = Path::new(&mount.path);
+        if mount_path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            if mount.intent == FsIntent::Denied {
+                uncertain_deny = true;
+            } else {
+                uncertain_allow = true;
+            }
+            continue;
+        }
+        match contains_existing_symlink(mount_path) {
+            Ok(true) => {
+                if mount.intent == FsIntent::Denied {
+                    uncertain_deny = true;
+                } else {
+                    uncertain_allow = true;
+                }
+                continue;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                if mount.intent == FsIntent::Denied {
+                    uncertain_deny = true;
+                } else {
+                    uncertain_allow = true;
+                }
+                continue;
+            }
+        }
+        let Some(mount_path) = normalize_absolute_path(mount_path) else {
+            continue;
+        };
+        if cwd.starts_with(&mount_path) {
+            visible = mount.intent != FsIntent::Denied;
+            denied_by = (mount.intent == FsIntent::Denied).then_some(mount.path);
+        } else if mount_path.starts_with(&cwd) {
+            // bwrap creates destination parents for every mount operation,
+            // including denied masks.
+            visible = true;
+            denied_by = None;
+        }
+    }
+
+    if uncertain_allow {
+        PathVisibility::Indeterminate("a filesystem policy path is ambiguous")
+    } else if let Some(path) = denied_by {
+        PathVisibility::Denied(path)
+    } else if uncertain_deny {
+        PathVisibility::Indeterminate("a filesystem policy path is ambiguous")
+    } else if visible {
+        PathVisibility::Visible
+    } else {
+        PathVisibility::Hidden
+    }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn contains_existing_symlink(path: &Path) -> std::io::Result<bool> {
+    let mut prefix = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => return Ok(false),
+            Component::Normal(segment) => prefix.push(segment),
+            Component::Prefix(_) => return Ok(false),
+        }
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn warn_if_resolver_target_is_hidden(
+    request: &ExecutionRequest,
+    resolv_conf: &Path,
+    logger: &mut Logger,
+    originals: &HashMap<String, String>,
+) {
+    let target = match resolver_symlink_target(resolv_conf) {
+        Ok(Some(target)) => target,
+        Ok(None) => return,
+        Err(error) => {
+            logger.warning_line(&format!(
+                "WARNING: Bubblewrap: could not inspect symlinked '{}': {}; DNS may fail inside \
+                 the sandbox. Repair the host resolver path before retrying.",
+                resolv_conf.display(),
+                error
+            ));
+            return;
+        }
+    };
+
+    match working_directory_visibility(request, &target) {
+        PathVisibility::Visible => {}
+        PathVisibility::Denied(denied_path) => {
+            let denied_path = originals
+                .get(&denied_path)
+                .map(String::as_str)
+                .unwrap_or(&denied_path);
+            let denied_path = wxc_common::diagnostic_text::escape(denied_path);
+            logger.warning_line(&format!(
+                "WARNING: Bubblewrap: the configured resolver target is covered by \
+                 filesystem.deniedPaths entry '{}'; DNS may fail inside the sandbox. Remove or \
+                 narrow that entry.",
+                denied_path
+            ));
+        }
+        PathVisibility::Hidden => logger.warning_line(
+            "WARNING: Bubblewrap: the configured resolver target is outside the \
+             deny-by-default filesystem baseline and configured policy paths; DNS may fail \
+             inside the sandbox. Add the target (or an ancestor) to filesystem.readonlyPaths.",
+        ),
+        PathVisibility::Indeterminate(reason) => logger.warning_line(&format!(
+            "WARNING: Bubblewrap: the configured resolver target could not be conclusively \
+             preflighted because {}; DNS may fail inside the sandbox.",
+            reason
+        )),
+    }
+}
+
+fn resolver_symlink_target(resolv_conf: &Path) -> std::io::Result<Option<PathBuf>> {
+    let metadata = std::fs::symlink_metadata(resolv_conf)?;
+    if !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let link_target = std::fs::read_link(resolv_conf)?;
+    let target = if link_target.is_absolute() {
+        link_target
+    } else {
+        resolv_conf
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .join(link_target)
+    };
+    Ok(Some(std::fs::canonicalize(target)?))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathVisibility {
+    Visible,
+    Hidden,
+    Denied(String),
+    Indeterminate(&'static str),
 }
 
 impl BubblewrapScriptRunner {
@@ -923,6 +1212,8 @@ struct DeniedPlan {
     /// Subset of the (final) denied paths that must be masked as files with
     /// `--ro-bind /dev/null`; every other denied path is masked with `--tmpfs`.
     files: HashSet<String>,
+    /// Original caller spelling for each final denied mask path.
+    originals: HashMap<String, String>,
 }
 
 /// Resolve every `deniedPaths` entry that traverses a symlink to its real host
@@ -943,13 +1234,15 @@ struct DeniedPlan {
 /// An entry still a symlink after resolution (dangling/unresolvable) is kept and
 /// file-masked with `/dev/null` — nothing resolvable is behind it to leak, and
 /// bwrap tolerates `/dev/null` over a symlink node (whereas `--tmpfs` aborts).
-fn resolve_denied_paths(
+fn resolve_denied_paths_with_originals(
     policy: &wxc_common::models::ContainerPolicy,
+    original_denied_paths: &HashSet<String>,
     logger: &mut Logger,
 ) -> Result<DeniedPlan, String> {
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
     let mut files = HashSet::new();
+    let mut originals = HashMap::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
             let resolved = resolved.to_str().ok_or_else(|| {
@@ -967,6 +1260,11 @@ fn resolve_denied_paths(
                 if is_file_mask_target(resolved) {
                     files.insert(resolved.to_owned());
                 }
+                if original_denied_paths.contains(p) {
+                    originals
+                        .entry(resolved.to_owned())
+                        .or_insert_with(|| p.clone());
+                }
                 out.push(resolved.to_owned());
                 changed = true;
                 continue;
@@ -977,12 +1275,25 @@ fn resolve_denied_paths(
         if is_file_mask_target(p) {
             files.insert(p.clone());
         }
+        if original_denied_paths.contains(p) {
+            originals.entry(p.clone()).or_insert_with(|| p.clone());
+        }
         out.push(p.clone());
     }
     Ok(DeniedPlan {
         paths: changed.then_some(out),
         files,
+        originals,
     })
+}
+
+#[cfg(test)]
+fn resolve_denied_paths(
+    policy: &wxc_common::models::ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<DeniedPlan, String> {
+    let original_denied_paths = policy.denied_paths.iter().cloned().collect();
+    resolve_denied_paths_with_originals(policy, &original_denied_paths, logger)
 }
 
 /// Classify a denied path for masking: `true` = `--ro-bind /dev/null` (file),
@@ -2104,6 +2415,450 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.error_message, expected);
         }
+    }
+
+    #[test]
+    fn launch_preflight_rejects_uncovered_working_directory() {
+        use wxc_common::logger::Mode;
+
+        let mut req = base_request();
+        req.working_directory = "/home/user/project".to_string();
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let error = preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap_err();
+        assert!(error.contains("process.cwd '/home/user/project'"));
+        assert!(error.contains("filesystem.readonlyPaths"));
+        assert!(error.contains("filesystem.readwritePaths"));
+    }
+
+    #[test]
+    fn validate_names_the_denied_path_that_blocks_the_working_directory() {
+        use wxc_common::logger::Mode;
+
+        let mut req = base_request();
+        req.working_directory = "/home/user/project/secrets".to_string();
+        req.policy.readonly_paths = vec!["/home/user/project".to_string()];
+        req.policy.denied_paths = vec!["/home/user/project/secrets".to_string()];
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let error = preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap_err();
+        assert!(error.contains("filesystem.deniedPaths entry '/home/user/project/secrets'"));
+        assert!(error.contains("Remove that entry or narrow it"));
+        assert!(!error.contains("filesystem.readonlyPaths"));
+        assert!(!error.contains("filesystem.readwritePaths"));
+    }
+
+    #[test]
+    fn validate_preserves_relative_working_directory_contract() {
+        use wxc_common::logger::Mode;
+
+        let mut req = base_request();
+        req.working_directory = "relative/project".to_string();
+
+        let mut logger = Logger::new(Mode::Buffer);
+        preflight_working_directory(&req, &mut logger, &HashMap::new())
+            .expect("relative cwd must remain a bwrap concern");
+    }
+
+    #[test]
+    fn working_directory_visibility_tracks_baseline_and_policy_mounts() {
+        let mut req = base_request();
+
+        assert!(working_directory_is_visible(&req, Path::new("/")));
+        assert!(working_directory_is_visible(&req, Path::new("/tmp")));
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/tmp/unmounted")
+        ));
+        assert!(working_directory_is_visible(&req, Path::new("/etc/ssl")));
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project")
+        ));
+
+        req.policy.readonly_paths = vec!["/home/user/project".to_string()];
+        assert!(working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/src")
+        ));
+        assert!(working_directory_is_visible(&req, Path::new("/home/user")));
+
+        req.policy.denied_paths = vec!["/home/user/project/secrets".to_string()];
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/secrets/config")
+        ));
+
+        req.policy
+            .readonly_paths
+            .push("/home/user/project/secrets/config".to_string());
+        assert!(working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/secrets/config")
+        ));
+
+        req.policy.readonly_paths = vec!["/var/cache/apt".to_string()];
+        req.policy.denied_paths = vec!["/var".to_string()];
+        assert!(working_directory_is_visible(&req, Path::new("/var/cache")));
+
+        req.policy.readonly_paths.clear();
+        req.policy.denied_paths = vec!["/home/user/.cache".to_string()];
+        assert!(working_directory_is_visible(&req, Path::new("/home/user")));
+    }
+
+    #[test]
+    fn working_directory_preflight_matches_host_var_run_topology() {
+        let mut req = base_request();
+        req.policy.readonly_paths = vec!["/var/run/custom".to_string()];
+
+        let visibility = working_directory_visibility(&req, Path::new("/var/run/custom"));
+        let var_run_is_symlink = std::fs::symlink_metadata("/var/run")
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if var_run_is_symlink {
+            assert!(matches!(visibility, PathVisibility::Indeterminate(_)));
+        } else {
+            assert_eq!(visibility, PathVisibility::Visible);
+        }
+    }
+
+    #[test]
+    fn working_directory_preflight_defers_parent_components() {
+        let req = base_request();
+        for path in ["/usr/bin/../../home/user", "/bin/../etc", "/var/run/../etc"] {
+            assert!(matches!(
+                working_directory_visibility(&req, Path::new(path)),
+                PathVisibility::Indeterminate(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn parent_traversal_policy_defers_without_lexical_overlap() {
+        let mut req = base_request();
+        req.policy.readonly_paths = vec!["/tmp/../home/user/project".to_string()];
+
+        assert!(matches!(
+            working_directory_visibility(&req, Path::new("/home/user/project")),
+            PathVisibility::Indeterminate(_)
+        ));
+    }
+
+    #[test]
+    fn inconclusive_working_directory_is_retained_as_warning() {
+        use wxc_common::logger::Mode;
+
+        let mut req = base_request();
+        req.working_directory = "/bin/../etc".to_string();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap();
+
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("could not be conclusively preflighted"));
+        assert!(logger.warnings()[0].contains("deferring working-directory validation to bwrap"));
+    }
+
+    #[test]
+    fn working_directory_diagnostics_escape_control_characters() {
+        use wxc_common::logger::Mode;
+
+        let assert_escaped = |message: &str| {
+            assert!(!message.contains('\n'));
+            assert!(!message.contains('\u{1b}'));
+            assert!(message.contains("\\n"));
+            assert!(message.contains("\\u{1b}"));
+        };
+
+        let hostile_path = "/unmounted\nforged\u{1b}";
+        let mut req = base_request();
+        req.working_directory = hostile_path.to_string();
+        let mut logger = Logger::new(Mode::Buffer);
+        let hidden = preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap_err();
+        assert_escaped(&hidden);
+
+        req.policy.denied_paths = vec![hostile_path.to_string()];
+        let denied = preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap_err();
+        assert_escaped(&denied);
+
+        req.policy.denied_paths.clear();
+        req.working_directory = format!("{hostile_path}/../etc");
+        preflight_working_directory(&req, &mut logger, &HashMap::new()).unwrap();
+        assert_escaped(logger.warnings().last().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_directory_preflight_defers_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounted = dir.path().join("mounted");
+        let hidden = dir.path().join("hidden");
+        std::fs::create_dir(&mounted).unwrap();
+        std::fs::create_dir(&hidden).unwrap();
+        let link = mounted.join("link");
+        std::os::unix::fs::symlink(&hidden, &link).unwrap();
+
+        let mut req = base_request();
+        req.policy.readonly_paths = vec![mounted.to_string_lossy().into_owned()];
+        assert!(matches!(
+            working_directory_visibility(&req, &link),
+            PathVisibility::Indeterminate(_)
+        ));
+
+        req.policy
+            .readonly_paths
+            .push(hidden.to_string_lossy().into_owned());
+        assert!(matches!(
+            working_directory_visibility(&req, &link),
+            PathVisibility::Indeterminate(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_mount_symlink_is_deferred_to_bwrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut req = base_request();
+        req.policy.readonly_paths = vec![link.to_string_lossy().into_owned()];
+
+        assert!(matches!(
+            working_directory_visibility(&req, &target),
+            PathVisibility::Indeterminate(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn object_alias_tightening_changes_the_cwd_verdict() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("deep").join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let denied_alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &denied_alias).unwrap();
+
+        let mut req = base_request();
+        req.working_directory = real.to_string_lossy().into_owned();
+        req.policy.readonly_paths = vec![real.to_string_lossy().into_owned()];
+        req.policy.denied_paths = vec![denied_alias.to_string_lossy().into_owned()];
+
+        let mut preflight_logger = Logger::new(Mode::Buffer);
+        preflight_working_directory(&req, &mut preflight_logger, &HashMap::new())
+            .expect("written mount order permits the deeper readonly spelling");
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let policy =
+            wxc_common::filesystem_object::normalize_object_conflicts(&req.policy, &mut logger)
+                .unwrap()
+                .expect("aliases with different intents must be tightened");
+        req.policy = policy;
+
+        let error = preflight_working_directory(&req, &mut logger, &HashMap::new())
+            .expect_err("the normalized denied alias must reject the cwd");
+        assert!(error.contains("filesystem.deniedPaths"));
+        assert!(error.contains("Remove that entry or narrow it"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_denied_cwd_error_preserves_original_symlink_spelling() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let secret = real.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let denied_alias = alias.join("secret");
+
+        let mut req = base_request();
+        req.working_directory = secret.to_string_lossy().into_owned();
+        req.policy.readonly_paths = vec![real.to_string_lossy().into_owned()];
+        req.policy.denied_paths = vec![denied_alias.to_string_lossy().into_owned()];
+
+        let mut logger = Logger::new(Mode::Buffer);
+        preflight_working_directory(&req, &mut logger, &HashMap::new())
+            .expect("the unresolved alias is conservatively deferred");
+        let plan = resolve_denied_paths(&req.policy, &mut logger).unwrap();
+        req.policy.denied_paths = plan.paths.clone().expect("alias must resolve");
+
+        let error = preflight_working_directory(&req, &mut logger, &plan.originals)
+            .expect_err("the resolved deny must reject the cwd");
+        assert!(error.contains(&format!(
+            "filesystem.deniedPaths entry '{}'",
+            denied_alias.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn object_normalization_does_not_replace_original_denied_spelling() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let original_alias = alias.to_string_lossy().into_owned();
+        let original_denied_paths = HashSet::from([original_alias.clone()]);
+        let policy = wxc_common::models::ContainerPolicy {
+            readonly_paths: vec![real.to_string_lossy().into_owned()],
+            denied_paths: vec![original_alias.clone()],
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let normalized =
+            wxc_common::filesystem_object::normalize_object_conflicts(&policy, &mut logger)
+                .unwrap()
+                .expect("the readonly alias must be tightened to denied");
+
+        let plan =
+            resolve_denied_paths_with_originals(&normalized, &original_denied_paths, &mut logger)
+                .unwrap();
+        let resolved = std::fs::canonicalize(&real)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(plan.originals.get(&resolved), Some(&original_alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_denied_child_creates_visible_cwd_parent() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let secret = real.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let mut req = base_request();
+        req.working_directory = real.to_string_lossy().into_owned();
+        req.policy.denied_paths = vec![alias.join("secret").to_string_lossy().into_owned()];
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let plan = resolve_denied_paths(&req.policy, &mut logger).unwrap();
+        req.policy.denied_paths = plan.paths.clone().expect("alias must resolve");
+
+        preflight_working_directory(&req, &mut logger, &plan.originals)
+            .expect("the resolved denied child creates the cwd parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_warning_names_unmounted_symlink_target() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.1\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let req = base_request();
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger, &HashMap::new());
+
+        let warning = logger.warnings().join("\n");
+        assert!(warning.contains("DNS may fail"));
+        assert!(warning.contains("configured resolver target"));
+        assert!(warning.contains("filesystem.readonlyPaths"));
+        assert!(!warning.contains(&target.to_string_lossy().into_owned()));
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_warning_names_denied_path_remediation() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.1\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut req = base_request();
+        let target = target.to_string_lossy().into_owned();
+        req.policy.denied_paths = vec![target.clone()];
+        let hostile_spelling = format!("{target}\nforged\u{1b}");
+        let originals = HashMap::from([(target, hostile_spelling)]);
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger, &originals);
+
+        let warning = logger.warnings().join("\n");
+        assert!(warning.contains("filesystem.deniedPaths entry"));
+        assert!(warning.contains("Remove or narrow that entry"));
+        assert!(!warning.contains("filesystem.readonlyPaths"));
+        assert!(!warning.contains("\nforged"));
+        assert!(!warning.contains('\u{1b}'));
+        assert!(warning.contains("\\nforged\\u{1b}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_inspection_failure_is_retained_as_warning() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-resolv.conf");
+        let req = base_request();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        warn_if_resolver_target_is_hidden(&req, &missing, &mut logger, &HashMap::new());
+
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("could not inspect symlinked"));
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_resolver_target_is_retained_as_warning() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        let req = base_request();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger, &HashMap::new());
+
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("could not inspect symlinked"));
+        assert!(logger.warnings()[0].contains("Repair the host resolver path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_warning_is_suppressed_for_policy_mounted_target() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.1\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut req = base_request();
+        req.policy.readonly_paths = vec![dir.path().to_string_lossy().into_owned()];
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger, &HashMap::new());
+
+        assert!(logger.warnings().is_empty());
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
