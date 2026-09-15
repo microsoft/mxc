@@ -7,6 +7,7 @@ import {
   bindingRequestUnsupportedReason,
   prepareRequestSpec,
 } from '../../src/bindings/request.js';
+import { buildSandboxPayload } from '../../src/sandbox.js';
 import type { ContainerConfig } from '../../src/types.js';
 
 describe('native binding request', () => {
@@ -179,6 +180,19 @@ describe('native binding request', () => {
       portMappings: [{ windowsPort: 8080, containerPort: 80 }],
     });
 
+    it('does not synthesize unsupported UI policy for WSLC', () => {
+      const config = buildSandboxPayload(
+        'echo hello',
+        { version: '0.9.0-alpha' },
+        undefined,
+        undefined,
+        'wslc',
+      );
+      const request = prepareBindingSandboxRequest(config, { experimental: true });
+
+      assert.strictEqual(request.policy.ui, undefined);
+      assert.strictEqual(request.containment.type, 'wslc');
+    });
   });
 
   it('rejects configurations the native one-shot contract cannot represent', () => {

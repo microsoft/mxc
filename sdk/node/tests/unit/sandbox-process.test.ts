@@ -4,7 +4,11 @@
 import assert from 'node:assert';
 import { getEventListeners, once } from 'node:events';
 import { afterEach, describe, it } from 'node:test';
-import { spawnSandboxProcess } from '../../src/sandbox.js';
+import {
+  spawnSandbox,
+  spawnSandboxFromConfig,
+  spawnSandboxProcess,
+} from '../../src/sandbox.js';
 import {
   _createMxcSandboxProcess,
   type SandboxProcessBinding,
@@ -119,6 +123,48 @@ describe('spawnSandboxProcess', () => {
     assert.deepStrictEqual(seen?.environment, {});
     assert.strictEqual(seen?.experimental, true);
     proc.dispose();
+  });
+
+  it('preserves policy and config entry points over the same process model', () => {
+    const requests: BindingSandboxRequest[] = [];
+    _setBindingSandboxProcessFactory((request) => {
+      requests.push(request);
+      return _createMxcSandboxProcess(new FakeBinding(42, 0));
+    });
+
+    const policyProcess = spawnSandbox('echo policy', { version: '0.9.0-alpha' });
+    const configProcess = spawnSandboxFromConfig({
+      version: '0.9.0-alpha',
+      containment: 'wslc',
+      containerId: 'configured',
+      process: {
+        commandLine: 'echo config',
+        env: ['FROM_CONFIG=yes'],
+      },
+      experimental: { wslc: { image: 'alpine:latest' } },
+    }, { experimental: true }, undefined, { FROM_CALLER: 'yes' });
+
+    assert.strictEqual(policyProcess.id, 42);
+    assert.strictEqual(configProcess.id, 42);
+    assert.strictEqual(requests[0].command, 'echo policy');
+    assert.deepStrictEqual(requests[1], {
+      policy: {
+        version: '0.9.0-alpha',
+        filesystem: undefined,
+        network: undefined,
+        ui: undefined,
+        timeoutMs: undefined,
+        telemetry: undefined,
+      },
+      command: 'echo config',
+      containment: { type: 'wslc', image: 'alpine:latest', portMappings: undefined },
+      containerName: 'configured',
+      workingDirectory: undefined,
+      environment: { FROM_CONFIG: 'yes', FROM_CALLER: 'yes' },
+      experimental: true,
+    });
+    policyProcess.dispose();
+    configProcess.dispose();
   });
 
   it('surfaces stdout as a Node readable stream', async () => {
