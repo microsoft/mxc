@@ -1,26 +1,37 @@
 # Version-Aware Stack Plan
 
-Status: proposed implementation plan and decision record.
+Status: revised implementation plan and decision record.
 
-Date: September 14, 2026.
+Date: September 15, 2026.
 
 Base:
-`origin/user/gudge/version_specific_config_parsers_phase10b` at `a6176ac9`
-(`Complete the v0.9 directional networking cutover`).
+`origin/main` at `50a6abf4`
+(`Complete the v0.9 directional networking cutover (#1145)`).
 
 ## 1. Purpose
 
-This plan replaces the former Phase 11 direction with a smaller stack that:
+This plan replaces the former Phase 11 direction and separates work inherited
+from two versioning journeys:
+
+- the rolling-schema and promotion-guard journey through approximately
+  `4766ccaa`;
+- the exact-contract parser journey that made exact version dispatch
+  authoritative.
+
+The remaining stack:
 
 1. publishes the v0.9 exact configuration contract;
 2. graduates IsolationSession from experimental status as part of v0.9;
-3. reduces the number of parser, publication, SDK-builder, and migration types;
-4. prevents the post-1.0 design from recreating a rolling parser or rolling
+3. removes the test-only rolling parser and equivalence harness before
+   publishing the new baseline;
+4. reduces the number of parser, publication, SDK-builder, and migration types;
+5. prevents the post-1.0 design from recreating a rolling parser or rolling
    SDK contract interpreter;
-5. starts the v1.0 contract and SDK work, with v1.0 expected to remain close to
+6. starts the v1.0 contract and SDK work, with v1.0 expected to remain close to
    v0.9 unless a deliberate breaking change is required.
 
-The implementation uses three substantive pull requests. A later v1.0
+The implementation uses three substantive phases/pull requests: Phase 12,
+Phase 13, and Phase 14. A later v1.0
 publication pull request may be added if the v1.0 candidate needs a separate
 validation period.
 
@@ -108,6 +119,27 @@ Every request type belongs to:
 
 There is no parallel `PublicationProfile` request hierarchy.
 
+### 2.6 Do not preserve guards for the abandoned rolling architecture
+
+The earlier versioning journey assumed that one rolling request model mixed
+stable and experimental surfaces and that publication selected or projected a
+subset of that model. Promotion guards, publication profiles, breaking-change
+classifiers, freeze generators, SDK-emission guards, and rolling equivalence
+tests were reasonable defenses for that architecture.
+
+Exact contracts change the authority:
+
+- a published exact module defines one historical JSON contract;
+- the one development exact module defines the mutable next contract;
+- exact registry dispatch selects the parser;
+- publication changes lifecycle state and artifact location, not request
+  representation.
+
+Retain architecture-neutral protections such as actionable diagnostics,
+secret redaction, exact config-corpus validation, and fail-closed base
+resolution. Remove or avoid guards whose only purpose is to compare, project,
+or freeze the former rolling request model.
+
 ## 3. Target architecture
 
 ```text
@@ -140,31 +172,34 @@ Node SandboxPolicy
 
 Raw Node configuration APIs continue to expose the exact version.
 
-## 4. Pull request stack
+## 4. Phase and pull request stack
 
 ```text
-origin/...phase10b (a6176ac9)
+origin/main (50a6abf4)
         |
-        +-- PR 1: Publish v0.9 and graduate IsolationSession
+        +-- Phase 12 / PR 1: Publish v0.9 and graduate IsolationSession
         |
-        +-- PR 2: Collapse parser and runtime representations
+        +-- Phase 13 / PR 2: Collapse parser and runtime representations
         |
-        `-- PR 3: Establish the v1 SDK and v1.0 contract candidate
+        `-- Phase 14 / PR 3: Establish the v1 SDK and v1.0 contract candidate
                   |
                   `-- optional: mechanical v1.0 publication
 ```
 
 These are the minimum sensible boundaries:
 
-- PR 1 intentionally changes the published contract and product support.
-- PR 2 is a behavior-preserving internal simplification protected by the v0.9
-  freeze.
-- PR 3 intentionally changes public SDK APIs and starts the v1 contract line.
+- Phase 12 intentionally changes the published contract and product support,
+  and removes equivalence scaffolding for the parser architecture that has
+  already been replaced.
+- Phase 13 is a behavior-preserving internal simplification protected by exact
+  fixtures, direct adapter/runtime tests, and immutable stable schemas.
+- Phase 14 intentionally changes public SDK APIs and starts the v1 contract
+  line.
 
 Combining these boundaries would make it difficult to distinguish publication
 errors, refactoring regressions, and intended v1 API changes.
 
-## 5. PR 1: Publish v0.9 and graduate IsolationSession
+## 5. Phase 12 / PR 1: Publish v0.9 and graduate IsolationSession
 
 ### 5.1 Outcome
 
@@ -185,21 +220,53 @@ development:  v0.10
 The lifecycle transition is atomic. No candidate status or parallel
 publication contract is required.
 
-### 5.2 Contract sequence
+### 5.2 Retire test-only rolling parser equivalence
 
-1. Copy the complete Phase 10b v0.9 development contract forward to v0.10.
-2. Change the copied contract's exact version, generated schema path,
+Exact registered dispatch is already the production trust boundary. Remove the
+test-only rolling parser and executable equivalence harness before changing the
+v0.9 shape so Phase 12 does not maintain or publish against an obsolete
+reference implementation.
+
+Delete:
+
+- `LegacyMxcRequest`;
+- `LegacyStateAwareRequest`;
+- `LegacyStateAwareWireInput`;
+- `legacy_state_aware_request.rs`;
+- `legacy_payload_reference.rs` when it has no independent diagnostic role;
+- test-only rolling raw-JSON loaders;
+- `parse_rolling_state_aware_wire_input`;
+- rolling-versus-exact corpus comparisons;
+- divergence classifications;
+- `assert_matches_current_wire_deserialization`;
+- `assert_common_matches_legacy`;
+- exact-versus-rolling builder round-trip assertions;
+- test-only translations between permanent backend fields and the old
+  `experimental` wrapper.
+
+Preserve direct assertions for exact containment mapping, optional-field
+presence, network normalization, diagnostics, phase routing, and sandbox-ID
+routing. Do not remove `ConfigInput`/`wire::MxcConfig`, reusable normalization
+types, per-version exact builders, or the Node rolling type oracle in this
+phase.
+
+### 5.3 Contract sequence
+
+1. Remove the test-only rolling parser/equivalence harness.
+2. Restructure the v0.9 development contract at its permanent field locations.
+3. Copy the complete restructured v0.9 development contract forward to v0.10.
+4. Change the copied contract's exact version, generated schema path,
    TypeScript oracle, fixtures, adapter, and registry identity.
-3. Finalize the actual v0.9 contract contents.
-4. Copy the final actual v0.9 module into
+5. Finalize the actual v0.9 contract contents.
+6. Copy the final actual v0.9 module into
    `published/v0_9_0_alpha`.
-5. Mark v0.9 published and v0.10 development in the exact registry.
-6. Generate and record v0.9 schema and behavior freeze evidence.
+7. Mark v0.9 published and v0.10 development in the exact registry.
+8. Add lean stable-schema and registry-history protection.
 
 Publication must not transform or project the candidate shape. The exact v0.9
 module tested before publication is the module that becomes published.
 
-### 5.3 IsolationSession graduation
+### 5.4 IsolationSession graduation
 
 Published v0.9 includes:
 
@@ -232,7 +299,7 @@ experimental: true
 IsolationSession may remain compile-time feature-gated where required by the
 build, but it is no longer a runtime experimental feature.
 
-### 5.4 Permanent development field locations
+### 5.5 Permanent development field locations
 
 Remove the JSON `experimental` wrapper from v0.9 and v0.10.
 
@@ -269,29 +336,35 @@ For v0.10:
 Unless separately decided, Windows Sandbox, WSLC, MicroVM, Hyperlight, and the
 test feature do not graduate in v0.9.
 
-### 5.5 Publication and freeze tooling
+### 5.6 Published-contract history protection
 
-Retain the useful Phase 11a concepts:
+Do not add a publication evidence directory, digest manifest, behavior
+snapshot, or source-tree freeze. In particular, do not freeze:
 
-- Rust registry as lifecycle source of truth;
-- generated machine-readable registry;
-- immutable schema digest;
-- exact accepted/rejected fixtures;
-- adapter-to-runtime snapshots;
-- field-presence snapshots;
-- builder/parser equivalence while builders remain;
-- backend dispatch observations;
-- base-ref-aware CI checks.
+- adapters;
+- runtime representations;
+- builders;
+- fixtures or test source;
+- generated TypeScript bytes independently;
+- selected backend behavior in hand-authored publication JSON.
 
-Do not add:
+Use the Rust registry as lifecycle source of truth and the existing fail-closed
+base-ref helper to enforce only durable history invariants:
 
-- `PublicationProfile`;
-- publication `StateAwareBackend`;
-- publication-specific `Containment`;
-- publication-specific one-shot or state-aware request roots;
-- a stable-candidate type family parallel to the v0.9 contract.
+1. every stable schema present at the merge base still exists;
+2. its normalized contents are unchanged;
+3. a published registry entry cannot disappear or become development;
+4. a published entry's exact version, schema ID, and schema path cannot change;
+5. exactly one development contract exists;
+6. a new stable schema is allowed only when its version was not published at
+   the merge base.
 
-### 5.6 PR 1 exit criteria
+Git already content-addresses repository files; a second checked-in digest is
+duplicative. Exact fixtures and direct adapter/runtime/dispatch tests remain
+ordinary mutable tests so they can gain regression coverage as implementations
+evolve.
+
+### 5.7 Phase 12 exit criteria
 
 - v0.9 is registered as published.
 - v0.10 is the only mutable development contract.
@@ -302,13 +375,21 @@ Do not add:
 - v0.10 retains ungraduated development features.
 - repository configs using those features declare v0.10.
 - published v0.6-v0.8 contracts and schemas are unchanged.
-- v0.9 shape and adapter/runtime behavior are frozen.
+- the test-only rolling parser and equivalence harness are removed.
+- stable schemas and published registry identities are protected against
+  merge-base mutation.
+- there is no publication projection, digest manifest, or frozen runtime
+  behavior snapshot.
 
-## 6. PR 2: Collapse parser and runtime representations
+## 6. Phase 13 / PR 2: Collapse parser and runtime representations
 
 ### 6.1 Outcome
 
-This PR is behavior-preserving against the newly published v0.9 contract.
+This phase is behavior-preserving against the newly published v0.9 contract
+and every other registered exact contract. Phase 12 has already removed the
+test-only rolling parser and equivalence harness; Phase 13 removes the
+remaining rolling whole-request representation, schema/oracle generation, and
+runtime compatibility machinery.
 
 It reduces the architecture to:
 
@@ -360,30 +441,62 @@ convert_wire_config -> convert_config_input
 
 Delete:
 
-- rolling whole-request parser;
-- rolling loader APIs;
+- remaining whole-request `wire::MxcConfig` deserialization;
 - rolling policy-builder oracle;
 - rolling `-dev` schema;
 - rolling generated TypeScript `wire.ts`;
 - `--legacy-wire` code generation;
-- rolling-versus-exact executable comparisons;
-- `legacy_payload_reference.rs`;
-- `legacy_state_aware_request.rs`;
-- `LegacyStateAwareWireInput`;
-- `LegacyStateAwareRequest`;
-- `LegacyMxcRequest`;
 - successful-request source retention;
 - dispatch-time backend JSON reparsing;
-- obsolete divergence classifications.
+- compatibility converters used only by the rolling request model.
 
-Replace useful evidence with:
+Phase 12 already removed:
 
-- direct exact acceptance/rejection fixtures;
-- diagnostic regressions;
-- exact adapter/runtime snapshots;
-- independent state-aware dispatch expectations.
+- rolling-versus-exact executable comparisons;
+- legacy rolling request/reference types;
+- divergence classifications;
+- equivalence-only adapter and builder assertions.
 
-### 6.4 Retain typed state-aware operations
+Retain direct exact acceptance/rejection fixtures, diagnostic regressions,
+adapter normalization assertions, and independent state-aware dispatch tests.
+
+Retarget the Node one-shot conformance oracle from rolling
+`sdk/node/src/generated/wire.ts` to the exact v0.10 generated types before
+deleting the rolling TypeScript artifact. If the public `ContainerConfig` still
+intentionally spans incompatible historical shapes, document it as the sole
+remaining transition dependency and remove it with the high-level/raw-config
+split in Phase 14 rather than retaining any Rust rolling parser.
+
+### 6.4 Verify published models without freezing Rust source
+
+Permit `mxc_schema_gen` to render a published exact contract into temporary
+output for verification. Publication still forbids rewriting a stable schema
+in place.
+
+CI compares:
+
+```text
+development exact model -> schemas/dev registered artifact
+published exact model   -> schemas/stable registered artifact
+```
+
+This allows mechanical Rust refactoring while rejecting any change to the
+published JSON contract. Do not hash or freeze published Rust directories.
+
+### 6.5 Consolidate exact contract tests
+
+Replace copied version test families with:
+
+- shared conformance tests for inherited annotations, aliases, primitives,
+  optional/null behavior, and common lifecycle roots;
+- compact per-version valid/invalid fixture corpora;
+- explicit version-delta tests for fields, roots, and containments introduced
+  or removed at each boundary.
+
+Each version retains direct coverage of its distinctive contract. It does not
+need another copy of every inherited primitive test.
+
+### 6.6 Retain typed state-aware operations
 
 Retain:
 
@@ -398,7 +511,7 @@ These types remove independent phase, containment, sandbox ID, raw payload, and
 source-text authorities. They are shared across every config version and do
 not grow per minor release.
 
-### 6.5 Remove config-version-driven backend behavior
+### 6.7 Remove config-version-driven backend behavior
 
 `ExecutionRequest::schema_version` currently serves two unrelated purposes:
 
@@ -447,7 +560,7 @@ Delete:
 - backend SemVer parsing;
 - malformed-version fallback behavior inside backends.
 
-### 6.6 De-wire runtime types
+### 6.8 De-wire runtime types
 
 Retain but restrict:
 
@@ -461,17 +574,21 @@ Remove unnecessary `Serialize`/`Deserialize` implementations and public
 fields. These types are internal runtime models, not alternative wire
 contracts.
 
-### 6.7 PR 2 exit criteria
+### 6.9 Phase 13 exit criteria
 
 - exact v0.6-v0.10 parsing is unchanged;
-- published v0.9 freeze evidence remains unchanged;
-- no rolling whole-request parser is compiled in production or tests;
+- all stable schemas remain unchanged;
+- no rolling whole-request representation is compiled in production or tests;
 - `ConfigInput` cannot be deserialized externally;
 - successful state-aware requests retain no raw JSON or source text;
 - backends perform no config SemVer parsing;
+- published exact Rust models regenerate their stable schemas exactly;
+- rolling schema and TypeScript artifacts are removed, or one explicitly
+  documented Node transition dependency remains for Phase 14;
+- exact tests are organized as shared conformance plus version deltas;
 - only exact contracts and adapters grow per config version.
 
-## 7. PR 3: Establish the v1 SDK and v1.0 contract candidate
+## 7. Phase 14 / PR 3: Establish the v1 SDK and v1.0 contract candidate
 
 ### 7.1 Outcome
 
@@ -485,7 +602,27 @@ This PR:
 
 This is the appropriate pull request for intentional public API breaks.
 
-### 7.2 Rust SDK
+### 7.2 Resolve the v0.10 development lineage
+
+Phase 12 uses v0.10 as the sole development contract for ungraduated
+Windows Sandbox, WSLC, MicroVM, Hyperlight, and test surfaces. Phase 14 also
+requires v1.0 to become the sole development contract and to start close to
+published v0.9. Those goals require an explicit transition rather than an
+implicit rename.
+
+Use this sequence:
+
+1. copy published v0.9 as the initial v1.0 baseline;
+2. apply only approved v1 API, alias, deprecation, and naming changes;
+3. review each v0.10-only development feature independently before
+   reintroducing it into v1.0;
+4. retire the unshipped v0.10 development identity when v1.0 becomes the sole
+   development contract.
+
+Do not automatically promote every v0.10 development field into the v1
+baseline. Do not keep v0.10 and v1.0 as two mutable development contracts.
+
+### 7.3 Rust SDK
 
 Remove:
 
@@ -516,7 +653,7 @@ ExactOneShotContract
 Do not retain historical config encoders speculatively. Add an explicit config
 serialization feature later only if a concrete caller requires it.
 
-### 7.3 Current SDK network model
+### 7.4 Current SDK network model
 
 The v1 typed SDK exposes current directional policy only.
 
@@ -535,7 +672,7 @@ Remove from current Rust, Node, and .NET high-level policy types:
 Legacy network syntax remains supported by the frozen v0.6-v0.8 exact JSON
 contracts.
 
-### 7.4 .NET and FFI
+### 7.5 .NET and FFI
 
 Remove:
 
@@ -560,7 +697,7 @@ State-aware .NET may continue to emit exact JSON initially. The high-level SDK
 owns the emitted version; the caller does not select it. Replacing that JSON
 transport with a typed FFI operation is separate optimization work.
 
-### 7.5 Node
+### 7.6 Node
 
 Separate high-level policy from raw config:
 
@@ -592,7 +729,7 @@ Exact versions remain required for:
 
 Normal high-level execution does not infer the oldest representable contract.
 
-### 7.6 v1.0 exact contract
+### 7.7 v1.0 exact contract
 
 Create v1.0 by copying the published v0.9 exact contract as the initial
 development shape:
@@ -611,13 +748,14 @@ Keep v1.0 close to v0.9. Differences must be deliberate, for example:
 - removal of pre-v1 deprecated fields;
 - final naming cleanup;
 - changes required by the v1 SDK boundary.
+- explicitly approved development features carried forward from v0.10.
 
 Do not add changes merely to justify the major version.
 
 The v1.0 adapter may share private conversion helpers with v0.9, but v1.0
 retains its own exact request root and adapter entry point.
 
-### 7.7 Post-1.0 compatibility gate
+### 7.8 Post-1.0 compatibility gate
 
 Add a classifier that compares exact contracts:
 
@@ -636,7 +774,8 @@ Before v1.0 publication:
 
 - same-major breaking changes must be rejected;
 - semantic changes must require an explicit decision;
-- adapter and normalization snapshots must be reviewed independently;
+- adapter and normalization changes must be reviewed through direct tests and
+  an explicit semantic decision, not frozen source or behavior manifests;
 - the classifier must not participate in runtime dispatch.
 
 Do not introduce:
@@ -647,15 +786,16 @@ Do not introduce:
 - automatic oldest-representable selection for execution;
 - one SDK union containing every historical config shape.
 
-### 7.8 PR 3 exit criteria
+### 7.9 Phase 14 exit criteria
 
 - direct Rust and one-shot .NET calls contain no config version;
 - Node high-level calls hide their package-owned exact target;
 - raw config APIs continue requiring exact versions;
 - current SDK policies are directional-only;
 - per-version SDK execution builders are removed;
-- v1.0 exists as an exact development contract;
+- v1.0 is the sole exact development contract;
 - v1.0 remains intentionally close to v0.9;
+- every v0.10-only feature is explicitly carried forward or deferred;
 - compatibility tooling is ready for a future v1.1.
 
 ## 8. Optional v1.0 publication PR
@@ -665,13 +805,14 @@ be a small mechanical pull request:
 
 - mark v1.0 published;
 - move its exact schema to stable;
-- record schema and behavior digests;
+- verify that the published Rust model regenerates the stable schema;
+- activate stable-schema and registry-history protection for v1.0;
 - open the next development contract;
 - update release documentation.
 
 No parser, adapter, SDK, or runtime redesign belongs in this publication PR.
 
-If the candidate evidence is already sufficient, this mechanical transition
+If candidate validation is already sufficient, this mechanical transition
 may be included at the end of PR 3.
 
 ## 9. Type-growth result
@@ -748,6 +889,7 @@ The stack does not grow:
 - complete legacy state-aware reference implementation
 - raw backend payload and source retention
 - publication projection types
+- publication digest manifests and frozen runtime behavior snapshots
 - direct SDK config-version fields
 - per-version direct SDK builders
 - current SDK legacy network authoring types
@@ -764,26 +906,29 @@ The stack does not grow:
 
 ## 11. Validation strategy
 
-### PR 1
+### Phase 12
 
+- removal checks for the test-only rolling parser/equivalence harness;
 - exact contract tests for v0.9 and v0.10;
 - generated exact schema and TypeScript gates;
 - IsolationSession one-shot and state-aware tests without experimental opt-in;
 - negative tests proving ungraduated v0.9 surfaces are rejected;
-- published-contract freeze checks;
+- merge-base checks for immutable stable schemas and published registry
+  identities;
 - Rust, Node, .NET, and FFI parity.
 
-### PR 2
+### Phase 13
 
-- all published contract fixtures unchanged;
-- adapter/runtime snapshot equality;
+- published exact-model-to-stable-schema equivalence;
+- direct exact adapter/runtime assertions;
 - exact diagnostic regression coverage;
 - state-aware binding and dispatch tests;
 - compile-time removal checks for rolling APIs;
 - backend tests covering explicit strict/compatibility policy;
-- no remaining rolling parser symbols or artifacts.
+- shared exact conformance tests plus version-delta tests;
+- no remaining rolling whole-request symbols or artifacts.
 
-### PR 3
+### Phase 14
 
 - Rust direct SDK equivalence against v1.0 exact JSON fixtures;
 - .NET/FFI request equivalence;
@@ -791,6 +936,7 @@ The stack does not grow:
 - raw config exact-version validation;
 - v1.0 contract fixtures and code generation;
 - compatibility-classifier unit tests;
+- explicit disposition for every v0.10-only development feature;
 - API removal and migration diagnostics.
 
 ## 12. Completion criteria
@@ -800,11 +946,14 @@ The plan is complete when:
 1. v0.9 is published and immutable.
 2. IsolationSession is non-experimental on its published v0.9 surfaces.
 3. v0.10 carries the remaining development features.
-4. no rolling whole-request parser or builder survives.
-5. successful state-aware requests retain no raw backend JSON.
-6. direct SDK calls carry no config contract version.
-7. backends do not interpret config version strings.
-8. only exact contract types and adapters grow per config version.
-9. v1.0 exists as an exact candidate close to v0.9.
-10. future v1.x compatibility is enforced by publication tooling, not runtime
-    parser fallback.
+4. no test-only rolling parser or equivalence harness survives Phase 12.
+5. no rolling whole-request representation, schema, TypeScript model, or
+   builder survives Phase 13.
+6. successful state-aware requests retain no raw backend JSON.
+7. direct SDK calls carry no config contract version.
+8. backends do not interpret config version strings.
+9. only exact contract types and adapters grow per config version.
+10. v1.0 exists as an exact candidate close to v0.9, with every v0.10-only
+    feature explicitly carried forward or deferred.
+11. future v1.x compatibility is enforced by exact-contract comparison and
+    publication history tooling, not runtime parser fallback.
