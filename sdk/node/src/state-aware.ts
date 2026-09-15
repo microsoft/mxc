@@ -4,8 +4,9 @@
 import pty from 'node-pty';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
-import { mxcErrorFromEnvelope } from './errors.js';
+import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 import { diagLog } from './diagnostic.js';
+import { runBindingStateAwareRequestAsync } from './bindings/state-aware-worker.js';
 import {
   DeprovisionConfigFor,
   DeprovisionResult,
@@ -25,7 +26,7 @@ import {
 import {
   backendForSandboxId,
   buildStateAwareEnvelope,
-  nonExecCall,
+  parseNonExecResponse,
   spawnAndCollect,
   tryParseErrorEnvelope,
 } from './state-aware-helper.js';
@@ -40,6 +41,124 @@ export type ProvisionArgs<C extends StateAwareContainmentBackend> =
   EveryBackendConfigIsOptional<C> extends true
     ? [config?: ProvisionConfigFor<C>, options?: SandboxSpawnOptions]
     : [config: ProvisionConfigFor<C>, options?: SandboxSpawnOptions];
+
+function unsupportedStateAwareFfiOption(
+  options: SandboxSpawnOptions,
+  allowDryRun: boolean,
+): string | undefined {
+  if (options.debug === true) return 'debug';
+  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.executablePath !== undefined) return 'executablePath';
+  if (options.ptyOptions !== undefined) return 'ptyOptions';
+  if (!allowDryRun && options.dryRun === true) return 'dryRun';
+  if (options.logDir !== undefined) return 'logDir';
+  if (options.usePty === true) return 'usePty';
+  return undefined;
+}
+
+function assertStateAwareFfiOptions(
+  apiName: string,
+  options: SandboxSpawnOptions,
+  allowDryRun: boolean,
+): void {
+  const unsupportedOption = unsupportedStateAwareFfiOption(options, allowDryRun);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `${apiName} does not support executor-only option '${unsupportedOption}'`,
+    );
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error('Aborted');
+}
+
+function scheduleAbortedProvisionCleanup(
+  responseJson: string,
+  envelope: Record<string, unknown>,
+  experimental: boolean,
+): void {
+  if (envelope.phase !== 'provision' || envelope.containment === undefined) {
+    return;
+  }
+  try {
+    const sandboxId = parseNonExecResponse<{ sandboxId?: string }>(responseJson).sandboxId;
+    if (!sandboxId) return;
+    const cleanup = buildStateAwareEnvelope({
+      phase: 'deprovision',
+      backendKey: backendForSandboxId(sandboxId),
+      sandboxId,
+    });
+    if (typeof envelope.version === 'string') {
+      cleanup.version = envelope.version;
+    }
+    void runBindingStateAwareRequestAsync({
+      requestJson: JSON.stringify(cleanup),
+      dryRun: false,
+      experimental,
+    }).catch(() => {});
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+async function nonExecBindingCall<T>(
+  apiName: string,
+  envelope: Record<string, unknown>,
+  options: SandboxSpawnOptions,
+): Promise<T> {
+  assertStateAwareFfiOptions(apiName, options, true);
+
+  const signal = options.signal;
+  if (signal?.aborted) {
+    throw abortReason(signal);
+  }
+
+  const experimental = options.experimental === true;
+  const request = runBindingStateAwareRequestAsync({
+    requestJson: JSON.stringify(envelope),
+    dryRun: options.dryRun === true,
+    experimental,
+  });
+
+  if (!signal) {
+    return parseNonExecResponse<T>(await request);
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let aborted = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      action();
+    };
+    const onAbort = () => {
+      aborted = true;
+      finish(() => reject(abortReason(signal)));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    void request.then((responseJson) => {
+      if (aborted) {
+        scheduleAbortedProvisionCleanup(responseJson, envelope, experimental);
+        return;
+      }
+      finish(() => {
+        try {
+          resolve(parseNonExecResponse<T>(responseJson));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }, (error) => {
+      if (aborted) return;
+      finish(() => reject(error));
+    });
+  });
+}
 
 /**
  * Provisions a state-aware sandbox of the requested backend. Returns a
@@ -67,10 +186,10 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
     containment,
     config: config as Record<string, unknown> | undefined,
   });
-  const result = await nonExecCall<{
+  const result = await nonExecBindingCall<{
     sandboxId: string;
     metadata?: ProvisionMetadataFor<C>;
-  }>(envelope, options);
+  }>('provisionSandbox', envelope, options);
   return {
     sandboxId: result.sandboxId as SandboxId<C>,
     metadata: result.metadata,
@@ -93,7 +212,7 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
     sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StartResult<C>>(envelope, options);
+  return nonExecBindingCall<StartResult<C>>('startSandbox', envelope, options);
 }
 
 /**
@@ -183,7 +302,7 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
     sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StopResult<C>>(envelope, options);
+  return nonExecBindingCall<StopResult<C>>('stopSandbox', envelope, options);
 }
 
 /**
@@ -202,5 +321,5 @@ export async function deprovisionSandbox<C extends StateAwareContainmentBackend>
     sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<DeprovisionResult<C>>(envelope, options);
+  return nonExecBindingCall<DeprovisionResult<C>>('deprovisionSandbox', envelope, options);
 }
