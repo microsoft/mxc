@@ -208,6 +208,7 @@ function wireAbortToStateAwareProcess(
     return;
   }
   signal.addEventListener('abort', onAbort, { once: true });
+  proc._registerCleanup(() => signal.removeEventListener('abort', onAbort));
 }
 
 function collectStream(stream: Readable | null): Promise<string> {
