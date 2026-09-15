@@ -207,7 +207,8 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         && request.containment != crate::models::ContainmentBackend::ProcessContainer
     {
         return Err(ScriptResponse::error(
-            "filesystem.enumeratePaths is supported only by the Windows ProcessContainer backend",
+            "processContainer.filesystem.enumeratePaths is supported only by the Windows \
+             ProcessContainer backend",
         ));
     }
 

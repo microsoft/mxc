@@ -425,7 +425,6 @@ mod tests {
             filesystem: Some(crate::policy::FilesystemSection {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
-                enumerate_paths: vec![],
                 denied_paths: vec![],
                 clear_policy_on_exit: None,
             }),

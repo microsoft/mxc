@@ -604,11 +604,16 @@ describe('createConfigFromPolicy', () => {
   it('should pass enumerate-only filesystem paths through for 0.9', () => {
     const config = createConfigFromPolicy({
       version: '0.9.0-alpha',
-      filesystem: {
-        enumeratePaths: ['C:\\tools'],
+      processContainer: {
+        filesystem: {
+          enumeratePaths: ['C:\\tools'],
+        },
       },
     });
-    assert.deepStrictEqual(config.filesystem!.enumeratePaths, ['C:\\tools']);
+    assert.deepStrictEqual(
+      config.processContainer!.filesystem!.enumeratePaths,
+      ['C:\\tools'],
+    );
   });
 
   it('should map UI fields correctly', () => {

@@ -235,7 +235,7 @@ pub enum FallbackError {
 
     /// Enumeration-only access cannot be represented by AppContainer fallback tiers.
     #[error(
-        "filesystem.enumeratePaths is not supported by this version of Windows; \
+        "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
          enumeration-only access requires native ProcessContainer support"
     )]
     EnumeratePathsUnsupported,
@@ -278,11 +278,14 @@ pub fn detect(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
 ) -> Result<TierDecision, FallbackError> {
+    let supports_enumerate_paths = policy.enumerate_paths.is_empty()
+        || crate::base_container_runner::BaseContainerRunner::supports_enumerate_paths();
     detect_with_base_container_capabilities(
         policy,
         prefer_base_container,
         is_base_container_usable(),
         base_container_supports_deny_paths(),
+        supports_enumerate_paths,
     )
 }
 
@@ -294,6 +297,7 @@ pub(crate) fn detect_with_base_container_capabilities(
     prefer_base_container: bool,
     base_container_usable: bool,
     base_container_supports_deny_paths: bool,
+    base_container_supports_enumerate_paths: bool,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
     let enumerate = !policy.enumerate_paths.is_empty();
@@ -302,7 +306,11 @@ pub(crate) fn detect_with_base_container_capabilities(
         || enumerate
         || denied;
 
-    if enumerate && !(prefer_base_container && base_container_usable) {
+    if enumerate
+        && !(prefer_base_container
+            && base_container_usable
+            && base_container_supports_enumerate_paths)
+    {
         return Err(FallbackError::EnumeratePathsUnsupported);
     }
 

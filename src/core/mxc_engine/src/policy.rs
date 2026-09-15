@@ -469,7 +469,6 @@ impl ClipboardPolicy {
 pub struct FilesystemSection {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
-    pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     /// Clear the filesystem policy when the shell exits (default `true`).
     pub clear_policy_on_exit: Option<bool>,
@@ -913,9 +912,6 @@ fn build_wire_config_with_network_format(
             "deniedPaths": fs.denied_paths,
         },
     });
-    if !fs.enumerate_paths.is_empty() {
-        config["filesystem"]["enumeratePaths"] = json!(fs.enumerate_paths);
-    }
     // `ui` is emitted only when the caller actually supplied one.
     //
     // The parser records presence as `ContainerPolicy::ui_specified`, and
@@ -1274,7 +1270,6 @@ mod tests {
                 filesystem: Some(super::FilesystemSection {
                     readwrite_paths: vec!["C:\\work".to_string()],
                     readonly_paths: vec!["C:\\tools".to_string()],
-                    enumerate_paths: vec![],
                     denied_paths: vec!["C:\\secrets".to_string()],
                     clear_policy_on_exit: Some(false),
                 }),
@@ -1652,7 +1647,6 @@ mod tests {
             filesystem: Some(super::FilesystemSection {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
-                enumerate_paths: vec![],
                 denied_paths: vec![],
                 clear_policy_on_exit: None,
             }),
@@ -1679,17 +1673,20 @@ mod tests {
     fn build_request_maps_enumerate_paths_for_v0_9() {
         let policy = SandboxPolicy {
             version: "0.9.0-alpha".to_string(),
-            filesystem: Some(super::FilesystemSection {
-                enumerate_paths: vec!["C:\\tools".to_string()],
-                ..Default::default()
-            }),
+            filesystem: None,
             network: None,
             ui: None,
             timeout_ms: None,
         };
+        let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
+            filesystem: Some(crate::configs::ProcessContainerFilesystem {
+                enumerate_paths: vec!["C:\\tools".to_string()],
+            }),
+            ..Default::default()
+        });
 
-        let request =
-            build_request(&policy, TEST_COMMAND, None).expect("0.9 enumeratePaths should build");
+        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
+            .expect("0.9 enumeratePaths should build");
 
         assert_eq!(request.inner.policy.enumerate_paths, vec!["C:\\tools"]);
     }
@@ -1699,16 +1696,19 @@ mod tests {
         for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
             let policy = SandboxPolicy {
                 version: version.to_string(),
-                filesystem: Some(super::FilesystemSection {
-                    enumerate_paths: vec!["C:\\tools".to_string()],
-                    ..Default::default()
-                }),
+                filesystem: None,
                 network: None,
                 ui: None,
                 timeout_ms: None,
             };
+            let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
+                filesystem: Some(crate::configs::ProcessContainerFilesystem {
+                    enumerate_paths: vec!["C:\\tools".to_string()],
+                }),
+                ..Default::default()
+            });
 
-            let error = build_request(&policy, TEST_COMMAND, None)
+            let error = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
                 .expect_err("older contracts must not silently drop enumeratePaths");
 
             assert!(

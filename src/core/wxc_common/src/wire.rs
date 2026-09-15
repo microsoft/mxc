@@ -230,8 +230,19 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
+    /// ProcessContainer-specific filesystem configuration.
+    pub filesystem: Option<ProcessContainerFilesystem>,
     /// ProcessContainer-specific network configuration.
     pub network: Option<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific filesystem configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerFilesystem {
+    /// Paths the process can query or enumerate without reading file contents.
+    pub enumerate_paths: Option<Vec<String>>,
 }
 
 /// ProcessContainer-specific network configuration.
@@ -354,8 +365,6 @@ pub struct Filesystem {
     pub readwrite_paths: Option<Vec<String>>,
     /// Paths the process can read but not write.
     pub readonly_paths: Option<Vec<String>>,
-    /// Paths the process can query or enumerate without reading file contents.
-    pub enumerate_paths: Option<Vec<String>>,
     /// Paths explicitly denied (override broader allow rules).
     pub denied_paths: Option<Vec<String>>,
 }

@@ -327,7 +327,6 @@ public class MxcSandboxTests
         Assert.Equal("0.7.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal(5000, root.GetProperty("timeoutMs").GetInt32());
         Assert.Equal("/tmp", root.GetProperty("filesystem").GetProperty("readwritePaths")[0].GetString());
-        Assert.False(root.GetProperty("filesystem").TryGetProperty("enumeratePaths", out _));
         Assert.Equal(8080,
             root.GetProperty("network").GetProperty("proxy").GetProperty("localhost").GetInt32());
         Assert.Equal("read", root.GetProperty("ui").GetProperty("clipboard").GetString());
@@ -341,17 +340,27 @@ public class MxcSandboxTests
         var policy = new SandboxPolicy
         {
             Version = "0.9.0-alpha",
-            Filesystem = new FilesystemPolicy
+        };
+        var request = new SandboxRequest(policy, "echo parity")
+        {
+            Containment = new ProcessContainerContainment
             {
-                EnumeratePaths = [@"C:\input"],
+                Filesystem = new ProcessContainerFilesystemPolicy
+                {
+                    EnumeratePaths = [@"C:\input"],
+                },
             },
         };
 
-        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
 
         Assert.Equal(
             @"C:\input",
-            doc.RootElement.GetProperty("filesystem").GetProperty("enumeratePaths")[0].GetString());
+            doc.RootElement
+                .GetProperty("containment")
+                .GetProperty("filesystem")
+                .GetProperty("enumeratePaths")[0]
+                .GetString());
     }
 
     [Fact]

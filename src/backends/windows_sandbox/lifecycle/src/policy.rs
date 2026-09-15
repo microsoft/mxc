@@ -73,7 +73,8 @@ fn plan_filesystem(request: &ExecutionRequest) -> Result<Vec<MappedFolder>, OneS
     let policy = &request.policy;
     if !policy.enumerate_paths.is_empty() {
         return Err(OneShotError::Policy(
-            "filesystem.enumeratePaths is not supported by the Windows Sandbox backend".to_string(),
+            "processContainer.filesystem.enumeratePaths is not supported by the Windows Sandbox backend"
+                .to_string(),
         ));
     }
     let mut roots: Vec<MappedRoot> = Vec::new();

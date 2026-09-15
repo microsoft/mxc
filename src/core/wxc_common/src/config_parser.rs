@@ -1001,9 +1001,10 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             false
         } else if enumerate.contains(p) {
             logger.log_line(&format!(
-                "Filesystem path '{}' appears in 'readwritePaths' and 'enumeratePaths'; \
+                "Filesystem path '{}' appears in 'filesystem.readwritePaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
                  applying most-restrictive intent (enumerate)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else if readonly.contains(p) {
@@ -1027,9 +1028,10 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             false
         } else if enumerate.contains(p) {
             logger.log_line(&format!(
-                "Filesystem path '{}' appears in 'readonlyPaths' and 'enumeratePaths'; \
+                "Filesystem path '{}' appears in 'filesystem.readonlyPaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
                  applying most-restrictive intent (enumerate)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -1039,9 +1041,10 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     policy.enumerate_paths.retain(|p| {
         if denied.contains(p) {
             logger.log_line(&format!(
-                "Filesystem path '{}' appears in 'enumeratePaths' and 'deniedPaths'; \
+                "Filesystem path '{}' appears in 'processContainer.filesystem.enumeratePaths' and \
+                 'filesystem.deniedPaths'; \
                  applying most-restrictive intent (denied)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -1053,7 +1056,10 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     for (paths, list_name) in [
         (&policy.readwrite_paths, "readwritePaths"),
         (&policy.readonly_paths, "readonlyPaths"),
-        (&policy.enumerate_paths, "enumeratePaths"),
+        (
+            &policy.enumerate_paths,
+            "processContainer.filesystem.enumeratePaths",
+        ),
         (&policy.denied_paths, "deniedPaths"),
     ] {
         for path in paths {
@@ -1504,6 +1510,12 @@ fn convert_wire_config(
             policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
         }
 
+        if let Some(filesystem) = ac.filesystem {
+            if let Some(paths) = filesystem.enumerate_paths {
+                policy.enumerate_paths = paths;
+            }
+        }
+
         process_container_network = ac.network;
     }
 
@@ -1517,9 +1529,6 @@ fn convert_wire_config(
         }
         if let Some(v) = fscfg.readonly_paths {
             policy.readonly_paths = v;
-        }
-        if let Some(v) = fscfg.enumerate_paths {
-            policy.enumerate_paths = v;
         }
     }
     validate_filesystem_paths(&policy)?;
@@ -11099,7 +11108,7 @@ mod tests {
 
     #[test]
     fn dev_contract_maps_enumerate_paths() {
-        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"process","filesystem":{"enumeratePaths":["C:\\tools"]}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -11110,7 +11119,7 @@ mod tests {
 
     #[test]
     fn same_path_in_readonly_and_enumerate_becomes_enumerate() {
-        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"process","filesystem":{"readonlyPaths":["C:\\tools"],"enumeratePaths":["C:\\tools"]}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -11118,6 +11127,18 @@ mod tests {
 
         assert!(req.policy.readonly_paths.is_empty());
         assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn enumerate_path_conflict_diagnostic_escapes_control_characters() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools\nforged"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools\nforged"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(!logger.get_buffer().contains("C:\\tools\nforged"));
+        assert!(logger.get_buffer().contains("C:\\tools\\nforged"));
     }
 
     #[test]

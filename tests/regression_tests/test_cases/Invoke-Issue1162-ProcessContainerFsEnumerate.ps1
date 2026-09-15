@@ -34,8 +34,12 @@ $configJson = @"
     },
     "filesystem": {
         "readonlyPaths": $((ConvertTo-Json -InputObject @($systemDriveRoot, $env:SystemRoot) -Compress)),
-        "readwritePaths": $((ConvertTo-Json -InputObject @($scratchDirectory) -Compress)),
-        "enumeratePaths": $((ConvertTo-Json -InputObject @($enumerateDirectory) -Compress))
+        "readwritePaths": $((ConvertTo-Json -InputObject @($scratchDirectory) -Compress))
+    },
+    "processContainer": {
+        "filesystem": {
+            "enumeratePaths": $((ConvertTo-Json -InputObject @($enumerateDirectory) -Compress))
+        }
     },
     "fallback": {
         "allowDaclMutation": false

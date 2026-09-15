@@ -257,7 +257,7 @@ const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
      build does not support that policy, and the process-security-environment path \
      cannot fall back to AppContainer or host-DACL enforcement";
 const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
-    "filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
+    "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
      and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
      build does not support that policy, and enumeration-only access cannot fall back to SBOX \
      or AppContainer enforcement";
@@ -704,7 +704,7 @@ impl BaseContainerRunner {
         Self::native_denied_paths_supported(psec_supported, sbox_capabilities)
     }
 
-    /// Whether PSEC can enforce `filesystem.enumeratePaths` on this host.
+    /// Whether PSEC can enforce `processContainer.filesystem.enumeratePaths` on this host.
     pub fn supports_enumerate_paths() -> bool {
         Self::is_process_security_environment_usable()
             && Self::query_psec_enumerate_support().unwrap_or(false)
@@ -1135,6 +1135,12 @@ impl BaseContainerRunner {
             return true;
         }
         crate::fallback_detector::base_container_supports_deny_paths()
+    }
+
+    pub(crate) fn supports_enumerate_paths_for_request(request: &ExecutionRequest) -> bool {
+        request.policy.enumerate_paths.is_empty()
+            || (Self::is_process_security_environment_usable()
+                && Self::query_psec_enumerate_support().unwrap_or(false))
     }
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {

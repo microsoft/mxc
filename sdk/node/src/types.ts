@@ -188,6 +188,11 @@ export interface ProcessContainerConfig {
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
+  /** ProcessContainer-specific filesystem settings. */
+  filesystem?: {
+    /** Paths the script can enumerate without reading file contents. */
+    enumeratePaths?: string[];
+  };
   /** ProcessContainer-specific networking settings. */
   network?: {
     /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
@@ -203,8 +208,6 @@ export interface FilesystemConfig {
   readwritePaths?: string[];
   /** Paths the script can read but not write */
   readonlyPaths?: string[];
-  /** Paths the script can enumerate without reading file contents */
-  enumeratePaths?: string[];
   /** Paths the script cannot access */
   deniedPaths?: string[];
   /** Automatically remove file access policy after execution (default: true) */
@@ -443,8 +446,6 @@ export type SandboxPolicy = {
       readwritePaths?: string[];
       /** Paths that are granted read-only access */
       readonlyPaths?: string[];
-      /** Paths that may be enumerated without granting file-content reads */
-      enumeratePaths?: string[];
       /** Paths that are explicitly denied all access */
       deniedPaths?: string[];
       /** Whether to clear the filesystem policy when the shell exits. (default: true) */
@@ -482,8 +483,13 @@ export type SandboxPolicy = {
   runtimeConfig?: RuntimeConfig;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
-  /** Schema 0.8 ProcessContainer-specific policy. */
+  /** ProcessContainer-specific policy. Individual fields may require newer schemas. */
   processContainer?: {
+      /** ProcessContainer-specific filesystem settings. */
+      filesystem?: {
+          /** Paths that may be enumerated without granting file-content reads. */
+          enumeratePaths?: string[];
+      };
       /** ProcessContainer-specific networking settings. */
       network?: {
           /** Package family name or AppContainer profile authorized as the loopback proxy peer. */

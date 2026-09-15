@@ -320,6 +320,7 @@ public static class MxcSandbox
             Capabilities = new List<string>(containment.Capabilities),
             CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
             Ui = containment.Ui,
+            Filesystem = containment.Filesystem,
             Network = containment.Network,
         };
     }

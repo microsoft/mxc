@@ -24,7 +24,7 @@ pub enum BackendCapability {
     CaptureDenials,
     /// Native `filesystem.deniedPaths` enforcement at the reported tier.
     FilesystemDeniedPaths,
-    /// Native `filesystem.enumeratePaths` enforcement at the reported tier.
+    /// Native `processContainer.filesystem.enumeratePaths` enforcement at the reported tier.
     FilesystemEnumeratePaths,
     /// `network.ingress.hostLoopback = "allow"` at the reported tier.
     IngressHostLoopbackAllow,

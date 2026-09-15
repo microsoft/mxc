@@ -58,7 +58,6 @@ fn convert_filesystem(value: contract::Filesystem) -> wire::Filesystem {
     wire::Filesystem {
         readwrite_paths: readwrite_paths.into_option(),
         readonly_paths: readonly_paths.into_option(),
-        enumerate_paths: None,
         denied_paths: denied_paths.into_option(),
     }
 }
@@ -168,6 +167,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities: capabilities.into_option(),
         capture_denials: None,
         ui: ui.into_option().map(convert_process_container_ui),
+        filesystem: None,
         network: None,
     }
 }

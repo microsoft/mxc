@@ -117,10 +117,6 @@ export interface Filesystem {
    */
   deniedPaths?: string[] | null;
   /**
-   * Paths the process can query or enumerate without reading file contents.
-   */
-  enumeratePaths?: string[] | null;
-  /**
    * Paths the process can read but not write.
    */
   readonlyPaths?: string[] | null;
@@ -392,6 +388,10 @@ export interface ProcessContainer {
    */
   captureDenials?: CaptureDenials | null;
   /**
+   * ProcessContainer-specific filesystem configuration.
+   */
+  filesystem?: ProcessContainerFilesystem | null;
+  /**
    * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
    */
   learningMode?: boolean | null;
@@ -407,6 +407,16 @@ export interface ProcessContainer {
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
+}
+
+/**
+ * ProcessContainer-specific filesystem configuration.
+ */
+export interface ProcessContainerFilesystem {
+  /**
+   * Paths the process can query or enumerate without reading file contents.
+   */
+  enumeratePaths?: string[] | null;
 }
 
 /**

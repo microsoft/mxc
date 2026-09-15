@@ -253,7 +253,7 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::Fallback(FallbackError::EnumeratePathsUnsupported) => write!(
                 f,
-                "filesystem.enumeratePaths is not supported by this version of Windows; \
+                "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
                  enumeration-only access requires native ProcessContainer support and cannot \
                  fall back to AppContainer."
             ),
@@ -452,11 +452,14 @@ fn select_backend_with_fallback(
     let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
     let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
+    let supports_enumerate_paths =
+        BaseContainerRunner::supports_enumerate_paths_for_request(request);
     let decision = fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
         prefer_base_container,
         prefer_base_container,
         supports_deny_paths,
+        supports_enumerate_paths,
     )?;
     let guarded_capture_required = request.policy.capture_denials.is_some()
         && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);

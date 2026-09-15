@@ -36,9 +36,10 @@ use wxc_common::mxc_error::MxcError;
 use crate::policy_mapping::validate_denied_path_overlap;
 
 const ERR_FILESYSTEM_IMMUTABLE: &str =
-    "filesystem policy (readwritePaths / readonlyPaths / enumeratePaths / deniedPaths) is bound to the provision \
+    "filesystem policy (readwritePaths / readonlyPaths / deniedPaths and processContainer.filesystem.enumeratePaths) is bound to the provision \
      phase and cannot be changed by the WSLc backend after provisioning";
-const ERR_ENUMERATE_PATHS: &str = "filesystem.enumeratePaths is not supported by the WSLc backend";
+const ERR_ENUMERATE_PATHS: &str =
+    "processContainer.filesystem.enumeratePaths is not supported by the WSLc backend";
 const ERR_HOST_FILTERING: &str =
     "per-host network filtering (allowedHosts / blockedHosts) is not supported by the WSLc backend";
 const ERR_NETWORK_IMMUTABLE: &str =
