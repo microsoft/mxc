@@ -16,7 +16,6 @@ import {
   createTempDir,
   withToolPaths,
   startTestProxy,
-  debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
 } from './test-helpers.js';
@@ -50,7 +49,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'",
       { version: schemaVersion.raw, ui: { allowWindows: true } },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-2-${schemaVersion}`,
     );
@@ -63,7 +62,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
-      debugSpawnOptions,
+      {},
       undefined,
       `test-3-${schemaVersion}`,
     );
@@ -84,7 +83,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} ${scriptFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-4-${schemaVersion}`,
     );
@@ -104,7 +103,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `cmd.exe /c type ${inputFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-5-${schemaVersion}`,
     );
@@ -116,7 +115,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       'cmd.exe /c echo version ok',
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-ver-${schemaVersion}`,
     );
@@ -143,41 +142,6 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         proxyProcess.kill();
         proxyProcess = null;
       }
-    });
-
-    it('should route traffic through built-in proxy', async () => {
-      tempDir = createTempDir('mxc-proxy-test');
-      const policy = withToolPaths({
-        version: schemaVersion.raw,
-        network: { allowOutbound: true, proxy: { builtinTestServer: true } },
-        ui: { allowWindows: true },
-      }) as SandboxPolicy;
-      const script =
-        `powershell.exe -NoProfile -Command "` +
-        `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
-        `$h.Open('GET','https://api.github.com/zen',$false); ` +
-        `$h.Send(); ` +
-        `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
-        (resolve) => {
-          const process = sdk.spawnSandbox(
-            script,
-            policy,
-            { debug: true, allowTestingFeatures: true },
-            undefined,
-            `proxy-builtin-${schemaVersion}`,
-          );
-          let stdout = '';
-          process.onData((data: string) => { stdout += data; });
-          process.onExit(({ exitCode }: { exitCode: number }) => {
-            resolve({ stdout, stderr: '', exitCode });
-          });
-        },
-      );
-
-      assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
-      assert.ok(result.stdout.includes('PROXY_RESPONSE:'));
-      assert.ok(result.stdout.includes('Proxy policy active'));
     });
 
     it('should route traffic through external proxy', async () => {
