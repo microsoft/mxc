@@ -55,7 +55,6 @@ interface StreamingApi {
 let sharedApi: StreamingApi | undefined;
 let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
   | undefined;
-
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
 const AbiReadStream = koffi.opaque('MxcNodeReadStream');
 const AbiWriteStream = koffi.opaque('MxcNodeWriteStream');
@@ -125,7 +124,6 @@ function bindStreamingFunctions() {
     stringFree, freeSandbox, freeRead, freeWrite, freeCloser,
   };
 }
-
 function createStreamingApi(): StreamingApi {
   const native = bindStreamingFunctions();
   const readJson = (call: (out: Pointer[]) => number, message: string): string | undefined => {
