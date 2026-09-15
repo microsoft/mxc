@@ -2,11 +2,13 @@
 // Licensed under the MIT License.
 
 import pty from 'node-pty';
+import { Readable } from 'node:stream';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
-import { MxcError, mxcErrorFromEnvelope } from './errors.js';
+import { MxcError } from './errors.js';
 import { diagLog } from './diagnostic.js';
 import { runBindingStateAwareRequestAsync } from './bindings/state-aware-worker.js';
+import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
 import {
   DeprovisionConfigFor,
   DeprovisionResult,
@@ -23,12 +25,11 @@ import {
   StopConfigFor,
   StopResult,
 } from './state-aware-types.js';
+import type { MxcSandboxProcess } from './sandbox-process.js';
 import {
   backendForSandboxId,
   buildStateAwareEnvelope,
   parseNonExecResponse,
-  spawnAndCollect,
-  tryParseErrorEnvelope,
 } from './state-aware-helper.js';
 
 /**
@@ -103,11 +104,11 @@ function scheduleAbortedProvisionCleanup(
   }
 }
 
-async function nonExecBindingCall<T>(
+async function runStateAwareEnvelopeRequest(
   apiName: string,
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
-): Promise<T> {
+): Promise<string> {
   assertStateAwareFfiOptions(apiName, options, true);
 
   const signal = options.signal;
@@ -123,10 +124,10 @@ async function nonExecBindingCall<T>(
   });
 
   if (!signal) {
-    return parseNonExecResponse<T>(await request);
+    return request;
   }
 
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let settled = false;
     let aborted = false;
     const finish = (action: () => void) => {
@@ -146,18 +147,93 @@ async function nonExecBindingCall<T>(
         scheduleAbortedProvisionCleanup(responseJson, envelope, experimental);
         return;
       }
-      finish(() => {
-        try {
-          resolve(parseNonExecResponse<T>(responseJson));
-        } catch (error) {
-          reject(error);
-        }
-      });
+      finish(() => resolve(responseJson));
     }, (error) => {
       if (aborted) return;
       finish(() => reject(error));
     });
   });
+}
+
+async function nonExecBindingCall<T>(
+  apiName: string,
+  envelope: Record<string, unknown>,
+  options: SandboxSpawnOptions,
+): Promise<T> {
+  return parseNonExecResponse<T>(await runStateAwareEnvelopeRequest(apiName, envelope, options));
+}
+
+function buildExecEnvelope<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
+): Record<string, unknown> {
+  return buildStateAwareEnvelope({
+    phase: 'exec',
+    backendKey: backendForSandboxId(sandboxId) as C,
+    sandboxId,
+    config: config as unknown as Record<string, unknown>,
+  });
+}
+
+function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
+  options: SandboxSpawnOptions,
+  apiName: string,
+): MxcSandboxProcess {
+  assertStateAwareFfiOptions(apiName, options, false);
+  return spawnStateAwareBindingSandboxProcess(
+    JSON.stringify(buildExecEnvelope(sandboxId, config)),
+    options.experimental === true,
+    config.process.timeout,
+  );
+}
+
+function collectStream(stream: Readable | null): Promise<string> {
+  if (stream === null) {
+    return Promise.resolve('');
+  }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    stream.once('error', reject);
+  });
+}
+
+function createAbortPromise(
+  proc: MxcSandboxProcess,
+  signal: AbortSignal | undefined,
+): { promise?: Promise<never>; cleanup: () => void } {
+  if (!signal) {
+    return { cleanup: () => {} };
+  }
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      try {
+        proc.kill();
+      } catch {
+        // Best-effort cancellation only.
+      }
+      reject(abortReason(signal));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return {
+    promise,
+    cleanup: () => {
+      if (onAbort) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    },
+  };
 }
 
 /**
@@ -267,23 +343,30 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
 ): Promise<ExecResult> {
-  const backendKey = backendForSandboxId(sandboxId) as C;
-  const envelope = buildStateAwareEnvelope({
-    phase: 'exec',
-    backendKey,
-    sandboxId,
-    config: config as unknown as Record<string, unknown>,
-  });
-  const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
-
-  if (exitCode !== 0) {
-    const errorEnvelope = tryParseErrorEnvelope(stdout);
-    if (errorEnvelope) {
-      throw mxcErrorFromEnvelope(errorEnvelope.error);
-    }
+  const envelope = buildExecEnvelope(sandboxId, config);
+  if (options.dryRun === true) {
+    return {
+      stdout: await runStateAwareEnvelopeRequest('execInSandboxAsync', envelope, options),
+      stderr: '',
+      exitCode: 0,
+    };
   }
 
-  return { stdout, stderr, exitCode };
+  const proc = spawnStateAwareExecProcess(sandboxId, config, options, 'execInSandboxAsync');
+  const stdoutPromise = collectStream(proc.stdout);
+  const stderrPromise = collectStream(proc.stderr);
+  const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
+  const abort = createAbortPromise(proc, options.signal);
+
+  try {
+    const [result, stdout, stderr] = abort.promise
+      ? await Promise.race([waitPromise, abort.promise])
+      : await waitPromise;
+    return { stdout, stderr, exitCode: result.exitCode };
+  } finally {
+    abort.cleanup();
+    proc.dispose();
+  }
 }
 
 /**
