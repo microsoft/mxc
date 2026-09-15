@@ -837,6 +837,7 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_seatbelt_launch_method_version(config: &serde_json::Value) -> Result<(), WxcError> {
     let Some(config) = config.as_object() else {
         return Ok(());
