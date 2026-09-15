@@ -7,6 +7,7 @@ use serde_json::json;
 use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
 
 const CAP_NET_ADMIN: u64 = 1 << 12;
+const CAP_NET_RAW: u64 = 1 << 13;
 
 /// Whether the LXC capability prerequisites are present.
 fn ready() -> bool {
@@ -24,7 +25,7 @@ fn capability_mask(status: &str, field: &str) -> u64 {
 }
 
 #[test]
-fn workload_cannot_reconfigure_the_network() {
+fn workload_cannot_reconfigure_or_bypass_the_firewall() {
     if !ready() {
         return;
     }
@@ -53,10 +54,16 @@ fn workload_cannot_reconfigure_the_network() {
     // its effective set whenever it likes, and only a bounding-set drop
     // survives execve.
     for field in ["CapEff:", "CapPrm:", "CapBnd:"] {
+        let mask = capability_mask(&status, field);
         assert_eq!(
-            capability_mask(&status, field) & CAP_NET_ADMIN,
+            mask & CAP_NET_ADMIN,
             0,
             "{field} still carries CAP_NET_ADMIN; the workload can rewrite the firewall confining it\n{status}"
+        );
+        assert_eq!(
+            mask & CAP_NET_RAW,
+            0,
+            "{field} still carries CAP_NET_RAW; the workload can send AF_PACKET frames that never reach the firewall's OUTPUT chain\n{status}"
         );
     }
 }

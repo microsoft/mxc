@@ -43,7 +43,7 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 # Case A: 0.7 positive control -- bare legacy default-allow.
-CTRL_CONFIG="$REPO_DIR/tests/configs/lxc_network_legacy_v08_outbound_ctrl.json"
+CTRL_CONFIG="$REPO_DIR/tests/configs/lxc_network_legacy_v07_outbound_ctrl.json"
 # Case B: 0.8 case under test -- byte-identical to A except version and containerId.
 CASE_CONFIG="$REPO_DIR/tests/configs/lxc_network_legacy_v08_outbound_case.json"
 # Case C: 0.8 negative guard -- same bare network section, default-block.

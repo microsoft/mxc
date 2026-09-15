@@ -199,8 +199,8 @@ pub fn has_lxc_exe() -> bool {
 /// never installs LXC.
 pub fn has_lxc_host() -> bool {
     match Command::new("lxc-start").arg("--version").output() {
-        Ok(_) => true,
-        Err(_) => {
+        Ok(output) if output.status.success() => true,
+        _ => {
             println!(
                 "SKIPPED: lxc-start not installed — this host cannot start a system container"
             );

@@ -11,6 +11,11 @@
 # which goes allowed-then-denied.  This test goes denied-then-allowed and pins
 # the orthogonal half: loosening the policy on a reused container must restore
 # access.
+#
+# The runner reapplies policy by stopping the surviving container and starting
+# it again, because LXC reads the network section only at start.  Run 3 below
+# therefore restarts the container rather than reconfiguring it in place, and
+# the init PID check after it is what holds that behavior down.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,7 +165,7 @@ run_config "run 1 (positive control): fresh container, explicit egress allow to 
 assert_allowed "an explicitly allowed destination was unreachable on the positive control.  Run 3 would prove nothing without a working allow path, so this test fails rather than proceeding."
 
 # Run 2: setup run on the reuse container id, with no network section.  The
-# container must survive so run 3 reuses the same live instance.
+# container must survive so run 3 reuses the same instance.
 run_config "run 2 (setup): reuse id, no network section -- workload must be blocked" "$DENY_CONFIG"
 assert_blocked "the workload reached $PROBE_ADDRESS on a 0.8 request with no network section.  The container was not isolated as expected, so run 3 would not be testing the loosening scenario."
 
@@ -170,7 +175,7 @@ fi
 
 INIT_PID="$(lxc-info -n "$REUSE_CONTAINER" -p -H 2>/dev/null || true)"
 if [ -z "$INIT_PID" ] || [ "$INIT_PID" = "-1" ]; then
-    fail "run 2 left the container stopped, so run 3 cannot exercise reuse of a live container.  This test is not covering the scenario it was written for."
+    fail "run 2 left the container stopped, so run 3 cannot exercise reuse of a surviving container.  This test is not covering the scenario it was written for."
 fi
 echo "--- container survived run 2 and is still running as PID $INIT_PID ---"
 
@@ -178,6 +183,18 @@ echo "--- container survived run 2 and is still running as PID $INIT_PID ---"
 # egress allow.  The workload must reach the allowed destination.
 run_config "run 3 (case under test): same reuse id, explicit egress allow to $PROBE_ADDRESS" "$ALLOW_CONFIG"
 assert_allowed "a container reused under an explicit egress allow could not reach $PROBE_ADDRESS.  The workload was blocked despite the policy explicitly permitting the destination on the second run."
+
+# Reapplying policy means restarting the container, so the init PID must have
+# moved.  An unchanged PID means run 3 inherited run 2's live namespace and the
+# allowed verdict above came from something other than the new policy.
+FINAL_PID="$(lxc-info -n "$REUSE_CONTAINER" -p -H 2>/dev/null || true)"
+if [ -z "$FINAL_PID" ] || [ "$FINAL_PID" = "-1" ]; then
+    fail "run 3 left the container stopped, so its init PID cannot be compared with run 2's."
+fi
+if [ "$FINAL_PID" = "$INIT_PID" ]; then
+    fail "the container still runs as PID $INIT_PID after run 3, so it was never restarted.  LXC reads the network section only at start, so the loosened policy cannot have been applied to this namespace."
+fi
+echo "--- container was restarted for run 3: PID $INIT_PID -> $FINAL_PID ---"
 
 echo "PASS: a container reused under a loosened policy can reach an explicitly allowed destination."
 echo "LXC reuse policy-loosening test complete."

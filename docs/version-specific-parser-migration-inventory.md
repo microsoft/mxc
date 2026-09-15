@@ -8,7 +8,11 @@ The post-migration corpus baseline was refreshed at commit
 over newer configuration fixtures, primarily the Seatbelt validation corpus
 from #1125. The rebase added 73 JSON documents and removed one, producing 67
 additional equivalent accepts and five additional shared rejections without
-changing the seven classified exact-stricter results.
+changing the seven classified exact-stricter results. Merging `main` into the
+LXC network-enforcement branch refreshed the baseline again: that branch adds
+twelve LXC network fixtures and removes the bridge fail-closed one, producing
+eleven additional equivalent accepts without changing the shared rejections or
+the classified exact-stricter results.
 
 This branch is a combined delivery: it makes exact contracts authoritative
 and completes the v0.9 directional-network cutover. The latter is a breaking

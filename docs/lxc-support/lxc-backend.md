@@ -46,6 +46,7 @@ Note the required field lxc.
 
 ```json
 {
+    "version": "0.8.0-alpha",
     "containerId": "my-sandbox",
     "containment": "lxc",
     "process": {
@@ -65,6 +66,7 @@ Note the required field lxc.
     },
     "network": {
         "defaultPolicy": "block",
+        "enforcementMode": "firewall",
         "allowedHosts": ["api.github.com"],
         "blockedHosts": ["notapi.example.com"]
     }
@@ -82,18 +84,23 @@ Note the required field lxc.
 
 Any combination that lxc-create supports.
 
-### Preventing Evs from leaking into LXC
+### Preventing environment variables from leaking into LXC
 
-If `process.env` has a value then `lxc-attach` is ran with `--clear-env` to prevent EV's from the host leaking inside the container.
+If `process.env` has a value, `lxc-attach` is run with `--clear-env` so host
+environment variables do not leak into the container.
 
 ## Network Policy
 
-The DNS port, port 53, is also affected by network rules.
+A legacy deny-default policy that names `allowedHosts` opens port 53
+unconditionally, so it cannot block DNS.  The directional `network.egress`
+rules carry no such exemption and govern port 53 like any other destination.
 
-`preservePolicy` leaves the egress chains in place after the run.  A partially
-installed chain from a failed run is torn down regardless.
+`preservePolicy` leaves the egress chains in place after the run.  The chains
+live in the container's network namespace, so they last only as long as the
+container keeps running; stopping or destroying it takes them with it.  A
+partially installed chain from a failed run is torn down regardless.
 
-If using the v0.7.0 network shape `enforcmentMode` can not be `capabilities`.
+If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
 
 The `url` must not carry credentials.
 

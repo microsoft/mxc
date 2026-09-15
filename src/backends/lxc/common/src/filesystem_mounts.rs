@@ -7,7 +7,10 @@ use wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use wxc_common::logger::Logger;
 use wxc_common::models::ContainerPolicy;
 
-use crate::lxc_bindings::LxcContainer;
+use crate::lxc_bindings::{
+    LxcContainer, MASK_DIR, MASK_DIR_HOLDING_MOUNTPOINTS, MASK_FILE, MOUNT_READONLY,
+    MOUNT_READWRITE,
+};
 
 fn validate_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
@@ -128,8 +131,7 @@ pub fn configure_filesystem_mounts(
 
         match mount.intent {
             FsIntent::ReadWrite => {
-                let mount_entry =
-                    format!("{} {} none bind,create=dir 0 0", host_path, container_path);
+                let mount_entry = MOUNT_READWRITE.entry(host_path, container_path);
                 logger.log_line(&format!(
                     "Adding rw bind mount: {} -> /{}",
                     host_path, container_path
@@ -137,10 +139,7 @@ pub fn configure_filesystem_mounts(
                 entries.push(mount_entry);
             }
             FsIntent::ReadOnly => {
-                let mount_entry = format!(
-                    "{} {} none bind,ro,create=dir 0 0",
-                    host_path, container_path
-                );
+                let mount_entry = MOUNT_READONLY.entry(host_path, container_path);
                 logger.log_line(&format!(
                     "Adding ro bind mount: {} -> /{}",
                     host_path, container_path
@@ -163,15 +162,15 @@ pub fn configure_filesystem_mounts(
                 let is_file = denied_path_is_file(&real_host);
 
                 let mount_entry = if is_file {
-                    format!("/dev/null {} none bind,ro,create=file 0 0", container_path)
+                    MASK_FILE.entry("/dev/null", container_path)
                 } else if has_rebound_descendant(container_path, &rebound_container_paths) {
                     // A read-only, zero-size tmpfs rejects the mkdir LXC needs
                     // to create the descendant's mountpoint, and the container
                     // aborts. `size=1m` holds empty mountpoint directories
                     // without letting sandboxed code exhaust host memory.
-                    format!("tmpfs {} tmpfs size=1m,create=dir 0 0", container_path)
+                    MASK_DIR_HOLDING_MOUNTPOINTS.entry("tmpfs", container_path)
                 } else {
-                    format!("tmpfs {} tmpfs ro,size=0,create=dir 0 0", container_path)
+                    MASK_DIR.entry("tmpfs", container_path)
                 };
                 let create_type = if is_file { "file" } else { "dir" };
                 logger.log_line(&format!(

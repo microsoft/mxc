@@ -4,6 +4,51 @@
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
 
+/// The filesystem type and options of one kind of `lxc.mount.entry`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MountShape {
+    filesystem: &'static str,
+    options: &'static str,
+}
+
+impl MountShape {
+    pub(crate) fn entry(self, source: &str, target: &str) -> String {
+        format!(
+            "{} {} {} {} 0 0",
+            source, target, self.filesystem, self.options
+        )
+    }
+}
+
+pub(crate) const MOUNT_READWRITE: MountShape = MountShape {
+    filesystem: "none",
+    options: "bind,create=dir",
+};
+pub(crate) const MOUNT_READONLY: MountShape = MountShape {
+    filesystem: "none",
+    options: "bind,ro,create=dir",
+};
+pub(crate) const MASK_FILE: MountShape = MountShape {
+    filesystem: "none",
+    options: "bind,ro,create=file",
+};
+pub(crate) const MASK_DIR_HOLDING_MOUNTPOINTS: MountShape = MountShape {
+    filesystem: "tmpfs",
+    options: "size=1m,create=dir",
+};
+pub(crate) const MASK_DIR: MountShape = MountShape {
+    filesystem: "tmpfs",
+    options: "ro,size=0,create=dir",
+};
+
+const MXC_MOUNT_SHAPES: &[MountShape] = &[
+    MOUNT_READWRITE,
+    MOUNT_READONLY,
+    MASK_FILE,
+    MASK_DIR_HOLDING_MOUNTPOINTS,
+    MASK_DIR,
+];
+
 /// Resolve the default LXC storage path the way liblxc does.
 fn resolve_lxcpath_with_env<F, G>(get_env: F, geteuid: G) -> String
 where
@@ -95,16 +140,20 @@ fn build_attach_args_with_env_control(
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
-    // `libc` does not export this; the value is from linux/capability.h.
+    // AF_PACKET frames sent under CAP_NET_RAW never reach the firewall's
+    // OUTPUT chain. Values are from linux/capability.h.
     const CAP_NET_ADMIN: libc::c_ulong = 12;
+    const CAP_NET_RAW: libc::c_ulong = 13;
 
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `prctl` is a bare syscall and this
     // closure allocates nothing and captures nothing.
     unsafe {
         command.pre_exec(|| {
-            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+            for capability in [CAP_NET_ADMIN, CAP_NET_RAW] {
+                if libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -270,12 +319,37 @@ impl LxcContainer {
                 inside = false;
                 continue;
             }
-            if !inside {
-                out.push_str(line);
-                out.push('\n');
+            if inside || Self::is_mxc_written_mount_entry(trimmed) {
+                continue;
             }
+            out.push_str(line);
+            out.push('\n');
         }
         out
+    }
+
+    /// Whether `line` is a mount entry MXC wrote before it marked its own block.
+    ///
+    /// Containers created by an earlier MXC carry its mounts as unmarked lines,
+    /// which a tightened policy would otherwise leave in place. The filesystem
+    /// type and options identify them; a user's own entry keeps its own shape
+    /// and survives.
+    fn is_mxc_written_mount_entry(line: &str) -> bool {
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        if key.trim() != "lxc.mount.entry" {
+            return false;
+        }
+
+        let fields: Vec<&str> = value.split_whitespace().collect();
+        let [_source, _target, filesystem, options, "0", "0"] = fields[..] else {
+            return false;
+        };
+
+        MXC_MOUNT_SHAPES
+            .iter()
+            .any(|shape| shape.filesystem == filesystem && shape.options == options)
     }
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
@@ -651,6 +725,74 @@ mod tests {
             assert!(
                 body.contains(line),
                 "{line:?} must survive the rewrite; got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_container_from_before_the_marker_block_loses_its_stale_grants() {
+        // An MXC that predates the marker block appended its mounts as plain
+        // lines, so a tightened policy has to recognize them by shape.
+        let legacy = "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
+                      lxc.mount.entry = /srv/secrets srv/secrets none bind,create=dir 0 0\n\
+                      lxc.mount.entry = /opt/tools opt/tools none bind,ro,create=dir 0 0\n\
+                      lxc.mount.entry = /dev/null etc/shadow none bind,ro,create=file 0 0\n\
+                      lxc.mount.entry = tmpfs var/cache tmpfs ro,size=0,create=dir 0 0\n\
+                      lxc.mount.entry = tmpfs var/lib tmpfs size=1m,create=dir 0 0\n";
+        let (container, config) = container_with_config(legacy);
+
+        container
+            .set_filesystem_access_points(&[])
+            .expect("a run granting nothing rewrites the config");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            !body.contains("lxc.mount.entry"),
+            "every mount MXC wrote before the marker block must be reclaimed; got:\n{body}"
+        );
+        assert!(
+            body.contains("lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs"),
+            "the sweep must keep the lines it does not own; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_sweep_keeps_mount_entries_mxc_did_not_write() {
+        // Same key, shapes MXC never emits: a bare bind, a non-zero pass field,
+        // and an option string that only starts like one of ours.
+        let foreign = [
+            "lxc.mount.entry = /opt/handwritten opt none bind 0 0",
+            "lxc.mount.entry = /a b none bind,create=dir 0 1",
+            "lxc.mount.entry = /a b none bind,create=dir,extra 0 0",
+            "lxc.mount.entry = /a b ext4 bind,create=dir 0 0",
+            "lxc.mount.entry = /a b none bind,create=dir",
+        ];
+        let config_body = format!(
+            "lxc.rootfs.path = dir:/box/rootfs\n{}\n",
+            foreign.join("\n")
+        );
+        let (container, config) = container_with_config(&config_body);
+
+        container
+            .set_filesystem_access_points(&[])
+            .expect("a run granting nothing rewrites the config");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        for line in foreign {
+            assert!(
+                body.contains(line),
+                "{line:?} is not a shape MXC writes and must survive; got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_shape_the_policy_builder_emits_is_reclaimed() {
+        for shape in MXC_MOUNT_SHAPES {
+            let line = format!("lxc.mount.entry = {}", shape.entry("/source", "target"));
+            assert!(
+                LxcContainer::is_mxc_written_mount_entry(&line),
+                "{line:?} is emitted by the policy builder but would survive a tightened policy"
             );
         }
     }

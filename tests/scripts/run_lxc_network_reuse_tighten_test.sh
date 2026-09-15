@@ -6,6 +6,11 @@
 # first reaches an allowed destination, the second permits nothing and must not
 # reach it.
 #
+# The runner reapplies policy by stopping the surviving container and starting
+# it again, because LXC reads the network section only at start. The second run
+# below therefore restarts the container rather than reconfiguring it in place,
+# and the init PID check after it is what holds that behavior down.
+#
 # No other script covers this. The proxy reuse script next door reuses a
 # container but changes only the proxy pin, never the reachability the
 # container is left holding, and every other network fixture destroys its
@@ -137,17 +142,31 @@ if ! lxc-info -n "$CONTAINER" >/dev/null 2>&1; then
     fail "destroyOnExit was false, but the first run destroyed the container. There is nothing for the second run to reuse."
 fi
 
-# The scenario is a container reused *while still running*: a container the
-# first run left stopped is started fresh by the second, which reads the new
-# policy on its way up and never had the chance to carry the old one over.
+# A container the first run left stopped would be started fresh by the second,
+# which reads the new policy on its way up and never had the chance to carry the
+# old one over. The reuse this test is about only happens when the first run
+# leaves it running.
 INIT_PID="$(lxc-info -n "$CONTAINER" -p -H 2>/dev/null || true)"
 if [ -z "$INIT_PID" ] || [ "$INIT_PID" = "-1" ]; then
-    fail "the first run left the container stopped, so the second run cannot exercise reuse of a live container. This test is not covering the scenario it was written for."
+    fail "the first run left the container stopped, so the second run cannot exercise reuse of a surviving container. This test is not covering the scenario it was written for."
 fi
 echo "--- container survived the first run and is still running as PID $INIT_PID ---"
 
 run_config "second run: same container, policy permits no network" "$DENY_CONFIG"
-assert_blocked "a container reused while still running reached $PROBE_ADDRESS under a policy that permits no network. It is still on the first run's topology, so tightening the policy on a surviving container does nothing and the workload keeps access the current policy never granted."
+assert_blocked "a surviving container reused under a policy that permits no network still reached $PROBE_ADDRESS. It is still on the first run's topology, so tightening the policy on a reused container does nothing and the workload keeps access the current policy never granted."
 
-echo "PASS: a live container reused under a tightened policy lost the access its previous run had."
+# Reapplying policy means restarting the container, so the init PID must have
+# moved. An unchanged PID means the second run inherited the first run's live
+# namespace and the deny verdict above came from something other than the new
+# policy.
+FINAL_PID="$(lxc-info -n "$CONTAINER" -p -H 2>/dev/null || true)"
+if [ -z "$FINAL_PID" ] || [ "$FINAL_PID" = "-1" ]; then
+    fail "the second run left the container stopped, so its init PID cannot be compared with the first run's."
+fi
+if [ "$FINAL_PID" = "$INIT_PID" ]; then
+    fail "the container still runs as PID $INIT_PID after the second run, so it was never restarted. LXC reads the network section only at start, so the tightened policy cannot have been applied to this namespace."
+fi
+echo "--- container was restarted for the second run: PID $INIT_PID -> $FINAL_PID ---"
+
+echo "PASS: a surviving container reused under a tightened policy lost the access its previous run had."
 echo "LXC reuse policy-tightening test complete."

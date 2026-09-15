@@ -779,7 +779,7 @@ fn a_legacy_block_with_allowed_hosts_opens_dns() {
 #[test]
 fn a_legacy_block_with_no_allowed_hosts_does_not_open_dns() {
     let policy = policy_from_json(
-        r#"{"version": "0.7.0",
+        r#"{"version": "0.7.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
                         "blockedHosts": ["example.com"]}}"#,
@@ -795,7 +795,7 @@ fn a_legacy_block_with_no_allowed_hosts_does_not_open_dns() {
 #[test]
 fn a_legacy_allow_with_blocked_hosts_does_not_open_dns() {
     let policy = policy_from_json(
-        r#"{"version": "0.7.0",
+        r#"{"version": "0.7.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "allow", "enforcementMode": "firewall",
                         "blockedHosts": ["example.com"]}}"#,
