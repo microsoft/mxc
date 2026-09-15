@@ -123,39 +123,57 @@ describe('native streaming spawn APIs', () => {
     proc.dispose();
   });
 
-  it('routes the existing config entry point through the binding request adapter', () => {
-    let seen: RequestSpec | undefined;
+  it('preserves policy and config entry points over the same process model', () => {
+    const requests: RequestSpec[] = [];
     _setBindingSandboxProcessFactory((request) => {
-      seen = request;
-      return _createMxcSandboxProcess(new FakeBinding(43, 0));
+      requests.push(request);
+      return _createMxcSandboxProcess(new FakeBinding(42, 0));
     });
 
-    const proc = spawnSandboxFromConfig({
+    const policyProcess = spawnSandbox('echo policy', { version: '0.9.0-alpha' });
+    const configProcess = spawnSandboxFromConfig({
       version: '0.9.0-alpha',
       containment: 'wslc',
+      containerId: 'configured',
       process: {
-        commandLine: 'echo configured',
-        env: ['FROM_CONFIG=value', 'OVERRIDE=old'],
+        commandLine: 'echo config',
+        env: ['FROM_CONFIG=yes', 'OVERRIDE=old'],
       },
+      experimental: { wslc: { image: 'alpine:latest' } },
     }, {
       experimental: true,
       inheritDefaultEnv: true,
-    }, 'C:\\work', {
+    }, undefined, {
       FROM_CALLER: 'yes',
       OVERRIDE: 'new',
     });
 
-    assert.strictEqual(proc.id, 43);
-    assert.strictEqual(seen?.command, 'echo configured');
-    assert.strictEqual(seen?.containment.type, 'wslc');
-    assert.strictEqual(seen?.workingDirectory, 'C:\\work');
-    assert.deepStrictEqual(seen?.environment, {
-      FROM_CONFIG: 'value',
-      FROM_CALLER: 'yes',
-      OVERRIDE: 'new',
+    assert.strictEqual(policyProcess.id, 42);
+    assert.strictEqual(configProcess.id, 42);
+    assert.strictEqual(requests[0].command, 'echo policy');
+    assert.deepStrictEqual(requests[1], {
+      policy: {
+        version: '0.9.0-alpha',
+        filesystem: undefined,
+        network: undefined,
+        ui: undefined,
+        timeoutMs: undefined,
+        telemetry: undefined,
+      },
+      command: 'echo config',
+      containment: { type: 'wslc', image: 'alpine:latest', portMappings: undefined },
+      containerName: 'configured',
+      workingDirectory: undefined,
+      environment: {
+        FROM_CONFIG: 'yes',
+        OVERRIDE: 'new',
+        FROM_CALLER: 'yes',
+      },
+      inheritDefaultEnv: true,
+      experimental: true,
     });
-    assert.strictEqual(seen?.inheritDefaultEnv, true);
-    proc.dispose();
+    policyProcess.dispose();
+    configProcess.dispose();
   });
 
   it('surfaces stdout as a Node readable stream', async () => {
