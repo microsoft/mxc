@@ -17,6 +17,8 @@ import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareRequestSpec } from './bindings/request.js';
 import { runBindingRequestAsync } from './bindings/run-worker.js';
+import { spawnBindingSandboxProcess } from './bindings/streaming.js';
+import type { MxcSandboxProcess } from './sandbox-process.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
@@ -783,4 +785,38 @@ export function spawnSandboxAsync(
       exitCode: result.exitCode,
     };
   })();
+}
+
+/**
+ * Spawn a sandboxed process with pipe-based stdin/stdout/stderr streams.
+ * Runs in-process through `mxc_ffi` and never falls back to the executor.
+ *
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name
+ */
+export function spawnSandboxProcess(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+): MxcSandboxProcess {
+  const unsupportedOption = unsupportedInProcessRunOption(options);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `spawnSandboxProcess does not support executor-only option '${unsupportedOption}'`,
+    );
+  }
+
+  return spawnBindingSandboxProcess(prepareBindingSandboxRequest({
+    script,
+    policy,
+    workingDirectory,
+    containerName,
+    experimental: options.experimental,
+  }), policy.timeoutMs);
 }

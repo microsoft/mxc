@@ -152,7 +152,7 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 
 ---
 
-## Three Ways to Spawn
+## Four Ways to Spawn
 
 The SDK provides three entry points. **Prefer the config-based path** (`createConfigFromPolicy` + `spawnSandboxFromConfig`) — it gives you backend selection, backend-specific tuning, and (with `usePty: false`) separated stdout/stderr.
 
@@ -249,6 +249,24 @@ const result = await spawnSandboxAsync(
   },
 );
 console.log(result.stdout);
+```
+
+### 4. `spawnSandboxProcess(script, policy, ...)` — live pipes via `mxc_ffi`
+
+This pipe-based API keeps the sandbox live and exposes Node streams without
+using `node-pty` or the executor. `wait()` resolves with the terminal status;
+`kill()` terminates the sandbox; `dispose()` releases the native handle.
+
+```typescript
+import { spawnSandboxProcess } from '@microsoft/mxc-sdk';
+
+const proc = spawnSandboxProcess('python -c "print(\'hello\')"', {
+  version: '0.6.0-alpha',
+});
+
+proc.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+console.log(await proc.wait());
+proc.dispose();
 ```
 
 > **Tip:** for agentic workloads, prefer **multiple narrow sandboxes** (one policy per task step) over a single broad policy. Add task-specific paths on top of the discovered base (e.g. a scoped output directory in `readwritePaths`, a project source tree in `readonlyPaths`, secrets in `deniedPaths`).
