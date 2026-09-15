@@ -18,6 +18,8 @@
 //!     LPCVOID sandboxSpecification, DWORD sandboxSpecificationSize,
 //!     PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
 //!     HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment);
+//! HRESULT IsProcessSecurityEnvironmentVersionSupported(
+//!     DWORD major, BOOLEAN* available, DWORD* minor);
 //! void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment);
 //! ```
 //!
@@ -54,6 +56,8 @@ const PROCESSMODEL_DLL: &str = "processmodel.dll";
 const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~securityenvironment";
 const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
     c"api-win-appmodel-processmodel~securityenvironment";
+const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
 
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
@@ -78,6 +82,11 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
 /// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
 type PfnQueryProcessSecurityEnvironmentSupport =
     unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
+
+/// `HRESULT IsProcessSecurityEnvironmentVersionSupported(
+/// DWORD major, BOOLEAN* available, DWORD* minor)`.
+type PfnIsProcessSecurityEnvironmentVersionSupported =
+    unsafe extern "system" fn(major: u32, available: *mut u8, minor: *mut u32) -> HRESULT;
 
 /// `void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment)`.
 type PfnCloseProcessSecurityEnvironment =
@@ -310,6 +319,8 @@ impl SecurityEnvironmentExportReport {
 
 const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
 const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
+const VERSION_SUPPORT_NAMES: &[&core::ffi::CStr] =
+    &[c"IsProcessSecurityEnvironmentVersionSupported"];
 const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 
 /// Resolved process security-environment exports from `processmodel.dll`.
@@ -323,6 +334,7 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
+    version_support: Option<PfnIsProcessSecurityEnvironmentVersionSupported>,
     close: PfnCloseProcessSecurityEnvironment,
     cacheable: bool,
 }
@@ -332,6 +344,10 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
         f.debug_struct("SecurityEnvironmentApi")
             .field("create", &(self.create as *const ()))
             .field("query_support", &(self.query_support as *const ()))
+            .field(
+                "version_support",
+                &self.version_support.map(|function| function as *const ()),
+            )
             .field("close", &(self.close as *const ()))
             .field("cacheable", &self.cacheable)
             .finish()
@@ -386,6 +402,15 @@ impl SecurityEnvironmentApi {
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
             let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
+            let version_support =
+                GetProcAddress(hmodule, PCSTR(VERSION_SUPPORT_NAMES[0].as_ptr().cast())).map(
+                    |function| {
+                        std::mem::transmute::<
+                            unsafe extern "system" fn() -> isize,
+                            PfnIsProcessSecurityEnvironmentVersionSupported,
+                        >(function)
+                    },
+                );
             let close_proc = resolve_any(hmodule, CLOSE_NAMES)?;
 
             Ok(Self {
@@ -397,6 +422,7 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnQueryProcessSecurityEnvironmentSupport,
                 >(query_support_proc),
+                version_support,
                 close: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnCloseProcessSecurityEnvironment,
@@ -419,6 +445,7 @@ impl SecurityEnvironmentApi {
         Self {
             create,
             query_support,
+            version_support: None,
             close,
             cacheable: false,
         }
@@ -436,6 +463,7 @@ impl SecurityEnvironmentApi {
         Self {
             create,
             query_support,
+            version_support: None,
             close,
             cacheable: true,
         }
@@ -460,7 +488,24 @@ impl SecurityEnvironmentApi {
     /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
     /// without consulting or populating the process-wide cache.
     fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
-        const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+        self.query_support(PSE_SUPPORT_FS_DENY)
+    }
+
+    /// Whether the official PSEC API supports the ingress policy table.
+    pub fn supports_network_ingress(&self) -> Result<bool, LearningModeError> {
+        self.query_support(PSE_SUPPORT_NETWORK_INGRESS)
+    }
+
+    /// Whether the requested PSEC contract version is supported.
+    pub fn supports_version(&self, major: u32, minor: u32) -> Result<bool, LearningModeError> {
+        let Some(version_support) = self.version_support else {
+            return Ok(major == 1 && minor == 0);
+        };
+        query_supported_minor_version_with(major, version_support)
+            .map(|supported| supported.is_some_and(|supported| supported >= minor))
+    }
+
+    fn query_support(&self, capability: u64) -> Result<bool, LearningModeError> {
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
         // `support_flags` is a valid out-pointer.
@@ -471,7 +516,7 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
-        Ok(support_flags & PSE_SUPPORT_FS_DENY != 0)
+        Ok(support_flags & capability != 0)
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -521,6 +566,24 @@ impl SecurityEnvironmentApi {
             close: self.close,
         })
     }
+}
+
+fn query_supported_minor_version_with(
+    major: u32,
+    version_support: PfnIsProcessSecurityEnvironmentVersionSupported,
+) -> Result<Option<u32>, LearningModeError> {
+    let mut available = 0u8;
+    let mut minor = 0u32;
+    // SAFETY: `version_support` has the documented OS ABI and both output
+    // pointers remain valid for the duration of the call.
+    let result = unsafe { version_support(major, &mut available, &mut minor) };
+    if result.is_err() {
+        return Err(LearningModeError::HResultCall {
+            function: "IsProcessSecurityEnvironmentVersionSupported",
+            code: result.0,
+        });
+    }
+    Ok((available != 0).then_some(minor))
 }
 
 /// Resolve the first name in `names` that is present in `hmodule`.
@@ -625,9 +688,8 @@ mod tests {
     static QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static QUERY_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
     static QUERY_FLAGS: AtomicU64 = AtomicU64::new(0);
-
-    /// Native-deny-path support bit reported by `QueryProcessSecurityEnvironmentSupport`.
-    const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+    static VERSION_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
+    static VERSION_MINOR: AtomicUsize = AtomicUsize::new(1);
 
     unsafe extern "system" fn fake_close(_: HANDLE) {
         CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -647,6 +709,17 @@ mod tests {
         let result = HRESULT(QUERY_RESULT.load(Ordering::SeqCst));
         if result.is_ok() {
             unsafe { *support_flags = QUERY_FLAGS.load(Ordering::SeqCst) };
+        }
+        result
+    }
+
+    unsafe extern "system" fn fake_version(_: u32, available: *mut u8, minor: *mut u32) -> HRESULT {
+        let result = HRESULT(VERSION_RESULT.load(Ordering::SeqCst));
+        if result.is_ok() {
+            unsafe {
+                *available = 1;
+                *minor = VERSION_MINOR.load(Ordering::SeqCst) as u32;
+            }
         }
         result
     }
@@ -770,23 +843,48 @@ mod tests {
     }
 
     #[test]
-    fn supports_deny_paths_reports_flag_state() {
+    fn support_flags_are_reported_independently() {
         let _guard = QUERY_LOCK.lock().unwrap();
         let api = fake_uncached_api();
 
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         assert!(api.supports_deny_paths().unwrap());
-        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
+        assert!(!api.supports_network_ingress().unwrap());
 
         reset_query_fakes();
-        QUERY_FLAGS.store(0, Ordering::SeqCst);
+        QUERY_FLAGS.store(PSE_SUPPORT_NETWORK_INGRESS, Ordering::SeqCst);
         assert!(!api.supports_deny_paths().unwrap());
+        assert!(api.supports_network_ingress().unwrap());
+    }
 
-        reset_query_fakes();
-        // Unrelated support bits must not be mistaken for deny-path support.
-        QUERY_FLAGS.store(0xFFFF_FFFF_FFFF_FFFE, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
+    #[test]
+    fn supported_minor_version_preserves_api_outcomes() {
+        VERSION_RESULT.store(S_OK.0, Ordering::SeqCst);
+        VERSION_MINOR.store(3, Ordering::SeqCst);
+        assert_eq!(
+            query_supported_minor_version_with(1, fake_version).unwrap(),
+            Some(3)
+        );
+
+        VERSION_RESULT.store(E_FAIL.0, Ordering::SeqCst);
+        let error = query_supported_minor_version_with(1, fake_version).unwrap_err();
+        assert!(matches!(
+            error,
+            LearningModeError::HResultCall {
+                function: "IsProcessSecurityEnvironmentVersionSupported",
+                code
+            } if code == E_FAIL.0
+        ));
+    }
+
+    #[test]
+    fn missing_version_export_supports_only_the_baseline_contract() {
+        let api = fake_uncached_api();
+
+        assert!(api.supports_version(1, 0).unwrap());
+        assert!(!api.supports_version(1, 1).unwrap());
+        assert!(!api.supports_version(2, 0).unwrap());
     }
 
     #[test]

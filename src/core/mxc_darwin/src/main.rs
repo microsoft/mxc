@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_one_shot_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 
@@ -106,7 +106,7 @@ fn main() {
         }
     }
 
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -127,27 +127,26 @@ fn main() {
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use wxc_common::telemetry;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
+    // ── Telemetry init ──────────────────────────────────────────────
     // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
     // so `init` returns false and every emit below is a no-op; wiring it anyway
     // keeps the three executors structurally identical and ready the moment
     // telemetry gains a macOS sink.
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -172,10 +171,11 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     display_script_results(&response, logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
-    telemetry::emit_completion(
+    // ── Telemetry emit ──────────────────────────────────────────────
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

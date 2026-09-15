@@ -16,6 +16,7 @@ test-support = []
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error = { workspace = true }
+sha2 = { workspace = true }
 unicode-general-category = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
@@ -31,7 +32,12 @@ mxc_schema_support = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true, features = ["Win32_Globalization"] }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
@@ -40,6 +46,7 @@ winreg = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+filetime = "0.2"
 tempfile.workspace = true
 
 [build-dependencies]

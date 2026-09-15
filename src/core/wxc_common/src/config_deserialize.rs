@@ -3,8 +3,12 @@
 
 use std::fmt;
 
-use serde::{de::DeserializeOwned, Deserialize, Deserializer};
-use serde_json::{error::Category, Value};
+#[cfg(test)]
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
+use serde_json::error::Category;
+#[cfg(test)]
+use serde_json::Value;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// Field-name substrings that mark a value as secret-bearing. Matched anywhere
@@ -34,6 +38,46 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
 
+/// Whether a single (not-yet-lower-cased) JSON object key is secret-bearing,
+/// per [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
+/// (substring match) — an ASCII-case-insensitive equivalent of
+/// [`is_secret_path_field`] for callers that only need the yes/no decision and
+/// would otherwise allocate a lower-cased copy of `field` just to ask it.
+#[cfg(test)]
+pub(crate) fn is_secret_path_field_ci(field: &str) -> bool {
+    SECRET_PATH_SEGMENTS
+        .iter()
+        .any(|segment| field.eq_ignore_ascii_case(segment))
+        || SECRET_PATH_MARKERS
+            .iter()
+            .any(|marker| contains_ignore_ascii_case(field, marker))
+}
+
+/// ASCII-case-insensitive `str::contains`, without allocating a lower-cased
+/// copy of `haystack`. `needle` is always one of the ASCII lower-case
+/// constants above.
+#[cfg(test)]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    needle.is_empty()
+        || (needle.len() <= haystack.len()
+            && haystack
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle)))
+}
+
+/// Whether a single lower-cased JSON object key is secret-bearing, per
+/// [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
+/// (substring match). Shared by error-path redaction (this module) and raw
+/// config redaction (`diagnostic::redact_raw_config_json`) so both use one
+/// definition of "secret-bearing".
+pub(crate) fn is_secret_path_field(field: &str) -> bool {
+    SECRET_PATH_SEGMENTS.contains(&field)
+        || SECRET_PATH_MARKERS
+            .iter()
+            .any(|marker| field.contains(marker))
+}
+
 /// A JSON deserialization failure with the path at which typed policy parsing
 /// failed. Syntax errors have no meaningful policy path.
 #[derive(Debug)]
@@ -48,6 +92,11 @@ pub(crate) struct ConfigDeserializeError {
 }
 
 impl ConfigDeserializeError {
+    /// The exact source field that failed structural deserialization.
+    pub(crate) fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
     fn from_path_error(error: serde_path_to_error::Error<serde_json::Error>) -> Self {
         let path = error.path().to_string();
         let path = (path != ".").then_some(path);
@@ -61,6 +110,7 @@ impl ConfigDeserializeError {
     /// Override the source location rendered by `Display` with whole-file
     /// coordinates. Used when translating a fragment-local serde location back
     /// to its position in the complete request text.
+    #[cfg(test)]
     pub(crate) fn with_source_location(mut self, line: usize, column: usize) -> Self {
         self.location_override = Some((line, column));
         self
@@ -68,13 +118,21 @@ impl ConfigDeserializeError {
 
     /// The `(line, column)` serde recorded for this error, or `None` when serde
     /// could not attribute a position (it reports line 0 in that case).
+    #[cfg(test)]
     pub(crate) fn source_line_column(&self) -> Option<(usize, usize)> {
         let line = self.source.line();
         (line > 0).then(|| (line, self.source.column()))
     }
 
+    /// Whether serde classified this failure as malformed JSON syntax.
+    #[cfg(test)]
+    pub(crate) fn is_syntax_error(&self) -> bool {
+        matches!(self.source.classify(), Category::Syntax | Category::Eof)
+    }
+
     /// Prefix a path produced while deserializing a JSON subtree with its path
     /// in the complete request.
+    #[cfg(test)]
     pub(crate) fn with_prefix(mut self, prefix: &str) -> Self {
         self.path = Some(match self.path.take() {
             None => prefix.to_string(),
@@ -90,10 +148,7 @@ impl ConfigDeserializeError {
                 // Match on the field name only, dropping any array-index suffix
                 // so `field[0]` matches on `field`.
                 let field = segment.split('[').next().unwrap_or(segment);
-                SECRET_PATH_SEGMENTS.contains(&field)
-                    || SECRET_PATH_MARKERS
-                        .iter()
-                        .any(|marker| field.contains(marker))
+                is_secret_path_field(field)
             })
         })
     }
@@ -186,6 +241,7 @@ fn split_leading_digits(text: &str) -> (&str, &str) {
 /// ever hands us JSON, which is ASCII outside string literals, and offsets are
 /// only used to translate error positions. Returns `None` when the position is
 /// out of range so callers can fall back gracefully.
+#[cfg(test)]
 fn byte_offset_of_line_col(text: &str, line: usize, column: usize) -> Option<usize> {
     if line == 0 || column == 0 {
         return None;
@@ -213,6 +269,7 @@ fn byte_offset_of_line_col(text: &str, line: usize, column: usize) -> Option<usi
 /// Line counting is byte-exact; column arithmetic assumes ASCII (see
 /// [`byte_offset_of_line_col`]). Operates on bytes to avoid slicing panics on a
 /// non-char-boundary offset.
+#[cfg(test)]
 fn line_col_of_byte_offset(text: &str, offset: usize) -> (usize, usize) {
     let bytes = text.as_bytes();
     let end = offset.min(bytes.len());
@@ -235,6 +292,7 @@ fn line_col_of_byte_offset(text: &str, offset: usize) -> (usize, usize) {
 /// (which begins at byte `fragment_offset` within `source_text`) so its
 /// rendered location reports whole-file coordinates instead of fragment-local
 /// ones. Any step that cannot be resolved returns `err` unchanged.
+#[cfg(test)]
 pub(crate) fn remap_error_to_source(
     err: ConfigDeserializeError,
     fragment: &str,
@@ -323,6 +381,7 @@ where
     Ok(value)
 }
 
+#[cfg(test)]
 pub(crate) fn from_value<T>(value: Value) -> Result<T, ConfigDeserializeError>
 where
     T: DeserializeOwned,
@@ -330,6 +389,7 @@ where
     deserialize_with_path(value)
 }
 
+#[cfg(test)]
 pub(crate) fn from_value_ref<'de, T>(value: &'de Value) -> Result<T, ConfigDeserializeError>
 where
     T: Deserialize<'de>,

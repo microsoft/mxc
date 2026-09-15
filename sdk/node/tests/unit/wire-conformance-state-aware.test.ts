@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// State-aware wire-type conformance oracle (Phase 2.5).
+// State-aware wire-type conformance oracle.
 //
 // The one-shot oracle (`wire-conformance.test.ts`) asserts that
 // `sdk/src/types.ts` conforms to the generated wire types. This companion does
@@ -49,10 +49,15 @@ import type {
 } from '../../src/state-aware-types.js';
 
 import type {
-  Phase as WirePhase,
-  IsolationSessionProvisionPhase as WireProvisionPhase,
-  WslcProvisionPhase as WireWslcProvisionPhase,
-} from '../../src/generated/wire.js';
+  IsolationSessionProvision as WireProvisionPhase,
+  WslcProvision as WireWslcProvisionPhase,
+  IsolationSessionProvisionRequest,
+  WslcProvisionRequest,
+  ExecRequest,
+  StartRequest,
+  StopRequest,
+  DeprovisionRequest,
+} from '../../src/generated/v0_9_0_alpha/wire.js';
 
 import type {
   AssertTrue,
@@ -64,8 +69,23 @@ import type {
 
 // --- enum conformance ------------------------------------------------------
 
+type WirePhase = (
+  IsolationSessionProvisionRequest | ExecRequest | StartRequest | StopRequest | DeprovisionRequest
+)['phase'];
 // The lifecycle phase enum must be value-for-value identical to the wire `Phase`.
 type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
+type _ExactWslcNetwork = AssertTrue<
+  Equivalent<NonNullable<WslcProvisionConfig['network']>, NonNullable<WslcProvisionRequest['network']>>
+>;
+type _ExactExecRuntime = AssertTrue<
+  Equivalent<NonNullable<WslcExecConfig['runtimeConfig']>, NonNullable<ExecRequest['runtimeConfig']>>
+>;
+type _ExactIsoNetwork = AssertTrue<
+  Equivalent<
+    NonNullable<IsolationSessionProvisionConfig['network']>,
+    NonNullable<IsolationSessionProvisionRequest['network']>
+  >
+>;
 
 // --- per-phase wire field-set conformance ----------------------------------
 
@@ -81,11 +101,11 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // field legal only on provision cannot satisfy the oracle by appearing
 // on the start config, or vice versa.
 //
-// `filesystem` is a lifted top-level wire field (like `network`): WSLc provision
-// surfaces it publicly but it maps to the envelope's top-level `filesystem`, not
-// under `experimental.wslc.provision`. Listing it here keeps the backend-key set
-// limited to genuinely per-phase wire fields.
-type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem';
+// `filesystem` and `telemetry` are lifted top-level wire fields (like `network`):
+// phase configs surface them publicly but they map to the envelope top level,
+// not under `experimental.<backend>.<phase>`. Listing them here keeps the
+// backend-key set limited to genuinely per-phase wire fields.
+type LiftedPhaseKey = 'version' | 'process' | 'network' | 'runtimeConfig' | 'filesystem' | 'telemetry';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;
@@ -183,6 +203,9 @@ type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecConfig['process'], Pr
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
+  _ExactWslcNetwork,
+  _ExactExecRuntime,
+  _ExactIsoNetwork,
   _Phase,
   _ProvisionPublicKeys,
   _ProvisionWireKeys,

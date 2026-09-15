@@ -23,6 +23,7 @@ impl<'a> NetworkPolicy<'a> {
     pub const VT_PROXY: ::flatbuffers::VOffsetT = 4;
     pub const VT_EGRESS: ::flatbuffers::VOffsetT = 6;
     pub const VT_ALLOWED_APPCONTAINER_PEER: ::flatbuffers::VOffsetT = 8;
+    pub const VT_INGRESS: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -39,6 +40,9 @@ impl<'a> NetworkPolicy<'a> {
         args: &'args NetworkPolicyArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<NetworkPolicy<'bldr>> {
         let mut builder = NetworkPolicyBuilder::new(_fbb);
+        if let Some(x) = args.ingress {
+            builder.add_ingress(x);
+        }
         if let Some(x) = args.allowed_appcontainer_peer {
             builder.add_allowed_appcontainer_peer(x);
         }
@@ -57,10 +61,12 @@ impl<'a> NetworkPolicy<'a> {
         let allowed_appcontainer_peer = self
             .allowed_appcontainer_peer()
             .map(|x| alloc::string::ToString::to_string(x));
+        let ingress = self.ingress().map(|x| alloc::boxed::Box::new(x.unpack()));
         NetworkPolicyT {
             proxy,
             egress,
             allowed_appcontainer_peer,
+            ingress,
         }
     }
 
@@ -99,6 +105,19 @@ impl<'a> NetworkPolicy<'a> {
             )
         }
     }
+    #[inline]
+    pub fn ingress(&self) -> Option<IngressPolicy<'a>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<IngressPolicy>>(
+                    NetworkPolicy::VT_INGRESS,
+                    None,
+                )
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for NetworkPolicy<'_> {
@@ -123,6 +142,11 @@ impl ::flatbuffers::Verifiable for NetworkPolicy<'_> {
                 Self::VT_ALLOWED_APPCONTAINER_PEER,
                 false,
             )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<IngressPolicy>>(
+                "ingress",
+                Self::VT_INGRESS,
+                false,
+            )?
             .finish();
         Ok(())
     }
@@ -131,6 +155,7 @@ pub struct NetworkPolicyArgs<'a> {
     pub proxy: Option<::flatbuffers::WIPOffset<ProxyInfo<'a>>>,
     pub egress: Option<::flatbuffers::WIPOffset<EndpointPolicy<'a>>>,
     pub allowed_appcontainer_peer: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub ingress: Option<::flatbuffers::WIPOffset<IngressPolicy<'a>>>,
 }
 impl<'a> Default for NetworkPolicyArgs<'a> {
     #[inline]
@@ -139,6 +164,7 @@ impl<'a> Default for NetworkPolicyArgs<'a> {
             proxy: None,
             egress: None,
             allowed_appcontainer_peer: None,
+            ingress: None,
         }
     }
 }
@@ -175,6 +201,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> NetworkPolicyBuilder<'a, 'b, 
         );
     }
     #[inline]
+    pub fn add_ingress(&mut self, ingress: ::flatbuffers::WIPOffset<IngressPolicy<'b>>) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<IngressPolicy>>(
+                NetworkPolicy::VT_INGRESS,
+                ingress,
+            );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> NetworkPolicyBuilder<'a, 'b, A> {
@@ -200,6 +234,7 @@ impl ::core::fmt::Debug for NetworkPolicy<'_> {
             "allowed_appcontainer_peer",
             &self.allowed_appcontainer_peer(),
         );
+        ds.field("ingress", &self.ingress());
         ds.finish()
     }
 }
@@ -209,6 +244,7 @@ pub struct NetworkPolicyT {
     pub proxy: Option<alloc::boxed::Box<ProxyInfoT>>,
     pub egress: Option<alloc::boxed::Box<EndpointPolicyT>>,
     pub allowed_appcontainer_peer: Option<alloc::string::String>,
+    pub ingress: Option<alloc::boxed::Box<IngressPolicyT>>,
 }
 impl Default for NetworkPolicyT {
     fn default() -> Self {
@@ -216,6 +252,7 @@ impl Default for NetworkPolicyT {
             proxy: None,
             egress: None,
             allowed_appcontainer_peer: None,
+            ingress: None,
         }
     }
 }
@@ -230,12 +267,14 @@ impl NetworkPolicyT {
             .allowed_appcontainer_peer
             .as_ref()
             .map(|x| _fbb.create_string(x));
+        let ingress = self.ingress.as_ref().map(|x| x.pack(_fbb));
         NetworkPolicy::create(
             _fbb,
             &NetworkPolicyArgs {
                 proxy,
                 egress,
                 allowed_appcontainer_peer,
+                ingress,
             },
         )
     }

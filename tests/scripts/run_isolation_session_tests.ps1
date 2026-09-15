@@ -29,7 +29,7 @@
       - isolation_session_exit42.json --exit code propagation
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
-      - isolation_session_timeout.json --OS-side timeout terminates with exit code 1
+      - isolation_session_timeout.json --timeout enforcement
 
     Manual smoke configs (NOT asserted --observe the output yourself):
       - isolation_session_streaming_smoke.json --output appears with delays
@@ -215,16 +215,27 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
+        [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
-        [string[]]$OutputLineNotEqual = @()
+        [string[]]$OutputLineNotEqual = @(),
+        [hashtable]$Request,
+        [switch]$DryRun
     )
 
-    $configPath = Join-Path $ConfigDir $ConfigFile
-    if (-not (Test-Path $configPath)) {
-        Write-Host "  $ConfigFile ... " -NoNewline
-        Write-Host "SKIP (file not found)" -ForegroundColor Yellow
-        return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
+    if ($null -ne $Request) {
+        $json = $Request | ConvertTo-Json -Compress -Depth 12
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+        $configArgs = @('--config-base64', $encoded)
+    } else {
+        $configPath = Join-Path $ConfigDir $ConfigFile
+        if (-not (Test-Path $configPath)) {
+            Write-Host "  $ConfigFile ... " -NoNewline
+            Write-Host "SKIP (file not found)" -ForegroundColor Yellow
+            return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
+        }
+        $configArgs = @($configPath)
     }
+    if ($DryRun) { $configArgs += '--dry-run' }
 
     Write-Host "  $ConfigFile ... " -NoNewline
 
@@ -238,7 +249,7 @@ function Run-IsolationSessionTest {
         # stdout. Without --debug, one-shot keeps Logger in Mode::Buffer
         # and never flushes the buffer, so the agent name is lost and
         # leaks cannot be correlated to a specific test.
-        $output = & $WxcExec --debug --experimental $configPath 2>&1 | Out-String
+        $output = & $WxcExec --debug --experimental @configArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevPref
     } catch {
@@ -252,7 +263,12 @@ function Run-IsolationSessionTest {
     $pass = $true
     $reason = ""
 
-    if ($exitCode -ne $ExpectedExit) {
+    if ($ExpectedExitAnyOf.Count -gt 0) {
+        if ($ExpectedExitAnyOf -notcontains $exitCode) {
+            $pass = $false
+            $reason = "Expected exit one of $($ExpectedExitAnyOf -join ', '), got $exitCode"
+        }
+    } elseif ($exitCode -ne $ExpectedExit) {
         $pass = $false
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
@@ -316,11 +332,11 @@ $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
-# Same shape as hello.json with an unknown configurationId in the experimental block.
-# The backend should ignore that field and run normally.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_ignored.json" `
-    -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
-    -OutputLineNotEqual @($HostWhoami)))
+# Exact one-shot contracts are recursively closed, so backend configuration
+# that the IsolationSession one-shot surface does not define is rejected.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("experimental.isolation_session.configurationId", "unknown field ``configurationId``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -332,40 +348,68 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s; OS-side per-process timer set to 1500ms forces
-# the agent to exit with code 1.
+# Timeout: ping runs ~30s against a 1500ms deadline. The service-side timer and
+# the local wait report different codes, and either can win the race to end the
+# run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
-    -ExpectedExit 1))
+    -ExpectedExitAnyOf 1, -1))
 
-# One-shot takes no backend configuration at all, so any key under
-# `experimental.isolation_session` is just an unrecognised key in the
-# deliberately permissive `experimental` block and is ignored — the run
-# proceeds normally. Guarding it with an explicit rejection would be
-# scaffolding that graduation to the closed stable surface deletes anyway.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_ignored.json" `
-    -ExpectedExit 0 `
-    -OutputContains @("ONE_SHOT_STRAY_CONFIG_IGNORED")))
+# A nested unknown backend payload is rejected at the same closed exact
+# contract boundary, before the command can run.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains @("experimental.isolation_session.unrecognizedSetting", "unknown field ``unrecognizedSetting``")))
 
 # One-shot network rejection: the isolation session container's network is
-# unrestricted and cannot be filtered or denied, so a non-canonical network
-# policy (here defaultPolicy=block) is refused at provision. Only the canonical
-# acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is accepted.
+# unrestricted and cannot be filtered or denied. A directional deny policy is
+# therefore rejected.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
 
-# Inbound axis: `allow` outbound without `allowLocalNetwork` is still refused --
-# a process inside CAN listen on a localhost-reachable port, so the caller must
-# acknowledge inbound too. Both axes must be the unrestricted form.
+# Inbound axis: allowing egress does not make an ingress/host-loopback deny
+# enforceable. A process inside can listen on a localhost-reachable port.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_no_local.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
 
-# Host rules: even with the canonical allow + allowLocalNetwork base, any
-# allowedHosts/blockedHosts entry is refused -- the backend cannot filter hosts.
+# Per-destination rules remain unsupported.
+# The fixture uses a documentation CIDR, not a DNS-derived hostname mapping.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_hosts.json" `
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
+
+# Every legacy Network member is rejected by exact v0.9 parsing, including
+# semantically neutral values. These requests must never launch their command.
+$legacyNetworkFields = [ordered]@{
+    defaultPolicy = 'allow'
+    enforcementMode = 'capabilities'
+    allowedHosts = @()
+    blockedHosts = @()
+    allowLocalNetwork = $true
+    proxy = @{ url = 'http://127.0.0.1:8888' }
+}
+foreach ($field in $legacyNetworkFields.Keys) {
+    $request = @{
+        version = '0.9.0-alpha'
+        containment = 'isolation_session'
+        process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
+        network = @{ $field = $legacyNetworkFields[$field] }
+    }
+    $null = $results.Add((Run-IsolationSessionTest "legacy network.$field rejected" `
+        -Request $request -DryRun -ExpectedExit 1 `
+        -OutputContains @("network.$field", "unknown field ``$field``")))
+}
+
+$legacyNetworkRequest = @{
+    version = '0.9.0-alpha'
+    containment = 'isolation_session'
+    process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
+    network = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+}
+$null = $results.Add((Run-IsolationSessionTest "legacy network posture rejected" `
+    -Request $legacyNetworkRequest -DryRun -ExpectedExit 1 `
+    -OutputContains @("network.defaultPolicy", "unknown field ``defaultPolicy``")))
 
 # One-shot UI rejection: the isolation session is a separate OS session, which
 # isolates the host's UI from the contained code but does not deny it UI

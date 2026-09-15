@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 wxc_common.workspace = true
+mxc_config_contract.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under
@@ -34,6 +35,8 @@ plm = { workspace = true }
 # ProcessLifetime / AnalysisResult types shared across the guarded-capture DI
 # boundary; appcontainer_common and plm already depend on this crate.
 learning_mode_core = { workspace = true }
+getrandom.workspace = true
+sha2.workspace = true
 windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -56,5 +59,12 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "dep:isolation_session_common",
 ]
+# Forwards the test-executor-only ProcessContainer tier override.
+force-tier-testing = ["appcontainer_common/force-tier-testing"]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs"]
+
+[dev-dependencies]
+mxc_config_contract.workspace = true
+wxc_common = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

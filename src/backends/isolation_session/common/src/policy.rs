@@ -15,14 +15,13 @@
 //!
 //! Network policy is honesty-gated. The container runs on an unrestricted
 //! network that MXC cannot filter or deny, so at provision (and one-shot, which
-//! runs the full lifecycle in one call) the ONLY accepted network policy is the
-//! canonical acknowledgment — `defaultPolicy=allow` + `allowLocalNetwork=true`
-//! with no host rules, no proxy, and default enforcement. Anything else,
-//! including an absent policy (which defaults to the unenforceable `Block`), is
+//! runs the full lifecycle in one call) the caller must describe that actual
+//! unrestricted posture through the standard directional all-allow spelling.
+//! Anything else, including an absent policy (which defaults to deny), is
 //! refused. On post-provision phases the network posture is fixed at provision:
 //! any supplied network policy is refused, an absent one is inherited.
 
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy};
+use wxc_common::models::{ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 use super::error::IsolationSessionError;
 
@@ -35,9 +34,9 @@ const ERR_UI_POLICY: &str = "UI policy is not supported by the isolation session
     applies no restriction — it is not the lockdown the schema's default implies. Use a \
     backend that enforces UI policy if you need one";
 const ERR_NETWORK_POLICY: &str = "the network is unrestricted and cannot be filtered or denied; \
-    set network.defaultPolicy=allow and network.allowLocalNetwork=true with no allowed/blocked \
-    hosts, no proxy, and default enforcement to acknowledge the container is fully \
-    network-accessible, or use a backend that enforces network policy";
+    describe that posture with network.egress.default=allow, \
+    network.ingress.default=allow, and network.ingress.hostLoopback=allow; do not supply rules, \
+    proxy settings, or legacy network fields, or use a backend that enforces network policy";
 const ERR_PROXY_POLICY: &str =
     "the network cannot be routed through a proxy; remove network.proxy \
     (the container's network is unrestricted and unproxied)";
@@ -48,7 +47,7 @@ const ERR_NETWORK_IMMUTABLE: &str =
 /// Validates the request for the provision phase (also used by the one-shot
 /// runner, which runs the whole lifecycle in one call so provision-phase
 /// semantics apply). Filesystem policy is rejected first, then the network
-/// policy must be the canonical unrestricted-network acknowledgment.
+/// policy must be one of the canonical unrestricted-network postures.
 pub(super) fn validate_provision_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
@@ -110,24 +109,25 @@ fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), IsolationSessionEr
     Ok(())
 }
 
-/// Accepts only the canonical unrestricted-network acknowledgment and refuses
-/// everything else. The container's network is open on both axes — outbound is
-/// unrestricted and a process inside can listen on a localhost-reachable port —
-/// and MXC has no primitive to change that, so the one honest request is
-/// `defaultPolicy=allow` + `allowLocalNetwork=true` with no host rules, no
-/// proxy, and default enforcement. An absent policy (domain default `Block`),
-/// an explicit `Block`, host rules, non-default enforcement, or a proxy all
-/// imply a restriction the backend cannot honor and are refused.
+/// Accepts only the canonical directional unrestricted-network spelling.
 fn validate_provision_network_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     let policy = &request.policy;
-    let is_canonical_allow = policy.default_network_policy == NetworkPolicy::Allow
-        && policy.allow_local_network
+    let is_directional_allow = policy.default_network_policy == NetworkPolicy::Block
+        && !policy.allow_local_network
         && policy.allowed_hosts.is_empty()
         && policy.blocked_hosts.is_empty()
-        && policy.network_enforcement_mode == NetworkEnforcementMode::Capabilities;
-    if !is_canonical_allow {
+        && policy.network_enforcement_mode == NetworkEnforcementMode::Capabilities
+        && policy.network_egress.as_ref().is_some_and(|egress| {
+            egress.default == NetworkAction::Allow
+                && egress.allow.is_empty()
+                && egress.deny.is_empty()
+        })
+        && policy.network_ingress.as_ref().is_some_and(|ingress| {
+            ingress.default == NetworkAction::Allow && ingress.host_loopback == NetworkAction::Allow
+        });
+    if !is_directional_allow {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_POLICY.to_string(),
         ));
@@ -142,7 +142,8 @@ fn validate_provision_network_policy(
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkEgressPolicy, ProxyAddress, ProxyConfig, UiPolicy,
+        ContainerPolicy, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        UiPolicy,
     };
     use wxc_common::mxc_error::MxcErrorCode;
 
@@ -155,13 +156,27 @@ mod tests {
         }
     }
 
-    /// A `ContainerPolicy` in the one canonical unrestricted-network form the
-    /// provision validator accepts: `allow` outbound + `allowLocalNetwork` +
-    /// no host rules + default enforcement + no proxy.
+    /// The removed legacy unrestricted-network spelling.
     fn canonical_allow_policy() -> ContainerPolicy {
         ContainerPolicy {
             default_network_policy: NetworkPolicy::Allow,
             allow_local_network: true,
+            ..Default::default()
+        }
+    }
+
+    fn directional_allow_policy() -> ContainerPolicy {
+        ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                host_loopback: NetworkAction::Allow,
+            }),
+            network_specified: true,
+            network_mode_specified: true,
             ..Default::default()
         }
     }
@@ -252,12 +267,67 @@ mod tests {
     }
 
     #[test]
-    fn provision_policy_accepts_canonical_allow() {
+    fn provision_policy_rejects_legacy_allow() {
         let request = ExecutionRequest {
             policy: canonical_allow_policy(),
             ..Default::default()
         };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_POLICY,
+        );
+    }
+
+    #[test]
+    fn provision_policy_accepts_directional_allow() {
+        let request = ExecutionRequest {
+            policy: directional_allow_policy(),
+            ..Default::default()
+        };
         validate_provision_policy(&request).unwrap();
+    }
+
+    #[test]
+    fn provision_policy_rejects_mixed_or_partial_directional_postures() {
+        for policy in [
+            ContainerPolicy {
+                network_ingress: None,
+                ..directional_allow_policy()
+            },
+            ContainerPolicy {
+                network_egress: None,
+                ..directional_allow_policy()
+            },
+            ContainerPolicy {
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Deny,
+                }),
+                ..directional_allow_policy()
+            },
+            ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..directional_allow_policy()
+            },
+            ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    allow: vec![Default::default()],
+                    deny: Vec::new(),
+                }),
+                ..directional_allow_policy()
+            },
+        ] {
+            assert_policy_err_contains(
+                validate_provision_policy(&ExecutionRequest {
+                    policy,
+                    ..Default::default()
+                })
+                .unwrap_err(),
+                ERR_NETWORK_POLICY,
+            );
+        }
     }
 
     #[test]
@@ -308,7 +378,7 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".to_string()],
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -323,7 +393,7 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 blocked_hosts: vec!["evil.com".to_string()],
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -372,7 +442,7 @@ mod tests {
                     address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
                     builtin_test_server: false,
                 },
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -420,7 +490,7 @@ mod tests {
     fn provision_policy_accepts_absent_ui() {
         // Guard against over-rejection: the canonical request carries no `ui`.
         let request = ExecutionRequest {
-            policy: canonical_allow_policy(),
+            policy: directional_allow_policy(),
             ..Default::default()
         };
         validate_provision_policy(&request).unwrap();

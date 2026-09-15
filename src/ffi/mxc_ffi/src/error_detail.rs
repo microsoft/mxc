@@ -108,10 +108,12 @@ pub unsafe extern "C" fn mxc_error_detail_free(detail: *mut MxcErrorDetail) {
     if detail.is_null() {
         return;
     }
-    let _ = catch_unwind(|| {
+    if let Err(panic) = catch_unwind(|| {
         // SAFETY: non-null per the check above, and valid per the caller contract.
         unsafe { (*detail).free_strings() };
-    });
+    }) {
+        crate::report_panic("mxc_error_detail_free", &*panic);
+    }
 }
 
 #[cfg(test)]

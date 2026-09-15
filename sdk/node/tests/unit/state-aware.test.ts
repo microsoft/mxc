@@ -21,23 +21,96 @@ import { SandboxId } from '../../src/state-aware-types.js';
 import { fakeSpawn, testOptions, platformSkip } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
+  it('lifts telemetry to the top-level envelope', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'windows_sandbox',
+      sandboxId: 'wsb:01234567',
+      config: { telemetry: { enabled: true } },
+    });
+    assert.deepEqual(env.telemetry, { enabled: true });
+    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.experimental, undefined);
+  });
+
+  it('rejects an explicitly older schema version when telemetry is present', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'start',
+        backendKey: 'windows_sandbox',
+        sandboxId: 'wsb:01234567',
+        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes(
+          "State-aware windows_sandbox requests require schema version '0.9.0-alpha'",
+        ),
+    );
+  });
+
+  it('selects schema 0.9 when exec inherits the backend environment', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
+        },
+      },
+    });
+    assert.equal(env.version, '0.9.0-alpha');
+    assert.deepEqual(env.process, {
+      commandLine: 'echo hi',
+      inheritDefaultEnv: true,
+    });
+  });
+
+  it('rejects an explicitly older schema version when the environment is inherited', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        sandboxId: 'wslc:abc',
+        config: {
+          version: '0.8.0-alpha',
+          process: {
+            commandLine: 'echo hi',
+            inheritDefaultEnv: true,
+          },
+        },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes(
+          "State-aware wslc requests require schema version '0.9.0-alpha'",
+        ),
+    );
+  });
+
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.6.0-alpha',
-        filesystem: { readwritePaths: ['C:\\workspace'] },
-        network: { defaultPolicy: 'block' },
-        ui: { disable: true, clipboard: 'none', injection: false },
+        version: '0.9.0-alpha',
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
       },
     });
     assert.strictEqual(env.phase, 'provision');
     assert.strictEqual(env.containment, 'isolation_session');
-    assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\workspace'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
-    assert.deepStrictEqual(env.ui, { disable: true, clipboard: 'none', injection: false });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
     assert.strictEqual(env.experimental, undefined);
     assert.strictEqual(env.sandboxId, undefined);
   });
@@ -79,14 +152,18 @@ describe('buildStateAwareEnvelope', () => {
     }
   });
 
-  it('uses caller-supplied version when provided', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'isolation_session',
-      containment: 'isolation_session',
-      config: { version: '0.6.5-alpha' },
-    });
-    assert.strictEqual(env.version, '0.6.5-alpha');
+  it('rejects an untyped caller-supplied version with malformed_request', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'isolation_session',
+        containment: 'isolation_session',
+        config: { version: '0.6.5-alpha' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('nests provision appId under experimental.isolation_session.provision', () => {
@@ -130,22 +207,32 @@ describe('buildStateAwareEnvelope', () => {
     assert.strictEqual(wire.experimental, undefined);
   });
 
-  it('relays correlationVector onto non-provision envelopes and omits it from provision', () => {
+  it('never emits correlationVector on state-aware envelopes', () => {
     const nonProvision = buildStateAwareEnvelope({
       phase: 'start',
       backendKey: 'isolation_session',
       sandboxId: 'iso:abc',
-      correlationVector: 'BASEbaseBASEbaseBASEba.1',
     });
-    assert.strictEqual(nonProvision.correlationVector, 'BASEbaseBASEbaseBASEba.1');
+    assert.strictEqual(nonProvision.correlationVector, undefined);
 
-    // Provision seeds its own cV in the executor; the builder never emits one.
     const provision = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
       containment: 'isolation_session',
     });
     assert.strictEqual(provision.correlationVector, undefined);
+  });
+
+  it('places stable telemetry at the envelope top level', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+      config: { telemetry: { enabled: true } },
+    });
+    assert.deepStrictEqual(env.telemetry, { enabled: true });
+    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.experimental, undefined);
   });
 
 });
@@ -236,11 +323,16 @@ describe('parseNonExecResponse', () => {
 describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
-  // The unrestricted-network acknowledgment is a required member of
+  // The unrestricted-network posture is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
   // itself use this minimal valid value.
-  const ACK = { network: { defaultPolicy: 'allow', allowLocalNetwork: true } } as const;
+  const ACK = {
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  } as const;
 
   beforeEach(() => { activeFake = null; });
   afterEach(() => { _resetSpawnImpl(); activeFake = null; });
@@ -255,7 +347,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     const result = await provisionSandbox(
       'isolation_session',
       {
-        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         appId: 'example.app.id',
       },
       testOptions(),
@@ -273,23 +368,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
-      defaultPolicy: 'allow',
-      allowLocalNetwork: true,
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
     });
     assert.ok(fake.captured.args?.includes('--experimental'));
-  });
-
-  it('surfaces the correlationVector from the provision result envelope', async () => {
-    const fake = fakeSpawn({
-      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","correlationVector":"BASEbaseBASEbaseBASEba.42"}}',
-      exitCode: 0,
-    });
-    activeFake = fake;
-    _setSpawnImpl(fake.spawn);
-    const result = await provisionSandbox('isolation_session', ACK, testOptions());
-    assert.strictEqual(result.correlationVector, 'BASEbaseBASEbaseBASEba.42');
-    // Provision itself never sends a correlationVector on the wire.
-    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
 
   it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
@@ -339,13 +421,24 @@ describe('startSandbox', { skip: platformSkip }, () => {
     );
   });
 
-  it('relays the correlationVector from options onto the start envelope', async () => {
+  it('does not serialize correlationVector onto the start envelope', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.7' }));
-    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.7');
+    await startSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
+
+  it('relays stable telemetry from phase config onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, { telemetry: { enabled: false } }, testOptions());
+    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: false });
+    assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+    assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+  });
+
 });
 
 describe('stopSandbox', { skip: platformSkip }, () => {
@@ -372,12 +465,12 @@ describe('stopSandbox', { skip: platformSkip }, () => {
     );
   });
 
-  it('relays the correlationVector from options onto the stop envelope', async () => {
+  it('does not serialize correlationVector onto the stop envelope', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await stopSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.9' }));
-    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.9');
+    await stopSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
 });
 
@@ -393,12 +486,12 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
   });
 
-  it('relays the correlationVector from options onto the deprovision envelope', async () => {
+  it('does not serialize correlationVector onto the deprovision envelope', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await deprovisionSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.11' }));
-    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.11');
+    await deprovisionSandbox(id, undefined, testOptions());
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
 });
 
@@ -458,16 +551,16 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     );
   });
 
-  it('relays the correlationVector from options onto the exec envelope', async () => {
+  it('does not serialize correlationVector onto the exec envelope', async () => {
     const fake = fakeSpawn({ stdout: 'hi\n', stderr: '', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     await execInSandboxAsync(
       id,
       { process: { commandLine: 'echo hi' } },
-      testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.13' }),
+      testOptions(),
     );
-    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.13');
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
   });
 });
 
@@ -478,7 +571,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
@@ -553,24 +646,28 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to 0.8.0-alpha (not the isolation_session default)', () => {
+  it('defaults the version to the shared 0.9.0-alpha development contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.8.0-alpha');
+    assert.strictEqual(env.version, '0.9.0-alpha');
   });
 
-  it('still honors a caller-supplied version over the wslc default', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'wslc',
-      containment: 'wslc',
-      config: { version: '0.8.1-alpha', image: 'alpine:latest' },
-    });
-    assert.strictEqual(env.version, '0.8.1-alpha');
+  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'provision',
+        backendKey: 'wslc',
+        containment: 'wslc',
+        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+      }),
+      (err: unknown) => err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        /require schema version '0\.9\.0-alpha'/.test(err.message),
+    );
   });
 
   it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
@@ -580,14 +677,20 @@ describe('wslc state-aware lifecycle', () => {
       containment: 'wslc',
       config: {
         filesystem: { readwritePaths: ['C:\\ws\\rw'] },
-        network: { defaultPolicy: 'allow' },
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
         image: 'alpine:latest',
         imageTarPath: 'C:\\images\\alpine.tar',
       },
     });
     assert.strictEqual(env.containment, 'wslc');
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\ws\\rw'] });
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'allow' });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
     const wire = JSON.parse(JSON.stringify(env));
     assert.deepStrictEqual(wire.experimental, {
       wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
@@ -599,10 +702,18 @@ describe('wslc state-aware lifecycle', () => {
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
-      config: { network: { defaultPolicy: 'block' } },
+      config: {
+        network: {
+          egress: { default: 'deny' },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        },
+      },
     });
     assert.strictEqual(env.experimental, undefined);
-    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
+    assert.deepStrictEqual(env.network, {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    });
   });
 
   it('lifts exec process + cooperative proxy network to top-level with no experimental block', () => {
@@ -612,11 +723,13 @@ describe('wslc state-aware lifecycle', () => {
       sandboxId: 'wslc:abc',
       config: {
         process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://127.0.0.1:8888' } },
+        runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
       },
     });
     assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
-    assert.deepStrictEqual(env.network, { proxy: { url: 'http://127.0.0.1:8888' } });
+    assert.deepStrictEqual(env.runtimeConfig, {
+      networkProxy: 'http://127.0.0.1:8888',
+    });
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -628,13 +741,19 @@ describe('wslc state-aware lifecycle', () => {
       _setSpawnImpl(fake.spawn);
       const result = await provisionSandbox(
         'wslc',
-        { image: 'alpine:latest', network: { defaultPolicy: 'block' } },
+        {
+          image: 'alpine:latest',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        },
         testOptions(),
       );
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
-      assert.strictEqual(fake.captured.envelope?.version, '0.8.0-alpha');
+      assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

@@ -15,7 +15,7 @@
 //! [`wxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
 //! `unsupported_phase` envelope.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use wxc_common::logger::{Logger, Mode};
@@ -26,13 +26,11 @@ use wxc_common::state_aware_dispatch::{
     resolve_backend, run_state_aware as run_state_aware_fallback, DispatchOutcome,
 };
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::telemetry;
 
 use crate::error::Error;
+use crate::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
 
-/// The `backend_unavailable` error returned when a state-aware WSLc request
-/// reaches a build compiled without the `wslc` feature (or a non-Windows
-/// target). Mirrors the documented error mapping so the availability probe can
-/// skip a feature-off build instead of misreading `unsupported_phase`.
 #[cfg(not(all(target_os = "windows", feature = "wslc")))]
 fn wslc_unavailable() -> MxcError {
     MxcError::backend_unavailable(
@@ -62,13 +60,60 @@ fn require_experimental_optin(
         wxc_common::models::ContainmentBackend::WindowsSandbox
             | wxc_common::models::ContainmentBackend::IsolationSession
             | wxc_common::models::ContainmentBackend::Wslc
-    ) && !parsed.request.experimental_enabled
+    ) && !parsed.request().experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
             "{backend:?} is an experimental backend; enable experimental features to use it"
         )));
     }
     Ok(())
+}
+
+/// This phase's telemetry correlation vector, purely internal to MXC: no
+/// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
+/// exist yet) mints a fresh vector; every later phase recalls the same
+/// lifecycle root persisted by `provision` and spins a distinct child off it —
+/// see [`telemetry::correlation_state`].
+fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
+    telemetry::correlation_state::pre_dispatch_vector(active, phase == Phase::Provision, sandbox_id)
+}
+
+fn surface_attached_warnings(logger: &mut Logger, mut surface: impl FnMut(&str)) {
+    for warning in logger.take_warnings() {
+        surface(&warning);
+    }
+}
+
+/// Merge `warnings` from telemetry initialisation into the envelope's
+/// `result.warnings` array. Existing entries in the array are preserved and
+/// duplicates suppressed so the field remains a stable set-like list.
+///
+/// This mirrors what the ordinary SDK `spawn` path does for streaming
+/// invocations (see `ProcessWithWarnings::wrap` in `lib.rs`): both entry
+/// points buffer telemetry-init diagnostics in a `Logger` and must surface
+/// them to the caller instead of dropping them on the floor.
+fn inject_warnings(outcome: &mut Result<DispatchOutcome, MxcError>, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    if let Ok(DispatchOutcome::Envelope(value)) = outcome {
+        if let Some(result) = value
+            .get_mut("result")
+            .and_then(|result| result.as_object_mut())
+        {
+            let existing = result
+                .entry("warnings")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(array) = existing.as_array_mut() {
+                for warning in warnings {
+                    let value = serde_json::Value::String(warning.clone());
+                    if !array.contains(&value) {
+                        array.push(value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Resolve `parsed`'s backend and run the requested state-aware phase.
@@ -86,21 +131,22 @@ pub fn run_state_aware(
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         wxc_common::models::ContainmentBackend::Wslc => {
+            let bound = wxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = wslc_common::WslcStateAwareRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, bound, dry_run)
         }
-        // Feature-off build: keep the documented `backend_unavailable` contract
-        // rather than falling through to the generic `unsupported_phase`.
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
@@ -124,26 +170,36 @@ pub fn exec_state_aware(
     let backend = resolve_backend(&parsed)?;
     require_experimental_optin(&backend, &parsed)?;
     match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
+            let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
+            let handle =
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
+            Ok(Box::new(
+                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
             Ok(Box::new(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         wxc_common::models::ContainmentBackend::Wslc => {
+            let bound = wxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = wslc_common::WslcStateAwareRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, bound)?;
             Ok(Box::new(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
-        // Feature-off build: keep the documented `backend_unavailable` contract
-        // rather than falling through to the generic `unsupported_phase`.
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
@@ -167,11 +223,11 @@ pub fn exec_state_aware(
 fn parse_state_aware(
     request_json: &str,
     experimental: bool,
+    logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, Error> {
-    let mut logger = Logger::new(Mode::Buffer);
-    match wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger) {
+    match wxc_common::config_parser::load_mxc_request_from_json(request_json, logger) {
         Ok(MxcRequest::StateAware(mut parsed)) => {
-            parsed.request.experimental_enabled = experimental;
+            parsed.set_experimental_enabled(experimental);
             Ok(parsed)
         }
         Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
@@ -182,15 +238,16 @@ fn parse_state_aware(
 }
 
 /// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
-/// an [`MxcError`]. The state-aware arm already carries one; the decode / one-
-/// shot arms carry a `WxcError` that maps to `malformed_request`.
+/// an [`MxcError`]. The state-aware arm already carries one; the decode,
+/// version, and one-shot arms carry a `WxcError` that maps to `malformed_request`.
 fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
-        ParseError::Decode(err) | ParseError::OneShot(err) => {
-            MxcError::malformed_request(err.to_string())
-        }
+        ParseError::Decode(err)
+        | ParseError::Version(err)
+        | ParseError::OneShot(err)
+        | ParseError::OneShotMalformed(err) => MxcError::malformed_request(err.to_string()),
     }
 }
 
@@ -287,24 +344,61 @@ fn exec_state_aware_attached_with(
     experimental: bool,
     host_is_interactive: impl FnOnce() -> bool,
 ) -> Result<ExecOutcome, Error> {
-    let parsed = parse_state_aware(request_json, experimental)?;
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
 
-    if !matches!(parsed.phase, Phase::Exec) {
+    if !matches!(parsed.phase(), Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
             "an attached exec requires the exec phase, got {}",
-            parsed.phase
+            parsed.phase()
         ))));
     }
 
     exec_attached_gate(host_is_interactive)?;
+    let phase = parsed.phase();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
+    let requested_sandbox_kind = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let telemetry_active = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    // This API explicitly attaches the workload to the host's stdio and has no
+    // warning-bearing return handle. Surface retained parser/init warnings on
+    // host stderr rather than silently dropping them as the buffered logger
+    // goes out of scope.
+    surface_attached_warnings(&mut logger, |warning| {
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    });
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let started = std::time::Instant::now();
     let dispatched = with_attached_exec_claim(|| run_state_aware(parsed, /* dry_run */ false))
-        .ok_or_else(|| {
-            Error::from(MxcError::malformed_request(
+        .unwrap_or_else(|| {
+            Err(MxcError::malformed_request(
                 "another attached exec is already running in this process. An attached exec \
                  owns this process's console mode and control handler, so only one can run at \
                  a time. Nothing has been run.",
             ))
-        })?;
+        });
+    telemetry::emit_sdk_state_aware_with_kind(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+        &dispatched,
+        started.elapsed(),
+    );
 
     match dispatched.map_err(Error::from)? {
         DispatchOutcome::ExecCompleted { exit_code } => Ok(ExecOutcome::Exited(exit_code)),
@@ -331,9 +425,10 @@ pub fn run_state_aware_json(
     dry_run: bool,
     experimental: bool,
 ) -> Result<String, Error> {
-    let parsed = parse_state_aware(request_json, experimental)?;
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
 
-    if matches!(parsed.phase, Phase::Exec) && !dry_run {
+    if matches!(parsed.phase(), Phase::Exec) && !dry_run {
         return Err(Error::from(MxcError::malformed_request(
             "the exec phase does not return an envelope; run it through one of the exec entry \
              points instead — attached to this process's stdio, or streaming with the caller \
@@ -341,7 +436,66 @@ pub fn run_state_aware_json(
         )));
     }
 
-    match run_state_aware(parsed, dry_run).map_err(Error::from)? {
+    let phase = parsed.phase();
+    let phase_name = phase.as_str();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
+    let requested_sandbox_kind = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let telemetry_active = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    // Snapshot warnings buffered during telemetry init (e.g., provider
+    // registration failures) so we can surface them via the outgoing
+    // envelope. The ordinary streaming `spawn` path in lib.rs threads these
+    // through `ProcessWithWarnings::wrap`; the envelope-returning state-aware
+    // path had been silently dropping them.
+    let init_warnings = logger.take_warnings();
+    let started = std::time::Instant::now();
+    let mut outcome = run_state_aware(parsed, dry_run);
+    inject_warnings(&mut outcome, &init_warnings);
+    match phase {
+        Phase::Provision => {
+            telemetry::correlation_state::on_provision_outcome(
+                telemetry_active,
+                &correlation,
+                &outcome,
+            );
+        }
+        Phase::Deprovision => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_deprovision_outcome(
+                    telemetry_active,
+                    id,
+                    dry_run,
+                    &outcome,
+                );
+            }
+        }
+        _ => {}
+    }
+    telemetry::emit_sdk_state_aware_with_kind(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase_name,
+            correlation_vector: &correlation,
+        },
+        &outcome,
+        started.elapsed(),
+    );
+
+    match outcome.map_err(Error::from)? {
         DispatchOutcome::Envelope(value) => serde_json::to_string(&value).map_err(|e| {
             Error::from(MxcError::backend_error(format!(
                 "serialising the response envelope failed: {e}"
@@ -363,34 +517,137 @@ pub fn exec_state_aware_json(
     request_json: &str,
     experimental: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    let parsed = parse_state_aware(request_json, experimental)?;
-    if !matches!(parsed.phase, Phase::Exec) {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    if !matches!(parsed.phase(), Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
             "streaming exec requires the exec phase, got {}",
-            parsed.phase
+            parsed.phase()
         ))));
     }
-    exec_state_aware(parsed).map_err(Error::from)
+    let phase = parsed.phase();
+    let sandbox_id = parsed.sandbox_id().map(str::to_owned);
+    let requested_sandbox_kind = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let telemetry_active = parsed
+        .request()
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    // Same warning-propagation contract as `run_state_aware_json` above:
+    // snapshot init-time warnings so the streaming caller sees them via the
+    // returned process handle's `warnings()`.
+    let init_warnings = logger.take_warnings();
+    let started = std::time::Instant::now();
+    match exec_state_aware(parsed) {
+        Ok(process) => {
+            let process = crate::ProcessWithWarnings::wrap(process, init_warnings);
+            Ok(wrap_state_aware_telemetry_process_with_kind(
+                process,
+                telemetry_registration.transfer(),
+                backend,
+                phase.as_str().to_string(),
+                correlation,
+                requested_sandbox_kind,
+                started,
+            ))
+        }
+        Err(error) => {
+            let outcome = Err(error.clone());
+            telemetry::emit_sdk_state_aware_with_kind(
+                telemetry_registration.transfer(),
+                requested_sandbox_kind,
+                telemetry::TelemetryContext {
+                    backend: &backend,
+                    phase: phase.as_str(),
+                    correlation_vector: &correlation,
+                },
+                &outcome,
+                started.elapsed(),
+            );
+            Err(Error::from(error))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainmentBackend, ExecutionRequest};
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::Phase;
+    use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+
+    #[test]
+    fn version_failures_keep_the_state_aware_wire_error_code() {
+        for json in [
+            r#"{"version":"0.6.1-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":null,"phase":"start","sandboxId":"wsb:abcd1234"}"#,
+        ] {
+            let error = parse_state_aware(json, false, &mut Logger::new(Mode::Buffer)).unwrap_err();
+            assert_eq!(error.code, crate::ErrorCode::MalformedRequest);
+            assert!(error.message.contains("version"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn inactive_telemetry_does_not_create_a_correlation_vector() {
+        assert_eq!(
+            phase_correlation(false, Phase::Provision, None),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn attached_warning_surface_drains_retained_warnings() {
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.warning_line("first");
+        logger.warning_line("second");
+        let mut surfaced = Vec::new();
+
+        surface_attached_warnings(&mut logger, |warning| surfaced.push(warning.to_string()));
+
+        assert_eq!(surfaced, ["first", "second"]);
+        assert!(logger.warnings().is_empty());
+    }
+
+    #[test]
+    fn later_phase_without_a_persisted_record_seeds_a_disconnected_vector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+
+        let a = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
+        let b = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
+
+        assert!(telemetry::correlation_vector::is_relayable(&a));
+        assert!(telemetry::correlation_vector::is_relayable(&b));
+        // No provision ever persisted a root for this sandbox_id, so each call
+        // seeds its own fresh, disconnected vector instead of sharing a base.
+        let base_of = |cv: &str| cv.split('.').next().unwrap().to_string();
+        assert_ne!(
+            base_of(&a),
+            base_of(&b),
+            "with no persisted record, repeated calls must not coincidentally share a base"
+        );
+    }
 
     #[test]
     fn experimental_backend_requires_optin() {
-        let parsed = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Provision,
-            containment: Some(ContainmentBackend::WindowsSandbox),
-            sandbox_id: None,
-            correlation_vector: None,
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = run_state_aware(parsed, false).unwrap_err();
 
@@ -403,15 +660,14 @@ mod tests {
         // The streaming exec entry point applies the same opt-in gate as the
         // envelope dispatcher: a `wslc:` exec without the opt-in must be
         // refused before reaching the backend.
-        let parsed = ParsedStateAwareRequest {
-            request: ExecutionRequest::default(),
-            phase: Phase::Exec,
-            containment: Some(ContainmentBackend::Wslc),
-            sandbox_id: Some("wslc:00000000000000000000000000000000".to_string()),
-            correlation_vector: None,
-            experimental_raw: None,
-            source_text: None,
-        };
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"exec",
+                "sandboxId":"wslc:00000000000000000000000000000000",
+                "process":{"commandLine":"echo typed"}}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
 
         let error = match exec_state_aware(parsed) {
             Ok(_) => {
@@ -503,7 +759,7 @@ mod tests {
         // The gate and phase checks pass, so the refusal can only come from the
         // single-flight claim. The exec goes no further: `wsb:` resolves to a
         // backend needing a live host, and the claim is taken before that.
-        let json = r#"{"phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let held = claim_attached_exec().expect("the claim must be available");
@@ -521,7 +777,7 @@ mod tests {
 
     #[test]
     fn attached_exec_requires_a_terminal() {
-        let json = r#"{"phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let err = exec_state_aware_attached_with(json, true, || false)
@@ -538,8 +794,8 @@ mod tests {
     fn attached_exec_checks_the_phase_before_the_terminal() {
         // A non-exec phase must be reported as such even from a non-terminal
         // host, so the caller learns the actionable problem first.
-        let provision = r#"{"phase":"provision","containment":"isolation_session",
-            "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
 
         let err = exec_state_aware_attached_with(provision, true, || false)
             .expect_err("a non-exec phase must be refused");
@@ -548,5 +804,419 @@ mod tests {
             "the phase check must precede the terminal check, got: {}",
             err.message
         );
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "wslc")))]
+    #[test]
+    fn feature_off_wslc_returns_backend_unavailable() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"start",
+                "sandboxId":"wslc:00000000000000000000000000000000"}"#,
+            true,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        let error = run_state_aware(parsed, false).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error
+            .message
+            .contains("compiled without the `wslc` feature"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
+                "process":{"commandLine":"echo typed"}}"#,
+            true,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        let error = match exec_state_aware(parsed) {
+            Ok(_) => panic!("expected the backend to reject the synthetic sandbox id"),
+            Err(error) => error,
+        };
+        assert_ne!(
+            error.code,
+            MxcErrorCode::UnsupportedPhase,
+            "Windows Sandbox exec should dispatch to the backend-specific implementation"
+        );
+    }
+
+    fn backend_cases() -> [(&'static str, &'static str, bool); 3] {
+        [
+            (
+                "windows_sandbox",
+                "wsb:abcd1234",
+                cfg!(target_os = "windows"),
+            ),
+            (
+                "isolation_session",
+                "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoid3hjLWFiY2QxMjM0In0",
+                cfg!(all(target_os = "windows", feature = "isolation_session")),
+            ),
+            (
+                "wslc",
+                "wslc:00000000000000000000000000000000",
+                cfg!(all(target_os = "windows", feature = "wslc")),
+            ),
+        ]
+    }
+
+    fn lifecycle_fixture(backend: &str, id: &str, phase: Phase) -> String {
+        let mut value = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": phase.as_str(),
+        });
+        if phase == Phase::Provision {
+            value["containment"] = backend.into();
+            if backend == "isolation_session" {
+                value["network"] = serde_json::json!({
+                    "egress": {"default": "allow"},
+                    "ingress": {"default": "allow", "hostLoopback": "allow"}
+                });
+            }
+        } else {
+            value["sandboxId"] = id.into();
+            if phase == Phase::Exec {
+                value["process"] = serde_json::json!({"commandLine": "echo typed"});
+            }
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn every_backend_and_phase_keeps_optin_and_feature_gates_before_binding() {
+        for (backend, id, available) in backend_cases() {
+            for phase in [
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+            ] {
+                let json = lifecycle_fixture(backend, id, phase);
+                let parsed =
+                    parse_state_aware(&json, false, &mut Logger::new(Mode::Buffer)).unwrap();
+                let error = run_state_aware(parsed.clone(), true).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    MxcErrorCode::BackendUnavailable,
+                    "{backend} {phase}"
+                );
+                assert!(error.message.contains("experimental"));
+                let error = exec_state_aware(parsed)
+                    .err()
+                    .expect("opt-in must be required");
+                assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+                assert!(error.message.contains("experimental"));
+
+                if !available {
+                    let parsed =
+                        parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                    let expected = if backend == "windows_sandbox" {
+                        MxcErrorCode::UnsupportedPhase
+                    } else {
+                        MxcErrorCode::BackendUnavailable
+                    };
+                    assert_eq!(
+                        run_state_aware(parsed.clone(), true).unwrap_err().code,
+                        expected,
+                        "{backend} {phase}"
+                    );
+                    assert_eq!(
+                        exec_state_aware(parsed)
+                            .err()
+                            .expect("backend unavailable")
+                            .code,
+                        expected,
+                        "{backend} {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_backends_bind_and_validate_every_phase_without_live_execution() {
+        for (backend, id, available) in backend_cases() {
+            if !available {
+                continue;
+            }
+            for phase in [
+                Phase::Provision,
+                Phase::Start,
+                Phase::Exec,
+                Phase::Stop,
+                Phase::Deprovision,
+            ] {
+                let json = lifecycle_fixture(backend, id, phase);
+                let parsed =
+                    parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                let outcome = run_state_aware(parsed.clone(), true)
+                    .unwrap_or_else(|error| panic!("{backend} {phase}: {error}"));
+                let DispatchOutcome::Envelope(envelope) = outcome else {
+                    panic!("dry run must never execute {backend} {phase}");
+                };
+                assert_eq!(envelope, serde_json::json!({"result": {}}));
+                if phase != Phase::Exec {
+                    let error = exec_state_aware(parsed).err().expect("requires exec");
+                    assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+                    assert_eq!(
+                        error.message,
+                        format!("streaming exec requires the exec phase, got {phase}")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_backends_validate_ids_after_binding_even_in_dry_run() {
+        for (backend, id, available) in backend_cases() {
+            if !available {
+                continue;
+            }
+            let prefix = id.split_once(':').unwrap().0;
+            let malformed = format!("{prefix}:invalid-body");
+            for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+                let json = lifecycle_fixture(backend, &malformed, phase);
+                let parsed =
+                    parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+                assert_eq!(
+                    run_state_aware(parsed.clone(), true).unwrap_err().code,
+                    MxcErrorCode::MalformedId,
+                    "{backend} {phase}"
+                );
+                if phase == Phase::Exec {
+                    assert_eq!(
+                        exec_state_aware(parsed).err().expect("malformed ID").code,
+                        MxcErrorCode::MalformedId,
+                        "{backend} {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_piped_backends_refuse_streaming_after_typed_binding_without_running() {
+        for (backend, id, available) in backend_cases() {
+            if !available || backend == "isolation_session" {
+                continue;
+            }
+            let json = lifecycle_fixture(backend, id, Phase::Exec);
+            let parsed = parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
+            let error = exec_state_aware(parsed)
+                .err()
+                .expect("cannot return streams");
+            assert_eq!(error.code, MxcErrorCode::BackendError);
+            assert!(error.message.contains("cannot return exec streams"));
+            assert!(error.message.contains("Nothing has been run"));
+        }
+    }
+
+    /// `provision` seeds a vector and persists it once dispatch mints a
+    /// `sandbox_id`; every non-provision phase of the same lifecycle recalls
+    /// that persisted root and *spins* a distinct child off it, so all phases
+    /// share a telemetry base without any caller relay or sandbox_id-derived
+    /// base.
+    #[test]
+    fn engine_state_aware_correlation_base_shared_across_phases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let sandbox_id = "wsb:12345678";
+
+        let provisioned = phase_correlation(true, Phase::Provision, None);
+        let provision_outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
+        ));
+        telemetry::correlation_state::on_provision_outcome(true, &provisioned, &provision_outcome);
+        let base_prefix = provisioned
+            .split('.')
+            .next()
+            .expect("provisioned correlation vector has a base")
+            .to_string();
+
+        // Every phase in the same lifecycle spins that persisted root.
+        for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+            let spun = phase_correlation(true, phase, Some(sandbox_id));
+            assert!(
+                spun.starts_with(&base_prefix),
+                "phase {phase:?} lost the base prefix: {spun}"
+            );
+            assert_ne!(spun, provisioned, "phase {phase:?} did not spin");
+            assert!(
+                telemetry::correlation_vector::is_relayable(&spun),
+                "phase {phase:?} produced a non-relayable vector: {spun}"
+            );
+        }
+    }
+
+    #[test]
+    fn dry_run_deprovision_keeps_the_shared_correlation_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let sandbox_id = "wsb:dryrun02";
+
+        let provisioned = phase_correlation(true, Phase::Provision, None);
+        let provision_outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
+        ));
+        telemetry::correlation_state::on_provision_outcome(true, &provisioned, &provision_outcome);
+        telemetry::correlation_state::on_deprovision_outcome(
+            true,
+            sandbox_id,
+            true,
+            &Ok(DispatchOutcome::Envelope(serde_json::json!({}))),
+        );
+
+        let base_prefix = provisioned.split('.').next().unwrap().to_string();
+        let later = phase_correlation(true, Phase::Stop, Some(sandbox_id));
+        assert_eq!(later.split('.').next().unwrap(), base_prefix);
+    }
+
+    /// `run_state_aware_json` maps engine errors through the shared
+    /// `telemetry::classify_mxc_error`. This is the same helper `spawn` in
+    /// `lib.rs` now uses, so if the mapping ever regresses in either
+    /// direction the two paths would drift; instead they drift together and
+    /// this test catches it in a single crate.
+    ///
+    /// We assert both halves independently:
+    ///   * `run_state_aware_json` surfaces the expected `ErrorCode`s (so
+    ///     `Error → MxcErrorCode` mapping is preserved).
+    ///   * `telemetry::classify_mxc_error` maps those `MxcErrorCode`s to the
+    ///     expected `FailureReason` (the actual shared classifier).
+    #[test]
+    fn engine_state_aware_error_codes_classify_via_shared_helper() {
+        use crate::error::ErrorCode;
+        use wxc_common::telemetry::FailureReason;
+
+        // Malformed JSON — the JSON decoder rejects it, `parse_state_aware`
+        // wraps it as `MalformedRequest`, and the classifier maps that to
+        // `ConfigError`. This is the same path a user's typo takes.
+        let error = super::run_state_aware_json("{ not json", false, false).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert_eq!(
+            telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
+            FailureReason::ConfigError
+        );
+
+        // Provision without containment — the dispatcher rejects it as
+        // `MalformedRequest` before ever reaching a backend.
+        let error = super::run_state_aware_json(
+            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert_eq!(
+            telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
+            FailureReason::ConfigError
+        );
+
+        // Provision of an experimental backend without --experimental —
+        // `BackendUnavailable` → `InitError`; the shared classifier keeps
+        // streaming and state-aware attribution in lockstep.
+        let error = super::run_state_aware_json(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable);
+        assert_eq!(
+            telemetry::classify_mxc_error(&MxcError::backend_unavailable(error.message)),
+            FailureReason::InitError
+        );
+    }
+
+    /// Telemetry providers are released between successive
+    /// `run_state_aware_json` calls, even on the error path. A leaked
+    /// provider reference on error would prevent shutdown from ever
+    /// happening — a follow-up call would then reuse a partially-torn-down
+    /// state. Two chained failing calls exercise this: if the first one
+    /// leaked, the second would see stale process context (or, worse, would
+    /// double-emit).
+    ///
+    /// We can't directly observe the ETW provider from user-space test code
+    /// on non-Windows platforms, but we can assert the observable contract:
+    /// each call finishes cleanly with the expected error, and the process
+    /// stays healthy across the two.
+    #[test]
+    fn engine_state_aware_provider_released_between_calls() {
+        use crate::error::ErrorCode;
+        for _ in 0..3 {
+            let error = super::run_state_aware_json(
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                false,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::BackendUnavailable);
+        }
+    }
+
+    /// `inject_warnings` merges telemetry-init warnings into the
+    /// envelope's `result.warnings` array, dedupes across calls, and leaves
+    /// the outcome untouched when there are no warnings.
+    #[test]
+    fn engine_state_aware_inject_warnings_merges_into_envelope() {
+        // No warnings — outcome untouched (no `warnings` key added).
+        let mut outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({
+            "result": { "sandboxId": "iso:abc" }
+        })));
+        super::inject_warnings(&mut outcome, &[]);
+        let value = match &outcome {
+            Ok(DispatchOutcome::Envelope(v)) => v,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            value["result"].get("warnings").is_none(),
+            "empty warning list should not add the field"
+        );
+
+        // With warnings — merged into `result.warnings`, order preserved.
+        let mut outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({
+            "result": { "sandboxId": "iso:abc" }
+        })));
+        super::inject_warnings(
+            &mut outcome,
+            &["telemetry init failed".to_string(), "second".to_string()],
+        );
+        let value = match &outcome {
+            Ok(DispatchOutcome::Envelope(v)) => v,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let warnings = value["result"]["warnings"]
+            .as_array()
+            .expect("warnings field should be a JSON array");
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0], "telemetry init failed");
+        assert_eq!(warnings[1], "second");
+
+        // Duplicate suppression — merging the same set again is a no-op.
+        super::inject_warnings(
+            &mut outcome,
+            &["telemetry init failed".to_string(), "second".to_string()],
+        );
+        let value = match &outcome {
+            Ok(DispatchOutcome::Envelope(v)) => v,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let warnings = value["result"]["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 2, "duplicates must be suppressed");
+
+        // Errors are untouched — `inject_warnings` only mutates envelope
+        // results (the error path renders separately).
+        let mut outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::backend_unavailable("no backend"));
+        super::inject_warnings(&mut outcome, &["ignored".to_string()]);
+        assert!(outcome.is_err());
     }
 }

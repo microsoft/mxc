@@ -1,10 +1,10 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "isolation-session-hello",
   "containment": "isolation_session",
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "process": {
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",

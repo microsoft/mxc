@@ -29,9 +29,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// MXC container execution configuration. Defines the recommended config format
-/// for both one-shot and state-aware sandbox lifecycle requests. A few
-/// deprecated field spellings not listed here are also accepted via serde aliases.
+/// Rolling compatibility model retained as a test oracle while production
+/// requests use registered exact contracts. It includes historical fields that
+/// exact `0.9.0-alpha` rejects; authors should use the exact development schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(title = "MXC Configuration"))]
@@ -61,18 +61,6 @@ pub struct MxcConfig {
     /// Sandbox identifier returned by a prior provision request. Required for
     /// non-provision state-aware phases.
     pub sandbox_id: Option<String>,
-
-    /// Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in
-    /// the provision result. The client relays it verbatim into every later
-    /// state-aware phase so all phases of one lifecycle share a telemetry base
-    /// prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on
-    /// each non-provision phase it validates the relayed value and *spins* a fresh
-    /// child element off a mutable base (so multiple invocations of one phase stay
-    /// distinct), passes an already-frozen vector through unchanged, and reseeds a
-    /// brand-new base if the relayed value is absent or malformed — so a missing
-    /// or hostile relay never reaches telemetry unvalidated. Ignored unless
-    /// experimental telemetry is enabled; not valid on one-shot requests.
-    pub correlation_vector: Option<String>,
 
     /// Externally assigned container identifier.
     pub container_id: Option<String>,
@@ -115,6 +103,9 @@ pub struct MxcConfig {
     /// `seatbelt`.
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
+
+    /// Telemetry configuration.
+    pub telemetry: Option<Telemetry>,
 
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
@@ -179,7 +170,21 @@ pub struct Process {
     /// working directory outright. See `docs/schema.md` ("Working Directory").
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
+    ///
+    /// Omit the field to give the child the backend's default environment (on
+    /// Windows, the user's profile block). Supply it — including as an empty
+    /// array — and it is used verbatim; MXC adds nothing to it unless
+    /// `inheritDefaultEnv` is set.
     pub env: Option<Vec<String>>,
+    /// Start from the backend's default environment and layer `env` on top of
+    /// it, rather than replacing it (default false).
+    ///
+    /// This exists because the default environment is not something a caller
+    /// can assemble: on Windows it is the user's profile block, which only the
+    /// OS can produce. Entries in `env` override same-named defaults. Has no
+    /// effect on backends whose default environment is empty, and none when
+    /// `env` is omitted (that already yields the default).
+    pub inherit_default_env: Option<bool>,
     /// Wall-clock timeout in milliseconds.
     pub timeout: Option<u32>,
 }
@@ -589,17 +594,17 @@ pub struct Experimental {
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
-    /// Telemetry configuration.
-    pub telemetry: Option<Telemetry>,
 }
 
-/// Telemetry configuration (`experimental.telemetry`).
+/// Telemetry configuration (`telemetry`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Telemetry {
-    /// Explicit telemetry override. `true` = force on, `false` = force off,
-    /// omitted = disabled (default off).
+    /// Explicit telemetry opt-in for this invocation. `true` = opt in (still
+    /// subject to the user's consent and to administrative policy — it can
+    /// never turn telemetry on for someone who has not consented), `false` =
+    /// force off, omitted = off.
     pub enabled: Option<bool>,
 }
 
@@ -741,6 +746,7 @@ pub struct IsolationSessionProvisionPhase {
 #[cfg(feature = "schema-gen")]
 mod schema_gen {
     use super::MxcConfig;
+    use schemars::JsonSchema;
 
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
@@ -769,9 +775,13 @@ mod schema_gen {
     /// JSON-schema renderer and the TypeScript emitter so both consume exactly the
     /// same model.
     fn schema_value() -> serde_json::Value {
-        let schema = schemars::schema_for!(MxcConfig);
+        schema_value_for::<MxcConfig>(SCHEMA_ID)
+    }
+
+    fn schema_value_for<T: JsonSchema>(schema_id: &str) -> serde_json::Value {
+        let schema = schemars::schema_for!(T);
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
-        mxc_schema_support::prepare_schema(&mut value, SCHEMA_ID);
+        mxc_schema_support::prepare_schema(&mut value, schema_id);
         value
     }
 

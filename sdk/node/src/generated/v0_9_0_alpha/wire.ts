@@ -32,16 +32,10 @@ export interface CaptureDenials {
 
 export type CaptureDenialsMode = "block" | "allow";
 
-export type DefaultNetworkPolicy = "allow" | "block";
-
 /**
  * Experimental settings accepted by the `deprovision` phase.
  */
 export interface DeprovisionExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type DeprovisionPhase = "deprovision";
@@ -59,10 +53,6 @@ export interface DeprovisionRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: DeprovisionExperimental;
@@ -75,6 +65,10 @@ export interface DeprovisionRequest {
    */
   sandboxId: string;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
@@ -84,10 +78,6 @@ export interface DeprovisionRequest {
  * Experimental settings accepted by the `exec` phase.
  */
 export interface ExecExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type ExecPhase = "exec";
@@ -105,10 +95,6 @@ export interface ExecRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed exec experimental settings.
    */
   experimental?: ExecExperimental;
@@ -125,9 +111,17 @@ export interface ExecRequest {
    */
   process: Process;
   /**
+   * Optional per-execution runtime values, including the cooperative proxy URL.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
    * Identifier of the sandbox to execute in.
    */
   sandboxId: string;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -165,20 +159,44 @@ export interface Filesystem {
 export type IsolationSessionContainment = "isolation_session";
 
 /**
- * The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.
+ * The canonical unrestricted-network posture.
  */
 export interface IsolationSessionNetwork {
   /**
-   * Required acknowledgment that local network access is allowed.
+   * Required unrestricted outbound posture.
    */
-  allowLocalNetwork: True;
+  egress: IsolationSessionNetworkEgress;
   /**
-   * Exact `allow` default network policy marker.
+   * Required unrestricted inbound and host-loopback posture.
    */
-  defaultPolicy: IsolationSessionNetworkDefaultPolicy;
+  ingress: IsolationSessionNetworkIngress;
 }
 
-export type IsolationSessionNetworkDefaultPolicy = "allow";
+export type IsolationSessionNetworkAllow = "allow";
+
+/**
+ * Unrestricted outbound posture.
+ */
+export interface IsolationSessionNetworkEgress {
+  /**
+   * Allow outbound traffic by default.
+   */
+  default: IsolationSessionNetworkAllow;
+}
+
+/**
+ * Unrestricted inbound and host-loopback posture.
+ */
+export interface IsolationSessionNetworkIngress {
+  /**
+   * Allow private-network inbound traffic by default.
+   */
+  default: IsolationSessionNetworkAllow;
+  /**
+   * Allow bidirectional host-loopback connectivity.
+   */
+  hostLoopback: IsolationSessionNetworkAllow;
+}
 
 /**
  * IsolationSession settings accepted during provisioning.
@@ -198,14 +216,12 @@ export interface IsolationSessionProvisionExperimental {
    * Optional IsolationSession backend settings.
    */
   isolation_session?: StateAwareIsolationSession;
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 /**
- * A complete state-aware `provision` request for isolation_session
+ * A complete state-aware `provision` request for IsolationSession.
+ *
+ * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.
  */
 export interface IsolationSessionProvisionRequest {
   /**
@@ -221,17 +237,21 @@ export interface IsolationSessionProvisionRequest {
    */
   containment: IsolationSessionContainment;
   /**
-   * Optional closed experimental settings.
+   * Optional closed experimental settings containing only `appId`.
    */
   experimental?: IsolationSessionProvisionExperimental;
   /**
-   * Required unrestricted-network acknowledgment.
+   * Required unrestricted network posture.
    */
   network: IsolationSessionNetwork;
   /**
    * Exact `provision` phase marker.
    */
   phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -273,37 +293,13 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Optional permission to bind and accept local network connections.
-   */
-  allowLocalNetwork?: boolean;
-  /**
-   * Optional hosts allowed when the default policy blocks access.
-   */
-  allowedHosts?: string[];
-  /**
-   * Optional hosts blocked when the default policy allows access.
-   */
-  blockedHosts?: string[];
-  /**
-   * Optional default network posture.
-   */
-  defaultPolicy?: DefaultNetworkPolicy;
-  /**
    * Optional outbound network rules.
    */
   egress?: NetworkEgress;
   /**
-   * Optional network enforcement mechanism.
-   */
-  enforcementMode?: NetworkEnforcementMode;
-  /**
    * Optional inbound and host-loopback network rules.
    */
   ingress?: NetworkIngress;
-  /**
-   * Optional proxy configuration.
-   */
-  proxy?: NetworkProxy;
 }
 
 export type NetworkAction = "allow" | "deny";
@@ -325,8 +321,6 @@ export interface NetworkEgress {
    */
   deny?: NetworkRule[];
 }
-
-export type NetworkEnforcementMode = "capabilities" | "firewall" | "both";
 
 /**
  * Inbound and host-loopback network policy.
@@ -377,11 +371,6 @@ export interface NetworkPort {
 export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
 
 /**
- * One of the proxy configurations accepted by the `0.9.0-alpha` contract.
- */
-export type NetworkProxy = { localhost: number; builtinTestServer?: never; url?: never } | { builtinTestServer: True; localhost?: never; url?: never } | { url: string; builtinTestServer?: never; localhost?: never };
-
-/**
  * One outbound rule, matching destinations and ports.
  */
 export interface NetworkRule {
@@ -403,10 +392,6 @@ export type OneShotContainment = "process" | "processcontainer" | "appcontainer"
  * Experimental settings.
  */
 export interface OneShotExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
   /**
    * Optional placeholder test feature.
    */
@@ -489,6 +474,10 @@ export type OneShotRequest = {
    * Optional macOS Seatbelt configuration.
    */
   seatbelt?: Seatbelt;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Optional cross-platform user-interface policy.
    */
@@ -587,8 +576,14 @@ export interface Process {
   cwd?: string;
   /**
    * Optional environment entries encoded as `KEY=VALUE` strings.
+   *
+   * Omitted gives the backend's default environment; supplied (including as an empty array) is used verbatim unless `inheritDefaultEnv` is set.
    */
   env?: string[];
+  /**
+   * Layer `env` on top of the backend's default environment rather than replacing it.
+   */
+  inheritDefaultEnv?: boolean;
   /**
    * Optional execution timeout in milliseconds.
    */
@@ -668,7 +663,7 @@ export type ProvisionPhase = "provision";
  */
 export interface RuntimeConfig {
   /**
-   * Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.
+   * Optional HTTP/S proxy URL. Host-process backends require a localhost endpoint; WSLc requires an endpoint routable from its container and inherits the provisioned networking mode on exec.
    */
   networkProxy?: string;
 }
@@ -707,10 +702,6 @@ export interface Seatbelt {
  * Experimental settings accepted by the `start` phase.
  */
 export interface StartExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type StartPhase = "start";
@@ -728,10 +719,6 @@ export interface StartRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: StartExperimental;
@@ -743,6 +730,10 @@ export interface StartRequest {
    * Identifier returned by the provision phase.
    */
   sandboxId: string;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */
@@ -773,10 +764,6 @@ export interface StateAwareWslc {
  * Experimental settings accepted by the `stop` phase.
  */
 export interface StopExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 export type StopPhase = "stop";
@@ -794,10 +781,6 @@ export interface StopRequest {
    */
   _comment?: unknown;
   /**
-   * Optional correlation vector relayed from provision.
-   */
-  correlationVector?: string;
-  /**
    * Optional closed post-provision experimental settings.
    */
   experimental?: StopExperimental;
@@ -810,13 +793,17 @@ export interface StopRequest {
    */
   sandboxId: string;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
 }
 
 /**
- * One-shot telemetry override.
+ * Telemetry settings.
  */
 export interface Telemetry {
   /**
@@ -836,8 +823,6 @@ export interface TestFeature {
 }
 
 export type TransportProtocol = "tcp";
-
-export type True = true;
 
 /**
  * Cross-platform user-interface policy.
@@ -867,10 +852,6 @@ export type WindowsSandboxContainment = "windows_sandbox";
  * Experimental settings accepted by a Windows Sandbox provision request.
  */
 export interface WindowsSandboxExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
 }
 
 /**
@@ -902,6 +883,10 @@ export interface WindowsSandboxProvisionRequest {
    */
   phase: ProvisionPhase;
   /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
    * Exact development contract version.
    */
   version: Version;
@@ -927,10 +912,6 @@ export interface WslcProvision {
  * Experimental settings accepted by a WSLC provision request.
  */
 export interface WslcProvisionExperimental {
-  /**
-   * Optional telemetry override.
-   */
-  telemetry?: Telemetry;
   /**
    * Optional WSLC backend settings.
    */
@@ -969,6 +950,10 @@ export interface WslcProvisionRequest {
    * Exact `provision` phase marker.
    */
   phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
   /**
    * Exact development contract version.
    */

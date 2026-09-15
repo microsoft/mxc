@@ -83,10 +83,16 @@ table EndpointPolicy {
     deny:[EndpointRule];
 }
 
+table IngressPolicy {
+    default_action:FilterAction = deny;
+    host_loopback:FilterAction = deny;
+}
+
 table NetworkPolicy {
     proxy:ProxyInfo;
     egress:EndpointPolicy;
     allowed_appcontainer_peer:string;
+    ingress:IngressPolicy;
 }
 
 root_type ProcessSecurityEnvironment;

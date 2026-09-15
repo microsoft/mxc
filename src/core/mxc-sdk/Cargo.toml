@@ -16,6 +16,8 @@ default = []
 wslc = ["mxc_engine/wslc"]
 # IsolationSession backend (Windows only, experimental).
 isolation_session = ["mxc_engine/isolation_session"]
+# Exposes the debug-only telemetry test seams to downstream binding tests.
+test-support = ["wxc_common/test-support"]
 
 [dependencies]
 wxc_common.workspace = true

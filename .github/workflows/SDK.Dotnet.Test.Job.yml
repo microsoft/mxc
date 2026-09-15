@@ -38,9 +38,9 @@ jobs:
       # `--no-build` reuses the compile above rather than repeating it.
       #
       # Tests needing a prepared sandbox host gate on MXC_E2E_HOST_PREPPED,
-      # deliberately left unset: no runner satisfies it, and the same variable
-      # also gates the isolation-session tests, which additionally need an
-      # OS-side service. Those report as skips, so what this lane establishes is
+      # deliberately left unset: no runner satisfies it. The isolation-session
+      # tests gate on the SDK's backend probe, and this lane does not build that
+      # backend. Both report as skips, so what this lane establishes is
       # the managed surface plus the native library loading on this platform.
       #
       # A zero exit code is not sufficient evidence on its own, because a run in

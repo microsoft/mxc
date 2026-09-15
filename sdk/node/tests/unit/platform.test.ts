@@ -18,9 +18,16 @@ import {
   _runBwrapVersionCommand,
   _setBwrapProbeWorkerFactory,
   _setBwrapVersionRunner,
+  _probeBubblewrapNetwork,
+  _setLinuxProbeRunner,
+  _setLinuxProbeExec,
+  _runLinuxProbe,
+  _linuxProbeTimeouts,
   _setLxcAvailabilityProbe,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
+  _resetWxcExecutableCache,
+  _setWxcExecutableVerifier,
 } from '../../src/platform.js';
 
 const isWindows = os.platform() === 'win32';
@@ -96,6 +103,32 @@ describe('getPlatformSupport probe integration', () => {
     _setProbeRunner(null);
     _resetPlatformSupportCache();
   });
+
+  // `bubblewrapNetwork` is a Linux-only fact. Off Linux it must be *absent*
+  // rather than `unsupported`, which would claim the host was evaluated and
+  // found wanting. Nothing else pins the non-Linux shape.
+  it('omits bubblewrapNetwork off Linux', { skip: os.platform() === 'linux' }, () => {
+    assert.strictEqual(getPlatformSupport().bubblewrapNetwork, undefined);
+  });
+
+  it(
+    'reports bubblewrapNetwork on Linux only when bubblewrap is available',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const support = getPlatformSupport();
+      if (support.availableMethods.includes('bubblewrap')) {
+        assert.ok(
+          support.bubblewrapNetwork,
+          'an available bubblewrap must report its network support',
+        );
+        assert.ok(
+          ['supported', 'unsupported'].includes(support.bubblewrapNetwork.proxyEnforcement),
+        );
+      } else {
+        assert.strictEqual(support.bubblewrapNetwork, undefined);
+      }
+    },
+  );
 
   it('returns isolationTier when probe succeeds', { skip: !isWindows }, () => {
     let calls = 0;
@@ -352,6 +385,7 @@ describe('findWxcExecutable failure modes', () => {
 
   beforeEach(() => {
     prevBinDir = process.env.MXC_BIN_DIR;
+    _resetWxcExecutableCache();
   });
 
   afterEach(() => {
@@ -360,6 +394,8 @@ describe('findWxcExecutable failure modes', () => {
     } else {
       process.env.MXC_BIN_DIR = prevBinDir;
     }
+    _setWxcExecutableVerifier(null);
+    _resetWxcExecutableCache();
   });
 
   it('returns a string or null and never throws under a nonexistent MXC_BIN_DIR', () => {
@@ -380,6 +416,65 @@ describe('findWxcExecutable failure modes', () => {
     process.env.MXC_BIN_DIR = '';
     const result = findWxcExecutable();
     assert.ok(result === null || typeof result === 'string');
+  });
+
+  it('does not cache a failed executable lookup', () => {
+    process.env.MXC_BIN_DIR = path.join(
+      os.tmpdir(),
+      `mxc-sdk-unit-no-such-dir-${process.pid}`,
+    );
+    _setWxcExecutableVerifier(() => false);
+    assert.strictEqual(findWxcExecutable(), null);
+
+    _setWxcExecutableVerifier((candidate) => candidate.startsWith(process.env.MXC_BIN_DIR!));
+    assert.ok(findWxcExecutable()?.startsWith(process.env.MXC_BIN_DIR));
+  });
+
+  it('honors an MXC_BIN_DIR override configured after a cached lookup', () => {
+    delete process.env.MXC_BIN_DIR;
+    _setWxcExecutableVerifier(() => true);
+    const initial = findWxcExecutable();
+    assert.ok(initial);
+
+    const override = path.join(os.tmpdir(), `mxc-sdk-unit-override-${process.pid}`);
+    process.env.MXC_BIN_DIR = override;
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved?.startsWith(override));
+    assert.notStrictEqual(resolved, initial);
+  });
+
+  it('honors an MXC_BIN_DIR executable staged after caching a fallback', () => {
+    const override = path.join(os.tmpdir(), `mxc-sdk-unit-override-${process.pid}`);
+    const overrideExecutable = path.join(
+      override,
+      os.arch() === 'arm64' ? 'arm64' : 'x64',
+      'wxc-exec.exe',
+    );
+    process.env.MXC_BIN_DIR = override;
+
+    let overrideAvailable = false;
+    _setWxcExecutableVerifier((candidate) =>
+      candidate === overrideExecutable ? overrideAvailable : true,
+    );
+
+    const fallback = findWxcExecutable();
+    assert.ok(fallback);
+    assert.notStrictEqual(fallback, overrideExecutable);
+
+    overrideAvailable = true;
+    assert.strictEqual(findWxcExecutable(), overrideExecutable);
+  });
+
+  it('revalidates a cached executable before returning it', () => {
+    let cachedPath: string | null = null;
+    _setWxcExecutableVerifier((candidate) => candidate !== cachedPath);
+    cachedPath = findWxcExecutable();
+    assert.ok(cachedPath);
+
+    const resolved = findWxcExecutable();
+    assert.ok(resolved);
+    assert.notStrictEqual(resolved, cachedPath);
   });
 });
 
@@ -1328,4 +1423,195 @@ describe('bwrap minimum-version gate', () => {
       });
     },
   );
+});
+
+describe('_probeBubblewrapNetwork', () => {
+  afterEach(() => {
+    _setLinuxProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  // The SDK backstop and the native per-probe bounds are separate constants in
+  // separate languages. If the backstop drops below the native total, a slow
+  // but *successful* proxy walk followed by a slow `lxc-ls` gets killed here
+  // and reported as unsupported.
+  it('keeps the probe backstop above the native worst-case walk', () => {
+    assert.ok(
+      _linuxProbeTimeouts.backstopMs > _linuxProbeTimeouts.nativeWorstCaseMs,
+      `backstop ${_linuxProbeTimeouts.backstopMs}ms must exceed the native ` +
+        `${_linuxProbeTimeouts.nativeWorstCaseMs}ms worst case`,
+    );
+    // Startup, PATH resolution and serialization sit outside the native
+    // bounds, so a bare margin is not enough.
+    assert.ok(
+      _linuxProbeTimeouts.backstopMs - _linuxProbeTimeouts.nativeWorstCaseMs >= 5_000,
+      'the backstop needs real headroom over the native total, not a bare margin',
+    );
+  });
+
+  // The constant above can be correct while the option never reaches the child
+  // process, which leaves `execFileSync` on its default of *no* timeout — a
+  // hung `lxc-exec` then blocks the synchronous probe indefinitely. Assert the
+  // spawn options themselves, not just the constants that feed them.
+  it('passes the backstop timeout through to the probe process', () => {
+    let observed: Record<string, unknown> | undefined;
+    _setLinuxProbeExec((_file, _args, options) => {
+      observed = options as unknown as Record<string, unknown>;
+      return '[]';
+    });
+    try {
+      _runLinuxProbe('/nonexistent/lxc-exec');
+    } finally {
+      _setLinuxProbeExec(null);
+    }
+
+    assert.ok(observed, 'the probe must spawn through execFileSync');
+    assert.strictEqual(
+      observed.timeout,
+      _linuxProbeTimeouts.backstopMs,
+      'the probe must be spawned with the backstop timeout',
+    );
+  });
+
+  it('spawns the probe with the discovery flag and captured stdio', () => {
+    let file: string | undefined;
+    let args: string[] | undefined;
+    _setLinuxProbeExec((f, a) => {
+      file = f;
+      args = a;
+      return '[]';
+    });
+    try {
+      _runLinuxProbe('/nonexistent/lxc-exec');
+    } finally {
+      _setLinuxProbeExec(null);
+    }
+
+    assert.strictEqual(file, '/nonexistent/lxc-exec');
+    assert.deepStrictEqual(args, ['--available-backends']);
+  });
+
+  it('reports supported when the probe advertises proxyEnforcement', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', capabilities: ['proxyEnforcement'] }]),
+    );
+    assert.deepStrictEqual(_probeBubblewrapNetwork(), {
+      proxyEnforcement: 'supported',
+      warnings: [],
+    });
+  });
+
+  it('reports unsupported with the probe reason when the capability is absent', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', warnings: ['slirp4netns not found'] }]),
+    );
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.deepStrictEqual(result.warnings, ['slirp4netns not found']);
+  });
+
+  it('ignores capabilities reported for other backends', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([
+        { backend: 'lxc', capabilities: ['proxyEnforcement'] },
+        { backend: 'bubblewrap', capabilities: [] },
+      ]),
+    );
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when the probe binary cannot run', () => {
+    _setLinuxProbeRunner(() => {
+      throw new Error('lxc-exec not found');
+    });
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.match(result.warnings[0], /lxc-exec not found/);
+  });
+
+  it('fails closed on malformed JSON', () => {
+    _setLinuxProbeRunner(() => 'not json');
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when the payload is not an array', () => {
+    _setLinuxProbeRunner(() => JSON.stringify({ backend: 'bubblewrap' }));
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when bubblewrap is absent from the payload', () => {
+    _setLinuxProbeRunner(() => JSON.stringify([{ backend: 'lxc' }]));
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.match(result.warnings[0], /did not report bubblewrap/);
+  });
+
+  // A newer native library can add capabilities this SDK has never heard of.
+  // An unknown value must not be mistaken for `proxyEnforcement`.
+  it('fails closed when the payload carries only unknown capabilities', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', capabilities: ['someFutureCapability'] }]),
+    );
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.ok(result.warnings.length > 0, 'an unsupported host must say why');
+  });
+
+  it('still recognises proxyEnforcement alongside an unknown capability', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([
+        { backend: 'bubblewrap', capabilities: ['someFutureCapability', 'proxyEnforcement'] },
+      ]),
+    );
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'supported');
+  });
+
+  // `capabilities` and `warnings` are both optional on the wire
+  // (`skip_serializing_if = "Vec::is_empty"`), so absent and null must be
+  // handled as "no capabilities", never crash the parser.
+  it('treats missing capabilities and warnings as an unsupported host', () => {
+    _setLinuxProbeRunner(() => JSON.stringify([{ backend: 'bubblewrap' }]));
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.ok(result.warnings.length > 0, 'an unsupported host must say why');
+  });
+
+  it('fails closed when capabilities and warnings are null', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', capabilities: null, warnings: null }]),
+    );
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.ok(result.warnings.length > 0, 'an unsupported host must say why');
+  });
+
+  it('fails closed when the payload is JSON null', () => {
+    _setLinuxProbeRunner(() => 'null');
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed on empty probe output', () => {
+    _setLinuxProbeRunner(() => '');
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  // Entries are matched by wire name; a non-object entry must not throw.
+  it('fails closed when the array holds non-object entries', () => {
+    _setLinuxProbeRunner(() => JSON.stringify(['bubblewrap', null, 42]));
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  // Non-string warnings are filtered out, so they must not surface as a
+  // reason — but their absence must not leave the host unexplained either.
+  it('never reports an unsupported host without a reason', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', warnings: [1, null, {}] }]),
+    );
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.ok(result.warnings.length > 0, 'a refusal must never be anonymous');
+    for (const warning of result.warnings) {
+      assert.strictEqual(typeof warning, 'string');
+    }
+  });
 });

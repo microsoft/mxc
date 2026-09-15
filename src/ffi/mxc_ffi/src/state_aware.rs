@@ -14,7 +14,7 @@
 //!   interactive terminal. It blocks and reports an [`MxcExecOutcome`].
 //! - [`mxc_state_aware_exec`] drives the **exec phase as a live streaming**
 //!   process, returning the same opaque [`MxcSandbox`](crate::MxcSandbox) handle
-//!   as [`mxc_spawn`](crate::mxc_spawn) — so the caller reuses the
+//!   as [`mxc_spawn_request`](crate::mxc_spawn_request) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //!
 //! The two exec entry points take the **same** request JSON and differ only in
@@ -132,7 +132,10 @@ pub unsafe extern "C" fn mxc_state_aware(
     let result = catch_unwind(AssertUnwindSafe(|| {
         state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
     }))
-    .unwrap_or_else(|_| MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware", &*panic);
+        MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable; ownership of the
@@ -181,10 +184,12 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
     if r.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller guarantees `r` points to a valid, not-yet-freed result.
         unsafe { (*r).free_strings() };
-    }));
+    })) {
+        crate::report_panic("mxc_state_aware_result_free", &*panic);
+    }
 }
 
 /// Run the `exec` phase of a state-aware request as a **live streaming** process.
@@ -226,7 +231,7 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
         unsafe { *out_handle = ptr::null_mut() };
     }
     if !out_error.is_null() {
-        // `write` rather than assignment, for the reason given on `mxc_spawn`:
+        // `write` rather than assignment, for the reason given on `mxc_spawn_request`:
         // the storage may be uninitialised, and nothing here is dropped.
         // SAFETY: caller-guaranteed writable storage for one detail.
         unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
@@ -259,7 +264,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
             )
         })
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -366,7 +372,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec_attached(
             )
         })
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec_attached", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -468,9 +475,72 @@ mod tests {
     }
 
     #[test]
+    fn exact_payload_errors_keep_their_paths_and_source_coordinates() {
+        for fields in [
+            r#""appId":null"#,
+            r#""appId":17"#,
+            r#""appId":"first","appId":"second""#,
+            r#""appIdd":"typo""#,
+        ] {
+            let json = format!(
+                "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+                 \"containment\":\"isolation_session\",\n  \
+                 \"_comment\":\"typed payload diagnostic\",\n  \
+                 \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+            );
+            let mut out = call_opt(&json, true, true);
+            assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST, "{fields}");
+            assert!(out.response_json_utf8.is_null());
+            assert!(!out.error.message_utf8.is_null());
+            // SAFETY: the call returned a non-null owned error string.
+            let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
+                .to_str()
+                .unwrap();
+            assert!(
+                message.contains("experimental.isolation_session.provision"),
+                "{message}"
+            );
+            assert!(message.contains("line "), "{message}");
+            assert!(message.contains("column "), "{message}");
+            assert!(out.error.operation_utf8.is_null());
+            assert!(out.error.native_code_utf8.is_null());
+            // SAFETY: all result strings were allocated by mxc_state_aware.
+            unsafe { mxc_state_aware_result_free(&mut out) };
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+    #[test]
+    fn typed_provision_configuration_reaches_backend_semantic_validation() {
+        let json = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+            "experimental": {"isolation_session": {"provision": {
+                "appId": "x".repeat(257)
+            }}},
+        })
+        .to_string();
+        let mut out = call_opt(&json, true, true);
+        assert_eq!(out.status, crate::MXC_STATUS_POLICY_VALIDATION);
+        assert!(out.response_json_utf8.is_null());
+        assert!(!out.error.message_utf8.is_null());
+        // SAFETY: the failing call returned an owned error string.
+        let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "appId must be at most 256 characters (got 257)");
+        assert!(out.error.operation_utf8.is_null());
+        assert!(out.error.native_code_utf8.is_null());
+        // SAFETY: all result strings were allocated by mxc_state_aware.
+        unsafe { mxc_state_aware_result_free(&mut out) };
+    }
+
+    #[test]
     fn non_dry_run_exec_is_rejected() {
         let mut out = call(
-            r#"{"phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST);
@@ -486,7 +556,7 @@ mod tests {
         // (A real isolation_session provision is avoided: on a capable host it
         // would actually provision a sandbox. See the mxc-sdk state_aware test.)
         let mut out = call(
-            r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
@@ -507,7 +577,10 @@ mod tests {
 
     #[test]
     fn null_out_reports_null_argument() {
-        let j = CString::new(r#"{"phase":"provision","containment":"isolation_session"}"#).unwrap();
+        let j = CString::new(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+        )
+        .unwrap();
         // SAFETY: valid string, deliberately-null out.
         let status = unsafe { mxc_state_aware(j.as_ptr(), 0, 0, ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
@@ -515,7 +588,8 @@ mod tests {
 
     #[test]
     fn exec_null_out_handle_is_null_argument() {
-        let j = CString::new(r#"{"phase":"exec","sandboxId":"x:y"}"#).unwrap();
+        let j =
+            CString::new(r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out_handle.
         let status =
             unsafe { mxc_state_aware_exec(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
@@ -524,7 +598,10 @@ mod tests {
 
     #[test]
     fn exec_non_exec_phase_reports_error_and_null_handle() {
-        let j = CString::new(r#"{"phase":"provision","containment":"isolation_session"}"#).unwrap();
+        let j = CString::new(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+        )
+        .unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
@@ -542,7 +619,7 @@ mod tests {
     #[test]
     fn experimental_backend_is_refused_without_the_optin() {
         let mut out = call_opt(
-            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             true,
             false,
         );
@@ -562,7 +639,7 @@ mod tests {
     #[test]
     fn the_optin_admits_an_experimental_backend() {
         let mut out = call_opt(
-            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             true,
             true,
         );
@@ -580,7 +657,7 @@ mod tests {
     #[test]
     fn exec_honours_the_optin_on_its_own_path() {
         let j = CString::new(
-            r#"{"phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
         )
         .unwrap();
 
@@ -636,7 +713,7 @@ mod tests {
     #[test]
     fn attached_rejects_a_null_outcome_before_running_anything() {
         let j = CString::new(
-            r#"{"phase":"exec","sandboxId":"isolationsession:x",
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:x",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#,
         )
         .unwrap();
@@ -655,8 +732,8 @@ mod tests {
         // this is independent of the test binary's stdio. The message assertion
         // discriminates it from the other refusals, which share this status.
         let (status, outcome, mut err) = attached(
-            r#"{"phase":"provision","containment":"isolation_session",
-                "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+                "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             true,
         );
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);

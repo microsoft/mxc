@@ -11,23 +11,28 @@
 //!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
+mod exact;
 pub(crate) mod network;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use crate::configs::process_container;
 use crate::configs::ProcessContainer;
 #[cfg(test)]
 use crate::configs::{CaptureDenials, CaptureDenialsMode};
+#[cfg(test)]
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ExecutionRequest;
+use wxc_common::models::{ExecutionRequest, TelemetryConfig};
+#[cfg(test)]
 use wxc_common::mxc_error::MxcError;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 use network::has_host_rules;
-use network::{proxy_to_wire, select_network_format, NetworkFormat};
+#[cfg(test)]
+use network::{proxy_to_wire, select_rolling_network_format, NetworkFormat};
 pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
     NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
@@ -245,6 +250,28 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
     }
 }
 
+fn environment_keys_equal(existing_key: &str, override_key: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        existing_key.eq_ignore_ascii_case(override_key)
+    } else {
+        existing_key == override_key
+    }
+}
+
+fn apply_environment_overrides<K, V>(
+    entries: &mut Vec<(String, String)>,
+    overrides: impl IntoIterator<Item = (K, V)>,
+) where
+    K: Into<String>,
+    V: Into<String>,
+{
+    for (key, value) in overrides {
+        let key = key.into();
+        entries.retain(|(existing, _)| !environment_keys_equal(existing, &key));
+        entries.push((key, value.into()));
+    }
+}
+
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
 /// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
 /// enumerates the drive root on startup — plus the PSReadLine history directory
@@ -425,6 +452,7 @@ pub enum ClipboardPolicy {
 
 impl ClipboardPolicy {
     /// Wire-format value accepted by the config parser.
+    #[cfg(test)]
     fn wire(self) -> &'static str {
         match self {
             ClipboardPolicy::None => "none",
@@ -481,9 +509,21 @@ pub enum Containment {
     Wslc(WslcSection),
     /// IsolationSession backend: a Windows isolated user session.
     ///
-    /// Not served by [`crate::spawn`]; reach it through the state-aware
-    /// lifecycle.
+    /// Experimental — the request must opt in
+    /// ([`SandboxRequest::set_experimental`]). Served with piped stdio; the
+    /// multi-call lifecycle is reachable through the state-aware entry points.
     IsolationSession,
+}
+
+impl Containment {
+    fn telemetry_kind(&self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::ProcessContainer(_) => "processcontainer",
+            Self::Wslc(_) => "wslc",
+            Self::IsolationSession => "isolation_session",
+        }
+    }
 }
 
 /// WSL Container settings carried by [`Containment::Wslc`].
@@ -544,6 +584,7 @@ impl Default for WslcSection {
 impl WslcSection {
     /// The wire-format `experimental.wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
+    #[cfg(test)]
     fn wire(&self) -> serde_json::Value {
         use serde_json::json;
         let mut wslc = json!({ "image": self.image, "gpu": self.gpu });
@@ -577,6 +618,11 @@ impl WslcSection {
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
 /// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
+///
+/// Telemetry is intentionally not a policy field. It is invocation
+/// instrumentation rather than a sandbox restriction, matching the global
+/// sandbox-policy design. Build the request first, then use
+/// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxPolicy {
@@ -593,11 +639,9 @@ pub struct SandboxPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// A spawnable sandbox request, built from a [`SandboxPolicy`] by
-/// [`build_request`]. Fill in the command with
-/// [`set_script`](Self::set_script) — and optionally a working
-/// directory or environment — then hand it to
-/// [`spawn`](crate::spawn).
+/// A spawnable sandbox request, built from a [`SandboxPolicy`] and a command by
+/// [`build_request`]. Optionally adjust the working directory or environment,
+/// then hand it to [`spawn`](crate::spawn).
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
@@ -606,21 +650,10 @@ pub struct SandboxRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
+    requested_sandbox_kind: &'static str,
 }
 
 impl SandboxRequest {
-    /// Set the command the sandbox runs — the `/bin/sh -c` body on Unix, the
-    /// command line on Windows.
-    ///
-    /// This is the raw command string, mapped to the same `script_code` the
-    /// executor binaries run, so it is interpreted exactly as the SDK's
-    /// `spawnSandbox(script)` / `process.commandLine` is — behavior is identical
-    /// across the SDK and this crate.
-    pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
-        self.inner.script_code = script.into();
-        self
-    }
-
     /// Override the working directory the sandboxed child starts in. Left unset,
     /// it defaults to the policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
@@ -635,19 +668,93 @@ impl SandboxRequest {
     /// the same way), so behavior is identical across the SDK and this crate.
     /// Iteration order is preserved, so on a duplicate key the later entry wins,
     /// matching the SDK.
+    ///
+    /// The environment you set is used **verbatim**: MXC does not merge the
+    /// calling process's variables or the user's profile block into it. On the
+    /// Windows process container that includes the variables Windows requires
+    /// to be present, so a sparse environment fails the launch with a
+    /// diagnostic naming them — see [`Self::inherit_default_env`] and
+    /// [`Self::inherit_process_env`] for the supported ways to start from a
+    /// complete environment.
+    ///
+    /// Calling this with an empty iterator requests an *empty* environment,
+    /// which is distinct from never calling it at all (see [`Self::clear_env`]).
     pub fn set_env<K, V>(&mut self, env: impl IntoIterator<Item = (K, V)>) -> &mut Self
     where
         K: Into<String>,
         V: Into<String>,
     {
-        self.inner.env = env
-            .into_iter()
-            .map(|(k, v)| {
-                let (k, v): (String, String) = (k.into(), v.into());
-                format!("{k}={v}")
-            })
-            .collect();
+        self.inner.inherit_default_env = false;
+        self.inner.env = Some(
+            env.into_iter()
+                .map(|(k, v)| {
+                    let (k, v): (String, String) = (k.into(), v.into());
+                    format!("{k}={v}")
+                })
+                .collect(),
+        );
         self
+    }
+
+    /// The child's environment as `KEY=VALUE` entries, or `None` when none has
+    /// been set (in which case the backend supplies its default — on Windows,
+    /// the user's profile block).
+    pub fn env(&self) -> Option<&[String]> {
+        self.inner.env.as_deref()
+    }
+
+    /// Drop any environment set on this request, returning it to the backend
+    /// default.
+    ///
+    /// This is *not* the same as `set_env([])`: that asks for an empty
+    /// environment, whereas this asks for the backend's default one.
+    pub fn clear_env(&mut self) -> &mut Self {
+        self.inner.env = None;
+        self.inner.inherit_default_env = false;
+        self
+    }
+
+    /// Start from the backend's default environment and append `extra` on top,
+    /// so the child gets a complete environment plus your additions.
+    ///
+    /// This is the supported way to express "the usual environment, plus these"
+    /// on the Windows process container: the default block is the user's
+    /// profile block, obtainable only from the OS, so it cannot be assembled by
+    /// a caller. Entries in `extra` override same-named defaults.
+    ///
+    /// On backends whose default environment is empty (LXC, Bubblewrap,
+    /// Seatbelt, WSLc) this is equivalent to [`Self::set_env`].
+    pub fn inherit_default_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.set_env(extra);
+        self.inner.inherit_default_env = true;
+        self
+    }
+
+    /// Start from the *calling process's* environment and append `extra` on top.
+    ///
+    /// Note this is a different, generally larger and leakier set than
+    /// [`Self::inherit_default_env`]: it is whatever your process happens to be
+    /// running with, so anything you inherited — including secrets in the
+    /// ambient environment — is handed to the sandboxed child. Prefer
+    /// `inherit_default_env` unless you specifically need your own variables.
+    pub fn inherit_process_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut entries: Vec<(String, String)> = std::env::vars().collect();
+        apply_environment_overrides(&mut entries, extra);
+        self.set_env(entries)
     }
 
     /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
@@ -685,27 +792,47 @@ impl SandboxRequest {
         self.inner.experimental_enabled = enabled;
         self
     }
+
+    /// Enable or disable telemetry for this invocation.
+    ///
+    /// Enabling this per-request switch is necessary but not sufficient:
+    /// telemetry still requires persisted user consent and an administrative
+    /// policy that permits collection. It is independent of experimental mode.
+    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
+        self.inner.telemetry = Some(TelemetryConfig {
+            enabled: Some(enabled),
+            requested_sandbox_kind: Some(self.requested_sandbox_kind),
+        });
+        self
+    }
+
+    /// Return the explicit per-request telemetry switch for this invocation.
+    pub fn telemetry_enabled(&self) -> Option<bool> {
+        self.inner
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.enabled)
+    }
 }
 
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
-/// The returned request has an empty command line; set the command with
-/// [`SandboxRequest::set_script`] (and any working directory / env) before
-/// streaming it via [`crate::spawn`].
+/// The `script` becomes the request's command line, so the returned request is
+/// complete and needs no post-build patching before streaming it via
+/// [`crate::spawn`]. An empty script is rejected.
 ///
-/// Mirrors the SDK field mapping and validation (network proxy/host-filtering
-/// constraints) for the supported backends. Internally it builds the same
-/// wire-format `ContainerConfig` the SDK emits and runs it through the shared
-/// config parser, so validation and the wire→model mapping match production.
+/// Maps the policy into the exact contract selected by `SandboxPolicy.version`,
+/// then adapts that contract through the shared semantic validation path.
 ///
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
 pub fn build_request(
     policy: &SandboxPolicy,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    build_request_with_containment(policy, &Containment::Process, container_name)
+    build_request_with_containment(policy, &Containment::Process, script, container_name)
 }
 
 /// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
@@ -721,46 +848,51 @@ pub fn build_request(
 /// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
-///     version: "0.7.0-alpha".to_string(),
+///     version: "0.9.0-alpha".to_string(),
 ///     filesystem: None,
 ///     network: None,
 ///     ui: None,
 ///     timeout_ms: None,
 /// };
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-/// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-/// request.set_script("python3 -c 'print(1)'").set_experimental(true);
+/// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
+/// request.set_experimental(true);
 /// # Ok::<(), mxc_engine::Error>(())
 /// ```
 pub fn build_request_with_containment(
     policy: &SandboxPolicy,
     containment: &Containment,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    // The shared parser tolerates an empty schema version (treats it as
-    // "unset"), but the SDK requires it; reject it here for parity.
-    if policy.version.is_empty() {
-        return Err(MxcError::malformed_request("Policy version is required").into());
-    }
-    let config = build_wire_config(policy, containment, container_name)?;
-
-    let mut logger = Logger::new(Mode::Buffer);
-    // Map the wire config straight to a request — no base64/file round-trip.
-    // The command line is intentionally empty here (the caller fills
-    // `script_code` before running), so tolerate a missing command.
-    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
-        .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
-    Ok(SandboxRequest { inner })
+    exact::build_request(policy, containment, script, container_name)
 }
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
+#[cfg(test)]
 pub(crate) fn build_wire_config(
     policy: &SandboxPolicy,
     containment: &Containment,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
+    build_wire_config_with_network_format(policy, containment, script, container_name)
+        .map(|(config, _)| config)
+}
+
+#[cfg(test)]
+fn build_wire_config_with_network_format(
+    policy: &SandboxPolicy,
+    containment: &Containment,
+    script: &str,
+    container_name: Option<&str>,
+) -> Result<(serde_json::Value, NetworkFormat), MxcError> {
     use serde_json::json;
+
+    if script.is_empty() {
+        return Err(MxcError::malformed_request("script parameter is required"));
+    }
 
     let container_id = container_name
         .map(str::to_string)
@@ -773,14 +905,13 @@ pub(crate) fn build_wire_config(
         "version": policy.version,
         "containerId": container_id,
         "lifecycle": { "destroyOnExit": true, "preservePolicy": !clear_policy },
-        "process": { "commandLine": "", "timeout": policy.timeout_ms.unwrap_or(0) },
+        "process": { "commandLine": script, "timeout": policy.timeout_ms.unwrap_or(0) },
         "filesystem": {
             "readwritePaths": fs.readwrite_paths,
             "readonlyPaths": fs.readonly_paths,
             "deniedPaths": fs.denied_paths,
         },
     });
-
     // `ui` is emitted only when the caller actually supplied one.
     //
     // The parser records presence as `ContainerPolicy::ui_specified`, and
@@ -823,7 +954,7 @@ pub(crate) fn build_wire_config(
             .is_some_and(|peer| !peer.trim().is_empty()),
         _ => false,
     };
-    let network_format = select_network_format(
+    let network_format = select_rolling_network_format(
         &policy.version,
         policy.network.as_ref(),
         has_process_container_network,
@@ -916,13 +1047,14 @@ pub(crate) fn build_wire_config(
             config["containment"] = serde_json::json!("isolation_session");
         }
     }
-    Ok(config)
+    Ok((config, network_format))
 }
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
 /// AppContainer at runtime by host capability).
+#[cfg(test)]
 fn apply_host_process_backend(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
@@ -974,6 +1106,7 @@ fn apply_host_process_backend(
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
 /// its settings live under `experimental.wslc` because the backend is
 /// experimental.
+#[cfg(test)]
 fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
     use serde_json::json;
     config["containment"] = json!("wslc");
@@ -983,7 +1116,7 @@ fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
 /// Promote network enforcement to `firewall` when host rules are present and
 /// no cooperative proxy is configured — the Linux counterpart of the SDK's
 /// `applyLinuxNetworkPolicy`.
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn apply_linux_network_policy(config: &mut serde_json::Value) {
     use serde_json::json;
     let Some(network) = config.get_mut("network") else {
@@ -997,6 +1130,385 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    const TEST_COMMAND: &str = "echo hello";
+
+    #[test]
+    fn exact_contract_bridge_is_available_to_policy_builders() {
+        let request: mxc_config_contract::published::v0_7_0_alpha::Request = serde_json::from_str(
+            r#"{
+                    "version": "0.7.0-alpha",
+                    "process": {"commandLine": "echo hello"}
+                }"#,
+        )
+        .unwrap();
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let execution = wxc_common::config_parser::load_one_shot_request_from_contract(
+            wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap();
+
+        assert_eq!(execution.schema_version, "0.7.0-alpha");
+        assert_eq!(execution.script_code, "echo hello");
+    }
+
+    fn assert_exact_builder_matches_wire_round_trip(
+        policy: &SandboxPolicy,
+        containment: &Containment,
+    ) {
+        let exact =
+            build_request_with_containment(policy, containment, TEST_COMMAND, Some("builder-test"))
+                .unwrap();
+        let config =
+            super::build_wire_config(policy, containment, TEST_COMMAND, Some("builder-test"))
+                .unwrap();
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+        let json = serde_json::to_string(&config).unwrap();
+        let round_trip = match wxc_common::config_parser::load_mxc_request_from_json(
+            &json,
+            &mut logger,
+        )
+        .unwrap()
+        {
+            wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
+            wxc_common::state_aware_request::MxcRequest::StateAware(_) => {
+                panic!("typed one-shot policy produced a state-aware request")
+            }
+        };
+
+        assert_eq!(
+            serde_json::to_value(&exact.inner).unwrap(),
+            serde_json::to_value(&round_trip).unwrap(),
+            "{}",
+            policy.version
+        );
+
+        let exact_policy = &exact.inner.policy;
+        let round_trip_policy = &round_trip.policy;
+        assert_eq!(
+            exact_policy.network_specified, round_trip_policy.network_specified,
+            "{}: network presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.network_mode_specified, round_trip_policy.network_mode_specified,
+            "{}: network mode presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.runtime_network_proxy_specified,
+            round_trip_policy.runtime_network_proxy_specified,
+            "{}: runtime proxy presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.ui_specified, round_trip_policy.ui_specified,
+            "{}: UI presence",
+            policy.version
+        );
+        assert_eq!(
+            exact_policy.network_proxy.builtin_test_server,
+            round_trip_policy.network_proxy.builtin_test_server,
+            "{}: built-in proxy",
+            policy.version
+        );
+        match (
+            exact_policy.network_proxy.address.as_ref(),
+            round_trip_policy.network_proxy.address.as_ref(),
+        ) {
+            (Some(exact), Some(round_trip)) => {
+                assert_eq!(exact.address, round_trip.address, "{}", policy.version);
+                assert_eq!(exact.port, round_trip.port, "{}", policy.version);
+                assert_eq!(
+                    exact.original_url, round_trip.original_url,
+                    "{}",
+                    policy.version
+                );
+            }
+            (None, None) => {}
+            (exact, round_trip) => panic!(
+                "{}: proxy address mismatch: exact={exact:?}, round-trip={round_trip:?}",
+                policy.version
+            ),
+        }
+    }
+
+    fn host_process_versions() -> &'static [&'static str] {
+        #[cfg(target_os = "macos")]
+        {
+            &["0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            &["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"]
+        }
+    }
+
+    #[test]
+    fn exact_policy_builder_routes_every_host_supported_version() {
+        for version in host_process_versions() {
+            let policy = SandboxPolicy {
+                version: (*version).to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            let request =
+                build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                    .unwrap();
+            assert_eq!(request.inner.schema_version, *version);
+        }
+    }
+
+    #[test]
+    fn development_builder_preserves_absent_empty_and_runtime_only_network_presence() {
+        let mut policy = development_policy();
+        let absent =
+            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                .unwrap();
+        assert!(!absent.inner.policy.network_specified);
+        policy.network = Some(NetworkSection::default());
+        let empty =
+            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                .unwrap();
+        assert!(empty.inner.policy.network_specified);
+        assert!(!empty.inner.policy.network_mode_specified);
+        policy.network = Some(NetworkSection {
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://proxy.example:8080".into()),
+            }),
+            ..Default::default()
+        });
+        // Construction preserves runtime-only intent. Execution still requires
+        // a provisioned bridged route; the backend owns that validation.
+        let runtime_only = build_request_with_containment(
+            &policy,
+            &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
+            None,
+        )
+        .unwrap();
+        assert!(!runtime_only.inner.policy.network_specified);
+        assert!(!runtime_only.inner.policy.network_mode_specified);
+        assert!(runtime_only.inner.policy.runtime_network_proxy_specified);
+    }
+
+    #[test]
+    fn exact_policy_builder_matches_the_wire_round_trip_for_every_host_supported_version() {
+        for version in host_process_versions() {
+            let policy = SandboxPolicy {
+                version: (*version).to_string(),
+                filesystem: Some(super::FilesystemSection {
+                    readwrite_paths: vec!["C:\\work".to_string()],
+                    readonly_paths: vec!["C:\\tools".to_string()],
+                    denied_paths: vec!["C:\\secrets".to_string()],
+                    clear_policy_on_exit: Some(false),
+                }),
+                network: Some(if *version == "0.9.0-alpha" {
+                    NetworkSection {
+                        egress: Some(NetworkEgressSection {
+                            default: Some(NetworkAction::Allow),
+                            ..Default::default()
+                        }),
+                        ingress: Some(NetworkIngressSection {
+                            default: Some(NetworkAction::Allow),
+                            host_loopback: Some(NetworkAction::Allow),
+                        }),
+                        ..Default::default()
+                    }
+                } else {
+                    NetworkSection {
+                        allow_outbound: true,
+                        allow_local_network: true,
+                        ..Default::default()
+                    }
+                }),
+                ui: Some(super::UiSection {
+                    allow_windows: true,
+                    clipboard: super::ClipboardPolicy::Read,
+                    allow_input_injection: false,
+                }),
+                timeout_ms: Some(5000),
+            };
+            assert_exact_builder_matches_wire_round_trip(&policy, &Containment::Process);
+        }
+    }
+
+    #[test]
+    fn exact_directional_policy_builder_matches_the_wire_oracle() {
+        for version in ["0.8.0-alpha", "0.9.0-alpha"] {
+            let policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: Some(NetworkSection {
+                    egress: Some(NetworkEgressSection {
+                        default: Some(NetworkAction::Deny),
+                        allow: Some(vec![NetworkRuleSection {
+                            to: Some(vec![NetworkPeerSection {
+                                cidr: "10.0.0.0/8".to_string(),
+                                except: Some(vec!["10.1.0.0/16".to_string()]),
+                            }]),
+                            ports: Some(vec![NetworkPortSection {
+                                protocol: Some(NetworkProtocol::Tcp),
+                                port: Some(8000),
+                                end_port: Some(8010),
+                            }]),
+                        }]),
+                        deny: Some(vec![NetworkRuleSection {
+                            to: Some(vec![NetworkPeerSection::new("192.0.2.0/24")]),
+                            ports: Some(vec![NetworkPortSection {
+                                protocol: Some(NetworkProtocol::Udp),
+                                port: Some(53),
+                                end_port: None,
+                            }]),
+                        }]),
+                    }),
+                    ingress: Some(NetworkIngressSection {
+                        default: Some(NetworkAction::Deny),
+                        host_loopback: Some(NetworkAction::Allow),
+                    }),
+                    ..Default::default()
+                }),
+                ui: None,
+                timeout_ms: None,
+            };
+            assert_exact_builder_matches_wire_round_trip(
+                &policy,
+                &Containment::ProcessContainer(ProcessContainer::default()),
+            );
+
+            let proxy_policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: Some(NetworkSection {
+                    egress: Some(NetworkEgressSection {
+                        default: Some(NetworkAction::Deny),
+                        ..Default::default()
+                    }),
+                    ingress: Some(NetworkIngressSection {
+                        default: Some(NetworkAction::Allow),
+                        host_loopback: Some(NetworkAction::Deny),
+                    }),
+                    runtime_config: Some(RuntimeConfigSection {
+                        network_proxy: Some("http://127.0.0.1:8080".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+                ui: None,
+                timeout_ms: None,
+            };
+            let proxy_containment = Containment::ProcessContainer(ProcessContainer {
+                network: Some(crate::configs::ProcessContainerNetwork {
+                    allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+                }),
+                ..ProcessContainer::default()
+            });
+
+            assert_exact_builder_matches_wire_round_trip(&proxy_policy, &proxy_containment);
+        }
+    }
+
+    #[test]
+    fn exact_wslc_builder_matches_the_wire_oracle_with_all_options() {
+        let policy = SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            filesystem: None,
+            network: Some(NetworkSection {
+                egress: Some(NetworkEgressSection {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ingress: Some(NetworkIngressSection {
+                    default: Some(NetworkAction::Allow),
+                    host_loopback: Some(NetworkAction::Allow),
+                }),
+                ..Default::default()
+            }),
+            ui: None,
+            timeout_ms: Some(12_345),
+        };
+        let containment = Containment::Wslc(WslcSection {
+            image: "python:3.12".to_string(),
+            image_tar_path: Some("C:\\images\\python.tar".to_string()),
+            cpu_count: Some(2),
+            memory_mb: Some(2048),
+            gpu: true,
+            storage_path: Some("C:\\wslc-store".to_string()),
+            port_mappings: vec![(8080, 80)],
+        });
+
+        assert_exact_builder_matches_wire_round_trip(&policy, &containment);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exact_v0_6_policy_builder_rejects_seatbelt_host_process() {
+        let policy = SandboxPolicy {
+            version: "0.6.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+
+        let error =
+            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Seatbelt containment requires schema version 0.7.0-alpha or later"
+        );
+    }
+
+    #[test]
+    fn exact_policy_builder_rejects_development_containment_before_v0_9() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            for containment in [
+                Containment::Wslc(WslcSection::default()),
+                Containment::IsolationSession,
+            ] {
+                let error =
+                    build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
+                        .unwrap_err();
+                assert!(
+                    error
+                        .message
+                        .contains("requires schema version 0.9.0-alpha"),
+                    "{version}: {}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_v0_8_policy_builder_enforces_capability_construction_rules() {
+        let policy = SandboxPolicy {
+            version: "0.8.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let containment = Containment::ProcessContainer(ProcessContainer {
+            capabilities: vec!["internetClient,privateNetworkClientServer".to_string()],
+            ..ProcessContainer::default()
+        });
+
+        let error =
+            build_request_with_containment(&policy, &containment, TEST_COMMAND, None).unwrap_err();
+        assert!(error.message.contains("must not contain a comma"));
+    }
+
     // `ui` must be emitted only when the caller supplied one.
     //
     // These pin the fix for a defect that was invisible by value: the builder
@@ -1016,8 +1528,9 @@ mod tests {
             serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
-        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
-            .expect("minimal policy builds a wire config");
+        let config =
+            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
+                .expect("minimal policy builds a wire config");
 
         assert!(
             config.get("ui").is_none(),
@@ -1034,8 +1547,9 @@ mod tests {
                 .expect("policy with ui parses");
         assert!(policy.ui.is_some(), "precondition: ui supplied");
 
-        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
-            .expect("policy with ui builds a wire config");
+        let config =
+            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
+                .expect("policy with ui builds a wire config");
 
         assert!(
             config.get("ui").is_some(),
@@ -1093,8 +1607,9 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkEgressSection, NetworkSection,
-        ProxySpec, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
+        NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
+        NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1116,7 +1631,7 @@ mod tests {
         });
         policy.version = "0.8x".to_string();
 
-        let error = build_request(&policy, None)
+        let error = build_request(&policy, TEST_COMMAND, None)
             .expect_err("a malformed schema version must be rejected")
             .to_string();
 
@@ -1140,7 +1655,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            build_request(&policy, None).is_ok(),
+            build_request(&policy, TEST_COMMAND, None).is_ok(),
             "macOS must accept allowedHosts without allowOutbound, matching the SDK"
         );
     }
@@ -1156,7 +1671,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            build_request(&policy, None).is_ok(),
+            build_request(&policy, TEST_COMMAND, None).is_ok(),
             "outbound-allowed host filter should build"
         );
     }
@@ -1168,8 +1683,8 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..Default::default()
         });
-        let request =
-            build_request(&policy, None).expect("macOS must accept Seatbelt proxy configuration");
+        let request = build_request(&policy, TEST_COMMAND, None)
+            .expect("macOS must accept Seatbelt proxy configuration");
         let proxy = &request.inner.policy.network_proxy;
 
         assert!(proxy.is_enabled());
@@ -1196,15 +1711,16 @@ mod tests {
 
         // Inspect the internal model the SDK maps to — a unit concern; the public
         // API only hands back the opaque `SandboxRequest`.
-        let request =
-            build_request(&policy, Some("test-container")).expect("build_request should succeed");
+        let request = build_request(&policy, TEST_COMMAND, Some("test-container"))
+            .expect("build_request should succeed");
         assert_eq!(request.inner.script_timeout, 5000);
         assert!(request
             .inner
             .policy
             .readwrite_paths
             .contains(&"/tmp".to_string()));
-        assert!(request.inner.script_code.is_empty());
+        assert!(request.inner.script_code.contains(TEST_COMMAND));
+        assert_eq!(request.inner.container_id, "test-container".to_string());
     }
 
     #[test]
@@ -1219,9 +1735,98 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request should succeed");
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
         request.set_env([("FIRST", "1"), ("SECOND", "2")]);
-        assert_eq!(request.inner.env, vec!["FIRST=1", "SECOND=2"]);
+        assert_eq!(
+            env_of(&request),
+            Some(vec!["FIRST=1".to_string(), "SECOND=2".to_string()])
+        );
+    }
+
+    /// The request's environment as an owned value, so tests can compare it
+    /// against a literal without borrowing a temporary.
+    fn env_of(request: &super::SandboxRequest) -> Option<Vec<String>> {
+        request.env().map(<[String]>::to_vec)
+    }
+
+    #[test]
+    fn set_env_replaces_rather_than_merging() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
+
+        // No environment set yet: the backend supplies its default.
+        assert_eq!(env_of(&request), None::<Vec<String>>);
+
+        request.set_env([("ONLY", "me")]);
+        assert_eq!(env_of(&request), Some(vec!["ONLY=me".to_string()]));
+        assert!(!request.inner.inherit_default_env);
+
+        request.inherit_default_env([("EXTRA", "1")]);
+        request.set_env([("REPLACEMENT", "2")]);
+        assert_eq!(env_of(&request), Some(vec!["REPLACEMENT=2".to_string()]));
+        assert!(!request.inner.inherit_default_env);
+
+        // An empty iterator is a request for an empty environment, which is
+        // distinct from never having set one.
+        request.set_env(Vec::<(String, String)>::new());
+        assert_eq!(env_of(&request), Some(Vec::<String>::new()));
+
+        // clear_env goes back to the backend default.
+        request.inherit_default_env([("EXTRA", "1")]);
+        request.clear_env();
+        assert_eq!(env_of(&request), None::<Vec<String>>);
+        assert!(!request.inner.inherit_default_env);
+    }
+
+    #[test]
+    fn inherit_default_env_flags_the_request_and_keeps_the_extras() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
+        request.inherit_default_env([("EXTRA", "1")]);
+
+        assert!(request.inner.inherit_default_env);
+        assert_eq!(env_of(&request), Some(vec!["EXTRA=1".to_string()]));
+    }
+
+    #[test]
+    fn environment_overrides_replace_exact_duplicate_names() {
+        let mut entries = vec![
+            ("PATH".to_string(), "old".to_string()),
+            ("KEEP".to_string(), "value".to_string()),
+        ];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(
+            entries,
+            vec![
+                ("KEEP".to_string(), "value".to_string()),
+                ("PATH".to_string(), "new".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn environment_overrides_replace_windows_names_case_insensitively() {
+        let mut entries = vec![("Path".to_string(), "old".to_string())];
+        super::apply_environment_overrides(&mut entries, [("PATH", "new")]);
+
+        assert_eq!(entries, vec![("PATH".to_string(), "new".to_string())]);
     }
 
     #[test]
@@ -1246,7 +1851,8 @@ mod tests {
                 }),
                 timeout_ms: None,
             };
-            let request = build_request(&policy, None).expect("build_request should succeed");
+            let request =
+                build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
             assert_eq!(
                 request.inner.policy.ui.clipboard, expected,
                 "clipboard {input:?} should map to {expected:?}"
@@ -1263,7 +1869,7 @@ mod tests {
             blocked_hosts: vec!["198.51.100.10".to_string()],
             ..Default::default()
         });
-        let request = build_request(&policy, None)
+        let request = build_request(&policy, TEST_COMMAND, None)
             .expect("build_request should accept host rules with allowOutbound");
         assert!(request
             .inner
@@ -1285,12 +1891,42 @@ mod tests {
             ..Default::default()
         });
 
-        let error = build_request(&policy, None)
+        let error = build_request(&policy, TEST_COMMAND, None)
             .expect_err("the in-process SDK cannot start the built-in test proxy");
 
         assert!(error.message.contains("builtinTestServer"));
         assert!(error.message.contains("in-process Rust SDK"));
         assert!(error.message.contains("localhost or url"));
+    }
+
+    #[test]
+    fn request_builders_reject_an_empty_script() {
+        let policy: SandboxPolicy =
+            serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
+
+        let errors = [
+            (
+                "build_request",
+                build_request(&policy, "", None).expect_err("empty script should be rejected"),
+            ),
+            (
+                "build_request_with_containment",
+                build_request_with_containment(&policy, &Containment::Process, "", None)
+                    .expect_err("empty script should be rejected"),
+            ),
+        ];
+
+        for (entry_point, error) in errors {
+            assert_eq!(
+                error.code,
+                crate::ErrorCode::MalformedRequest,
+                "{entry_point}"
+            );
+            assert!(
+                error.message.contains("script parameter is required"),
+                "{entry_point} unexpected error: {error:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1305,7 +1941,7 @@ mod tests {
         };
         // build_request resolves Seatbelt on macOS, so the config is present and
         // the consumer can read its defaults and write back.
-        let mut request = build_request(&policy, None).expect("build_request");
+        let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
         union.push("com.example.service".to_string());
         request.set_seatbelt_extra_mach_lookups(union.clone());
@@ -1323,6 +1959,7 @@ mod tests {
             .contains(&"com.example.service".to_string()));
     }
 
+    #[cfg(target_os = "windows")]
     fn process_container_with_capture_denials(config: CaptureDenials) -> Containment {
         Containment::ProcessContainer(ProcessContainer {
             capture_denials: Some(config),
@@ -1370,7 +2007,7 @@ mod tests {
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
-        let request = build_request_with_containment(&policy, &containment, None)
+        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
             .expect("build_request_with_containment");
 
         let captured = request
@@ -1390,13 +2027,14 @@ mod tests {
         let mut policy = minimal_policy();
         policy.version = "0.8.0-alpha".to_string();
         let containment = process_container_with_capture_denials(CaptureDenials::default());
-        let request = build_request_with_containment(&policy, &containment, None)
+        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
             .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_some());
 
         let request = build_request_with_containment(
             &policy,
             &Containment::ProcessContainer(ProcessContainer::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("build_request_with_containment");
@@ -1446,20 +2084,30 @@ mod tests {
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
         let config = serde_json::json!({
-            "process": { "commandLine": "echo hello" },
+            "version": "0.9.0-alpha",
+            "process": { "commandLine": TEST_COMMAND },
             "containment": "processcontainer",
             "network": {
-                "defaultPolicy": "allow",
-                "proxy": { "localhost": 8080 },
+                "egress": {"default": "deny"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"},
             },
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
             "processContainer": {
                 "captureDenials": { "mode": "allow" },
             },
         });
 
         let mut logger = super::Logger::new(super::Mode::Buffer);
-        let request = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
-            .expect("captureDenials alongside network.proxy satisfies the wire contract");
+        let json = serde_json::to_string(&config).unwrap();
+        let request =
+            match wxc_common::config_parser::load_mxc_request_from_json(&json, &mut logger)
+                .expect("captureDenials alongside network.proxy satisfies the exact contract")
+            {
+                wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
+                wxc_common::state_aware_request::MxcRequest::StateAware(_) => {
+                    panic!("expected a one-shot request")
+                }
+            };
 
         assert!(
             request.policy.capture_denials.is_some(),
@@ -1493,7 +2141,7 @@ mod tests {
             retain_etl: true,
         });
 
-        let request = build_request_with_containment(&policy, &containment, None)
+        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
             .expect("captureDenials and network.proxy are accepted together");
 
         let captured = request
@@ -1520,11 +2168,28 @@ mod tests {
         }
     }
 
+    fn development_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            ..minimal_policy()
+        }
+    }
+
+    fn development_policy_with_network(network: NetworkSection) -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            filesystem: None,
+            network: Some(network),
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
     #[test]
     fn default_containment_resolves_the_host_backend() {
         // `build_request` must keep resolving the host's native backend — the
         // WSLC selection is strictly opt-in and must not change the default.
-        let request = build_request(&minimal_policy(), None).expect("build_request");
+        let request = build_request(&minimal_policy(), TEST_COMMAND, None).expect("build_request");
         assert_ne!(request.inner.containment, ContainmentBackend::Wslc);
     }
 
@@ -1542,9 +2207,13 @@ mod tests {
             port_mappings: vec![(8080, 80)],
             ..Default::default()
         };
-        let request =
-            build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
-                .expect("build_request_with_containment");
+        let request = build_request_with_containment(
+            &development_policy(),
+            &Containment::Wslc(wslc),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
 
         assert_eq!(request.inner.containment, ContainmentBackend::Wslc);
         let config = request
@@ -1569,8 +2238,9 @@ mod tests {
         // `WslcSection::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("build_request_with_containment");
@@ -1592,14 +2262,65 @@ mod tests {
         // the caller opts in explicitly, exactly like the SDK's
         // `SandboxSpawnOptions.experimental`.
         let mut request = build_request_with_containment(
-            &minimal_policy(),
+            &development_policy(),
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("build_request_with_containment");
         assert!(!request.inner.experimental_enabled);
         request.set_experimental(true);
         assert!(request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn telemetry_enablement_is_stable_and_independent_of_experimental_mode() {
+        let mut request =
+            build_request(&minimal_policy(), TEST_COMMAND, None).expect("build_request");
+        assert!(request.inner.telemetry.is_none());
+        assert!(!request.inner.experimental_enabled);
+
+        request.set_telemetry_opt_in(true);
+        assert_eq!(request.telemetry_enabled(), Some(true));
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            Some("process")
+        );
+        assert!(
+            !request.inner.experimental_enabled,
+            "stable telemetry enablement must not opt into experimental features"
+        );
+
+        request.set_telemetry_opt_in(false);
+        assert_eq!(request.telemetry_enabled(), Some(false));
+        assert!(!request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn telemetry_enablement_preserves_explicit_containment_intent() {
+        let containment = ProcessContainer::default();
+        let mut request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::ProcessContainer(containment),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
+
+        request.set_telemetry_opt_in(true);
+
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            Some("processcontainer")
+        );
     }
 
     #[test]
@@ -1610,8 +2331,13 @@ mod tests {
             port_mappings: vec![(8080, 80), (8080, 81)],
             ..Default::default()
         };
-        let err = build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
-            .expect_err("duplicate windowsPort must be rejected");
+        let err = build_request_with_containment(
+            &development_policy(),
+            &Containment::Wslc(wslc),
+            TEST_COMMAND,
+            None,
+        )
+        .expect_err("duplicate windowsPort must be rejected");
         assert!(
             err.message.contains("duplicate windowsPort"),
             "got: {}",
@@ -1624,7 +2350,7 @@ mod tests {
         // WSLc cannot enforce per-host egress filtering (containers lack
         // CAP_NET_ADMIN), so allowedHosts with a default-block policy is
         // rejected at build time rather than silently ignored.
-        let policy = policy_with_network(NetworkSection {
+        let policy = development_policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
@@ -1632,11 +2358,13 @@ mod tests {
         let err = build_request_with_containment(
             &policy,
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect_err("WSLc must reject per-host egress filtering");
         assert!(
-            err.message.contains("per-host egress filtering"),
+            err.message
+                .contains("schema 0.9.0-alpha no longer accepts legacy network authoring"),
             "got: {}",
             err.message
         );
@@ -1653,14 +2381,29 @@ mod tests {
         }
     }
 
+    fn isolation_session_directional_network() -> NetworkSection {
+        NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Allow),
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn isolation_session_names_the_backend_and_carries_no_section() {
         // The one-shot surface takes no backend configuration at all, so the
         // wire config must name the backend and add nothing else — unlike
         // WSLc, which also writes an `experimental.wslc` block.
-        let policy = policy_with_network(isolation_session_network());
-        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
-            .expect("build_wire_config");
+        let policy = development_policy();
+        let config =
+            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
+                .expect("build_wire_config");
         assert_eq!(config["containment"], "isolation_session");
         assert!(
             config.get("experimental").is_none(),
@@ -1669,36 +2412,36 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_carries_the_unrestricted_network_acknowledgment() {
-        // The backend accepts *only* this shape and refuses an absent policy,
-        // so the SDK types must be able to express it.
-        let policy = policy_with_network(isolation_session_network());
-        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
-            .expect("build_wire_config");
-        assert_eq!(config["network"]["defaultPolicy"], "allow");
-        assert_eq!(config["network"]["allowLocalNetwork"], true);
-        assert_eq!(
-            config["network"]["allowedHosts"].as_array().map(Vec::len),
-            Some(0)
-        );
-        assert_eq!(
-            config["network"]["blockedHosts"].as_array().map(Vec::len),
-            Some(0)
-        );
-        assert!(
-            config["network"].get("proxy").is_none(),
-            "no proxy expected"
-        );
+    fn isolation_session_rejects_the_removed_legacy_acknowledgment() {
+        let policy = development_policy_with_network(isolation_session_network());
+        let legacy =
+            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
+                .expect("the test-only rolling builder retains legacy characterization");
+        assert_eq!(legacy["network"]["defaultPolicy"], "allow");
+        let error = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect_err("legacy network values cannot acknowledge v0.9 networking");
+        assert!(error
+            .message
+            .contains("schema 0.9.0-alpha no longer accepts legacy"));
     }
 
     #[test]
     fn isolation_session_is_not_experimental_enabled_by_default() {
         // Selecting an experimental backend must not silently satisfy the
         // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
-        let policy = policy_with_network(isolation_session_network());
-        let mut request =
-            build_request_with_containment(&policy, &Containment::IsolationSession, None)
-                .expect("build_request_with_containment");
+        let policy = development_policy_with_network(isolation_session_directional_network());
+        let mut request = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         assert!(!request.inner.experimental_enabled);
         request.set_experimental(true);
         assert!(request.inner.experimental_enabled);
@@ -1706,12 +2449,35 @@ mod tests {
 
     #[test]
     fn isolation_session_selects_the_backend() {
-        let policy = policy_with_network(isolation_session_network());
-        let request = build_request_with_containment(&policy, &Containment::IsolationSession, None)
-            .expect("build_request_with_containment");
+        let policy = development_policy_with_network(isolation_session_directional_network());
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         assert_eq!(
             request.inner.containment,
             ContainmentBackend::IsolationSession
+        );
+    }
+
+    #[test]
+    fn isolation_session_requires_an_explicit_network_policy() {
+        let error = build_request_with_containment(
+            &development_policy(),
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect_err("IsolationSession must require its unrestricted network acknowledgment");
+
+        assert!(
+            error
+                .message
+                .contains("IsolationSession requires an explicit network policy"),
+            "unexpected error: {error}"
         );
     }
 }

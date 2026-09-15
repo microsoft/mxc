@@ -3,7 +3,7 @@
 
 //! `BaseContainerRunner` — executes scripts through the Windows BaseContainer APIs.
 //!
-//! The runner prefers the PSEC 1.0 / `CreateProcessSecurityEnvironment`
+//! The runner prefers the PSEC / `CreateProcessSecurityEnvironment`
 //! two-phase contract whenever its runtime probe succeeds and attaches the
 //! resulting environment to `CreateProcessW`. It temporarily falls back to the
 //! legacy `SandboxSpec` / one-shot `Experimental_CreateProcessInSandbox`
@@ -40,6 +40,7 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::base_container_helpers::{
     build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
+    PsecContract,
 };
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -52,20 +53,24 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
-    diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
-    is_environment_not_supported,
+    diagnose_create_process_failure, diagnose_environment_not_supported,
+    diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
+    validate_required_child_env,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use sandbox_spec::base_container_layout::IntegrityLevel;
+use wxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
+};
 use wxc_common::error::WxcError;
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ExecutionRequest, FailurePhase, ProxyAddress,
-    SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
+    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -83,6 +88,23 @@ use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
+/// Build the environment block handed to the contained child.
+///
+/// Honors the three states of [`ExecutionRequest::env`]:
+///
+/// * `None` — no environment supplied. The child gets a clean default user
+///   profile block (never the `wxc-exec` process's own variables). When the
+///   legacy one-shot SBOX API is in play and no proxy has to be injected, we
+///   return `Ok(None)` so the API supplies that default itself.
+/// * `Some(entries)` — the caller's environment, used **verbatim**. MXC adds
+///   nothing to it, including when `entries` is empty: an explicitly empty
+///   environment produces an empty block, not the default one. Proxy variables
+///   are still injected, because the proxy is enforced policy rather than
+///   inherited environment.
+///
+/// When `inherit_default_env` is set, `entries` is layered on top of the
+/// default block instead of replacing it, which is the supported way to ask for
+/// "the user's profile block plus these".
 fn build_child_env_block(
     request: &ExecutionRequest,
     use_process_security_environment: bool,
@@ -93,17 +115,23 @@ fn build_child_env_block(
         None
     };
 
-    let entries = if request.env.is_empty() {
-        if !use_process_security_environment && proxy_address.is_none() {
-            return Ok(None);
+    let entries = match request.env.as_deref() {
+        None => {
+            if !use_process_security_environment && proxy_address.is_none() {
+                return Ok(None);
+            }
+            let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
+            if let Some(address) = proxy_address {
+                crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
+            }
+            entries
         }
-        let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
-        if let Some(address) = proxy_address {
-            crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
+        Some(supplied) if request.inherit_default_env => {
+            crate::appcontainer_runner::build_inherited_entries(supplied, proxy_address)?
         }
-        entries
-    } else {
-        crate::appcontainer_runner::build_explicit_entries(&request.env, proxy_address)
+        Some(supplied) => {
+            crate::appcontainer_runner::build_explicit_entries(supplied, proxy_address)
+        }
     };
     Ok(Some(crate::appcontainer_runner::encode_env_block(&entries)))
 }
@@ -579,6 +607,20 @@ impl BaseContainerRunner {
         })
     }
 
+    /// Whether the native PSEC plus Learning Mode API set is available.
+    ///
+    /// This does not start a Learning Mode trace. It also does not evaluate
+    /// whether a particular request is compatible with PSEC.
+    pub fn is_native_capture_available() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
+            return forced == "1";
+        }
+
+        Self::is_process_security_environment_usable()
+            && RealCapturePlatformSupport.check_apis(true).is_ok()
+    }
+
     /// Whether this host can create a PSEC environment and start a Learning Mode trace.
     ///
     /// The successful probe session is dropped immediately, which closes and discards the trace.
@@ -629,6 +671,31 @@ impl BaseContainerRunner {
     pub fn base_container_supports_deny_paths() -> bool {
         Self::query_sandbox_capabilities()
             .is_some_and(|capabilities| Self::decode_deny_capability(1, capabilities))
+    }
+
+    /// Whether a BaseContainer contract can enforce `filesystem.deniedPaths`.
+    pub fn supports_native_denied_paths() -> bool {
+        let psec_supported = Self::is_process_security_environment_usable()
+            && SecurityEnvironmentApi::load()
+                .and_then(|api| api.supports_deny_paths())
+                .unwrap_or(false);
+        let sbox_capabilities = Self::query_sandbox_capabilities();
+        Self::native_denied_paths_supported(psec_supported, sbox_capabilities)
+    }
+
+    fn native_denied_paths_supported(psec_supported: bool, sbox_capabilities: Option<u64>) -> bool {
+        psec_supported
+            || sbox_capabilities.is_some_and(|capabilities| {
+                Self::decode_create_capability(1, capabilities)
+                    && Self::decode_deny_capability(1, capabilities)
+            })
+    }
+
+    /// Whether BaseContainer can enforce
+    /// `network.ingress.hostLoopback = "allow"`.
+    pub fn supports_ingress_host_loopback_allow() -> bool {
+        Self::is_process_security_environment_usable()
+            && Self::query_psec_ingress_support().unwrap_or(false)
     }
 
     /// Decode a `QuerySandboxSupport` result for the deny-paths capability.
@@ -697,16 +764,53 @@ impl BaseContainerRunner {
         )
     }
 
-    fn validate_resolved_network_contract(
-        request: &ExecutionRequest,
-        use_process_security_environment: bool,
-    ) -> Result<(), ScriptResponse> {
-        if use_process_security_environment
-            || Self::legacy_sbox_compatible_with_request(
-                request,
-                Self::query_sandbox_capabilities(),
+    fn resolve_psec_contract(request: &ExecutionRequest) -> Result<PsecContract, ScriptResponse> {
+        let contract = PsecContract::for_request(request);
+        // PSEC 1.0 preserves the default ingress posture through capability
+        // mapping; only unrestricted host-loopback access requires PSEC 1.1.
+        if contract == PsecContract::V1_0 {
+            return Ok(contract);
+        }
+
+        // PSEC 1.1 is usable only when the OS reports both the contract version
+        // and the ingress capability bit.
+        let psec_ingress_contract_supported =
+            Self::query_psec_ingress_support().map_err(|error| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&format!(
+                    "failed to query Process Security Environment ingress support: {error}"
+                ))
+            })?;
+        if psec_ingress_contract_supported {
+            return Ok(contract);
+        }
+        Err(ScriptResponse {
+            failure_phase: FailurePhase::Rejected,
+            ..ScriptResponse::error(
+                "network.ingress.hostLoopback='allow' requires Process Security Environment \
+                 contract version 1.1 with ingress support",
             )
-        {
+        })
+    }
+
+    fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
+        let api = SecurityEnvironmentApi::load()?;
+        if !api.supports_version(1, 1)? {
+            return Ok(false);
+        }
+        api.supports_network_ingress()
+    }
+
+    /// Transitional guard for the legacy SBOX fallback. Remove it with the
+    /// remaining `Experimental_CreateProcessInSandbox` path once PSEC adoption
+    /// reaches critical mass; tracked by #1129.
+    ///
+    /// Fail closed when the selected legacy SBOX contract cannot preserve the
+    /// requested network policy; PSEC ingress support is resolved separately.
+    fn validate_legacy_sbox_network_contract(
+        request: &ExecutionRequest,
+    ) -> Result<(), ScriptResponse> {
+        if Self::legacy_sbox_compatible_with_request(request, Self::query_sandbox_capabilities()) {
             return Ok(());
         }
 
@@ -1125,6 +1229,11 @@ impl BaseContainerRunner {
             logger,
         );
 
+        let use_process_security_environment = self.uses_process_security_environment(request);
+        let psec_contract = use_process_security_environment
+            .then(|| Self::resolve_psec_contract(request))
+            .transpose()?;
+
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
         if request.policy.network_proxy.builtin_test_server {
@@ -1161,12 +1270,8 @@ impl BaseContainerRunner {
                  the WinHTTP stack will be proxied; other HTTP stacks may bypass it.",
             );
         }
-
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
-
         let capture_denials = request.policy.capture_denials.clone();
-        let use_process_security_environment = self.uses_process_security_environment(&request);
-        Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
             let bytes = build_sbox_spec(&request);
@@ -1179,15 +1284,18 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec =
-            use_process_security_environment.then(|| build_psec_spec(&request));
-        if let Some(psec_spec) = process_security_environment_spec.as_ref() {
+        let process_security_environment_spec = psec_contract.map(|contract| {
+            let psec_spec = build_psec_spec(&request);
+            let contract_version = contract.version();
             let _ = writeln!(
                 logger,
-                "process security environment spec built (PSEC 1.0, {} bytes)",
+                "process security environment spec built (PSEC {}.{}, {} bytes)",
+                contract_version.major,
+                contract_version.minor,
                 psec_spec.len()
             );
-        }
+            psec_spec
+        });
 
         // Resolve two paths for the capture:
         //   * `capture_etl_path` — a runner-managed `.etl` in a protected
@@ -1527,7 +1635,11 @@ impl BaseContainerRunner {
         if use_process_security_environment {
             let psec_spec = process_security_environment_spec
                 .as_deref()
-                .expect("PSEC spec is initialized when the PSEC path is selected");
+                .ok_or_else(|| {
+                    ScriptResponse::error(
+                        "internal error: PSEC contract resolved without a specification",
+                    )
+                })?;
             if capture_denials.is_some() {
                 match self
                     .capture_factory
@@ -1742,11 +1854,18 @@ impl BaseContainerRunner {
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
             //
-            let diag = diagnose_create_process_failure(
-                err.0,
-                &request.script_code,
-                &request.policy.readonly_paths,
-            );
+            let diagnostic_env = if request.inherit_default_env {
+                None
+            } else {
+                request.env.as_deref()
+            };
+            let diag = diagnose_missing_required_env(err.0, diagnostic_env).unwrap_or_else(|| {
+                diagnose_create_process_failure(
+                    err.0,
+                    &request.script_code,
+                    &request.policy.readonly_paths,
+                )
+            });
 
             let mut extended_error = format!(
                 "{launch_api_name} failed: {err:?} (working directory: {})",
@@ -1987,6 +2106,53 @@ impl BaseContainerRunner {
             });
         }
 
+        wxc_common::telemetry::log_network_policy_applied(
+            sanitize_identity(&identity),
+            request.policy.network_enforcement_mode.as_str(),
+            request.policy.default_network_policy.as_str(),
+            request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|address| address.port as u64)
+                .unwrap_or(0),
+        );
+        if logger.has_diagnostic_sink() {
+            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&identity))
+                .str(
+                    "tier",
+                    crate::fallback_detector::IsolationTier::BaseContainer.as_str(),
+                )
+                .str(
+                    "enforcement_mode",
+                    request.policy.network_enforcement_mode.as_str(),
+                )
+                .str(
+                    "default_policy",
+                    request.policy.default_network_policy.as_str(),
+                )
+                .u64(
+                    "proxy_port",
+                    request
+                        .policy
+                        .network_proxy
+                        .address
+                        .as_ref()
+                        .map(|address| address.port as u64)
+                        .unwrap_or(0),
+                )
+                .u64("firewall_rules_created", 0)
+                .bool("firewall_applied", false)
+                .str(
+                    "status",
+                    wxc_common::audit::OperationStatus::Success.as_str(),
+                );
+            logger.log_audit_event(&record);
+        }
+
         // Hand ownership to the caller via `BaseChild`, which performs
         // sandbox/proxy teardown after the child exits. `job` is always present
         // here (we failed closed above); the `Option` and the root-only fallback
@@ -2001,6 +2167,7 @@ impl BaseContainerRunner {
             stderr_read,
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
             destroy_on_exit: legacy_destroy_on_exit,
+            preserve_policy: request.lifecycle.preserve_policy,
             proxy_enabled: request.policy.network_proxy.is_enabled(),
             identity,
             sid_string,
@@ -2036,6 +2203,7 @@ struct BaseChild {
     stderr_read: Option<OwnedHandle>,
     timeout_ms: u32,
     destroy_on_exit: bool,
+    preserve_policy: bool,
     proxy_enabled: bool,
     identity: String,
     sid_string: String,
@@ -2067,6 +2235,7 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -2088,7 +2257,11 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
-        Self::validate_resolved_network_contract(request, use_process_security_environment)?;
+        // A selected legacy SBOX contract must not silently drop networking
+        // fields that only PSEC can represent.
+        if !use_process_security_environment {
+            Self::validate_legacy_sbox_network_contract(request)?;
+        }
         // BaseContainer's native PSEC/V2 capture seals its own ETL, so when it
         // is selected retainEtl is honored natively regardless of the guarded
         // provider's transfer capability (the native-capture exception).
@@ -2193,7 +2366,9 @@ impl SandboxBackend for BaseContainerRunner {
         // the binary's own std handles / console (a TTY when the binary has one).
         let capture = stdio == StdioMode::Pipes;
         let child = self.spawn_base(request, logger, capture)?;
-        Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+        Ok(Box::new(BaseContainerSandboxProcess::from_child(
+            child, logger,
+        )))
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
@@ -2224,6 +2399,7 @@ struct BaseContainerSandboxProcess {
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
     destroy_on_exit: bool,
+    preserve_policy: bool,
     proxy_enabled: bool,
     identity: String,
     sid_string: String,
@@ -2250,6 +2426,7 @@ struct BaseContainerSandboxProcess {
     last_exit_code: Option<i32>,
     /// Structured output published after capture teardown succeeds.
     output_metadata: Option<SandboxOutputMetadata>,
+    audit_logger: Logger,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -2259,7 +2436,7 @@ struct BaseContainerSandboxProcess {
 unsafe impl Send for BaseContainerSandboxProcess {}
 
 impl BaseContainerSandboxProcess {
-    fn from_child(mut child: BaseChild) -> Self {
+    fn from_child(mut child: BaseChild, logger: &Logger) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
@@ -2279,8 +2456,9 @@ impl BaseContainerSandboxProcess {
             stderr_canceller,
             timeout_ms: child.timeout_ms,
             destroy_on_exit: child.destroy_on_exit,
+            preserve_policy: child.preserve_policy,
             proxy_enabled: child.proxy_enabled,
-            identity: std::mem::take(&mut child.identity),
+            identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_result: None,
@@ -2293,14 +2471,30 @@ impl BaseContainerSandboxProcess {
             retain_capture_etl: child.retain_capture_etl,
             last_exit_code: None,
             output_metadata: None,
+            audit_logger: logger.clone_diagnostic_sink(),
         }
+    }
+
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", &self.identity)
+            .str(
+                "tier",
+                crate::fallback_detector::IsolationTier::BaseContainer.as_str(),
+            )
+            .u64("pid", self.pid as u64)
+    }
+
+    fn audit_enabled(&self) -> bool {
+        self.audit_logger.has_diagnostic_sink()
     }
 
     fn run_teardown(&mut self, allow_retention: bool) -> std::io::Result<()> {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = self.audit_logger.clone_diagnostic_sink();
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
@@ -2481,13 +2675,48 @@ impl BaseContainerSandboxProcess {
             );
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
-        self.proxy_coordinator.stop(&mut logger);
+        let proxy_stopped = self.proxy_coordinator.stop(&mut logger);
         let result = capture_result
             .and(guarded_capture_result)
             .map(|_| ())
             .map_err(|error| error.to_string());
+        self.log_teardown(&result, proxy_stopped);
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
+    }
+
+    fn log_teardown(&mut self, capture_result: &Result<(), String>, proxy_stopped: bool) {
+        if !self.audit_enabled() && !wxc_common::telemetry::is_active() {
+            return;
+        }
+        let (status, skip_reason) = base_container_teardown_status(
+            capture_result.is_err(),
+            self.destroy_on_exit,
+            self.preserve_policy,
+        );
+        wxc_common::telemetry::log_sandbox_torn_down(
+            &self.identity,
+            status.as_str(),
+            &format!(
+                "firewall_rules_removed=0,bfs_removed=false,proxy_stopped={proxy_stopped},\
+                 container_released=false"
+            ),
+        );
+        if self.audit_enabled() {
+            let mut record = self
+                .audit(AuditEventName::SandboxTornDown)
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", 0)
+                .bool("firewall_removal_ok", true)
+                .bool("bfs_removed", false)
+                .bool("proxy_stopped", proxy_stopped)
+                .bool("preserve_policy", self.preserve_policy)
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            self.audit_logger.log_audit_event(&record);
+        }
     }
 
     fn release_guarded_capture_after_termination_failure(&mut self) {
@@ -2506,30 +2735,49 @@ impl BaseContainerSandboxProcess {
 
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
         if let Some(job) = &self.job {
+            if let Err(error) = job.terminate_raw(u32::MAX) {
+                self.record_kill_failure(KillMethod::TerminateJobObject, &error);
+                return Err(std::io::Error::other(format!(
+                    "TerminateJobObject: {error}"
+                )));
+            }
             if self.guarded_capture_session.is_some() {
                 // Guarded-WPR capture needs strict drain certainty: the ETL is
                 // only safely scoped if the job is proven to have fully drained
                 // before the trace is stopped/discarded.
-                job.terminate_and_wait(u32::MAX)
+                job.wait_for_empty()
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
             } else {
                 // Ordinary run: terminate the tree, but a slow drain is a
                 // warning, not a hard failure that would discard an otherwise
                 // valid result.
-                match job.terminate_best_effort(u32::MAX) {
-                    Ok(Some(drain_warning)) => write_stderr_line_best_effort(format_args!(
+                if let Err(drain_warning) = job.wait_for_empty() {
+                    write_stderr_line_best_effort(format_args!(
                         "sandbox job did not fully drain within the teardown window \
                          (continuing): {drain_warning}"
-                    )),
-                    Ok(None) => {}
-                    Err(error) => return Err(std::io::Error::other(error.to_string())),
+                    ));
                 }
             }
-        } else {
-            unsafe { TerminateProcess(self.process.get(), u32::MAX) }
-                .map_err(|error| std::io::Error::other(format!("TerminateProcess: {error}")))?;
+        } else if let Err(error) = unsafe { TerminateProcess(self.process.get(), u32::MAX) } {
+            self.record_kill_failure(KillMethod::TerminateProcess, &error);
+            return Err(std::io::Error::other(format!("TerminateProcess: {error}")));
         }
         Ok(())
+    }
+
+    fn record_kill_failure(&mut self, method: KillMethod, error: &windows::core::Error) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str(), error.code().0),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessKillFailed)
+                .str("kill_method", method.as_str())
+                .i64("error_code", error.code().0 as i64);
+            self.audit_logger.log_audit_event(&record);
+        }
     }
 
     fn terminate_and_reap(&mut self) -> std::io::Result<()> {
@@ -2679,6 +2927,29 @@ fn remove_managed_capture_path(path: &Path, directory: Option<&Path>) -> std::io
         ))),
     }
 }
+
+fn base_container_teardown_status(
+    capture_failed: bool,
+    destroy_on_exit: bool,
+    preserve_policy: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if capture_failed {
+        (TeardownStatus::Failure, None)
+    } else if preserve_policy {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        )
+    } else if destroy_on_exit {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::CleanupNotImplemented),
+        )
+    } else {
+        (TeardownStatus::Success, None)
+    }
+}
+
 impl SandboxProcess for BaseContainerSandboxProcess {
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
@@ -2748,13 +3019,38 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
-                    Ok(code as i32)
+                    let exit_code = code as i32;
+                    wxc_common::telemetry::log_process_event(
+                        &self.identity,
+                        self.pid,
+                        wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                    );
+                    if self.audit_enabled() {
+                        let record = self
+                            .audit(AuditEventName::ProcessExited)
+                            .i64("exit_code", exit_code as i64);
+                        self.audit_logger.log_audit_event(&record);
+                    }
+                    Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("script timed out after {}ms", self.timeout_ms),
-            )),
+            WAIT_TIMEOUT => {
+                wxc_common::telemetry::log_process_event(
+                    &self.identity,
+                    self.pid,
+                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+                );
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessTimedOut)
+                        .u64("timeout_ms", self.timeout_ms as u64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
+            }
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
@@ -2972,7 +3268,6 @@ fn derive_sid_string_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_container_helpers::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
     use crate::job_object::to_job_object_uilimit_mask;
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
@@ -3588,11 +3883,10 @@ mod tests {
 
     #[test]
     fn decode_deny_capability_table() {
-        // create bit alone does not imply deny support, and vice versa.
         let cap = SANDBOX_CAP_FS_DENY;
-        assert!(!BaseContainerRunner::decode_deny_capability(0, cap)); // FALSE return
-        assert!(!BaseContainerRunner::decode_deny_capability(1, 0)); // bit clear
-        assert!(BaseContainerRunner::decode_deny_capability(1, cap)); // enabled
+        assert!(!BaseContainerRunner::decode_deny_capability(0, cap));
+        assert!(!BaseContainerRunner::decode_deny_capability(1, 0));
+        assert!(BaseContainerRunner::decode_deny_capability(1, cap));
         assert!(!BaseContainerRunner::decode_deny_capability(
             1,
             SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
@@ -3600,6 +3894,23 @@ mod tests {
         assert!(BaseContainerRunner::decode_deny_capability(
             1,
             cap | SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+        ));
+    }
+
+    #[test]
+    fn native_denied_paths_include_usable_sbox_support() {
+        let sbox_capabilities = SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_FS_DENY;
+
+        assert!(BaseContainerRunner::native_denied_paths_supported(
+            false,
+            Some(sbox_capabilities)
+        ));
+        assert!(BaseContainerRunner::native_denied_paths_supported(
+            true, None
+        ));
+        assert!(!BaseContainerRunner::native_denied_paths_supported(
+            false,
+            Some(SANDBOX_CAP_FS_DENY)
         ));
     }
 
@@ -3663,11 +3974,7 @@ mod tests {
         let mut request = request_with_rich_network_rules();
         request.policy.capture_denials = Some(Default::default());
 
-        assert!(
-            BaseContainerRunner::validate_resolved_network_contract(&request, true).is_ok(),
-            "PSEC preserves the complete directional policy"
-        );
-        let error = BaseContainerRunner::validate_resolved_network_contract(&request, false)
+        let error = BaseContainerRunner::validate_legacy_sbox_network_contract(&request)
             .expect_err("a late PSEC-to-SBOX transition must fail closed");
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
         assert!(error
@@ -3679,7 +3986,22 @@ mod tests {
     fn resolved_sbox_contract_accepts_compatible_networking() {
         let request = ExecutionRequest::default();
 
-        assert!(BaseContainerRunner::validate_resolved_network_contract(&request, false).is_ok());
+        assert!(BaseContainerRunner::validate_legacy_sbox_network_contract(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_sparse_verbatim_environment_before_host_probes() {
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest {
+            env: Some(vec!["SystemRoot=C:\\Windows".to_string()]),
+            ..Default::default()
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("BaseContainer must reject the environment before launch");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("LOCALAPPDATA"));
     }
 
     #[test]
@@ -3690,7 +4012,7 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        request.env = vec!["PATH=C:\\Windows".to_string()];
+        request.env = Some(vec!["PATH=C:\\Windows".to_string()]);
 
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
@@ -3704,6 +4026,107 @@ mod tests {
         assert!(rendered.contains("PATH=C:\\Windows"));
         assert!(rendered.contains("HTTP_PROXY=http://127.0.0.1:8080"));
         assert!(rendered.contains("HTTPS_PROXY=http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn absent_env_yields_the_default_user_environment() {
+        // No caller environment: the child must get a populated default block,
+        // not an empty one.
+        let request = ExecutionRequest::default();
+        assert!(request.env.is_none());
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("PSEC always needs an explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+        assert!(
+            rendered.len() > 2,
+            "default block should carry the user profile variables"
+        );
+    }
+
+    #[test]
+    fn absent_env_defers_to_the_sbox_api_default() {
+        // The legacy one-shot API supplies its own default when handed NULL,
+        // and there is no proxy to inject, so we pass NULL rather than
+        // building a block ourselves.
+        let request = ExecutionRequest::default();
+        assert!(build_child_env_block(&request, false)
+            .expect("environment")
+            .is_none());
+    }
+
+    #[test]
+    fn explicitly_empty_env_yields_an_empty_block_not_the_default() {
+        // `"env": []` is a request for an empty environment. It must not be
+        // silently upgraded to the default profile block, and it must not
+        // become NULL (which the SBOX API reads as "give me the default").
+        let request = ExecutionRequest {
+            env: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        for psec in [true, false] {
+            let environment = build_child_env_block(&request, psec)
+                .expect("environment")
+                .expect("an explicitly empty env must still produce a block");
+            assert_eq!(
+                environment.len(),
+                2,
+                "an empty block still requires two terminators"
+            );
+            assert_eq!(environment, vec![0u16, 0u16]);
+        }
+    }
+
+    #[test]
+    fn supplied_env_is_used_verbatim() {
+        // MXC adds nothing to a caller-supplied environment -- notably not the
+        // variables Windows requires to be present. A caller that replaces the
+        // block owns its contents; a missing requirement surfaces as an
+        // actionable launch error instead.
+        let request = ExecutionRequest {
+            env: Some(vec!["MYVAR=hello".to_string()]),
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+
+        assert!(rendered.contains("MYVAR=hello"));
+        assert!(!rendered.to_ascii_uppercase().contains("SYSTEMROOT"));
+        assert!(!rendered.to_ascii_uppercase().contains("LOCALAPPDATA"));
+    }
+
+    #[test]
+    fn inherit_default_env_layers_the_caller_entries_on_the_default_block() {
+        // `inheritDefaultEnv` is how a caller asks for "the profile block plus
+        // these": the defaults must survive, and a caller entry must replace
+        // the same-named default rather than being appended alongside it.
+        let request = ExecutionRequest {
+            env: Some(vec![
+                "MYVAR=hello".to_string(),
+                "systemroot=C:\\Override".to_string(),
+            ]),
+            inherit_default_env: true,
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request, true)
+            .expect("environment")
+            .expect("explicit block");
+        let rendered = String::from_utf16_lossy(&environment);
+
+        assert!(rendered.contains("MYVAR=hello"));
+        assert!(rendered.to_ascii_uppercase().contains("LOCALAPPDATA"));
+        assert!(rendered.contains("systemroot=C:\\Override"));
+        assert_eq!(
+            rendered.to_ascii_uppercase().matches("SYSTEMROOT=").count(),
+            1,
+            "a caller entry must replace the default, not duplicate it"
+        );
     }
 
     #[test]
@@ -3886,7 +4309,7 @@ mod tests {
     }
 
     #[test]
-    fn build_process_security_environment_spec_enables_host_loopback() {
+    fn psec_1_1_encodes_host_loopback_ingress() {
         let mut request = ExecutionRequest::default();
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Deny,
@@ -3895,13 +4318,37 @@ mod tests {
 
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let ingress = spec
+            .network_policy()
+            .and_then(|network| network.ingress())
+            .expect("PSEC 1.1 must carry host-loopback policy");
+
+        assert_eq!(spec.version().minor(), 1);
+        assert!(spec.capabilities().is_none());
+        assert_eq!(ingress.default_action(), psec_layout::FilterAction::deny);
+        assert_eq!(ingress.host_loopback(), psec_layout::FilterAction::allow);
+    }
+
+    #[test]
+    fn psec_1_0_uses_capability_for_ingress_default_allow() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+        request.policy.allowed_proxy_peer = Some("S-1-15-2-1".into());
+
+        let bytes = build_psec_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().expect("network policy");
 
-        assert_eq!(spec.capabilities(), Some(LOOPBACK_NETWORK_CAPABILITY));
+        assert_eq!(spec.version().minor(), 0);
         assert_eq!(
-            network.allowed_appcontainer_peer(),
-            Some(LOOPBACK_NETWORK_PEER)
+            spec.capabilities(),
+            Some(crate::network_policy_helpers::PRIVATE_NETWORK_CAPABILITY)
         );
+        assert_eq!(network.allowed_appcontainer_peer(), Some("S-1-15-2-1"));
+        assert!(network.ingress().is_none());
     }
 
     #[test]

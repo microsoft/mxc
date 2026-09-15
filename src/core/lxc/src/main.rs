@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_one_shot_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::handle_dry_run_exit;
@@ -50,6 +50,10 @@ struct Cli {
     /// test HTTP proxy). Distinct from --experimental.
     #[arg(long = "allow-testing-features")]
     allow_testing_features: bool,
+
+    /// Report host backend availability as JSON and exit
+    #[arg(long = "available-backends")]
+    available_backends: bool,
 
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
@@ -138,6 +142,20 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Detection-only fast path used by SDK `getPlatformSupport()`; runs before
+    // config handling so no JSON file is needed just to ask what the host can
+    // do, and mutates no host state.
+    if cli.available_backends {
+        match mxc_engine::to_json_pretty(&mxc_engine::available_backends()) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("Error: probe serialization failed: {e}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
     // disk just to install.
@@ -218,7 +236,7 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -230,23 +248,22 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -267,9 +284,10 @@ fn main() {
             eprintln!("error: {}", e.message);
             emit_warnings(&logger);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -287,10 +305,11 @@ fn main() {
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
-    telemetry::emit_completion(
+    // ── Telemetry emit ──────────────────────────────────────────────
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

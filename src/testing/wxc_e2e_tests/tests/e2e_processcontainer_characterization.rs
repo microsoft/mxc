@@ -23,8 +23,9 @@
 //!
 //! Tier note: the ProcessContainer tier (BaseContainer vs AppContainer+DACL) is
 //! **not** independently selectable from a config — the dispatcher derives it
-//! purely from host capability, and the `MXC_FORCE_TIER` seam is `cfg(test)`-only
-//! so it has no effect on the production `wxc-exec.exe`. These tests therefore
+//! purely from host capability. A dedicated executor built with the
+//! `force-tier-testing` feature can override selection through `MXC_FORCE_TIER`;
+//! normal production executors do not honor it. Without that feature these tests
 //! exercise whichever tier the prepared lane resolves to; running them on both a
 //! BaseContainer-capable and a downlevel host covers both tiers. Because that is
 //! not enforceable in ordinary CI, the tier-independent guarantee — that neither

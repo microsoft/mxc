@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo \"HTTP_PROXY=[$HTTP_PROXY]\"",
+        "timeout": 30000,
+        "env": [
+            "HTTP_PROXY=http://attacker.invalid:9999"
+        ]
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "proxy": {
+            "builtinTestServer": true
+        }
+    }
+}

@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-readonly-mount",
   "containment": "wslc",
   "process": {
@@ -9,7 +9,7 @@
     "readonlyPaths": ["C:\\wslcro"]
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

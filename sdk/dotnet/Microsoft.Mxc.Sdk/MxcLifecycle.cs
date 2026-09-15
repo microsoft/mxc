@@ -29,6 +29,8 @@ public static class MxcLifecycle
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
 
+    private const string InheritDefaultEnvironmentVersion = "0.9.0-alpha";
+
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
 
@@ -99,7 +101,7 @@ public static class MxcLifecycle
         var backend = ContainmentKey(containment);
         var envelope = NewEnvelope(
             "provision",
-            options?.Version ?? DefaultVersion(containment));
+            ResolveVersion(containment, options?.Version));
         envelope["containment"] = backend;
 
         switch (options)
@@ -112,15 +114,6 @@ public static class MxcLifecycle
                     "provision",
                     "appId",
                     isolation.AppId);
-                break;
-            case ProvisionSandboxOptions legacy:
-                SetCrossCuttingPolicies(envelope, legacy.Filesystem, legacy.Network);
-                SetOptionalBackendConfig(
-                    envelope,
-                    backend,
-                    "provision",
-                    "appId",
-                    legacy.AppId);
                 break;
             case WindowsSandboxProvisionOptions windowsSandbox:
                 SetCrossCuttingPolicies(envelope, windowsSandbox.Filesystem, network: null);
@@ -142,6 +135,8 @@ public static class MxcLifecycle
                 break;
         }
 
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+
         return envelope;
     }
 
@@ -159,8 +154,13 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildStartEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("start", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("start", options);
+        var envelope = BuildIdEnvelope("start", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
 
     /// <summary>
     /// Run a command in a started sandbox and return live stdio streams.
@@ -261,7 +261,12 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
-        var envelope = BuildIdEnvelope("exec", id, options?.Version);
+        var version = options?.Version;
+        if (options?.InheritDefaultEnvironment is not null && version is null)
+        {
+            version = InheritDefaultEnvironmentVersion;
+        }
+        var envelope = BuildIdEnvelope("exec", id, version);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -271,15 +276,20 @@ public static class MxcLifecycle
         {
             process["env"] = SerializeToNode(env);
         }
+        if (options?.InheritDefaultEnvironment is { } inheritDefaultEnv)
+        {
+            process["inheritDefaultEnv"] = inheritDefaultEnv;
+        }
         if (options?.TimeoutMs is { } timeout)
         {
             process["timeout"] = timeout;
         }
         envelope["process"] = process;
-        if (options is WslcExecOptions { Network: { } network })
+        if (options is WslcExecOptions { RuntimeConfig: { } runtime })
         {
-            envelope["network"] = SerializeToNode(network);
+            envelope["runtimeConfig"] = SerializeToNode(runtime);
         }
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
 
@@ -299,8 +309,9 @@ public static class MxcLifecycle
         StateAwareExecOptions? options,
         CancellationToken cancellationToken = default)
     {
-        var proc = await Task.Run(
+        var proc = await RunBlockingOperationAsync(
                 () => ExecInSandbox(id, command, options),
+                lateProc => lateProc.Dispose(),
                 cancellationToken)
             .ConfigureAwait(false);
         try
@@ -324,6 +335,45 @@ public static class MxcLifecycle
         }
     }
 
+    // Runs a synchronous blocking call on a background thread so it can be
+    // awaited with cancellation. If the caller cancels while the operation is
+    // still running the returned Task faults with an OperationCanceledException
+    // immediately, but the background call is *not* aborted — it continues to
+    // completion and, if it produced a resource the caller would otherwise own,
+    // the late-result cleanup callback is invoked so the resource isn't leaked.
+    internal static async Task<T> RunBlockingOperationAsync<T>(
+        Func<T> operation,
+        Action<T> disposeLateResult,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var task = Task.Run(operation, cancellationToken);
+        try
+        {
+            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _ = task.ContinueWith(
+                t =>
+                {
+                    if (t.Status == TaskStatus.RanToCompletion)
+                    {
+                        try { disposeLateResult(t.Result); }
+                        catch { /* best-effort cleanup */ }
+                    }
+                    else if (t.IsFaulted)
+                    {
+                        _ = t.Exception;
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
+        }
+    }
+
     /// <summary>Stop a running sandbox.</summary>
     public static void StopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
@@ -338,8 +388,13 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildStopEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("stop", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("stop", options);
+        var envelope = BuildIdEnvelope("stop", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
 
     /// <summary>Destroy a sandbox and release its resources.</summary>
     public static void DeprovisionSandbox(
@@ -359,8 +414,33 @@ public static class MxcLifecycle
 
     internal static JsonObject BuildDeprovisionEnvelope(
         SandboxId id,
-        StateAwarePhaseOptions? options = null) =>
-        BuildIdEnvelope("deprovision", id, options?.Version);
+        StateAwarePhaseOptions? options = null)
+    {
+        ValidateNonExecOptions("deprovision", options);
+        var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        return envelope;
+    }
+
+    private static void ValidateNonExecOptions(
+        string phase,
+        StateAwarePhaseOptions? options)
+    {
+        if (options is WslcExecOptions wslc
+            && (wslc.RuntimeConfig is not null || wslc.Network is not null))
+        {
+            throw new ArgumentException(
+                "Runtime proxy configuration is accepted only on WSLC exec, not start, stop or deprovision.",
+                nameof(options));
+        }
+        if (options is StateAwareExecOptions)
+        {
+            throw new ArgumentException(
+                $"{options.GetType().Name} cannot configure the {phase} phase; "
+                    + $"use {nameof(StateAwarePhaseOptions)}.",
+                nameof(options));
+        }
+    }
 
     private static JsonObject BuildIdEnvelope(
         string phase,
@@ -370,7 +450,7 @@ public static class MxcLifecycle
         var containment = ContainmentForId(id);
         var envelope = NewEnvelope(
             phase,
-            version ?? DefaultVersion(containment));
+            ResolveVersion(containment, version));
         envelope["sandboxId"] = id.Value;
         return envelope;
     }
@@ -380,6 +460,24 @@ public static class MxcLifecycle
         ["version"] = version,
         ["phase"] = phase,
     };
+
+    // Stable, top-level telemetry request for this phase. Consent and
+    // administrative policy still gate emission independently. Never carries a
+    // caller-supplied correlationVector — that identifier is internal-only.
+    private static void ApplyTelemetry(
+        JsonObject envelope,
+        TelemetrySettings? telemetry,
+        string? suppliedVersion)
+    {
+        if (telemetry is not null)
+        {
+            if (suppliedVersion is null)
+            {
+                envelope["version"] = SchemaVersions.MaximumSupported;
+            }
+            envelope["telemetry"] = SerializeToNode(telemetry);
+        }
+    }
 
     private static string ContainmentKey(StateAwareContainment containment) => containment switch
     {
@@ -395,6 +493,23 @@ public static class MxcLifecycle
         containment == StateAwareContainment.Wslc
             ? WslcStateAwareVersion
             : StateAwareVersion;
+
+    private static string ResolveVersion(
+        StateAwareContainment containment,
+        string? requestedVersion)
+    {
+        var expectedVersion = DefaultVersion(containment);
+        if (requestedVersion is not null
+            && !string.Equals(requestedVersion, expectedVersion, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"State-aware {containment} requests require schema version "
+                    + $"'{expectedVersion}', got '{requestedVersion}'.",
+                nameof(requestedVersion));
+        }
+
+        return expectedVersion;
+    }
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,
@@ -418,11 +533,32 @@ public static class MxcLifecycle
                     : $"{options.GetType().Name} cannot configure {containment}",
                 nameof(options));
         }
+        if (options is ProvisionSandboxOptions)
+        {
+            throw new ArgumentException(
+                "Schema 0.9 no longer accepts legacy IsolationSession network fields. "
+                    + "Use IsolationSessionProvisionOptions with directional egress, ingress, "
+                    + "and host-loopback defaults set to Allow.",
+                nameof(options));
+        }
         if (options is IsolationSessionProvisionOptions isolation)
         {
-            IsolationSessionProvisionOptions.ValidateNetwork(
-                isolation.Network,
-                nameof(options));
+            ValidateDirectionalNetwork(isolation.Network);
+            if (isolation.Network.Egress?.Default != NetworkAction.Allow
+                || isolation.Network.Egress.Allow is not null
+                || isolation.Network.Egress.Deny is not null
+                || isolation.Network.Ingress?.Default != NetworkAction.Allow
+                || isolation.Network.Ingress.HostLoopback != NetworkAction.Allow)
+            {
+                throw new ArgumentException(
+                    "IsolationSession requires directional egress, ingress, and host-loopback "
+                        + "defaults set to Allow, with no rules.",
+                    nameof(options));
+            }
+        }
+        if (options is WslcProvisionOptions { Network: { } network })
+        {
+            ValidateDirectionalNetwork(network);
         }
     }
 
@@ -435,6 +571,41 @@ public static class MxcLifecycle
             throw new ArgumentException(
                 $"{nameof(WslcExecOptions)} requires a wslc: sandbox id",
                 nameof(options));
+        }
+        if (options is WslcExecOptions wslc)
+        {
+            if (wslc.Network is not null)
+            {
+                throw new ArgumentException(
+                    "Schema 0.9 no longer supports exec network.proxy; use "
+                        + "WslcExecOptions.RuntimeConfig.NetworkProxy with an HTTP/S URL.",
+                    nameof(options));
+            }
+            if (wslc.RuntimeConfig?.NetworkProxy is { } proxy
+                && (string.IsNullOrWhiteSpace(proxy)
+                    || proxy.Trim() != proxy
+                    || !Uri.TryCreate(proxy, UriKind.Absolute, out var uri)
+                    || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+            {
+                throw new ArgumentException(
+                    "runtimeConfig.networkProxy must be an HTTP/S URL string.",
+                    nameof(options));
+            }
+        }
+    }
+
+    private static void ValidateDirectionalNetwork(StateAwareNetworkPolicy network)
+    {
+        ArgumentNullException.ThrowIfNull(network);
+        if (network.LegacyFieldSpecified is { } field)
+        {
+            throw new ArgumentException(
+                $"Schema 0.9 no longer supports authored network.{field}, including null. "
+                    + "Use directional network.Egress/Ingress on WSLC provision. "
+                    + "Remove DefaultPolicy, EnforcementMode, AllowLocalNetwork, "
+                    + "AllowedHosts, BlockedHosts and Proxy; "
+                    + "configure a proxy with RuntimeConfig.NetworkProxy on exec. Hostnames are not converted to CIDRs.",
+                nameof(network));
         }
     }
 

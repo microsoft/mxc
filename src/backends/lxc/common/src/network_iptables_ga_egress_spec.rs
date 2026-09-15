@@ -763,7 +763,7 @@ fn a_legacy_policy_still_opens_dns() {
 #[test]
 fn a_legacy_block_with_allowed_hosts_opens_dns() {
     let policy = policy_from_json(
-        r#"{"version": "0.7.0",
+        r#"{"version": "0.7.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
                         "allowedHosts": ["example.com"]}}"#,

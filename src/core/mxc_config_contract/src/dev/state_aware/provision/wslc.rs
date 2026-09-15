@@ -42,9 +42,6 @@ pub struct WslcProvisionExperimental {
     /// Optional WSLC backend settings.
     #[serde(default)]
     pub wslc: OptionalField<StateAwareWslc>,
-    /// Optional telemetry override.
-    #[serde(default)]
-    pub telemetry: OptionalField<Telemetry>,
 }
 
 /// A complete state-aware `provision` request for wslc
@@ -70,6 +67,9 @@ pub struct WslcProvisionRequest {
     /// Optional network policy fixed at provision time.
     #[serde(default)]
     pub network: OptionalField<Network>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
     /// Optional closed experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<WslcProvisionExperimental>,

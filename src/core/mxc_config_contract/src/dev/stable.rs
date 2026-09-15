@@ -17,6 +17,16 @@ pub struct Lifecycle {
     pub preserve_policy: OptionalField<bool>,
 }
 
+/// Telemetry settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Telemetry {
+    /// Whether telemetry is enabled.
+    #[serde(default)]
+    pub enabled: OptionalField<bool>,
+}
+
 /// Process execution settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -28,8 +38,15 @@ pub struct Process {
     #[serde(default)]
     pub cwd: OptionalField<String>,
     /// Optional environment entries encoded as `KEY=VALUE` strings.
+    ///
+    /// Omitted gives the backend's default environment; supplied (including as
+    /// an empty array) is used verbatim unless `inheritDefaultEnv` is set.
     #[serde(default)]
     pub env: OptionalField<Vec<String>>,
+    /// Layer `env` on top of the backend's default environment rather than
+    /// replacing it.
+    #[serde(default)]
+    pub inherit_default_env: OptionalField<bool>,
     /// Optional execution timeout in milliseconds.
     #[serde(default)]
     pub timeout: OptionalField<u32>,
@@ -300,8 +317,9 @@ pub struct ProcessContainerNetwork {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Optional loopback proxy the runtime configures for the sandbox. Must
-    /// address localhost, and requires an egress policy.
+    /// Optional HTTP/S proxy URL. Host-process backends require a localhost
+    /// endpoint; WSLc requires an endpoint routable from its container and
+    /// inherits the provisioned networking mode on exec.
     #[serde(default)]
     pub network_proxy: OptionalField<String>,
 }

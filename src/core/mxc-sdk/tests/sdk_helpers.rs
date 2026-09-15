@@ -129,7 +129,8 @@ fn build_request_rejects_empty_version() {
         timeout_ms: None,
     };
 
-    let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
+    let err = build_request(&policy, "echo hello", None)
+        .expect_err("an empty policy version must be rejected");
     assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
 }
 
@@ -148,7 +149,7 @@ fn build_request_host_rules_require_outbound() {
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
     // ProcessContainer requires it. Either way this must not panic.
-    let result = build_request(&policy, None);
+    let result = build_request(&policy, "echo hello", None);
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             result.is_ok(),
@@ -180,7 +181,8 @@ fn rust_sdk_builds_legacy_networking() {
         timeout_ms: None,
     };
 
-    build_request(&policy, None).expect("the Rust SDK should build legacy networking");
+    build_request(&policy, "echo hello", None)
+        .expect("the Rust SDK should build legacy networking");
 }
 
 #[test]
@@ -206,7 +208,8 @@ fn rust_sdk_builds_directional_networking() {
         timeout_ms: None,
     };
 
-    build_request(&policy, None).expect("the Rust SDK should build directional networking");
+    build_request(&policy, "echo hello", None)
+        .expect("the Rust SDK should build directional networking");
 }
 
 #[test]
@@ -246,6 +249,7 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     build_request_with_containment(
         &policy,
         &Containment::ProcessContainer(process_container),
+        "echo hello",
         None,
     )
     .expect("public re-exports should build a schema 0.8 ProcessContainer request");
@@ -267,8 +271,8 @@ fn build_request_then_run_seatbelt() {
         timeout_ms: Some(10000),
     };
 
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script("echo built-from-policy");
+    let request = build_request(&policy, "echo built-from-policy", None)
+        .expect("build_request should succeed");
 
     let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();
@@ -305,15 +309,18 @@ fn platform_support_windows_includes_processcontainer() {
         support.available_methods.first().map(String::as_str),
         Some("processcontainer")
     );
-    // Beyond processcontainer, only `wslc` may appear (SDK-launchable, opt-in).
-    // `windows_sandbox` and `isolation_session` are host-capability backends
-    // reported by `available_backends()`, not here — so assert they never leak
-    // into this launchable set, or a regression would slip through.
+    // Beyond processcontainer, only the opt-in backends may appear.
+    // `windows_sandbox` is a host-capability backend reported by
+    // `available_backends()`, not here — so assert it never leaks into this
+    // launchable set, or a regression would slip through.
     for method in &support.available_methods {
         assert!(
-            matches!(method.as_str(), "processcontainer" | "wslc"),
-            "unexpected Windows method (only processcontainer + optional wslc \
-             are SDK-launchable): {method}"
+            matches!(
+                method.as_str(),
+                "processcontainer" | "wslc" | "isolation_session"
+            ),
+            "unexpected Windows method (only processcontainer plus the opt-in \
+             wslc / isolation_session are SDK-launchable): {method}"
         );
     }
 }
@@ -356,4 +363,20 @@ fn available_tools_policy_filters_system_critical() {
         "system-critical dir must be filtered: {:?}",
         result.readonly_paths
     );
+}
+
+/// The nested bubblewrap-network types must be nameable from the SDK facade
+/// alone; a consumer should never need `mxc_engine` as a direct dependency.
+#[test]
+fn bubblewrap_network_types_are_reachable_from_the_facade() {
+    use mxc_sdk::{BubblewrapNetworkSupport, ProxyEnforcement};
+
+    let network: Option<BubblewrapNetworkSupport> = platform_support().bubblewrap_network;
+    if let Some(network) = network {
+        assert!(
+            network.proxy_enforcement == ProxyEnforcement::Supported
+                || !network.warnings.is_empty(),
+            "an unsupported result must carry the reason (fail-closed contract)"
+        );
+    }
 }

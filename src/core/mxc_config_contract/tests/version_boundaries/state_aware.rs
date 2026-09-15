@@ -56,9 +56,7 @@ const CASES: &[StateAwareCase] = &[
                 "readonlyPaths": ["C:\\inputs"],
                 "deniedPaths": ["C:\\secrets"]
             },
-            "experimental": {
-                "telemetry": {"enabled": true}
-            }
+            "telemetry": {"enabled": true}
         }"#,
         expected: ExpectedRoot::WindowsSandboxProvision,
     },
@@ -68,17 +66,17 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
+            "telemetry": {"enabled": false},
             "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "experimental": {
                 "isolation_session": {
                     "provision": {
                         "appId": "Contoso.Sample_1234567890abc"
                     }
-                },
-                "telemetry": {"enabled": false}
+                }
             }
         }"#,
         expected: ExpectedRoot::IsolationSessionProvision,
@@ -95,19 +93,17 @@ const CASES: &[StateAwareCase] = &[
                 "deniedPaths": ["/secrets"]
             },
             "network": {
-                "defaultPolicy": "block",
-                "enforcementMode": "firewall",
-                "allowedHosts": ["packages.example"],
-                "allowLocalNetwork": false
+                "egress": {"default": "deny"},
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
             },
+            "telemetry": {"enabled": true},
             "experimental": {
                 "wslc": {
                     "provision": {
                         "image": "ubuntu:24.04",
                         "imageTarPath": "C:\\images\\ubuntu.tar"
                     }
-                },
-                "telemetry": {"enabled": true}
+                }
             }
         }"#,
         expected: ExpectedRoot::WslcProvision,
@@ -119,10 +115,7 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "wsb:1234abcd",
-            "correlationVector": "test.0",
-            "experimental": {
-                "telemetry": {"enabled": true}
-            }
+            "telemetry": {"enabled": true}
         }"#,
         expected: ExpectedRoot::Start,
     },
@@ -132,19 +125,14 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "wslc:1234abcd",
-            "correlationVector": "test.1",
             "process": {
                 "commandLine": "curl -sS https://example.com",
                 "cwd": "/workspace",
                 "env": ["MODE=test"],
                 "timeout": 30000
             },
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"}
-            },
-            "experimental": {
-                "telemetry": {"enabled": false}
-            }
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"},
+            "telemetry": {"enabled": false}
         }"#,
         expected: ExpectedRoot::Exec,
     },
@@ -154,10 +142,7 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "stop",
             "sandboxId": "wsb:1234abcd",
-            "correlationVector": "test.2",
-            "experimental": {
-                "telemetry": {"enabled": true}
-            }
+            "telemetry": {"enabled": true}
         }"#,
         expected: ExpectedRoot::Stop,
     },
@@ -167,10 +152,7 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "deprovision",
             "sandboxId": "wsb:1234abcd",
-            "correlationVector": "test.3",
-            "experimental": {
-                "telemetry": {"enabled": false}
-            }
+            "telemetry": {"enabled": false}
         }"#,
         expected: ExpectedRoot::Deprovision,
     },

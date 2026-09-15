@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ACCESS_DISABLED_BY_POLICY,
-    ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ALREADY_EXISTS, ERROR_ENVVAR_NOT_FOUND, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -37,12 +38,20 @@ use crate::guarded_capture::{
     GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
-use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::launch_diagnostics::{
+    diagnose_create_process_failure, diagnose_missing_required_env, validate_required_child_env,
+};
 use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
+use wxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
+    TeardownStatus,
+};
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
+use wxc_common::models::{
+    ContainmentBackend, ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
+};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -75,6 +84,7 @@ fn create_process_failure(
     command_line: &str,
     readonly_paths: &[String],
     working_directory: &str,
+    supplied_env: Option<&[String]>,
 ) -> WxcError {
     let message = if err.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
         diagnose_create_process_failure(
@@ -83,6 +93,11 @@ fn create_process_failure(
             readonly_paths,
         )
         .message
+    } else if let Some(diag) = (err.code() == ERROR_ENVVAR_NOT_FOUND.to_hresult())
+        .then(|| diagnose_missing_required_env(ERROR_ENVVAR_NOT_FOUND.0, supplied_env))
+        .flatten()
+    {
+        diag.message
     } else {
         format!("CreateProcessW failed: {err}")
     };
@@ -104,6 +119,9 @@ pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
         for ch in format!("{}={}", key, value).encode_utf16() {
             block.push(ch);
         }
+        block.push(0);
+    }
+    if block.is_empty() {
         block.push(0);
     }
     block.push(0);
@@ -172,6 +190,41 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
         }
     }
     entries
+}
+
+/// Build the child's entries by layering caller-supplied `KEY=VALUE` strings on
+/// top of the clean default user environment (`process.inheritDefaultEnv`).
+///
+/// The default block comes from `CreateEnvironmentBlock(bInherit=FALSE)`, so it
+/// is the *user's profile* environment and never the `wxc-exec` process's own.
+/// A caller entry replaces a same-named default (case-insensitively, as Windows
+/// environment names are case-insensitive) rather than duplicating it, since a
+/// block with two entries for one name has no well-defined winner.
+pub(crate) fn build_inherited_entries(
+    env_vars: &[String],
+    proxy_address: Option<&wxc_common::models::ProxyAddress>,
+) -> Result<Vec<(String, String)>, WxcError> {
+    let mut entries = create_default_env_entries()?;
+
+    for (key, value) in env_vars.iter().filter_map(|entry| {
+        entry
+            .split_once('=')
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+    }) {
+        match entries
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(&key))
+        {
+            Some(slot) => *slot = (key, value),
+            None => entries.push((key, value)),
+        }
+    }
+
+    if let Some(addr) = proxy_address {
+        inject_proxy_vars(&mut entries, addr);
+    }
+
+    Ok(entries)
 }
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
@@ -427,6 +480,15 @@ pub enum FilesystemMode {
     /// Skip BFS setup; the caller has handled filesystem policy via host
     /// DACL augmentation (Tier 3 path).
     Dacl,
+}
+
+impl FilesystemMode {
+    pub fn isolation_tier(self) -> crate::fallback_detector::IsolationTier {
+        match self {
+            Self::Bfs => crate::fallback_detector::IsolationTier::AppContainerBfs,
+            Self::Dacl => crate::fallback_detector::IsolationTier::AppContainerDacl,
+        }
+    }
 }
 
 /// Config capability string that enables **learning mode**: the OS logs every
@@ -1024,19 +1086,29 @@ impl AppContainerScriptRunner {
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
         // full environment). Always build an explicit block:
-        //   1. If explicit env vars were provided, use only those (+ proxy injection).
-        //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
-        //      default user environment and merge proxy vars if needed.
-        let env_block: Vec<u16> = if !request.env.is_empty() {
-            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
-            encode_env_block(&entries)
-        } else {
-            // Get clean default user env without inheriting process env vars.
-            let mut entries = create_default_env_entries()?;
-            if let Some(addr) = self.proxy_address.as_ref() {
-                inject_proxy_vars(&mut entries, addr);
+        //   1. If the caller supplied an environment, use exactly that (+ proxy
+        //      injection), including when it is empty. MXC does not add to a
+        //      caller-supplied environment unless `inheritDefaultEnv` asked it
+        //      to layer the environment on the default block.
+        //   2. If the caller supplied none, call CreateEnvironmentBlock(bInherit=FALSE)
+        //      for a clean default user environment and merge proxy vars if needed.
+        let env_block: Vec<u16> = match request.env.as_deref() {
+            Some(supplied) if request.inherit_default_env => {
+                let entries = build_inherited_entries(supplied, self.proxy_address.as_ref())?;
+                encode_env_block(&entries)
             }
-            encode_env_block(&entries)
+            Some(supplied) => {
+                let entries = build_explicit_entries(supplied, self.proxy_address.as_ref());
+                encode_env_block(&entries)
+            }
+            None => {
+                // Get clean default user env without inheriting process env vars.
+                let mut entries = create_default_env_entries()?;
+                if let Some(addr) = self.proxy_address.as_ref() {
+                    inject_proxy_vars(&mut entries, addr);
+                }
+                encode_env_block(&entries)
+            }
         };
 
         let env_ptr = env_block.as_ptr() as *const core::ffi::c_void;
@@ -1087,6 +1159,11 @@ impl AppContainerScriptRunner {
                 &request.script_code,
                 &request.policy.readonly_paths,
                 &working_directory.describe(),
+                if request.inherit_default_env {
+                    None
+                } else {
+                    request.env.as_deref()
+                },
             )
         })?;
 
@@ -1486,13 +1563,63 @@ impl AppContainerScriptRunner {
         }
 
         let mut network_manager = NetworkManager::new();
-        match network_manager.start(
+        let network_result = network_manager.start(
             &principal_id,
             &self.app_container_name,
             &request.policy,
             self.app_container_sid,
             logger,
-        ) {
+        );
+        if logger.has_diagnostic_sink() {
+            let firewall_applied = network_manager.firewall_applied();
+            let plan = NetworkManager::describe_policy(&request.policy);
+            let firewall_ok = !plan.rules_will_be_installed
+                || matches!(network_manager.firewall_apply_ok(), Some(true));
+            let status = if network_result.is_ok() && firewall_ok {
+                OperationStatus::Success
+            } else {
+                OperationStatus::Failure
+            };
+            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&self.app_container_name))
+                .str("tier", self.tier_str())
+                .str(
+                    "enforcement_mode",
+                    request.policy.network_enforcement_mode.as_str(),
+                )
+                .str(
+                    "default_policy",
+                    request.policy.default_network_policy.as_str(),
+                )
+                .u64(
+                    "proxy_port",
+                    network_manager
+                        .proxy_address()
+                        .map(|address| address.port as u64)
+                        .unwrap_or(0),
+                )
+                .u64(
+                    "firewall_rules_created",
+                    network_manager.rule_count() as u64,
+                )
+                .bool("firewall_applied", firewall_applied)
+                .str("status", status.as_str());
+            logger.log_audit_event(&record);
+        }
+        if wxc_common::telemetry::is_active() {
+            wxc_common::telemetry::log_network_policy_applied(
+                sanitize_identity(&self.app_container_name),
+                request.policy.network_enforcement_mode.as_str(),
+                request.policy.default_network_policy.as_str(),
+                network_manager
+                    .proxy_address()
+                    .map(|address| address.port as u64)
+                    .unwrap_or(0),
+            );
+        }
+
+        match network_result {
             Ok(()) => {
                 self.proxy_address = network_manager.proxy_address().cloned();
             }
@@ -1510,13 +1637,83 @@ impl AppContainerScriptRunner {
     /// Tear down the per-run firewall and filesystem policy. Idempotent at the
     /// manager level; called once after the child exits.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
-        prepared.network_manager.stop_all(!preserve_policy, logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
+        let network = prepared.network_manager.stop_all(!preserve_policy, logger);
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
-            && !preserve_policy
-        {
-            prepared.bfs_manager.remove_configuration(logger);
+            && !preserve_policy;
+        let bfs_removed = if bfs_requested {
+            prepared.bfs_manager.remove_configuration(logger)
+        } else {
+            false
+        };
+        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+            preserve_policy,
+            network.firewall_removal_ok,
+            bfs_requested,
+            bfs_removed,
+        );
+        if logger.has_diagnostic_sink() {
+            let mut record = AuditEvent::new(AuditEventName::SandboxTornDown)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&self.app_container_name))
+                .str("tier", self.tier_str())
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", network.rules_removed as u64)
+                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .bool("bfs_removed", bfs_removed)
+                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("preserve_policy", preserve_policy)
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            logger.log_audit_event(&record);
         }
+        if wxc_common::telemetry::is_active() {
+            wxc_common::telemetry::log_sandbox_torn_down(
+                sanitize_identity(&self.app_container_name),
+                status.as_str(),
+                &format_released_resources(
+                    network.rules_removed,
+                    bfs_removed,
+                    network.proxy_stopped,
+                ),
+            );
+        }
+    }
+
+    fn tier_str(&self) -> &'static str {
+        self.filesystem_mode.isolation_tier().as_str()
+    }
+}
+
+fn format_released_resources(
+    firewall_rules_removed: usize,
+    bfs_removed: bool,
+    proxy_stopped: bool,
+) -> String {
+    format!(
+        "firewall_rules_removed={firewall_rules_removed},bfs_removed={bfs_removed},\
+         proxy_stopped={proxy_stopped},container_released=false"
+    )
+}
+
+fn appcontainer_teardown_status_with_bfs(
+    preserve_policy: bool,
+    firewall_removal_ok: bool,
+    bfs_requested: bool,
+    bfs_removed: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if preserve_policy {
+        return (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        );
+    }
+    if firewall_removal_ok && (!bfs_requested || bfs_removed) {
+        (TeardownStatus::Success, None)
+    } else {
+        (TeardownStatus::Failure, None)
     }
 }
 
@@ -1532,6 +1729,7 @@ impl SandboxBackend for AppContainerScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if request
             .policy
@@ -1626,6 +1824,8 @@ impl SandboxBackend for AppContainerScriptRunner {
             prepared,
             self.filesystem_mode,
             request,
+            self.app_container_name.clone(),
+            logger,
         )))
     }
 
@@ -1674,6 +1874,9 @@ struct AppContainerSandboxProcess {
     last_exit_code: Option<i32>,
     /// Structured output published after capture teardown succeeds.
     output_metadata: Option<SandboxOutputMetadata>,
+    identity: String,
+    tier: &'static str,
+    audit_logger: Logger,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -1700,6 +1903,8 @@ impl AppContainerSandboxProcess {
         prepared: Prepared,
         filesystem_mode: FilesystemMode,
         request: &ExecutionRequest,
+        identity: String,
+        logger: &Logger,
     ) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
@@ -1728,6 +1933,39 @@ impl AppContainerSandboxProcess {
             capture_etl_path: child.capture_etl_path.take(),
             last_exit_code: None,
             output_metadata: None,
+            identity: sanitize_identity(&identity).to_string(),
+            tier: filesystem_mode.isolation_tier().as_str(),
+            audit_logger: logger.clone_diagnostic_sink(),
+        }
+    }
+
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", &self.identity)
+            .str("tier", self.tier)
+            .u64("pid", self.pid as u64)
+    }
+
+    fn audit_enabled(&self) -> bool {
+        self.audit_logger.has_diagnostic_sink()
+    }
+
+    fn record_kill_failure(&mut self, error: &windows::core::Error) {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::KillFailed(
+                KillMethod::TerminateJobObject.as_str(),
+                error.code().0,
+            ),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessKillFailed)
+                .str("kill_method", KillMethod::TerminateJobObject.as_str())
+                .i64("error_code", error.code().0 as i64);
+            self.audit_logger.log_audit_event(&record);
         }
     }
 
@@ -1735,16 +1973,20 @@ impl AppContainerSandboxProcess {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        self.prepared
+        let network = self
+            .prepared
             .network_manager
-            .stop_all(!self.preserve_policy, &mut logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
+            .stop_all(!self.preserve_policy, &mut self.audit_logger);
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
-            && !self.preserve_policy
-        {
-            self.prepared.bfs_manager.remove_configuration(&mut logger);
-        }
+            && !self.preserve_policy;
+        let bfs_removed = if bfs_requested {
+            self.prepared
+                .bfs_manager
+                .remove_configuration(&mut self.audit_logger)
+        } else {
+            false
+        };
 
         // Stop and analyze the guarded WPR capture now that the child has
         // exited and been reaped (both `wait` and `Drop` kill + reap before
@@ -1771,6 +2013,41 @@ impl AppContainerSandboxProcess {
             Ok(())
         };
         let result = result.map_err(|error| error.to_string());
+        let (mut status, skip_reason) = appcontainer_teardown_status_with_bfs(
+            self.preserve_policy,
+            network.firewall_removal_ok,
+            bfs_requested,
+            bfs_removed,
+        );
+        if result.is_err() {
+            status = TeardownStatus::Failure;
+        }
+        if self.audit_enabled() {
+            let mut record = self
+                .audit(AuditEventName::SandboxTornDown)
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", network.rules_removed as u64)
+                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .bool("bfs_removed", bfs_removed)
+                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("preserve_policy", self.preserve_policy)
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            self.audit_logger.log_audit_event(&record);
+        }
+        if wxc_common::telemetry::is_active() {
+            wxc_common::telemetry::log_sandbox_torn_down(
+                &self.identity,
+                status.as_str(),
+                &format_released_resources(
+                    network.rules_removed,
+                    bfs_removed,
+                    network.proxy_stopped,
+                ),
+            );
+        }
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
     }
@@ -1836,26 +2113,31 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
+        if let Err(error) = self.job.terminate_raw(u32::MAX) {
+            self.record_kill_failure(&error);
+            return Err(std::io::Error::other(format!(
+                "TerminateJobObject: {error}"
+            )));
+        }
         if self.capture_session.is_some() {
             // Guarded-WPR capture needs strict drain certainty before the trace
             // is stopped/discarded; a failure to drain is a hard error here.
             return self
                 .job
-                .terminate_and_wait(u32::MAX)
+                .wait_for_empty()
                 .map_err(|error| std::io::Error::other(error.to_string()));
         }
         // Ordinary run: terminate the tree, but downgrade a slow drain to a
         // warning so it does not fail an otherwise valid result.
-        match self.job.terminate_best_effort(u32::MAX) {
-            Ok(Some(drain_warning)) => {
+        match self.job.wait_for_empty() {
+            Err(drain_warning) => {
                 capture_output::write_stderr_line_best_effort(format_args!(
                     "sandbox job did not fully drain within the teardown window (continuing): \
                      {drain_warning}"
                 ));
                 Ok(())
             }
-            Ok(None) => Ok(()),
-            Err(error) => Err(std::io::Error::other(error.to_string())),
+            Ok(()) => Ok(()),
         }
     }
 
@@ -1876,13 +2158,38 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
-                    Ok(code as i32)
+                    let exit_code = code as i32;
+                    wxc_common::telemetry::log_process_event(
+                        &self.identity,
+                        self.pid,
+                        wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                    );
+                    if self.audit_enabled() {
+                        let record = self
+                            .audit(AuditEventName::ProcessExited)
+                            .i64("exit_code", exit_code as i64);
+                        self.audit_logger.log_audit_event(&record);
+                    }
+                    Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("script timed out after {}ms", self.timeout_ms),
-            )),
+            WAIT_TIMEOUT => {
+                wxc_common::telemetry::log_process_event(
+                    &self.identity,
+                    self.pid,
+                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+                );
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessTimedOut)
+                        .u64("timeout_ms", self.timeout_ms as u64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
+            }
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
@@ -1936,6 +2243,52 @@ impl Drop for AppContainerSandboxProcess {
 
 #[cfg(test)]
 mod tests {
+    use wxc_common::audit::{TeardownSkipReason, TeardownStatus};
+
+    #[test]
+    fn released_resources_format_is_stable() {
+        assert_eq!(
+            super::format_released_resources(2, true, false),
+            "firewall_rules_removed=2,bfs_removed=true,proxy_stopped=false,container_released=false"
+        );
+    }
+
+    #[test]
+    fn teardown_status_reports_preserve_policy_as_skipped() {
+        for firewall_ok in [true, false] {
+            for (bfs_requested, bfs_ok) in [(false, false), (true, true), (true, false)] {
+                assert_eq!(
+                    super::appcontainer_teardown_status_with_bfs(
+                        true,
+                        firewall_ok,
+                        bfs_requested,
+                        bfs_ok,
+                    ),
+                    (
+                        TeardownStatus::Skipped,
+                        Some(TeardownSkipReason::PreservePolicy)
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn teardown_status_distinguishes_cleanup_failures() {
+        assert_eq!(
+            super::appcontainer_teardown_status_with_bfs(false, true, false, false),
+            (TeardownStatus::Success, None)
+        );
+        assert_eq!(
+            super::appcontainer_teardown_status_with_bfs(false, false, false, false),
+            (TeardownStatus::Failure, None)
+        );
+        assert_eq!(
+            super::appcontainer_teardown_status_with_bfs(false, true, true, false),
+            (TeardownStatus::Failure, None)
+        );
+    }
+
     #[test]
     fn attr_count_neither() {
         assert_eq!(super::compute_attr_count(false, false, false), 1);
@@ -2151,6 +2504,11 @@ mod tests {
     }
 
     #[test]
+    fn encode_env_block_empty_input_is_double_null_terminated() {
+        assert_eq!(super::encode_env_block(&[]), vec![0u16, 0u16]);
+    }
+
+    #[test]
     fn encode_decode_round_trip_with_drive_vars() {
         let entries = vec![
             ("=C:".to_string(), "C:\\Users\\test".to_string()),
@@ -2258,6 +2616,7 @@ mod tests {
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
             &[],
             r"C:\work",
+            None,
         );
         let message = mapped.to_string();
 
@@ -2271,7 +2630,7 @@ mod tests {
     #[test]
     fn appcontainer_other_win32_error_preserves_create_process_message() {
         let err = windows_core::Error::from_hresult(ERROR_CALL_NOT_IMPLEMENTED.to_hresult());
-        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work");
+        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work", None);
         let message = mapped.to_string();
 
         assert!(message.contains("CreateProcessW failed"));
@@ -2316,6 +2675,21 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_sparse_verbatim_environment() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Dacl);
+        let request = ExecutionRequest {
+            env: Some(vec!["SystemRoot=C:\\Windows".to_string()]),
+            ..Default::default()
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must reject the environment before launch");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("LOCALAPPDATA"));
     }
 
     /// Records the order of guarded-capture callbacks so orchestration tests can

@@ -34,6 +34,16 @@ public static class MxcSandbox
         },
     };
 
+    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
+    {
+        Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
+    };
+
+    private static JsonSerializerOptions PolicyJsonOptions(string version) =>
+        SchemaVersions.IsPublished(version)
+            ? PublishedPolicyJsonOptions
+            : JsonOptions;
+
     /// <summary>
     /// The version of the native <c>mxc_ffi</c> library.
     /// </summary>
@@ -65,10 +75,22 @@ public static class MxcSandbox
             var json = ReadOwnedJson(
                 NativeMethods.mxc_available_backends_json(),
                 "probing available backends");
-            var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
-                ?? throw new JsonException("Native backend discovery returned null JSON.");
-            return backends.Select(MapAvailableBackend).ToArray();
+            return ParseAvailableBackends(json);
         }
+    }
+
+    /// <summary>
+    /// Map the native backend-discovery array onto the public model.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="GetAvailableBackends"/> so the projection is
+    /// testable against a fixed native payload.
+    /// </remarks>
+    internal static IReadOnlyList<AvailableBackend> ParseAvailableBackends(string json)
+    {
+        var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
+            ?? throw new JsonException("Native backend discovery returned null JSON.");
+        return backends.Select(MapAvailableBackend).ToArray();
     }
 
     /// <summary>
@@ -239,13 +261,42 @@ public static class MxcSandbox
     internal static string SerializePolicy(SandboxPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        return JsonSerializer.Serialize(policy, JsonOptions);
+        ValidateNetworkVersion(policy);
+        return JsonSerializer.Serialize(policy, PolicyJsonOptions(policy.Version));
     }
 
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
+        ValidateNetworkVersion(request.Policy);
+        return JsonSerializer.Serialize(PrepareRequest(request), PolicyJsonOptions(request.Policy.Version));
+    }
+
+    private static void ValidateNetworkVersion(SandboxPolicy policy)
+    {
+        if (policy.Network?.LegacyFieldSpecified is not { } field)
+        {
+            return;
+        }
+
+        if (!SchemaVersions.IsSupported(policy.Version))
+        {
+            throw new ArgumentException(
+                $"Schema version '{policy.Version}' is not supported. "
+                    + $"Use a version from {SchemaVersions.Minimum} through "
+                    + $"{SchemaVersions.MaximumSupported}.",
+                nameof(policy));
+        }
+
+        if (policy.Version == SchemaVersions.MaximumSupported)
+        {
+            throw new ArgumentException(
+                $"Schema 0.9 no longer supports authored network.{field}, including null. Legacy network authoring "
+                    + "(AllowOutbound, AllowLocalNetwork, AllowedHosts, BlockedHosts, Proxy). "
+                    + "Use Network.Egress/Ingress and Network.RuntimeConfig.NetworkProxy explicitly, "
+                    + "or retain schema 0.8.0-alpha. Hostnames are not converted to CIDRs.",
+                nameof(policy));
+        }
     }
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)
@@ -279,7 +330,10 @@ public static class MxcSandbox
             Containment = containment,
             ContainerName = request.ContainerName,
             WorkingDirectory = request.WorkingDirectory,
-            Environment = new Dictionary<string, string>(request.Environment),
+            Environment = request.Environment is null
+                ? null
+                : new Dictionary<string, string>(request.Environment),
+            InheritDefaultEnvironment = request.InheritDefaultEnvironment,
             Experimental = request.Experimental,
         };
     }
@@ -313,14 +367,7 @@ public static class MxcSandbox
     // obsolete CaptureDenials must be copied, or it is silently dropped from
     // any request that carries the legacy field.
     private static SandboxPolicy ClonePolicyWithoutCaptureDenials(SandboxPolicy policy) =>
-        new()
-        {
-            Version = policy.Version,
-            Filesystem = policy.Filesystem,
-            Network = policy.Network,
-            Ui = policy.Ui,
-            TimeoutMs = policy.TimeoutMs,
-        };
+        policy.WithoutLegacyCaptureDenials();
 
     private static bool CaptureDenialsEqual(
         CaptureDenialsPolicy left,
@@ -335,6 +382,7 @@ public static class MxcSandbox
             Backend = ParseBackend(backend.Backend),
             Tier = backend.Tier is null ? null : ParseIsolationTier(backend.Tier),
             Capabilities = backend.Capabilities.Select(ParseBackendCapability).ToArray(),
+            Warnings = backend.Warnings.ToArray(),
         };
 
     internal static ContainmentBackend ParseBackend(string value) =>
@@ -364,6 +412,9 @@ public static class MxcSandbox
         value switch
         {
             "captureDenials" => BackendCapability.CaptureDenials,
+            "filesystemDeniedPaths" => BackendCapability.FilesystemDeniedPaths,
+            "ingressHostLoopbackAllow" => BackendCapability.IngressHostLoopbackAllow,
+            "proxyEnforcement" => BackendCapability.ProxyEnforcement,
             _ => BackendCapability.Unknown,
         };
 

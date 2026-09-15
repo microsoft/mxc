@@ -13,7 +13,7 @@ use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
-use super::manager::IsolationSessionManager;
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::validate_provision_policy;
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
@@ -22,11 +22,11 @@ use super::IsolationSessionRunner;
 ///
 /// Value-based rather than presence-based (unlike `ui`), because the defaults
 /// genuinely match the behavior: the in-proc API exposes no session-lifetime
-/// knob, so one-shot always stops the session and removes the agent user before
-/// returning — exactly what `destroyOnExit: true` asks for. Only the values the
+/// knob, so one-shot always stops the session and removes the agent user —
+/// exactly what `destroyOnExit: true` asks for. Only the values the
 /// backend cannot deliver are refused:
 ///
-/// * `destroyOnExit: false` asks the session to outlive the call. It cannot.
+/// * `destroyOnExit: false` asks the session to outlive the run. It cannot.
 /// * `preservePolicy: true` asks for filesystem/network policy to be retained
 ///   past the run. This backend installs no persistent filesystem or network
 ///   enforcement — filesystem policy is refused outright, and the accepted
@@ -36,7 +36,7 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
     if !request.lifecycle.destroy_on_exit {
         return Err(ScriptResponse::error(
             "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
-             the session is always stopped and the agent user removed before the call returns",
+             the session is always stopped and the agent user removed",
         ));
     }
     if request.lifecycle.preserve_policy {
@@ -58,7 +58,12 @@ impl ScriptRunner for IsolationSessionRunner {
         // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
         validate_provision_policy(request).map_err(ScriptResponse::from)?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         Ok(())
     }
 
@@ -91,14 +96,14 @@ impl ScriptRunner for IsolationSessionRunner {
         // `appId`. Passing `None` selects the default registration, which the
         // in-proc client resolves to the calling process's PFN when packaged
         // (or leaves empty when unpackaged).
-        let manager = match IsolationSessionManager::add_user(None) {
+        let (identity, manager) = match IsolationSessionManager::add_user(None) {
             Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,
                     "Isolation Session: agent user = {}",
                     provisioned.agent_user_name
                 );
-                manager
+                (provisioned.agent_user_name, manager)
             }
             Err(e) => return e.into(),
         };
@@ -106,26 +111,54 @@ impl ScriptRunner for IsolationSessionRunner {
         if let Err(e) = manager.start_session() {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
-            let _ = manager.stop_session();
-            let _ = manager.deprovision_agent_user();
+            let stopped = manager.stop_session().is_ok();
+            let deprovisioned = manager.deprovision_agent_user().is_ok();
+            log_sandbox_torn_down(
+                logger,
+                &identity,
+                "one_shot",
+                TeardownOutcome {
+                    session_stopped: Some(stopped),
+                    agent_user_deprovisioned: Some(deprovisioned),
+                },
+            );
             return e.into();
         }
 
-        let exit_code = match manager.create_process(&options) {
+        let exit_code = match manager.create_process(&options, Some(logger)) {
             Ok(code) => code,
             Err(e) => {
-                let _ = manager.stop_session();
-                let _ = manager.deprovision_agent_user();
+                let stopped = manager.stop_session().is_ok();
+                let deprovisioned = manager.deprovision_agent_user().is_ok();
+                log_sandbox_torn_down(
+                    logger,
+                    &identity,
+                    "one_shot",
+                    TeardownOutcome {
+                        session_stopped: Some(stopped),
+                        agent_user_deprovisioned: Some(deprovisioned),
+                    },
+                );
                 return e.into();
             }
         };
 
-        if let Err(e) = manager.stop_session() {
-            let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
+        let mut outcome = TeardownOutcome::default();
+        match manager.stop_session() {
+            Ok(()) => outcome.session_stopped = Some(true),
+            Err(e) => {
+                outcome.session_stopped = Some(false);
+                let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
+            }
         }
-        if let Err(e) = manager.deprovision_agent_user() {
-            let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
+        match manager.deprovision_agent_user() {
+            Ok(()) => outcome.agent_user_deprovisioned = Some(true),
+            Err(e) => {
+                outcome.agent_user_deprovisioned = Some(false);
+                let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
+            }
         }
+        log_sandbox_torn_down(logger, &identity, "one_shot", outcome);
 
         // Output already streamed live to wxc-exec's stdio via relay
         // threads in `create_process` — captured fields intentionally
@@ -143,7 +176,9 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, LifecycleConfig, NetworkPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, LifecycleConfig, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+    };
 
     #[test]
     fn validate_runner_one_shot_rejects_default_network() {
@@ -166,8 +201,16 @@ mod tests {
     fn canonical_request() -> ExecutionRequest {
         ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()

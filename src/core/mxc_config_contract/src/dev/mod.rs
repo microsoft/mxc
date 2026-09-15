@@ -231,31 +231,33 @@ mod stable;
 mod state_aware;
 
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
+    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
     TransportProtocol,
 };
 pub use network::{
-    DefaultNetworkPolicy, Network, NetworkAction, NetworkEgress, NetworkEnforcementMode,
-    NetworkIngress, NetworkPeer, NetworkPort, NetworkProtocol, NetworkProxy, NetworkRule,
+    Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
+    NetworkProtocol, NetworkRule,
 };
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
-pub use primitives::{NonEmptyString, OptionalField, True};
-pub use request::{parse_request, Request, RequestParseError};
+pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
+pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
-    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Ui, UiClipboard,
+    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Telemetry, Ui,
+    UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};
 pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
 pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
 pub use state_aware::{
-    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
-    IsolationSessionProvision, IsolationSessionProvisionExperimental,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
+    IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    StateAwareIsolationSession,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{StartExperimental, StartPhase, StartRequest};

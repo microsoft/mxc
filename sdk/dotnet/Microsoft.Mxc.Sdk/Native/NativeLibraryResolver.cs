@@ -20,7 +20,7 @@ internal static class NativeLibraryResolver
 
     /// <summary>
     /// Register the resolver once. Called from the static constructor of the
-    /// SDK's public entry point so it runs before the first P/Invoke.
+    /// SDK's public entry points so it runs before the first P/Invoke.
     /// </summary>
     internal static void Initialize()
     {
@@ -29,7 +29,22 @@ internal static class NativeLibraryResolver
             return;
         }
 
-        NativeLibrary.SetDllImportResolver(typeof(NativeLibraryResolver).Assembly, Resolve);
+        try
+        {
+            NativeLibrary.SetDllImportResolver(typeof(NativeLibraryResolver).Assembly, Resolve);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                Console.Error.WriteLine(
+                    $"mxc: could not register the native library resolver ({ex.GetType().Name}: {ex.Message}). " +
+                    "Falling back to the default loader.");
+            }
+            catch
+            {
+            }
+        }
     }
 
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
@@ -54,7 +69,6 @@ internal static class NativeLibraryResolver
     private static IEnumerable<string> CandidatePaths()
     {
         var file = NativeFileName();
-
         var overrideDir = Environment.GetEnvironmentVariable("MXC_FFI_DIR");
         if (!string.IsNullOrEmpty(overrideDir))
         {
@@ -65,11 +79,21 @@ internal static class NativeLibraryResolver
         yield return Path.Combine(baseDir, file);
         yield return Path.Combine(baseDir, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", file);
 
-        // Dev layout: walk up looking for the Cargo target dir.
-        for (var dir = new DirectoryInfo(baseDir); dir is not null; dir = dir.Parent)
+        var dir = new DirectoryInfo(baseDir);
+        var depth = 0;
+        while (dir is not null && depth++ < 8)
         {
-            yield return Path.Combine(dir.FullName, "src", "target", "debug", file);
-            yield return Path.Combine(dir.FullName, "src", "target", "release", file);
+            if (File.Exists(Path.Combine(dir.FullName, ".git")) ||
+                File.Exists(Path.Combine(dir.FullName, "src", "Cargo.toml")))
+            {
+#if DEBUG
+                yield return Path.Combine(dir.FullName, "src", "target", "debug", file);
+#endif
+                yield return Path.Combine(dir.FullName, "src", "target", "release", file);
+                yield break;
+            }
+
+            dir = dir.Parent;
         }
     }
 
