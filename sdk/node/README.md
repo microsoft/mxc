@@ -44,18 +44,24 @@ console.log(result.stdout);
 
 ## Runtime model
 
-The Node SDK now runs **in-process through `mxc_ffi`**.
+The Node SDK now runs **in process through the native runtime**.
 
-- **One-shot APIs:** `spawnSandboxAsync`, `spawnSandboxProcess`
+The npm package no longer ships the standalone executor binaries
+(`wxc-exec.exe`, `lxc-exec`, `mxc-exec-mac`) or the executor-only
+`unix-test-proxy`. Those executables remain available in
+`mxc-release-binaries`.
+
+- **One-shot APIs:** `spawnSandboxAsync`, `spawnSandbox`,
+  `spawnSandboxFromConfig`, `spawnSandboxProcess`
 - **State-aware APIs:** `provisionSandbox`, `startSandbox`,
   `execInSandboxProcess`, `execInSandboxAsync`, `stopSandbox`,
   `deprovisionSandbox`
 - **Conversion utilities:** `createConfigFromPolicy`, `buildSandboxPayload`
 
 `createConfigFromPolicy` and `buildSandboxPayload` still produce
-`ContainerConfig` objects for inspection, serialization, testing, and policy
-authoring, but the Node SDK does **not** expose a one-shot "execute arbitrary
-executor JSON" API anymore.
+`ContainerConfig` objects for inspection, customization, and execution.
+`spawnSandboxFromConfig` converts that established public model to the private
+native request only at the binding boundary.
 
 The native library is resolved from:
 
@@ -63,6 +69,9 @@ The native library is resolved from:
 2. `MXC_BIN_DIR/<arch>/`
 3. the packaged `bin/<arch>/` directory
 4. local Cargo outputs under `src/target/...` during development
+
+The npm package keeps `mxc_ffi` and the backend runtime dependencies it needs,
+such as Windows Sandbox, WSLC, PLM, and NanVix assets when present.
 
 ## Compatibility
 
@@ -128,13 +137,20 @@ console.log(status.exitCode);
 proc.dispose();
 ```
 
-### Conversion helpers
+`spawnSandbox()` is the compatibility name for the same pipe-based process
+operation. It now returns `MxcSandboxProcess` rather than `IPty`.
 
-`createConfigFromPolicy()` and `buildSandboxPayload()` remain useful when you
-want the native wire shape explicitly:
+### Config-based execution
+
+`createConfigFromPolicy()` and `buildSandboxPayload()` preserve the existing
+configuration workflow. Customize the resulting `ContainerConfig`, then pass
+it to `spawnSandboxFromConfig()`:
 
 ```typescript
-import { buildSandboxPayload } from '@microsoft/mxc-sdk';
+import {
+  buildSandboxPayload,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
 
 const payload = buildSandboxPayload(
   'python app.py',
@@ -144,29 +160,29 @@ const payload = buildSandboxPayload(
   },
   'C:\\work',
   'sample',
+  'processcontainer',
 );
 
-console.log(payload.containment); // e.g. "process"
+payload.processContainer!.learningMode = true;
+const proc = spawnSandboxFromConfig(payload);
+const status = await proc.wait();
 ```
 
-These helpers do **not** imply that the resulting `ContainerConfig` can be
-executed directly by the Node SDK.
+The SDK converts `ContainerConfig` into its private native request internally.
+That transport shape is not part of the public Node API.
 
 ### One-shot limitations
 
 The in-process Node one-shot surface intentionally does **not** preserve the
 old executor-only features:
 
-- No `spawnSandbox`
-- No `spawnSandboxFromConfig`
 - No PTY / `node-pty` surface
 - No one-shot `dryRun`
 - No `debug`, `logDir`, `executablePath`, `ptyOptions`, `usePty`,
   `allowTestingFeatures`, or `skipPlatformCheck`
 - No `network.proxy.builtinTestServer`
 
-Only `experimental`, `signal`, and `containment` remain in
-`SandboxSpawnOptions`.
+Only `experimental` and `signal` remain in `SandboxSpawnOptions`.
 
 ### Migrating from `IPty`
 
@@ -317,6 +333,8 @@ createConfigFromPolicy(policy, containment?, containerName?) => ContainerConfig
 buildSandboxPayload(script, policy, workingDirectory?, containerName?, containment?) => ContainerConfig
 
 spawnSandboxAsync(script, policy, options?, workingDirectory?, containerName?) => Promise<{ stdout, stderr, exitCode }>
+spawnSandbox(script, policy, options?, workingDirectory?, containerName?, environment?) => MxcSandboxProcess
+spawnSandboxFromConfig(config, options?, workingDirectory?, environment?) => MxcSandboxProcess
 spawnSandboxProcess(script, policy, options?, workingDirectory?, containerName?) => MxcSandboxProcess
 
 provisionSandbox(containment, config, options?) => Promise<ProvisionResult>

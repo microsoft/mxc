@@ -77,16 +77,9 @@ wxc-exec.exe --experimental config.json
 
 ## SDK Usage
 
-Use `spawnSandboxFromConfig` with `usePty: false` for reliable exit codes and
-separate stdout/stderr streams:
-
-```typescript
-const child = spawnSandboxFromConfig(config, {
-  experimental: true,
-  usePty: false,
-});
-
-```
+The in-process Node one-shot API does not currently expose explicit MicroVM
+selection. Use `wxc-exec.exe --experimental` with the JSON config above, or use
+the Rust SDK.
 
 ## Filesystem Policy
 

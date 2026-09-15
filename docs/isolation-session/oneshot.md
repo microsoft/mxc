@@ -282,9 +282,8 @@ The full field-by-field table is in
 - **TypeScript SDK exposure.** Adding a one-shot isolation-session config
   surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
   workloads programmatically **on the one-shot path**. Today the one-shot
-  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
-  `wxc-exec` directly), and it takes no backend configuration; the
-  state-aware lifecycle *is* SDK-exposed.
+  backend is reachable only through `wxc-exec` JSON config, and it takes no
+  backend configuration; the state-aware lifecycle *is* SDK-exposed.
 
 ## Test Plan
 

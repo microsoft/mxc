@@ -494,10 +494,10 @@ The third positional argument is the existing `SandboxSpawnOptions` from
 `sdk/node/src/sandbox.ts`, extended with `signal?: AbortSignal` for cancellation.
 State-aware reuses the same options bag as one-shot — single mental model, single place
 to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
-(`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
-silently ignored on the other phases. State-awareness is not itself experimental —
-`experimental: true` must be set when the targeted backend is itself experimental, just
-as it is today for one-shot calls against `microvm` and `wslc`. IsolationSession is
+Only `experimental` and `signal` remain on this shared options bag. State-awareness
+is not itself experimental — `experimental: true` must be set when the targeted
+backend is itself experimental, just as it is for one-shot calls against `wslc`.
+IsolationSession is
 experimental at the time of writing; that status is independent of the state-aware API
 surface (§13).
 
@@ -507,7 +507,7 @@ surface (§13).
 import {
   provisionSandbox,
   startSandbox,
-  execInSandbox,
+  execInSandboxProcess,
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
@@ -538,14 +538,16 @@ const result = await execInSandboxAsync(
 );
 console.log(result.stdout);  // "hello\n"
 
-// Exec — streaming for long-running workloads. Returns IPty.
-const session = execInSandbox(
+// Exec — streaming for long-running workloads. Returns MxcSandboxProcess.
+const session = execInSandboxProcess(
   sandboxId,
   { process: { commandLine: 'C:\\workspace\\agent.exe --watch' } },
   opts,
 );
-session.onData((chunk) => process.stdout.write(chunk));
-session.onExit(({ exitCode }) => console.log(`agent exit: ${exitCode}`));
+session.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+const status = await session.wait();
+console.log(`agent exit: ${status.exitCode}`);
+session.dispose();
 
 // Stop and deprovision when done. Stop and deprovision Configs carry only `version?`,
 // so callers typically pass `{}` (or omit when no options are needed).
@@ -720,9 +722,9 @@ stderr streams distinctly.
 
 | Phase / outcome | stdout | stderr |
 |---|---|---|
-| Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
-| Exec, dispatch succeeded | Script's stdout (via PTY or pipe) | Script's stderr (pipe mode) or merged with stdout (PTY mode); MXC diagnostic also lands here when `--debug` is passed |
-| Exec, dispatch failed | Single JSON envelope (`{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
+| Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | Native diagnostic output; empty otherwise |
+| Exec, dispatch succeeded | Script's stdout | Script's stderr |
+| Exec, dispatch failed | Single JSON envelope (`{error}`) | Native diagnostic output; empty otherwise |
 
 `stdout` is authoritative: for non-exec phases it carries exactly one envelope; for exec
 it carries either the script's output (success) or exactly one envelope (failure).

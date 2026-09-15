@@ -156,13 +156,11 @@ config.experimental!.wslc!.image = 'python:3.12-alpine';
 config.experimental!.wslc!.cpuCount = 2;
 config.experimental!.wslc!.memoryMb = 1024;
 
-// PTY mode (interactive terminal):
-const ptyProcess = spawnSandboxFromConfig(config, { experimental: true });
-
-// Non-PTY mode (reliable exit codes, separate stdout/stderr):
-const child = spawnSandboxFromConfig(config, { experimental: true, usePty: false });
-child.stdout?.on('data', (data) => console.log(data.toString()));
-child.on('close', (code) => console.log('Exit code:', code));
+const sandbox = spawnSandboxFromConfig(config, { experimental: true });
+sandbox.stdout?.on('data', (data) => console.log(data.toString()));
+const result = await sandbox.wait();
+console.log('Exit code:', result.exitCode);
+sandbox.dispose();
 ```
 
 ### Rust SDK

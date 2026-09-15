@@ -164,21 +164,19 @@ of the flag; parsing is flag-independent. The `--experimental` flag only sets
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
 // With policy:
-const pty = spawnSandbox("python app.py", policy, {
+const sandbox = spawnSandbox("python app.py", policy, {
   experimental: true,
-  debug: false
 });
 
 // Or with config:
 const config = createConfigFromPolicy(policy, "process");
 config.process!.commandLine = "python app.py";
-const pty = spawnSandboxFromConfig(config, {
+const sandbox = spawnSandboxFromConfig(config, {
   experimental: true,
-  debug: false,
 });
 ```
 
-The SDK passes `--experimental` to the underlying binary when this option is set.
+The SDK enables experimental native-runtime features when this option is set.
 
 ### Forking Code for Experimental Features
 

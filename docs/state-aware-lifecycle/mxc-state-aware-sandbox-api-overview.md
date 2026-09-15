@@ -23,11 +23,11 @@ function signatures throughout. One-line summaries; full definitions live in
 | `ContainmentType` / `ContainmentBackend` | `sdk/node/src/types.ts` | Two-tier containment names: `ContainmentType` for abstract intents (`'process' \| 'vm' \| 'microvm'` today); `ContainmentBackend` for concrete runners (`'processcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'microvm' \| 'seatbelt' \| 'isolation_session'`). Wire `containment` accepts either. The deprecated alias `SandboxingMethod = ContainmentType \| ContainmentBackend` is retained for back-compat. |
 | `ProcessConfig` | `sdk/node/src/types.ts` | Per-process settings: `commandLine`, `cwd`, `env`, `timeout`. Reused inside state-aware exec Configs. |
 | `FilesystemConfig`, `NetworkConfig`, `UiConfig` | `sdk/node/src/types.ts` | Wire-format-aligned cross-cutting interfaces. Reused inline as field types inside the per-(backend, phase) state-aware Configs. |
-| `SandboxSpawnOptions` | `sdk/node/src/sandbox.ts` | Existing options bag (debug, dryRun, logDir, executablePath, ptyOptions, usePty, experimental). State-aware reuses it as the third positional arg, extended with `signal?: AbortSignal` for cancellation. |
-| `pty.IPty` | `node-pty` package | Interactive PTY handle. Used as the streaming-exec return type, matching existing `spawnSandbox`. |
+| `SandboxSpawnOptions` | `sdk/node/src/sandbox.ts` | Shared options bag for experimental opt-in and `AbortSignal` cancellation. |
+| `MxcSandboxProcess` | `sdk/node/src/sandbox-process.ts` | Pipe-based live process handle shared by one-shot and state-aware execution. |
 | `getAvailableToolsPolicy`, `getUserProfilePolicy`, `getTemporaryFilesPolicy` | `sdk/node/src/policy.ts` | Filesystem-policy discovery helpers. Produce `FilesystemPolicyResult` fragments that compose into a state-aware Config's `filesystem` field. |
 | `ContainmentBackend` (Rust) | `wxc_common::models` | Rust dispatch enum (one variant per backend). State-aware adds `IsolationSession` and future variants. |
-| ProcessContainer | MXC's existing AppContainer-based one-shot backend | Relevant context: ProcessContainer streams stdout/stderr live via PTY; state-aware exec preserves that streaming model. |
+| ProcessContainer | MXC's existing AppContainer-based one-shot backend | Relevant context: ProcessContainer streams stdout and stderr through the shared pipe-based process model. |
 
 **Disambiguation: `sandboxId` vs `containerId`.** The state-aware wire envelope's
 `sandboxId` (system-generated, opaque, returned by `provisionSandbox`) is distinct from

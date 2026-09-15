@@ -33,7 +33,7 @@ class FakeWorker extends EventEmitter implements BindingRunWorkerLike {
 
 afterEach(() => _setBindingRunWorkerFactory());
 
-describe('mxc_ffi run worker', () => {
+describe('native run worker', () => {
   it('resolves a native result asynchronously', async () => {
     const worker = new FakeWorker();
     _setBindingRunWorkerFactory(() => {
