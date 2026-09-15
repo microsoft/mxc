@@ -371,7 +371,7 @@ For long-lived sandboxes where you provision once, exec many times, and tear dow
 
 ```typescript
 import {
-  provisionSandbox, startSandbox, execInSandboxAsync,
+  provisionSandbox, startSandbox, execInSandboxAsync, execInSandboxProcess,
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
@@ -394,6 +394,15 @@ await startSandbox(sandboxId, undefined, opts);
 
 const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
 const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
+
+const live = execInSandboxProcess(
+  sandboxId,
+  { process: { commandLine: 'echo streamed' } },
+  opts,
+);
+live.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+await live.wait();
+live.dispose();
 
 await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
@@ -435,6 +444,13 @@ All state-aware requests default to the exact development schema
 `0.9.0-alpha`. See
 [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
 for the per-phase config matrix.
+
+`provisionSandbox`, `startSandbox`, `execInSandboxAsync`, `execInSandboxProcess`,
+`stopSandbox`, and `deprovisionSandbox` now run through `mxc_ffi` rather than
+launching executor processes. Executor-only options such as `executablePath`,
+`debug`, `logDir`, `ptyOptions`, and `usePty: true` are rejected on those
+APIs instead of silently falling back. The legacy `execInSandbox()` PTY API is
+still available for now when you explicitly want a `node-pty` `IPty`.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 
@@ -591,7 +607,8 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(sandboxId, config, options?)       → IPty             // streaming
+execInSandbox(sandboxId, config, options?)       → IPty             // legacy PTY streaming
+execInSandboxProcess(sandboxId, config, options?) → MxcSandboxProcess
 execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
