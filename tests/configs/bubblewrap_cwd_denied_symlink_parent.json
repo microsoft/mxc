@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-DeniedSymlinkParent",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = /tmp/mxc_bwrap_cwd/real ]; then echo CWD_DENIED_ALIAS_PARENT_OK; else echo CWD_DENIED_ALIAS_PARENT_BAD:$(pwd -P); fi; if [ ! -e secret/marker.txt ]; then echo DENIED_ALIAS_CHILD_MASKED_OK; else echo DENIED_ALIAS_CHILD_LEAK; fi",
+    "cwd": "/tmp/mxc_bwrap_cwd/real"
+  },
+  "filesystem": {
+    "deniedPaths": ["/tmp/mxc_bwrap_cwd/alias/secret"]
+  }
+}

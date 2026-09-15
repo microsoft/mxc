@@ -1,0 +1,15 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-SymlinkVisible",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = /tmp/mxc_bwrap_cwd/visible-target ]; then echo CWD_SYMLINK_VISIBLE_OK; else echo CWD_SYMLINK_VISIBLE_BAD:$(pwd -P); fi",
+    "cwd": "/tmp/mxc_bwrap_cwd/links/visible-cwd"
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/tmp/mxc_bwrap_cwd/links",
+      "/tmp/mxc_bwrap_cwd/visible-target"
+    ]
+  }
+}
