@@ -10,7 +10,7 @@ use mxc_config_contract::dev as contract;
 
 fn source(backend: &str, fields: &str) -> String {
     let network = if backend == "isolation_session" {
-        r#","network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#
+        r#","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#
     } else {
         ""
     };
@@ -20,7 +20,7 @@ fn source(backend: &str, fields: &str) -> String {
 }
 
 #[test]
-fn isolation_session_configuration_presence_matches_explicit_values_and_legacy() {
+fn isolation_session_configuration_presence_matches_explicit_values() {
     for (fields, expected) in [
         ("", None),
         (r#","experimental":{}"#, None),
@@ -45,10 +45,19 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
         assert!(common.filesystem.is_none());
         assert!(common.process.is_none());
         let network = common.network.unwrap();
-        assert_eq!(network.allow_local_network, Some(true));
+        assert!(network.allow_local_network.is_none());
+        assert!(network.default_policy.is_none());
         assert!(matches!(
-            network.default_policy,
-            Some(wire::NetworkPolicy::Allow)
+            network.egress.as_ref().unwrap().default,
+            Some(wire::NetworkAction::Allow)
+        ));
+        assert!(matches!(
+            network.ingress.as_ref().unwrap().default,
+            Some(wire::NetworkAction::Allow)
+        ));
+        assert!(matches!(
+            network.ingress.as_ref().unwrap().host_loopback,
+            Some(wire::NetworkAction::Allow)
         ));
         let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(config)) =
             operation
@@ -69,7 +78,6 @@ fn isolation_session_configuration_presence_matches_explicit_values_and_legacy()
 
 #[test]
 fn isolation_session_unrestricted_network_forms_map_without_loss() {
-    let legacy = r#""network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#;
     let directional = r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
     let request = |fields: &str| {
         format!(
@@ -78,7 +86,6 @@ fn isolation_session_unrestricted_network_forms_map_without_loss() {
     };
 
     for (fields, expected_app_id) in [
-        (format!(",{legacy}"), None),
         (format!(",{directional}"), None),
         (
             format!(
@@ -262,28 +269,6 @@ fn provision_common_fields_are_independent_of_backend_payload() {
     assert!(network.allowed_hosts.is_none());
     assert!(network.blocked_hosts.is_none());
     assert!(network.proxy.is_none());
-    let json = source(
-        "wslc",
-        r#","network":{"defaultPolicy":"block","enforcementMode":"firewall","allowLocalNetwork":false,"allowedHosts":["allowed"],"blockedHosts":["blocked"],"proxy":{"url":"http://proxy.example"}}"#,
-    );
-    let (common, _) = adapt(&json);
-    assert_common_matches_legacy(&json, &common);
-    let network = common.network.unwrap();
-    assert!(matches!(
-        network.default_policy,
-        Some(wire::NetworkPolicy::Block)
-    ));
-    assert!(matches!(
-        network.enforcement_mode,
-        Some(wire::NetworkEnforcement::Firewall)
-    ));
-    assert_eq!(network.allow_local_network, Some(false));
-    assert_eq!(network.allowed_hosts.unwrap(), ["allowed"]);
-    assert_eq!(network.blocked_hosts.unwrap(), ["blocked"]);
-    assert_eq!(
-        network.proxy.unwrap().url.as_deref(),
-        Some("http://proxy.example")
-    );
 }
 
 #[test]

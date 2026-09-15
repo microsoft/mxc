@@ -330,8 +330,9 @@ pub struct ProcessContainerNetwork {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Optional loopback proxy the runtime configures for the sandbox. Must
-    /// address localhost, and requires an egress policy.
+    /// Optional HTTP/S proxy URL. Host-process backends require a localhost
+    /// endpoint; WSLc requires an endpoint routable from its container and
+    /// inherits the provisioned networking mode on exec.
     #[serde(default)]
     pub network_proxy: OptionalField<String>,
 }
@@ -347,17 +348,6 @@ pub struct Lxc {
     pub release: String,
 }
 
-string_enum! {
-    /// Launch method for macOS Seatbelt config.
-    #[derive(Debug)]
-    pub enum LaunchMethod {
-        /// Launch the contained process directly through `exec`.
-        Exec => ["exec"],
-        /// Launch the contained application through macOS LaunchServices.
-        Open => ["open"],
-    }
-}
-
 /// macOS Seatbelt backend settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -369,9 +359,6 @@ pub struct Seatbelt {
     /// Whether GUI application access is allowed.
     #[serde(default)]
     pub gui_access: OptionalField<bool>,
-    /// Optional method used to launch the contained process.
-    #[serde(default)]
-    pub launch_method: OptionalField<LaunchMethod>,
     /// Whether the contained process may allocate nested pseudo-terminals.
     #[serde(default)]
     pub nested_pty: OptionalField<bool>,

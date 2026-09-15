@@ -2,12 +2,17 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-powershell-interactive",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
   "process": {
     "commandLine": "powershell.exe -NoLogo",
     "timeout": 0
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
   }
 }

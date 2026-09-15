@@ -129,6 +129,42 @@ function Assert-HypervisorPlatform {
     Write-Host 'WHP is enabled and hypervisor is present.'
 }
 
+# The matrix schedules by pool name, so this is the only evidence in the log
+# that a pool really booted the release it advertises. Which tier a
+# process-container job selects is a function of that build.
+function Write-HostOsVersion {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $values = @{}
+    foreach ($name in 'ProductName', 'DisplayVersion', 'ReleaseId', 'CurrentBuild', 'UBR', 'EditionID') {
+        try {
+            $values[$name] = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
+        } catch {
+            $values[$name] = $null
+        }
+    }
+
+    # Win32_OperatingSystem is the only reliable product name: the registry's
+    # ProductName still reads "Windows 10" on Windows 11 hosts.
+    $caption = $null
+    try {
+        $caption = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption
+    } catch {
+        Write-Host "Could not query Win32_OperatingSystem ($($_.Exception.Message)); falling back to the registry product name."
+        $caption = $values['ProductName']
+    }
+
+    $release = if ($values['DisplayVersion']) { $values['DisplayVersion'] } else { $values['ReleaseId'] }
+    $build = if ($null -ne $values['UBR']) {
+        "$($values['CurrentBuild']).$($values['UBR'])"
+    } else {
+        $values['CurrentBuild']
+    }
+
+    Write-Host "Host OS: $caption"
+    Write-Host "Host OS release: $release (build $build)"
+    Write-Host "Host OS edition: $($values['EditionID']); architecture: $env:PROCESSOR_ARCHITECTURE"
+}
+
 function Initialize-ProcessContainerHost {
     $hostPrep = Join-Path $BinaryDirectory 'wxc-host-prep.exe'
     if (-not (Test-Path $hostPrep)) {
@@ -138,6 +174,11 @@ function Initialize-ProcessContainerHost {
     # The AppContainer tier needs the system-drive ACEs and the \Device\Null
     # security descriptor. --no-sacl keeps the descriptor within what a CI host
     # can grant without SeSecurityPrivilege.
+    #
+    # This runs for process-t1 as well as process-t3. A T1 host selects
+    # BaseContainer for most policies, but the suite deliberately drives the
+    # AppContainer fallback tiers too, and an unprepared host fails the launch
+    # with WIN32_ERROR(5) instead of reporting a policy result.
     & $hostPrep prepare-system-drive
     if ($LASTEXITCODE -ne 0) {
         Exit-WithError "wxc-host-prep prepare-system-drive failed with exit code $LASTEXITCODE"
@@ -586,6 +627,8 @@ $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
 
 Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory"
 
+Write-HostOsVersion
+
 # Run for every backend: this is host inventory, not a backend prerequisite.
 # The winget repair comes first so the packaged-tooling install below can use
 # it, and the inventory reports the state after both.
@@ -594,6 +637,7 @@ Install-PackagedTooling
 Assert-WorkloadInterpreters
 
 switch ($Backend) {
+    'process-t1' { Initialize-ProcessContainerHost }
     'process-t3' { Initialize-ProcessContainerHost }
     'microvm' { Initialize-MicroVmHost }
     'wslc' { Initialize-WslcHost }

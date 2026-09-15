@@ -70,7 +70,7 @@ echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
 # Packages to build and lint — kept in one place so build and clippy stay in sync.
-LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy)
+LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy -p mxc_ffi)
 
 CARGO_FEATURES=()
 FEATURES_LIST=()
@@ -137,6 +137,10 @@ if [ -n "$TARGET_TRIPLE" ]; then
         cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
         echo "Warning: Could not find unix-test-proxy binary to copy"
     fi
+
+    cp "$SRC_DIR/target/$BUILD_TYPE/libmxc_ffi.so" "$BIN_DIR/" 2>/dev/null || \
+    cp "$SRC_DIR/target/$TARGET_TRIPLE/$BUILD_TYPE/libmxc_ffi.so" "$BIN_DIR/" 2>/dev/null || \
+    echo "Warning: Could not find libmxc_ffi.so to copy"
 fi
 
 # Build SDK

@@ -6,7 +6,7 @@
     "commandLine": "echo 'stdout message' && echo 'stderr message' >&2 && echo 'another stdout'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

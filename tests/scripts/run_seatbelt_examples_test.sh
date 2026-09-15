@@ -5,9 +5,6 @@
 # impression and, worse, a config that silently stopped meaning what its name
 # says. Every example must still pass validation, and the hermetic ones are
 # executed to prove they do what they claim.
-#
-# 27_mac_terminal_sandboxed is validated but never executed: it uses
-# launchMethod "open", which this suite does not run.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
