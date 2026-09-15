@@ -1,18 +1,42 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert';
+import { EventEmitter } from 'node:events';
+
 import {
   queryTelemetryConsentAsync,
   requestTelemetryConsent,
   withdrawTelemetryConsentAsync,
-  _setTelemetryConsentAsyncRunner,
-  _setTelemetryConsentProtocolRunner,
-  _setTelemetryPlatform,
   _resetTelemetryFailureReporting,
+  _setTelemetryPlatform,
   type TelemetryConsentPrompt,
 } from '../../src/telemetry.js';
+import {
+  _setBindingTelemetryWorkerFactory,
+  type BindingTelemetryWorkerLike,
+  type TelemetryWorkerData,
+  type TelemetryWorkerMessage,
+} from '../../src/bindings/telemetry-worker.js';
+import {
+  TELEMETRY_CONSENT_DECISION_YES,
+  TELEMETRY_CONSENT_PRESENTER_ERROR,
+} from '../../src/bindings/telemetry.js';
+
+class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
+  reply(message: TelemetryWorkerMessage): void {
+    queueMicrotask(() => this.emit('message', message));
+  }
+
+  fail(error: Error): void {
+    queueMicrotask(() => this.emit('error', error));
+  }
+
+  exit(code: number): void {
+    queueMicrotask(() => this.emit('exit', code));
+  }
+}
 
 const prompt: TelemetryConsentPrompt = {
   resourceVersion: 1,
@@ -24,25 +48,23 @@ const prompt: TelemetryConsentPrompt = {
   learnMoreLabel: { id: 'telemetry.consent.learnMore', text: 'Privacy Statement' },
   learnMoreUrl: 'https://go.microsoft.com/fwlink/?linkid=521839',
 };
+const promptJson = JSON.stringify(prompt);
 
-function status(
-  effectiveState: 'granted' | 'denied' | 'undetermined' | 'not-applicable',
-  policy: 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable' = 'unrestricted',
-  needsPrompt = false,
-): string {
-  return JSON.stringify({
-    action: 'status',
-    result: 'status',
-    storedState: effectiveState,
-    effectiveState,
-    needsPrompt,
-    policy,
-    reason: null,
+function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(() => {
+      if (condition()) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() - started > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error(`condition did not become true within ${timeoutMs}ms`));
+      }
+    }, 5);
   });
-}
-
-function commandOutput(stdout: string, stderr = ''): { stdout: string; stderr: string } {
-  return { stdout, stderr };
 }
 
 describe('telemetry consent', () => {
@@ -51,13 +73,25 @@ describe('telemetry consent', () => {
   });
 
   afterEach(() => {
-    _setTelemetryConsentAsyncRunner(null);
-    _setTelemetryConsentProtocolRunner(null);
+    _setBindingTelemetryWorkerFactory();
     _setTelemetryPlatform(null);
   });
 
-  it('parses typed stored/effective status', async () => {
-    _setTelemetryConsentAsyncRunner(async () => commandOutput(status('granted', 'allowed')));
+  it('parses typed stored/effective status from a consistent native snapshot', async () => {
+    _setBindingTelemetryWorkerFactory(() => {
+      const worker = new FakeWorker();
+      worker.reply({
+        kind: 'snapshot',
+        snapshot: {
+          consent: 'granted',
+          statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
+          policy: 'allowed',
+          needsPrompt: false,
+        },
+      });
+      return worker;
+    });
+
     assert.deepStrictEqual(await queryTelemetryConsentAsync(), {
       state: 'granted',
       storedState: 'granted',
@@ -67,225 +101,188 @@ describe('telemetry consent', () => {
     });
   });
 
-  it('queries status through the dedicated consent command', async () => {
-    let args: readonly string[] = [];
-    _setTelemetryConsentAsyncRunner(async (value) => {
-      args = value;
-      return commandOutput(status('undetermined', 'unrestricted', true));
+  it('fails closed when the native snapshot is internally inconsistent', async () => {
+    _setBindingTelemetryWorkerFactory(() => {
+      const worker = new FakeWorker();
+      worker.reply({
+        kind: 'snapshot',
+        snapshot: {
+          consent: 'granted',
+          statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
+          policy: 'blocked',
+          needsPrompt: false,
+        },
+      });
+      return worker;
     });
-    assert.strictEqual((await queryTelemetryConsentAsync()).needsPrompt, true);
-    assert.deepStrictEqual(args, ['--telemetry-consent', 'status']);
-    assert.ok(!args.includes('--config-base64'));
+
+    const query = await queryTelemetryConsentAsync();
+    assert.deepStrictEqual({
+      ...query,
+      error: undefined,
+    }, {
+      state: 'undetermined',
+      storedState: 'undetermined',
+      effectiveState: 'undetermined',
+      needsPrompt: false,
+      policy: 'blocked',
+      error: undefined,
+    });
+    assert.match(query.error ?? '', /unrecognised telemetry consent output/);
   });
 
   it('deduplicates variable fail-closed details by operation and safe result', async () => {
     _resetTelemetryFailureReporting();
     const warnings: string[] = [];
     const originalWarn = console.warn;
+    let call = 0;
     console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
     try {
-      _setTelemetryConsentAsyncRunner(async () => commandOutput('not json'));
+      _setBindingTelemetryWorkerFactory(() => {
+        const worker = new FakeWorker();
+        const statusJson = call === 0 ? 'not json' : '{"storedState":1}';
+        call += 1;
+        worker.reply({
+          kind: 'snapshot',
+          snapshot: {
+            consent: 'undetermined',
+            statusJson,
+            policy: 'blocked',
+            needsPrompt: false,
+          },
+        });
+        return worker;
+      });
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
-      assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
-      _setTelemetryConsentAsyncRunner(async () => commandOutput('different invalid output'));
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
     } finally {
       console.warn = originalWarn;
     }
     assert.strictEqual(warnings.length, 1);
-    assert.ok(warnings.every((warning) => /fail-closed/.test(warning)));
+    assert.ok(warnings[0]?.includes('fail-closed'));
   });
 
-  it('deduplicates variable native status diagnostics without changing the typed result', async () => {
-    _resetTelemetryFailureReporting();
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
-    try {
-      let call = 0;
-      _setTelemetryConsentAsyncRunner(async () => {
-        call += 1;
-        return commandOutput(
-          JSON.stringify({
-            action: 'status',
-            result: 'status',
-            storedState: 'undetermined',
-            effectiveState: 'undetermined',
-            needsPrompt: false,
-            policy: 'blocked',
-            reason: 'store-unreadable',
-          }),
-          `mxc: telemetry consent store could not be read (${call})`,
-        );
-      });
-      const first = await queryTelemetryConsentAsync();
-      const second = await queryTelemetryConsentAsync();
-      assert.strictEqual(first.effectiveState, 'undetermined');
-      assert.strictEqual(first.policy, 'blocked');
-      assert.strictEqual(first.error, undefined);
-      assert.deepStrictEqual(second, first);
-    } finally {
-      console.warn = originalWarn;
-    }
-    assert.deepStrictEqual(warnings, [
-      'mxc-sdk: queryTelemetryConsentAsync native diagnostic: '
-        + 'mxc: telemetry consent store could not be read (1)',
-    ]);
-  });
-
-  it('fails closed when native prompt eligibility conflicts with consent state or policy', async () => {
-    for (const response of [
-      status('granted', 'allowed', true),
-      status('undetermined', 'blocked', true),
-    ]) {
-      _setTelemetryConsentAsyncRunner(async () => commandOutput(response));
-      const query = await queryTelemetryConsentAsync();
-      assert.deepStrictEqual({
-        ...query,
-        error: undefined,
-      }, {
-        state: 'undetermined',
-        storedState: 'undetermined',
-        effectiveState: 'undetermined',
-        needsPrompt: false,
-        policy: 'blocked',
-        error: undefined,
-      });
-      assert.match(query.error ?? '', /unrecognised telemetry consent output/);
-    }
-  });
-
-  it('fails status queries closed for mismatched actions and invalid results', async () => {
-    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
-      action: 'status',
-      result: 'withdrawn',
-      storedState: 'granted',
-      effectiveState: 'granted',
-      needsPrompt: false,
-      policy: 'allowed',
-      reason: null,
-    })));
-    const asyncQuery = await queryTelemetryConsentAsync();
-    assert.strictEqual(asyncQuery.effectiveState, 'undetermined');
-    assert.strictEqual(asyncQuery.policy, 'blocked');
-    assert.strictEqual(asyncQuery.needsPrompt, false);
-  });
-
-  it('fails status queries closed when the native response omits reason', async () => {
-    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
-      action: 'status',
-      result: 'status',
-      storedState: 'granted',
-      effectiveState: 'granted',
-      needsPrompt: false,
-      policy: 'allowed',
-    })));
-    const query = await queryTelemetryConsentAsync();
-    assert.strictEqual(query.state, 'undetermined');
-    assert.strictEqual(query.storedState, 'undetermined');
-    assert.strictEqual(query.effectiveState, 'undetermined');
-    assert.strictEqual(query.policy, 'blocked');
-    assert.strictEqual(query.needsPrompt, false);
-  });
-
-  it('binds a synchronous presenter decision to the canonical prompt', async () => {
-    let observedLocale: string | undefined;
-    _setTelemetryConsentProtocolRunner(async (locale, presenter) => {
-      observedLocale = locale;
-      const decision = await presenter(prompt);
-      assert.strictEqual(decision, 'yes');
-      return {
-        action: 'request',
-        result: 'granted',
-        storedState: 'granted',
-        effectiveState: 'granted',
-        needsPrompt: false,
-        policy: 'unrestricted',
-      };
+  it('maps a typed presenter decision onto the native callback result', async () => {
+    let requestData: TelemetryWorkerData | undefined;
+    const worker = new FakeWorker();
+    _setBindingTelemetryWorkerFactory((data) => {
+      requestData = data;
+      return worker;
     });
 
-    const outcome = await requestTelemetryConsent((value) => {
+    const promise = requestTelemetryConsent((value) => {
       assert.deepStrictEqual(value, prompt);
       return 'yes';
     }, 'en-US');
-    assert.strictEqual(observedLocale, 'en-US');
-    assert.strictEqual(outcome.result, 'granted');
+    await waitFor(() => requestData?.operation === 'request');
+    const decision = new Int32Array((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).decisionShared);
+
+    worker.reply({ kind: 'present', promptJson });
+    await waitFor(() => Atomics.load(decision, 0) === 1);
+    assert.strictEqual(Atomics.load(decision, 1), TELEMETRY_CONSENT_DECISION_YES);
+    worker.reply({
+      kind: 'payload',
+      payload: '{"result":"granted","storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
+    });
+
+    assert.deepStrictEqual(await promise, {
+      action: 'request',
+      result: 'granted',
+      storedState: 'granted',
+      effectiveState: 'granted',
+      needsPrompt: false,
+      policy: 'allowed',
+    });
+    assert.strictEqual((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).locale, 'en-US');
   });
 
-  it('supports an asynchronous presenter and propagates presenter failure', async () => {
-    _setTelemetryConsentProtocolRunner(async (_locale, presenter) => {
-      await presenter(prompt);
-      throw new Error('should not continue');
+  it('rejects invalid presenter decisions and returns the original failure', async () => {
+    let requestData: TelemetryWorkerData | undefined;
+    const worker = new FakeWorker();
+    _setBindingTelemetryWorkerFactory((data) => {
+      requestData = data;
+      return worker;
+    });
+
+    const promise = requestTelemetryConsent(() => 'maybe' as unknown as 'yes');
+    await waitFor(() => requestData?.operation === 'request');
+    const decision = new Int32Array((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).decisionShared);
+
+    worker.reply({ kind: 'present', promptJson });
+    await waitFor(() => Atomics.load(decision, 0) === 1);
+    assert.strictEqual(Atomics.load(decision, 1), TELEMETRY_CONSENT_PRESENTER_ERROR);
+    worker.reply({
+      kind: 'error',
+      error: { code: 'backend_error', message: 'requesting telemetry consent failed' },
+    });
+
+    await assert.rejects(promise, /invalid decision/);
+  });
+
+  it('rejects locales containing embedded NUL characters', async () => {
+    let called = false;
+    _setBindingTelemetryWorkerFactory(() => {
+      called = true;
+      return new FakeWorker();
     });
     await assert.rejects(
-      requestTelemetryConsent(async () => {
-        await Promise.resolve();
-        throw new Error('UI unavailable');
-      }),
-      /UI unavailable/,
+      requestTelemetryConsent(() => 'yes', 'en-US\0dev'),
+      /embedded NUL/,
     );
+    assert.strictEqual(called, false);
   });
 
-  it('queries and withdraws through the non-blocking runner', async () => {
-    const actions: string[] = [];
-    _setTelemetryConsentAsyncRunner(async (args) => {
-      assert.deepStrictEqual(args.slice(0, 1), ['--telemetry-consent']);
-      const action = args[1]!;
-      actions.push(action);
-      return commandOutput(action === 'status'
-        ? status('granted', 'allowed')
-        : JSON.stringify({
-          action: 'withdraw',
-          result: 'withdrawn',
-          storedState: 'denied',
-          effectiveState: 'denied',
-          needsPrompt: false,
-          policy: 'unrestricted',
-          reason: null,
-        }));
+  it('parses and withdraws through the worker-backed binding', async () => {
+    let call = 0;
+    _setBindingTelemetryWorkerFactory(() => {
+      const worker = new FakeWorker();
+      if (call === 0) {
+        worker.reply({
+          kind: 'snapshot',
+          snapshot: {
+            consent: 'granted',
+            statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
+            policy: 'allowed',
+            needsPrompt: false,
+          },
+        });
+      } else {
+        worker.reply({
+          kind: 'payload',
+          payload: '{"result":"withdrawn","storedState":"denied","effectiveState":"denied","reason":null,"policy":"unrestricted"}',
+        });
+      }
+      call += 1;
+      return worker;
     });
 
     assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'granted');
-    assert.strictEqual((await withdrawTelemetryConsentAsync()).result, 'withdrawn');
-    assert.deepStrictEqual(actions, ['status', 'withdraw']);
-  });
-
-  it('rejects withdrawal responses with mismatched actions or invalid results', async () => {
-    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
-      action: 'withdraw',
-      result: 'status',
-      storedState: 'denied',
-      effectiveState: 'denied',
-      needsPrompt: false,
-      policy: 'blocked',
-      reason: null,
-    })));
-    await assert.rejects(
-      withdrawTelemetryConsentAsync(),
-      /unrecognised telemetry consent output/,
-    );
-  });
-
-  it('rejects withdrawal responses that omit reason', async () => {
-    _setTelemetryConsentAsyncRunner(async () => commandOutput(JSON.stringify({
+    assert.deepStrictEqual(await withdrawTelemetryConsentAsync(), {
       action: 'withdraw',
       result: 'withdrawn',
       storedState: 'denied',
       effectiveState: 'denied',
       needsPrompt: false,
       policy: 'unrestricted',
-    })));
-    await assert.rejects(
-      withdrawTelemetryConsentAsync(),
-      /unrecognised telemetry consent output/,
-    );
+    });
+  });
+
+  it('rejects withdrawal responses with invalid results', async () => {
+    _setBindingTelemetryWorkerFactory(() => {
+      const worker = new FakeWorker();
+      worker.reply({
+        kind: 'payload',
+        payload: '{"result":"status","storedState":"denied","effectiveState":"denied","reason":null,"policy":"blocked"}',
+      });
+      return worker;
+    });
+    await assert.rejects(withdrawTelemetryConsentAsync(), /unrecognised telemetry consent output/);
   });
 });
 
 describe('telemetry consent is Windows-only', () => {
   afterEach(() => {
-    _setTelemetryConsentAsyncRunner(null);
-    _setTelemetryConsentProtocolRunner(null);
+    _setBindingTelemetryWorkerFactory();
     _setTelemetryPlatform(null);
   });
 
@@ -293,13 +290,9 @@ describe('telemetry consent is Windows-only', () => {
     it(`does not query or present consent on ${platform}`, async () => {
       _setTelemetryPlatform(platform);
       let called = false;
-      _setTelemetryConsentAsyncRunner(async () => {
+      _setBindingTelemetryWorkerFactory(() => {
         called = true;
-        throw new Error('must not run');
-      });
-      _setTelemetryConsentProtocolRunner(async () => {
-        called = true;
-        throw new Error('must not run');
+        return new FakeWorker();
       });
 
       const request = await requestTelemetryConsent(() => {
