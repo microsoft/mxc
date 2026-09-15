@@ -87,22 +87,48 @@ jobs:
       enableTest: 'false'
 
   # Build the SDK and integration tests so the Node E2E suite can be
-  # included in the test bundle.  The SDK has a native dep (node-pty)
-  # that requires node-gyp; the windows-2022 image has VS build tools.
+  # included in the test bundle. The in-process SDK loads mxc_ffi from
+  # sdk/node/bin at runtime.
   - task: NodeTool@1
     displayName: Use Node.js 20
     inputs:
       version: '20.x'
 
-  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
-  # resolves its binary at runtime.  (build.bat does this; the pipeline
-  # must replicate it since we only build wxc-exec, not the full repo.)
+  # Populate sdk/node/bin/x64 with the freshly-built in-process runtime.
   - powershell: |
       $sdkBin = "$(Build.SourcesDirectory)/sdk/node/bin/x64"
       New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
-      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
-      Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
-    displayName: 'Stage wxc-exec into SDK bin'
+      foreach ($name in @('wxc-exec.exe', 'lxc-exec', 'mxc-exec-mac', 'unix-test-proxy')) {
+          Remove-Item -LiteralPath (Join-Path $sdkBin $name) -Force -ErrorAction SilentlyContinue
+      }
+
+      $required = @('mxc_ffi.dll')
+      $optional = @(
+          'plm.exe',
+          'wxc-host-prep.exe',
+          'winhttp-proxy-shim.exe',
+          'wxc-test-proxy.exe',
+          'wxc-windows-sandbox-daemon.exe',
+          'wxc-windows-sandbox-guest.exe'
+      )
+
+      foreach ($name in $required) {
+          $src = Join-Path "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release" $name
+          if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+              throw "Required Node runtime file not found: $src"
+          }
+          Copy-Item $src "$sdkBin/"
+          Write-Host "  -> sdk/node/bin/x64/$name"
+      }
+
+      foreach ($name in $optional) {
+          $src = Join-Path "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release" $name
+          if (Test-Path -LiteralPath $src -PathType Leaf) {
+              Copy-Item $src "$sdkBin/"
+              Write-Host "  -> sdk/node/bin/x64/$name"
+          }
+      }
+    displayName: 'Stage Node runtime into SDK bin'
 
   - script: npm ci && npm run build
     displayName: 'Build SDK (@microsoft/mxc-sdk)'

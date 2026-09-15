@@ -58,7 +58,8 @@ jobs:
           npm | "$(Agent.OS)"
         path: $(npm_config_cache)
 
-    # Download all artifacts dynamically
+    # Download all artifacts dynamically, then prune executor-only payloads so
+    # the npm package keeps only the in-process runtime libraries and sidecars.
     - ${{ each target in parameters.targets }}:
       - task: DownloadPipelineArtifact@2
         displayName: Download ${{ target.artifact }}
@@ -66,24 +67,13 @@ jobs:
           artifact: ${{ target.artifact }}
           path: $(sdkDirectory)/bin/${{ target.sdkArch }}
 
-    # Pipeline artifact downloads strip Unix execute permissions.
-    # Restore +x on Linux and macOS binaries so the tarball preserves them.
-    - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
-      displayName: Restore execute permission on lxc-exec
-
     - script: |
         set -euo pipefail
-        find $(sdkDirectory)/bin -name unix-test-proxy -exec chmod +x {} +
-      displayName: Restore execute permission on unix-test-proxy
-
-    # Drop symbol files from the npm package — symbols ship separately.
-    - script: rm -rf $(sdkDirectory)/bin/*/symbols
-      displayName: Strip symbols/ from npm package
-
-    - script: |
-        set -euo pipefail
-        find $(sdkDirectory)/bin -name mxc-exec-mac -exec chmod +x {} +
-      displayName: Restore execute permission on mxc-exec-mac
+        for name in wxc-exec.exe lxc-exec mxc-exec-mac unix-test-proxy; do
+          find $(sdkDirectory)/bin -name "$name" -type f -delete
+        done
+        find $(sdkDirectory)/bin -type d -name symbols -prune -exec rm -rf {} +
+      displayName: Prune executor-only payloads from npm package
 
     # Copy .npmrc to the SDK directory so Azure artifacts feed is used for npm install.
     - task: CopyFiles@2

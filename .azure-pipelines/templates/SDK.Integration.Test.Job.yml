@@ -99,12 +99,12 @@ jobs:
       - ${{ if eq(target.os, 'linux') }}:
         - script: |
             sudo apt-get update -qq
-            sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns
-          displayName: Install LXC, Bubblewrap, and slirp4netns
+            sudo apt-get install -y -qq bubblewrap
+          displayName: Install bubblewrap
 
-        - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+        - script: sudo MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
-          displayName: npm test (sudo, with LXC)
+          displayName: npm test (sudo)
 
       - ${{ if eq(target.os, 'windows') }}:
         - script: npm test
@@ -115,15 +115,6 @@ jobs:
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
 
       - ${{ if eq(target.os, 'macos') }}:
-        # Restore execute bit on the mac binary; pipeline artifact
-        # downloads (via npm pack/unpack) drop Unix execute permissions.
-        - script: |
-            set -euo pipefail
-            BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed package" && exit 1; fi
-          workingDirectory: $(integrationDirectory)
-          displayName: Restore execute permission on mxc-exec-mac
-
         - script: npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test
