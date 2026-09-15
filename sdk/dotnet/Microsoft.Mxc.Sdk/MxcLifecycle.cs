@@ -132,6 +132,26 @@ public static class MxcLifecycle
                     "provision",
                     "imageTarPath",
                     wslc.ImageTarPath);
+                if (wslc.PortMappings is { Count: > 0 })
+                {
+                    var portMappings = new JsonArray();
+                    foreach (var mapping in wslc.PortMappings)
+                    {
+                        portMappings.Add(new JsonObject
+                        {
+                            ["windowsPort"] = (int)mapping.WindowsPort,
+                            ["containerPort"] = (int)mapping.ContainerPort,
+                        });
+                    }
+
+                    SetBackendConfig(
+                        envelope,
+                        backend,
+                        "provision",
+                        "portMappings",
+                        portMappings);
+                }
+
                 break;
         }
 

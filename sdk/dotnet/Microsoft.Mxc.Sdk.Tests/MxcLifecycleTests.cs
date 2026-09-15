@@ -3,6 +3,7 @@
 
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
@@ -191,6 +192,58 @@ public class MxcLifecycleTests
                 StateAwareContainment.IsolationSession,
                 new ProvisionSandboxOptions { Network = network }));
         Assert.Contains("directional egress, ingress, and host-loopback", error.Message);
+    }
+
+    [Fact]
+    public void WslcProvisionOptions_PortMappingsLandOnTheProvisionPhase()
+    {
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.Wslc,
+            new WslcProvisionOptions
+            {
+                PortMappings =
+                [
+                    new WslcPortMapping(8080, 80),
+                    new WslcPortMapping(8443, 443),
+                ],
+            });
+
+        var mappings = envelope["experimental"]?["wslc"]?["provision"]?["portMappings"] as JsonArray;
+        Assert.NotNull(mappings);
+        Assert.Equal(2, mappings!.Count);
+        Assert.Equal(8080, (int)mappings[0]!["windowsPort"]!);
+        Assert.Equal(80, (int)mappings[0]!["containerPort"]!);
+        Assert.Equal(8443, (int)mappings[1]!["windowsPort"]!);
+        Assert.Equal(443, (int)mappings[1]!["containerPort"]!);
+    }
+
+    [Fact]
+    public void WslcProvisionOptions_OmittedPortMappingsEmitNoKey()
+    {
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(
+            StateAwareContainment.Wslc,
+            new WslcProvisionOptions { Image = "alpine:latest" });
+
+        Assert.Null(envelope["experimental"]?["wslc"]?["provision"]?["portMappings"]);
+    }
+
+    [Fact]
+    public void WslcProvisionOptions_RoundTripPreservesPortMappings()
+    {
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+        var json = JsonSerializer.Serialize(
+            new WslcProvisionOptions { PortMappings = [new WslcPortMapping(8080, 80)] },
+            jsonOptions);
+
+        var roundTripped = JsonSerializer.Deserialize<WslcProvisionOptions>(json, jsonOptions)!;
+
+        var mapping = Assert.Single(roundTripped.PortMappings!);
+        Assert.Equal(8080, mapping.WindowsPort);
+        Assert.Equal(80, mapping.ContainerPort);
     }
 
     [Fact]
