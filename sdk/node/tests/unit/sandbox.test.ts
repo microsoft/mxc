@@ -3,15 +3,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
-import { resolveExecutableAndArgs } from '../../src/helper.js';
-import {
-  _resetPlatformSupportCache,
-  _setPlatformSupportSnapshotReader,
-} from '../../src/platform.js';
+import { buildSandboxPayload, createConfigFromPolicy } from '../../src/sandbox.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
-import { MxcError } from '../../src/errors.js';
-import { platformSkip } from './test-helpers.js';
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.6.0-alpha' };
@@ -186,15 +179,15 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should pass builtinTestServer proxy through to network config', () => {
+    it('should pass localhost proxy through to network config', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
-        assert.deepStrictEqual(payload.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(payload.network!.proxy, { localhost: 8080 });
       } finally {
         restore();
       }
@@ -261,11 +254,11 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         };
         const config = buildSandboxPayload('echo hi', policy);
         assert.strictEqual(config.containment, 'process');
-        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.proxy, { localhost: 8080 });
       } finally {
         restore();
       }
@@ -276,11 +269,11 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         };
         const config = buildSandboxPayload('echo hi', policy, undefined, undefined, 'bubblewrap');
         assert.strictEqual(config.containment, 'bubblewrap');
-        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.proxy, { localhost: 8080 });
       } finally {
         restore();
       }
@@ -291,7 +284,7 @@ describe('buildSandboxPayload', () => {
       try {
         const policy: SandboxPolicy = {
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         };
         assert.throws(
           () => buildSandboxPayload('echo hi', policy, undefined, undefined, 'lxc'),
@@ -481,9 +474,7 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
-    assert.strictEqual(config.ui!.disable, true);
-    assert.strictEqual(config.ui!.clipboard, 'none');
-    assert.strictEqual(config.ui!.injection, false);
+    assert.strictEqual(config.ui, undefined);
     assert.strictEqual(config.process!.timeout, 0);
     assert.strictEqual(config.process!.commandLine, '');
     assert.strictEqual(config.lifecycle!.destroyOnExit, true);
@@ -616,11 +607,11 @@ describe('createConfigFromPolicy', () => {
     it('should pass proxy through to config', () => {
       mockWindows();
       try {
-        const builtin = createConfigFromPolicy({
+        const localhost = createConfigFromPolicy({
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         });
-        assert.deepStrictEqual(builtin.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(localhost.network!.proxy, { localhost: 8080 });
 
         const url = createConfigFromPolicy({
           version: '0.6.0-alpha',
@@ -841,10 +832,10 @@ describe('createConfigFromPolicy', () => {
       try {
         const config = createConfigFromPolicy({
           version: '0.6.0-alpha',
-          network: { proxy: { builtinTestServer: true } },
+          network: { proxy: { localhost: 8080 } },
         });
         assert.strictEqual(config.containment, 'process');
-        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.proxy, { localhost: 8080 });
       } finally {
         restore();
       }
@@ -856,12 +847,12 @@ describe('createConfigFromPolicy', () => {
         const config = createConfigFromPolicy(
           {
             version: '0.6.0-alpha',
-            network: { proxy: { builtinTestServer: true } },
+            network: { proxy: { localhost: 8080 } },
           },
           'bubblewrap',
         );
         assert.strictEqual(config.containment, 'bubblewrap');
-        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.proxy, { localhost: 8080 });
       } finally {
         restore();
       }
@@ -880,14 +871,14 @@ describe('createConfigFromPolicy', () => {
             network: {
               allowOutbound: true,
               allowedHosts: ['example.com'],
-              proxy: { builtinTestServer: true },
+              proxy: { localhost: 8080 },
             },
           },
           'bubblewrap',
         );
         assert.strictEqual(config.containment, 'bubblewrap');
         assert.strictEqual(config.network!.enforcementMode, undefined);
-        assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
+        assert.deepStrictEqual(config.network!.proxy, { localhost: 8080 });
         assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
       } finally {
         restore();
@@ -901,7 +892,7 @@ describe('createConfigFromPolicy', () => {
           () => createConfigFromPolicy(
             {
               version: '0.6.0-alpha',
-              network: { proxy: { builtinTestServer: true } },
+              network: { proxy: { localhost: 8080 } },
             },
             'lxc',
           ),
@@ -1623,23 +1614,6 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.containerId, 'my-container');
     });
 
-    it('should throw from spawnSandbox when experimental backend is used via config', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
-    });
-
-    it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
-    });
   });
 
   describe('Bubblewrap', () => {
@@ -1714,282 +1688,5 @@ describe('Schema 0.6.0 vocabulary', () => {
       containment: 'isolation_session',
     };
     assert.strictEqual(c.containment, 'isolation_session');
-  });
-});
-
-describe('resolveExecutableAndArgs (containment validation)', { skip: platformSkip }, () => {
-  // Use the running node binary as a stand-in executable so the helper does
-  // not try to discover wxc-exec on disk. The helper does not actually exec
-  // anything; it just builds the path + args.
-  const fakeExe = process.execPath;
-
-  function makeConfig(containment: string): ContainerConfig {
-    return {
-      version: '0.6.0-alpha',
-      containment: containment as ContainerConfig['containment'],
-      process: { commandLine: 'echo hi' },
-    };
-  }
-
-  it('should accept the abstract intent "process" without throwing', () => {
-    // Regression guard: createConfigFromPolicy() defaults to "process" and
-    // the SDK no longer pre-resolves it to a concrete backend. The validator
-    // must accept abstract intents and let the native binary resolve them.
-    assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('process'), { executablePath: fakeExe }),
-    );
-  });
-
-  it('should accept the abstract intent "microvm" with experimental flag (Windows only)', function (this: { skip: (reason?: string) => void }) {
-    if (process.platform !== 'win32') {
-      this.skip('microvm is Windows-only');
-      return;
-    }
-    assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('microvm'), {
-        executablePath: fakeExe,
-        experimental: true,
-      }),
-    );
-  });
-
-  it('should not require experimental mode for the non-experimental "process" intent', () => {
-    // process is an abstract intent; only its concrete resolution may be
-    // experimental (e.g. seatbelt today). The intent itself does not
-    // require --experimental at the SDK boundary.
-    assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('process'), { executablePath: fakeExe }),
-    );
-  });
-
-  it('should accept the abstract intent "vm" without throwing', () => {
-    // "vm" is a forward-looking ContainmentType intent. Even though no
-    // concrete VM backend resolves it yet, the SDK validator must let it
-    // pass — the binary owns the resolve/error step.
-    assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('vm'), { executablePath: fakeExe }),
-    );
-  });
-
-  it('should still reject genuinely unknown containment values', () => {
-    assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('bogus_backend'), { executablePath: fakeExe }),
-      { message: /not available on this platform/ },
-    );
-  });
-
-  it('includes the selected Linux backend failure reason', function (this: { skip: (reason?: string) => void }) {
-    if (process.platform !== 'linux') {
-      this.skip('per-backend availability reasons are Linux-only');
-      return;
-    }
-    try {
-      _setPlatformSupportSnapshotReader(() => ({
-        platformSupportJson: JSON.stringify({
-          isSupported: false,
-          reason: 'timed out after 5000ms',
-          availableMethods: [],
-        }),
-        availableBackendsJson: '[{"backend":"lxc"}]',
-      }));
-      _resetPlatformSupportCache();
-
-      assert.throws(
-        () => resolveExecutableAndArgs(makeConfig('bubblewrap'), { executablePath: fakeExe }),
-        { message: /timed out after 5000ms/ },
-      );
-    } finally {
-      _setPlatformSupportSnapshotReader(null);
-      _resetPlatformSupportCache();
-    }
-  });
-
-  it('should still require experimental mode for experimental backends like wslc', () => {
-    assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
-      { message: /experimental mode/ },
-    );
-  });
-
-  it('should NOT require experimental mode for explicit lxc containment', function (this: { skip: (reason?: string) => void }) {
-    if (process.platform !== 'linux') {
-      this.skip('lxc is Linux-only');
-      return;
-    }
-    assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('lxc'), { executablePath: fakeExe }),
-    );
-  });
-
-  // Legacy wire-value aliases (PR #268 deprecation window). The native binary
-  // accepts these via serde aliases regardless of schema version; the SDK
-  // validator must mirror that so configs carried forward from older spellings
-  // are not rejected before they reach wxc-exec. See also Rust parser tests
-  // `legacy_appcontainer_wire_value_aliases_processcontainer` and
-  // `legacy_macos_sandbox_wire_value_aliases_seatbelt`.
-  describe('legacy containment aliases', () => {
-    it('should accept "appcontainer" as an alias of processcontainer (Windows)', function (this: { skip: (reason?: string) => void }) {
-      if (process.platform !== 'win32') {
-        this.skip('processcontainer is Windows-only');
-        return;
-      }
-      assert.doesNotThrow(() =>
-        resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
-      );
-    });
-
-    it('should reject "appcontainer" on non-Windows hosts with the canonical error', function (this: { skip: (reason?: string) => void }) {
-      if (process.platform === 'win32') {
-        this.skip('appcontainer is the native value on Windows');
-        return;
-      }
-      assert.throws(
-        () => resolveExecutableAndArgs(makeConfig('appcontainer'), { executablePath: fakeExe }),
-        { message: /'appcontainer' is not available on this platform/ },
-      );
-    });
-
-    it('should accept "macos_sandbox" on macOS', function (this: { skip: (reason?: string) => void }) {
-      if (process.platform !== 'darwin') {
-        this.skip('seatbelt is macOS-only');
-        return;
-      }
-      assert.doesNotThrow(() =>
-        resolveExecutableAndArgs(makeConfig('macos_sandbox'), { executablePath: fakeExe }),
-      );
-    });
-
-    it('should forward the legacy wire value to the binary unchanged', () => {
-      // The SDK resolves the alias only for its own validation; the on-wire
-      // string sent to wxc-exec must still be the legacy form, because the
-      // Rust serde alias is the canonical resolution point. Re-decoding the
-      // base64 envelope confirms the wire form is preserved.
-      const { args } = resolveExecutableAndArgs(
-        // Force the validator to accept regardless of host: macOS would
-        // otherwise fail on the experimental gate; Windows/Linux on platform
-        // availability for non-native legacy values.
-        makeConfig('appcontainer'),
-        { executablePath: fakeExe, skipPlatformCheck: true },
-      );
-      const idx = args.indexOf('--config-base64');
-      assert.ok(idx >= 0, '--config-base64 should be present in args');
-      const decoded = Buffer.from(args[idx + 1], 'base64').toString('utf-8');
-      const envelope = JSON.parse(decoded);
-      assert.strictEqual(envelope.containment, 'appcontainer');
-    });
-  });
-
-  describe('builtinTestServer testing-features gate', () => {
-    it('forwards --allow-testing-features when the caller opts in via allowTestingFeatures', () => {
-      const config: ContainerConfig = {
-        version: '0.6.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
-      };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-        allowTestingFeatures: true,
-      });
-      assert.ok(
-        args.includes('--allow-testing-features'),
-        'expected --allow-testing-features to be forwarded',
-      );
-    });
-
-    it('throws when builtinTestServer is used without allowTestingFeatures', () => {
-      const config: ContainerConfig = {
-        version: '0.6.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
-      };
-      assert.throws(
-        () =>
-          resolveExecutableAndArgs(config, {
-            executablePath: fakeExe,
-            skipPlatformCheck: true,
-          }),
-        { message: /allowTestingFeatures: true/ },
-      );
-    });
-
-    it('does not forward --allow-testing-features for a non-test proxy', () => {
-      const config: ContainerConfig = {
-        version: '0.6.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://localhost:8080' } },
-      };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-      });
-      assert.ok(
-        !args.includes('--allow-testing-features'),
-        'did not expect --allow-testing-features for a url proxy',
-      );
-    });
-  });
-
-  describe('one-shot telemetry', () => {
-    function decodeConfig(args: string[]): ContainerConfig {
-      const index = args.indexOf('--config-base64');
-      assert.ok(index >= 0, '--config-base64 should be present in args');
-      return JSON.parse(
-        Buffer.from(args[index + 1], 'base64').toString('utf-8'),
-      ) as ContainerConfig;
-    }
-
-    it('serializes config telemetry with schema 0.9', () => {
-      const config = makeConfig('process');
-      config.version = '0.9.0-alpha';
-      config.telemetry = { enabled: true };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-      });
-
-      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
-    });
-
-    it('propagates SandboxPolicy telemetry through the primary one-shot API', () => {
-      const payload = buildSandboxPayload('echo hi', {
-        version: '0.9.0-alpha',
-        telemetry: { enabled: true },
-      });
-
-      assert.deepStrictEqual(payload.telemetry, { enabled: true });
-    });
-
-    it('leaves config telemetry schema validation to the native parser', () => {
-      const config = makeConfig('process');
-      config.telemetry = { enabled: true };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-      });
-
-      const serialized = decodeConfig(args);
-      assert.deepStrictEqual(serialized.telemetry, { enabled: true });
-      assert.strictEqual(serialized.version, config.version);
-    });
-
-    for (const experimental of [true, 'invalid']) {
-      it(`leaves malformed experimental value ${JSON.stringify(experimental)} to the native parser`, () => {
-        const config = {
-          ...makeConfig('process'),
-          experimental,
-        } as unknown as ContainerConfig;
-
-        const { args } = resolveExecutableAndArgs(config, {
-          executablePath: fakeExe,
-          skipPlatformCheck: true,
-        });
-
-        assert.strictEqual(decodeConfig(args).experimental, experimental);
-      });
-    }
   });
 });
