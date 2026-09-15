@@ -126,7 +126,7 @@ describe('spawnSandboxProcess', () => {
   });
 
   it('preserves policy and config entry points over the same process model', () => {
-    const requests: BindingSandboxRequest[] = [];
+    const requests: RequestSpec[] = [];
     _setBindingSandboxProcessFactory((request) => {
       requests.push(request);
       return _createMxcSandboxProcess(new FakeBinding(42, 0));
