@@ -77,11 +77,15 @@ function attachProcessListeners(sandboxProcess: import('@microsoft/mxc-sdk').Mxc
   sandboxProcess.stdout?.on('data', send);
   sandboxProcess.stderr?.on('data', send);
   void sandboxProcess.wait().then(({ exitCode }) => {
-    activeProcess = null;
+    if (activeProcess === sandboxProcess) {
+      activeProcess = null;
+    }
     mainWindow?.webContents.send('pty-exit', exitCode);
     sandboxProcess.dispose();
   }, (error: Error) => {
-    activeProcess = null;
+    if (activeProcess === sandboxProcess) {
+      activeProcess = null;
+    }
     mainWindow?.webContents.send('pty-data', error.message);
     mainWindow?.webContents.send('pty-exit', -1);
     sandboxProcess.dispose();
