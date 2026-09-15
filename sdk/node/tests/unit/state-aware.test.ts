@@ -30,6 +30,7 @@ import {
   type SandboxProcessBinding,
   type SandboxReadableBinding,
 } from '../../src/sandbox-process.js';
+import type { SandboxSpawnOptions } from '../../src/sandbox.js';
 import { ffiTestOptions, platformSkip } from './test-helpers.js';
 
 class FakeStateAwareWorker extends EventEmitter implements BindingStateAwareWorkerLike {
@@ -556,11 +557,12 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 
   it('rejects executor-only options instead of falling back', async () => {
     await assert.rejects(
-      () => provisionSandbox('isolation_session', ACK, {
-        ...ffiTestOptions(),
-        executablePath: 'wxc-exec.exe',
-      }),
-      (err: unknown) => err instanceof MxcError && err.message.includes('executor-only option'),
+      () => provisionSandbox(
+        'isolation_session',
+        ACK,
+        { ...ffiTestOptions(), executablePath: 'wxc-exec.exe' } as unknown as SandboxSpawnOptions,
+      ),
+      (err: unknown) => err instanceof MxcError && err.message.includes('legacy option'),
     );
   });
 
@@ -717,25 +719,6 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     );
   });
 
-  it('returns the dry-run response envelope instead of spawning a live process', async () => {
-    const request = installStateAwareReply('{"result":{"validated":true}}');
-    _setStateAwareBindingSandboxProcessFactory(() => {
-      throw new Error('dry-run should not create a live process');
-    });
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const result = await execInSandboxAsync(
-      id,
-      { process: { commandLine: 'cat' } },
-      ffiTestOptions({ dryRun: true }),
-    );
-    assert.deepStrictEqual(result, {
-      stdout: '{"result":{"validated":true}}',
-      stderr: '',
-      exitCode: 0,
-    });
-    assert.strictEqual(requestEnvelope(request()).phase, 'exec');
-  });
-
   it('kills and disposes the live process when AbortSignal fires', async () => {
     const ac = new AbortController();
     const exec = installStateAwareExecBinding(
@@ -759,8 +742,8 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
       () => execInSandboxAsync(id, { process: { commandLine: 'echo hi' } }, {
         ...ffiTestOptions(),
         executablePath: 'wxc-exec.exe',
-      }),
-      (err: unknown) => err instanceof MxcError && err.message.includes('executor-only option'),
+      } as unknown as SandboxSpawnOptions),
+      (err: unknown) => err instanceof MxcError && err.message.includes('legacy option'),
     );
   });
 });
@@ -789,11 +772,15 @@ describe('execInSandboxProcess', { skip: platformSkip }, () => {
     }
   });
 
-  it('rejects dryRun because no live process exists', () => {
+  it('rejects removed legacy options', () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     assert.throws(
-      () => execInSandboxProcess(id, { process: { commandLine: 'echo live' } }, ffiTestOptions({ dryRun: true })),
-      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
+      () => execInSandboxProcess(
+        id,
+        { process: { commandLine: 'echo live' } },
+        ffiTestOptions({ dryRun: true } as unknown as Partial<SandboxSpawnOptions>),
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /legacy option 'dryRun'/.test(err.message),
     );
   });
 
