@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Owns native sandbox and stream handles and adapts them to MxcSandboxProcess.
+
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';
 import type { BindingSandboxRequest } from './request.js';
