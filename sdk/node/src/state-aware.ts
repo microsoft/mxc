@@ -357,8 +357,8 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Streams a script execution inside a started sandbox over Node pipes backed
- * by `mxc_ffi`, returning the shared `MxcSandboxProcess` controller used by
+ * Streams a script execution inside a started sandbox over Node pipes,
+ * returning the shared `MxcSandboxProcess` controller used by
  * `spawnSandboxProcess()`.
  *
  * Unlike the legacy `execInSandbox()` PTY API, this never launches an
