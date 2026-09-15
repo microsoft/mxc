@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Synchronous Koffi wrapper for a run-to-completion native request. Async
+// callers invoke this module through run-worker.ts.
+
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';
 import type { BindingSandboxRequest } from './request.js';
