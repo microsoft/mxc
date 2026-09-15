@@ -135,6 +135,7 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
             image,
             image_tar_path,
+            port_mappings,
         }))) => {
             let mut config = Map::new();
             if let Some(image) = image {
@@ -142,6 +143,11 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             if let Some(image_tar_path) = image_tar_path {
                 config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+            if let Some(port_mappings) = port_mappings {
+                if let Ok(value) = serde_json::to_value(port_mappings) {
+                    config.insert("portMappings".into(), value);
+                }
             }
             Value::Object(config)
         }

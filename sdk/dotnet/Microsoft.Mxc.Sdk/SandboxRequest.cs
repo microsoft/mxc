@@ -231,6 +231,14 @@ public sealed class WslcPortMapping
         ContainerPort = ValidatePort(containerPort, nameof(containerPort));
     }
 
+    // System.Text.Json binds constructor parameters to properties by name and
+    // type, so the int overload above cannot deserialize into ushort members.
+    [JsonConstructor]
+    private WslcPortMapping(ushort windowsPort, ushort containerPort)
+        : this((int)windowsPort, (int)containerPort)
+    {
+    }
+
     /// <summary>The listening port on the Windows host.</summary>
     [JsonPropertyName("windowsPort")]
     public ushort WindowsPort { get; }

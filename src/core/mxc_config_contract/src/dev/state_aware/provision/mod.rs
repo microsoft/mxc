@@ -13,8 +13,8 @@ pub enum ProvisionRequest {
     IsolationSession(IsolationSessionProvisionRequest),
     /// A Windows Sandbox provision request.
     WindowsSandbox(WindowsSandboxProvisionRequest),
-    /// A WSLC provision request.
-    Wslc(WslcProvisionRequest),
+    /// A WSLC provision request. Boxed to keep the enum small.
+    Wslc(Box<WslcProvisionRequest>),
 }
 
 mod containment;

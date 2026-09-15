@@ -41,7 +41,7 @@ use wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ScriptResponse;
+use wxc_common::models::{PortMapping, ScriptResponse};
 
 /// Fixed name of the single WSL2 utility-VM session the daemon owns.
 const SESSION_NAME: &str = "mxc-wslc-daemon";
@@ -390,6 +390,17 @@ impl Worker {
                 read_only: v.read_only,
             })
             .collect();
+        // Daemon port mappings carry only ports (TCP-only today); map to the
+        // domain `PortMapping` that `ContainerSettings::build` consumes.
+        let port_mappings: Vec<PortMapping> = config
+            .port_mappings
+            .iter()
+            .map(|p| PortMapping {
+                windows_port: p.windows_port,
+                container_port: p.container_port,
+                protocol: "tcp".to_string(),
+            })
+            .collect();
         let net_mode = match config.network {
             NetworkMode::None => WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE,
             NetworkMode::Bridged => {
@@ -419,6 +430,7 @@ impl Worker {
                 session,
                 &config.image,
                 &mounts,
+                &port_mappings,
                 net_mode,
                 &mut keepalive,
                 &mut self.logger,
@@ -877,6 +889,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();

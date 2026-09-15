@@ -182,6 +182,12 @@ public sealed class WslcProvisionOptions : StateAwareProvisionOptions
 
     /// <summary>Optional local image archive to import instead of pulling.</summary>
     public string? ImageTarPath { get; set; }
+
+    /// <summary>
+    /// Host-to-container TCP port forwards, applied at provision and fixed for
+    /// the sandbox's life.
+    /// </summary>
+    public List<WslcPortMapping>? PortMappings { get; set; }
 }
 
 /// <summary>

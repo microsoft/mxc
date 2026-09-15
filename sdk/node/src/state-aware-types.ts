@@ -5,6 +5,7 @@ import {
   ContainmentBackend,
   FilesystemConfig,
   DirectionalNetworkConfig,
+  PortMapping,
   RuntimeConfig,
   ProcessConfig,
   TelemetryConfig,
@@ -180,6 +181,13 @@ export interface WslcProvisionConfig extends StateAwareConfig {
    * `experimental.wslc.provision.imageTarPath` on the wire.
    */
   imageTarPath?: string;
+  /**
+   * Host -> container port mappings, applied at provision and fixed for the
+   * life of the sandbox. Only TCP is supported: `protocol` defaults to `"tcp"`
+   * and `"udp"` is rejected. Nested under
+   * `experimental.wslc.provision.portMappings` on the wire.
+   */
+  portMappings?: PortMapping[];
 }
 
 export type WslcStartConfig = StateAwareConfig;

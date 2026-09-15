@@ -790,6 +790,7 @@ var wslc = new WslcProvisionOptions
 {
     Image = "alpine:latest",
     ImageTarPath = @"C:\images\alpine.tar", // optional local import
+    PortMappings = [new WslcPortMapping(8080, 80)], // host 8080 -> container 80
     Network = new StateAwareNetworkPolicy
     {
         Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
@@ -801,6 +802,11 @@ var wslc = new WslcProvisionOptions
     },
 };
 ```
+
+`PortMappings` forwards host TCP ports into the container. It is applied when
+the container is created and fixed for the sandbox's life, so later phases
+carry no port configuration. `WindowsPort` must be unique across the list, and
+TCP is the only supported protocol.
 
 All state-aware backends use the exact development schema `0.9.0-alpha`.
 `Version` may be omitted or explicitly set to that registered value; the SDK
