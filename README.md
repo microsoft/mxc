@@ -197,9 +197,11 @@ const config = createConfigFromPolicy({
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
 
-const child = spawnSandboxFromConfig(config, { usePty: false });
-child.stdout!.on('data', (d) => process.stdout.write(d));
-child.on('close', (code) => console.log('exit:', code));
+const sandbox = spawnSandboxFromConfig(config);
+sandbox.stdout!.on('data', (d) => process.stdout.write(d));
+const result = await sandbox.wait();
+console.log('exit:', result.exitCode);
+sandbox.dispose();
 ```
 
 The SDK also provides a **state-aware lifecycle** API for long-lived sandboxes:

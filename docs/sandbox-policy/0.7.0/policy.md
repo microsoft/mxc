@@ -99,7 +99,7 @@ Windows, LXC on Linux).
 ### Flow
 
 ```
-SandboxPolicy --> createConfigFromPolicy(policy, containment) --> ContainerConfig --> spawnSandboxFromConfig() --> executor --> OS
+SandboxPolicy --> createConfigFromPolicy(policy, containment) --> ContainerConfig --> spawnSandboxFromConfig() --> native runtime --> OS
 ```
 
 ### Two API paths

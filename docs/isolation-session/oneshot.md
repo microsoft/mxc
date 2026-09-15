@@ -280,11 +280,11 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
-  `spawn_sandbox` behind the `isolation_session` feature and experimental
-  opt-in. The Node JSON/config path (`spawnSandboxFromConfig`) and
-  `wxc-exec` support the required network posture. The C# SDK still reaches
-  IsolationSession only through the state-aware lifecycle APIs.
+- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
+  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
+  workloads programmatically **on the one-shot path**. Today the one-shot
+  backend is reachable only through `wxc-exec` JSON config, and it takes no
+  backend configuration; the state-aware lifecycle *is* SDK-exposed.
 
 ## Test Plan
 
