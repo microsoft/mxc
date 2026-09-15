@@ -23,6 +23,11 @@ export function testOptions(extra?: Partial<SandboxSpawnOptions>): SandboxSpawnO
   return { experimental: true, executablePath: process.execPath, ...extra };
 }
 
+/** Options preset for unit tests that route through mxc_ffi instead of the executor. */
+export function ffiTestOptions(extra?: Partial<SandboxSpawnOptions>): SandboxSpawnOptions {
+  return { experimental: true, ...extra };
+}
+
 export interface FakeChildOpts {
   stdout?: string;
   stderr?: string;
