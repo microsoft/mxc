@@ -7,11 +7,11 @@
 
 import { Worker } from 'node:worker_threads';
 import { MxcError, type MxcErrorFields } from '../errors.js';
-import type { BindingSandboxRequest } from './request.js';
+import type { RequestSpec } from './request.js';
 import type { BindingRunResult } from './run.js';
 
 export interface BindingRunWorkerData {
-  request: BindingSandboxRequest;
+  request: RequestSpec;
 }
 
 export type BindingRunWorkerMessage =
@@ -40,7 +40,7 @@ export function _setBindingRunWorkerFactory(factory?: WorkerFactory): void {
 }
 
 export function runBindingRequestAsync(
-  request: BindingSandboxRequest,
+  request: RequestSpec,
 ): Promise<BindingRunResult> {
   return new Promise((resolve, reject) => {
     const worker = workerFactory({ request });

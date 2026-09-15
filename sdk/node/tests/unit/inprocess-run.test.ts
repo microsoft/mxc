@@ -10,7 +10,7 @@ import {
   type BindingRunWorkerLike,
   type BindingRunWorkerMessage,
 } from '../../src/bindings/run-worker.js';
-import type { BindingSandboxRequest } from '../../src/bindings/request.js';
+import type { RequestSpec } from '../../src/bindings/request.js';
 
 class FakeWorker extends EventEmitter implements BindingRunWorkerLike {
   reply(message: BindingRunWorkerMessage): void {
@@ -22,7 +22,7 @@ afterEach(() => _setBindingRunWorkerFactory());
 
 describe('in-process async run routing', () => {
   it('converts the existing config flow at the native boundary', async () => {
-    let bindingRequest: BindingSandboxRequest | undefined;
+    let bindingRequest: RequestSpec | undefined;
     _setBindingRunWorkerFactory((data) => {
       bindingRequest = data.request;
       const worker = new FakeWorker();
