@@ -348,7 +348,7 @@ Set under a top-level `"seatbelt"` key.
 | `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
-| `launchMethod` | `"exec"` \| `"open"` | `"exec"` |`"exec"` applies `sandbox_init()` then execs directly. `"open"` runs the command as the first shell of a Terminal.app instance — and sandboxes that shell. Terminal itself runs unsandboxed. |
+| `launchMethod` | `"exec"` \| `"open"` | `"exec"` |**Removed in `0.9.0-alpha`** (see below); available on `0.7.0-alpha` and `0.8.0-alpha`. `"exec"` applies `sandbox_init()` then execs directly. `"open"` runs the command as the first shell of a Terminal.app instance — and sandboxes that shell. Terminal itself runs unsandboxed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
 
