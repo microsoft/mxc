@@ -11,7 +11,6 @@ import {
     ContainerConfig,
     ContainmentType,
     ContainmentBackend,
-    SandboxContainment,
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
@@ -480,12 +479,6 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
-   * Select a concrete one-shot containment backend and its backend-specific
-   * settings. Omission uses the portable `process` backend.
-   */
-  containment?: SandboxContainment;
-
-  /**
    * Allow testing-only, deliberately-permissive features that must never run
    * in production — currently `network.proxy.builtinTestServer` (a bundled
    * test HTTP proxy with no auth, no body limits, minimal hop-by-hop header
@@ -741,7 +734,7 @@ export function spawnSandboxFromConfig(
 
 /**
  * Spawn a sandboxed process and return a promise that resolves with output.
- * Runs non-interactive workloads in-process through mxc_ffi.
+ * Runs non-interactive workloads through the native runtime.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -779,13 +772,9 @@ export function spawnSandboxAsync(
       );
     }
 
-    const request = prepareBindingSandboxRequest({
-      script,
-      policy,
-      workingDirectory,
-      containerName,
+    const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+    const request = prepareBindingSandboxRequest(config, {
       experimental: options.experimental,
-      containment: options.containment,
     });
     const result = await runBindingRequestAsync(request);
     return {

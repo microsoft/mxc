@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Main-thread bridge for run-to-completion calls. The native call blocks until
+// the sandbox exits, so it runs in a worker thread to keep Node's event loop
+// responsive.
+
 import { Worker } from 'node:worker_threads';
 import { MxcError, type MxcErrorFields } from '../errors.js';
 import type { BindingSandboxRequest } from './request.js';
@@ -54,7 +58,7 @@ export function runBindingRequestAsync(
     worker.on('error', (error) => finish(() => reject(error)));
     worker.on('exit', (code) => finish(() => reject(new MxcError({
       code: 'backend_error',
-      message: `mxc_ffi worker exited before returning a result (code ${code})`,
+      message: `native execution worker exited before returning a result (code ${code})`,
     }))));
   });
 }

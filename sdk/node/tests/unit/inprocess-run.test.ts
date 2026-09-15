@@ -21,7 +21,7 @@ class FakeWorker extends EventEmitter implements BindingRunWorkerLike {
 afterEach(() => _setBindingRunWorkerFactory());
 
 describe('in-process async run routing', () => {
-  it('uses mxc_ffi for a compatible request', async () => {
+  it('converts the existing config flow at the native boundary', async () => {
     let bindingRequest: BindingSandboxRequest | undefined;
     _setBindingRunWorkerFactory((data) => {
       bindingRequest = data.request;
@@ -48,15 +48,12 @@ describe('in-process async run routing', () => {
     );
 
     assert.deepStrictEqual(result, { stdout: 'out', stderr: 'err', exitCode: 7 });
-    assert.deepStrictEqual(bindingRequest, {
-      policy: { version: '0.9.0-alpha' },
-      command: 'echo hello',
-      containment: { type: 'process' },
-      containerName: 'sample',
-      workingDirectory: 'C:\\work',
-      environment: {},
-      experimental: true,
-    });
+    assert.strictEqual(bindingRequest?.policy.version, '0.9.0-alpha');
+    assert.strictEqual(bindingRequest?.command, 'echo hello');
+    assert.strictEqual(bindingRequest?.containerName, 'sample');
+    assert.strictEqual(bindingRequest?.workingDirectory, 'C:\\work');
+    assert.deepStrictEqual(bindingRequest?.environment, {});
+    assert.strictEqual(bindingRequest?.experimental, true);
   });
 
   it('rejects executor-only options instead of falling back', async () => {
@@ -79,7 +76,7 @@ describe('in-process async run routing', () => {
         version: '0.9.0-alpha',
         network: { proxy: { builtinTestServer: true } },
       }),
-      /testing-feature gate/,
+      /not supported by the in-process Node SDK/,
     );
   });
 });

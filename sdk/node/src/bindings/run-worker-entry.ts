@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Worker-thread entry point for one-shot execution. It performs the blocking
+// native call and sends a structured result or error back to the main thread.
+
 import { parentPort, workerData } from 'node:worker_threads';
 import { MxcError } from '../errors.js';
 import { runBindingRequest } from './run.js';
