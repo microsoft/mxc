@@ -3,7 +3,7 @@
 
 /**
  * MXC SDK Types
- * These types match the wxc-exec JSON configuration schema
+ * These types describe MXC's JSON configuration and policy schema.
  */
 
 
@@ -246,15 +246,13 @@ export interface NetworkConfig extends DirectionalNetworkConfig {
   /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
    *  macOS Seatbelt, and WSLC). On Bubblewrap/Seatbelt/WSLC it is a cooperative
    *  env-var proxy (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it,
-   *  raw-socket clients can bypass it. `builtinTestServer` activates a bundled,
-   *  testing-only proxy; the SDK rejects it unless `allowTestingFeatures: true` is
-   *  set in SandboxSpawnOptions (which maps to the native `--allow-testing-features`
-   *  flag).
+   *  raw-socket clients can bypass it. The in-process Node SDK only exposes the
+   *  `localhost` and `url` forms.
    *
    *  WSLC imposes additional parse-time constraints (a violating config is
    *  rejected before it runs):
    *   - Only the `{ url }` form is accepted — its containers run in their own
-   *     network namespace, so the `localhost` / `builtinTestServer` loopback
+   *     network namespace, so the `localhost` loopback
    *     forms are unreachable and rejected.
    *   - The `url` scheme must be `http` or `https`.
    *   - `defaultPolicy` must be `"allow"` and both `allowedHosts` and
@@ -262,7 +260,7 @@ export interface NetworkConfig extends DirectionalNetworkConfig {
    *     it cannot enforce host lists, and the container needs outbound
    *     networking to reach the proxy at all.
    *  Enforcement is cooperative (no in-kernel iptables). */
-  proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
+  proxy?: { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
 }
@@ -480,13 +478,10 @@ export type SandboxPolicy = {
        * Seatbelt. On Bubblewrap/Seatbelt it is a cooperative env-var proxy
        * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Native
        * validation enforces backend-specific combination rules.
-       * `builtinTestServer` selects a bundled, testing-only proxy; the SDK
-       * rejects it unless `allowTestingFeatures: true` is set in
-       * SandboxSpawnOptions (which maps to the native
-       * `--allow-testing-features` flag).
+       * The in-process Node SDK only exposes the `localhost` and `url` forms.
        * Legacy network field.
        */
-      proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
+      proxy?: { localhost: number } | { url: string };
       /** Schema 0.8 outbound network policy. Cannot be combined with legacy network fields. */
       egress?: NetworkEgressConfig;
       /** Schema 0.8 inbound and host-loopback policy. Cannot be combined with legacy network fields. */
