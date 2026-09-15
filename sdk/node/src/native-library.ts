@@ -66,17 +66,14 @@ export function _mxcFfiCandidates(
     path.join(targetDir, 'debug', file),
   ];
 
-  if (process.env.MXC_BIN_DIR) {
-    candidates.unshift(path.join(process.env.MXC_BIN_DIR, sdkArch, file));
-  }
   if (process.env.MXC_FFI_DIR) {
     candidates.unshift(path.join(process.env.MXC_FFI_DIR, file));
   }
   return candidates;
 }
 
-export function findMxcFfiLibrary(): string | null {
-  return _mxcFfiCandidates().find((candidate) => {
+export function findMxcFfiLibrary(candidates = _mxcFfiCandidates()): string | null {
+  return candidates.find((candidate) => {
     try {
       return fs.statSync(candidate).isFile();
     } catch {
@@ -91,10 +88,12 @@ export type MxcNativeLibrary = {
   version: () => string;
 };
 
-export function loadMxcFfi(): MxcNativeLibrary {
-  const libraryPath = findMxcFfiLibrary();
+export function loadMxcFfi(candidates = _mxcFfiCandidates()): MxcNativeLibrary {
+  const libraryPath = findMxcFfiLibrary(candidates);
   if (!libraryPath) {
-    throw new Error('mxc_ffi native library was not found in the MXC SDK package or Cargo output');
+    throw new Error(
+      `mxc_ffi native library was not found. Searched:\n${candidates.map((candidate) => `- ${candidate}`).join('\n')}`,
+    );
   }
   const handle = koffi.load(libraryPath);
   const version = handle.func('const char *mxc_version(void)') as () => string;
