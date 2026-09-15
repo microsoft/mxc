@@ -796,8 +796,8 @@ impl BaseContainerRunner {
 
     fn resolve_psec_contract(request: &ExecutionRequest) -> Result<PsecContract, ScriptResponse> {
         let contract = PsecContract::for_request(request);
-        // PSEC 1.0 preserves the default ingress posture through capability
-        // mapping; only unrestricted host-loopback access requires PSEC 1.1.
+        // PSEC 1.0 preserves the default ingress posture through capability mapping.
+        // Enumeration-only access and unrestricted host-loopback access require PSEC 1.1.
         if contract == PsecContract::V1_0 {
             return Ok(contract);
         }
@@ -823,8 +823,10 @@ impl BaseContainerRunner {
                 )
             });
         }
-        if !request.policy.enumerate_paths.is_empty()
-            && !api
+
+        let requires_enumerate_paths = !request.policy.enumerate_paths.is_empty();
+        let enumerate_paths_supported = if requires_enumerate_paths {
+            api
                 .supports_enumerate_paths()
                 .map_err(|error| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
@@ -832,22 +834,30 @@ impl BaseContainerRunner {
                         "failed to query Process Security Environment filesystem enumeration support: {error}"
                     ))
                 })?
-        {
+        } else {
+            true
+        };
+        if requires_enumerate_paths && !enumerate_paths_supported {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::Rejected,
                 ..ScriptResponse::error(PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG)
             });
         }
-        if unrestricted_host_loopback_allowed(&request.policy)
-            && !api
-                .supports_network_ingress()
+
+        let requires_unrestricted_host_loopback =
+            unrestricted_host_loopback_allowed(&request.policy);
+        let network_ingress_supported = if requires_unrestricted_host_loopback {
+            api.supports_network_ingress()
                 .map_err(|error| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
                     ..ScriptResponse::error(&format!(
                         "failed to query Process Security Environment ingress support: {error}"
                     ))
                 })?
-        {
+        } else {
+            true
+        };
+        if requires_unrestricted_host_loopback && !network_ingress_supported {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::Rejected,
                 ..ScriptResponse::error(

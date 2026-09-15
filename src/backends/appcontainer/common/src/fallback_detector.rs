@@ -234,7 +234,10 @@ pub enum FallbackError {
     },
 
     /// Enumeration-only access cannot be represented by AppContainer fallback tiers.
-    #[error("filesystem.enumeratePaths requires BaseContainer PSEC 1.1 with fs_enumerate support")]
+    #[error(
+        "filesystem.enumeratePaths is not supported by this version of Windows; \
+         enumeration-only access requires native ProcessContainer support"
+    )]
     EnumeratePathsUnsupported,
 }
 

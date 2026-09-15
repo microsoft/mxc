@@ -253,9 +253,9 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::Fallback(FallbackError::EnumeratePathsUnsupported) => write!(
                 f,
-                "filesystem.enumeratePaths requires the BaseContainer PSEC 1.1 backend with \
-                 fs_enumerate support; AppContainer fallback tiers cannot preserve \
-                 enumeration-only access."
+                "filesystem.enumeratePaths is not supported by this version of Windows; \
+                 enumeration-only access requires native ProcessContainer support and cannot \
+                 fall back to AppContainer."
             ),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),

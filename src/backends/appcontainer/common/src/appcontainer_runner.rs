@@ -1733,8 +1733,9 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.enumerate_paths.is_empty() {
             return Err(ScriptResponse::error(
-                "filesystem.enumeratePaths requires the BaseContainer PSEC 1.1 backend and \
-                 cannot be enforced by an AppContainer fallback",
+                "filesystem.enumeratePaths is not supported by this version of Windows; \
+                 enumeration-only access requires native ProcessContainer support and cannot \
+                 be enforced by an AppContainer fallback",
             ));
         }
         if request

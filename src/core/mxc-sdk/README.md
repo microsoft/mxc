@@ -191,7 +191,7 @@ The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
 `capabilities` lists optional features supported by that tier.
 `FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
-`FilesystemEnumeratePaths` covers PSEC 1.1
+`FilesystemEnumeratePaths` indicates native support for
 `filesystem.enumeratePaths` without granting file-content reads.
 `IngressHostLoopbackAllow` covers
 `network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable

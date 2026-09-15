@@ -254,20 +254,30 @@ mod tests {
     }
 
     #[test]
-    fn enumerate_paths_reject_non_process_container_backends() {
-        let req = ExecutionRequest {
-            script_code: "echo hello".to_string(),
-            containment: crate::models::ContainmentBackend::Wslc,
-            policy: crate::models::ContainerPolicy {
-                enumerate_paths: vec!["C:\\tools".to_string()],
+    fn enumerate_paths_reject_non_process_container_one_shot_backends() {
+        for containment in [
+            crate::models::ContainmentBackend::Bubblewrap,
+            crate::models::ContainmentBackend::Lxc,
+            crate::models::ContainmentBackend::Wslc,
+        ] {
+            let req = ExecutionRequest {
+                script_code: "echo hello".to_string(),
+                containment: containment.clone(),
+                policy: crate::models::ContainerPolicy {
+                    enumerate_paths: vec!["C:\\tools".to_string()],
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
+            };
 
-        let error = validate_common(&req).expect_err("WSLc must not ignore enumeratePaths");
+            let error = validate_common(&req).expect_err("backend must not ignore enumeratePaths");
 
-        assert!(error.error_message.contains("Windows ProcessContainer"));
+            assert!(
+                error.error_message.contains("Windows ProcessContainer"),
+                "{containment:?}: {}",
+                error.error_message
+            );
+        }
     }
 
     #[test]

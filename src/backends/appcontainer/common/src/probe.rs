@@ -231,7 +231,8 @@ fn format_fallback_error(e: &FallbackError) -> String {
             format!("Could not resolve Windows system directory: {reason}")
         }
         FallbackError::EnumeratePathsUnsupported => {
-            "filesystem.enumeratePaths requires BaseContainer PSEC 1.1 with fs_enumerate support"
+            "filesystem.enumeratePaths is not supported by this version of Windows; \
+             enumeration-only access requires native ProcessContainer support"
                 .to_string()
         }
     }
