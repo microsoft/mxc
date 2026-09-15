@@ -13,7 +13,7 @@ import type {
 } from '../types.js';
 import { LegacyContainmentAliases } from '../types.js';
 
-export interface BindingRequestOptions {
+export interface RequestSpecOptions {
   workingDirectory?: string;
   environment?: { [key: string]: string | undefined };
   experimental?: boolean;
@@ -24,7 +24,7 @@ export interface BindingRequestOptions {
  * This private shape is derived from the public ContainerConfig at the native
  * transport boundary.
  */
-export interface BindingPolicy {
+export interface RequestPolicy {
   version: string;
   filesystem?: ContainerConfig['filesystem'];
   network?: {
@@ -50,7 +50,7 @@ export interface BindingPolicy {
  * Containment variants currently reachable through the native one-shot API.
  * This mirrors the tagged JSON contract consumed by `mxc_ffi::RequestSpec`.
  */
-export type BindingContainment =
+export type RequestContainment =
   | { type: 'process' }
   | ({ type: 'processContainer' } & Omit<ProcessContainerConfig, 'name'>)
   | ({
@@ -59,10 +59,10 @@ export type BindingContainment =
       portMappings?: Array<Pick<PortMapping, 'windowsPort' | 'containerPort'>>;
     });
 
-export interface BindingSandboxRequest {
-  policy: BindingPolicy;
+export interface RequestSpec {
+  policy: RequestPolicy;
   command: string;
-  containment: BindingContainment;
+  containment: RequestContainment;
   containerName?: string;
   workingDirectory?: string;
   environment: Record<string, string>;
@@ -133,10 +133,10 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
  * consumed by the native binding.
  * JSON serialization belongs in the Koffi binding, mirroring the .NET SDK.
  */
-export function prepareBindingSandboxRequest(
+export function prepareRequestSpec(
   config: ContainerConfig,
-  options: BindingRequestOptions = {},
-): BindingSandboxRequest {
+  options: RequestSpecOptions = {},
+): RequestSpec {
   const unsupported = bindingRequestUnsupportedReason(config);
   if (unsupported !== null) {
     throw new Error(unsupported);
@@ -173,7 +173,7 @@ export function prepareBindingSandboxRequest(
         ...(config.filesystem ?? {}),
         clearPolicyOnExit,
       };
-  const policy: BindingPolicy = {
+  const policy: RequestPolicy = {
     version: config.version,
     filesystem,
     network,
@@ -205,7 +205,7 @@ export function prepareBindingSandboxRequest(
     ? 'process'
     : 'processcontainer');
   const containmentName = LegacyContainmentAliases[rawContainment] ?? rawContainment;
-  let containment: BindingContainment;
+  let containment: RequestContainment;
   if (containmentName === 'wslc') {
     const {
       targetOs: _targetOs,
