@@ -22,16 +22,6 @@ jobs:
         working-directory: sdk/node/tests/integration
     env:
       MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
-      # Skip network-dependent LXC tests on GHA. Capability probe
-      # 27576588204 confirmed lxc-net.service + lxcbr0 + dnsmasq come up
-      # cleanly on every supported runner, but the alpine download
-      # template's eth0 stays IPv4-less inside the test window (only an
-      # IPv6 link-local address is configured), so DHCP-dependent DNS
-      # lookups fail. The non-network LXC paths (create/start/attach/
-      # mount/exit-code/multi-command) all pass and ship LXC backend
-      # coverage on GHA. ADO sets the same env var in
-      # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
-      MXC_SKIP_LXC_NETWORK_TESTS: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,29 +68,12 @@ jobs:
             sleep $((attempt * 5))
           done
 
-      - name: Install bubblewrap + LXC stack (Linux only, cached)
+      - name: Install bubblewrap (Linux only, cached)
         if: matrix.os_label == 'linux'
         continue-on-error: true
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          # Installs the LXC + Bubblewrap substrate the SDK integration
-          # tests need. Capability probe 27576588204 confirmed these
-          # packages install cleanly on ubuntu-latest, ubuntu-22.04, and
-          # ubuntu-24.04-arm and that lxc-net.service brings up the
-          # lxcbr0 bridge with dnsmasq serving DHCP on 10.0.3.0/24, so
-          # the long-standing "classic LXC is unreliable on GHA
-          # ubuntu-latest" assumption no longer holds for the non-network
-          # LXC paths (create/start/attach/mount/exit-code).
-          # The network-dependent LXC tests stay gated by
-          # MXC_SKIP_LXC_NETWORK_TESTS=1 (see the job-level env block)
-          # because the alpine download template's eth0 doesn't pick up
-          # a DHCP lease within the test window on these runners.
-          # The ADO equivalent
-          # (.azure-pipelines/templates/SDK.Integration.Test.Job.yml)
-          # installs a similar but narrower set and sets the same skip
-          # env var for the same reason (compounded by 1ES Hosted Pool
-          # egress filtering).
-          packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
+          packages: bubblewrap
           version: 1.4
 
       - name: Verify or repair Linux containment dependencies
@@ -111,20 +84,10 @@ jobs:
 
           packages=(
             bubblewrap
-            lxc
-            lxc-utils
-            dnsmasq-base
-            iptables
-            bridge-utils
           )
 
           required_commands=(
             bwrap
-            lxc-start
-            lxc-create
-            dnsmasq
-            iptables
-            brctl
           )
 
           missing_commands=()
@@ -163,42 +126,6 @@ jobs:
           for command in "${required_commands[@]}"; do
             command -v "$command"
           done
-
-      - name: Start LXC services (cache restore skips postinst hooks)
-        if: matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # cache-apt-pkgs-action restores package files but does not
-          # re-run postinst hooks on cache hit, so AppArmor profiles
-          # (lxc-container-default) and the lxc-net bridge service may
-          # not be active. Load/start them explicitly so lxc-start
-          # doesn't abort with an AppArmor denial.
-          sudo apparmor_parser -rT /etc/apparmor.d/lxc-containers
-          sudo systemctl daemon-reload
-          sudo systemctl start lxc-net
-          sudo systemctl is-active --quiet lxc-net
-
-      # A bridged veth reaches the LXC firewall chain only while br_netfilter
-      # delivers bridged packets to iptables, and the backend refuses to
-      # report success for a policy it cannot enforce.
-      - name: Enable bridge netfilter
-        if: matrix.os_label == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo modprobe br_netfilter
-          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
-          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
-
-      - name: Restore execute permission on mxc-exec-mac
-        if: matrix.os_label == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
       # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
       # preserves the env vars above.
