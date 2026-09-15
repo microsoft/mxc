@@ -60,6 +60,26 @@ function bindCoordinatorFunctions(handle: NativeLibraryHandle) {
       ],
     }),
 
+    stateAwareExec: bindNativeFunction<KoffiFunc<(
+      request: string,
+      experimental: number,
+      callback: RegisteredCallback,
+      userData: Pointer,
+      coordinator: Pointer[],
+      error: AbiErrorDetail,
+    ) => number>>(handle, {
+      symbol: 'mxc_io_state_aware_exec_callback',
+      result: 'int32_t',
+      parameters: [
+        'const char *',
+        'int32_t',
+        AbiEventCallback,
+        'void *',
+        koffi.out(koffi.pointer(AbiCoordinator, 2)),
+        koffi.out(koffi.pointer(AbiErrorDetailType)),
+      ],
+    }),
+
     id: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
       symbol: 'mxc_io_id',
       result: 'uint32_t',
@@ -187,6 +207,9 @@ type NativeCoordinator = ReturnType<typeof bindCoordinatorFunctions>;
 let sharedNative: NativeCoordinator | undefined;
 let sandboxProcessFactory:
   | ((request: RequestSpec) => MxcSandboxProcess)
+  | undefined;
+let stateAwareSandboxProcessFactory:
+  | ((requestJson: string, experimental: boolean) => MxcSandboxProcess)
   | undefined;
 
 function getNative(): NativeCoordinator {
@@ -372,7 +395,15 @@ function decodeEvent(
   }
 }
 
-function spawnDriver(request: RequestSpec): NativeStreamingDriver {
+function spawnDriver(
+  invoke: (
+    native: NativeCoordinator,
+    callback: RegisteredCallback,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ) => number,
+  fallback: string,
+): NativeStreamingDriver {
   const native = getNative();
   const outHandle = [null] as Pointer[];
   const error: AbiErrorDetail = {
@@ -414,15 +445,9 @@ function spawnDriver(request: RequestSpec): NativeStreamingDriver {
   }, AbiEventCallback);
 
   try {
-    const status = native.spawn(
-      JSON.stringify(request),
-      callback,
-      null,
-      outHandle,
-      error,
-    );
+    const status = invoke(native, callback, outHandle, error);
     if (status !== 0 || outHandle[0] === null) {
-      throw nativeStatusError(status || 12, error, 'spawning sandbox failed');
+      throw nativeStatusError(status || 12, error, fallback);
     }
     driver = new KoffiStreamingDriver(native, outHandle[0], callback);
     for (const event of queued) driver.onEvent(event);
@@ -447,11 +472,46 @@ export function _setBindingSandboxProcessFactory(
   sandboxProcessFactory = factory;
 }
 
+export function _setStateAwareBindingSandboxProcessFactory(
+  factory?: (requestJson: string, experimental: boolean) => MxcSandboxProcess,
+): void {
+  stateAwareSandboxProcessFactory = factory;
+}
+
 export function spawnBindingSandboxProcess(
   request: RequestSpec,
 ): MxcSandboxProcess {
   if (sandboxProcessFactory !== undefined) {
     return sandboxProcessFactory(request);
   }
-  return _createMxcSandboxProcess(spawnDriver(request));
+  return _createMxcSandboxProcess(spawnDriver(
+    (native, callback, outHandle, error) => native.spawn(
+      JSON.stringify(request),
+      callback,
+      null,
+      outHandle,
+      error,
+    ),
+    'spawning sandbox failed',
+  ));
+}
+
+export function spawnStateAwareBindingSandboxProcess(
+  requestJson: string,
+  experimental: boolean,
+): MxcSandboxProcess {
+  if (stateAwareSandboxProcessFactory !== undefined) {
+    return stateAwareSandboxProcessFactory(requestJson, experimental);
+  }
+  return _createMxcSandboxProcess(spawnDriver(
+    (native, callback, outHandle, error) => native.stateAwareExec(
+      requestJson,
+      experimental ? 1 : 0,
+      callback,
+      null,
+      outHandle,
+      error,
+    ),
+    'starting state-aware sandbox exec failed',
+  ));
 }
