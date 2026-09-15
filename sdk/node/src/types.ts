@@ -210,9 +210,10 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration
+ * Network access configuration across published versions. The legacy fields
+ * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
  */
-export interface NetworkConfig {
+export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
    * Network enforcement mode:
    * - "capabilities": Use AppContainer capabilities only (no admin required)
@@ -255,6 +256,10 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/** The complete network wire shape for schema 0.9. */
+export interface DirectionalNetworkConfig {
   /** Outbound network policy. */
   egress?: NetworkEgressConfig;
   /** Inbound and host-loopback network policy. */
@@ -313,7 +318,11 @@ export interface NetworkIngressConfig {
 
 /** Runtime values supplied separately from sandbox policy. */
 export interface RuntimeConfig {
-  /** HTTP/S loopback proxy URL. */
+  /**
+   * HTTP/S proxy URL. Host-loopback restrictions are backend-specific.
+   * WSLC accepts a URL reachable from inside the guest, including guest-loopback
+   * URLs such as `http://127.0.0.1:8888`.
+   */
   networkProxy?: string;
 }
 
@@ -607,6 +616,26 @@ export interface UiCapabilitySupport {
 }
 
 /**
+ * Host support for enforcing Bubblewrap proxy-only egress.
+ *
+ * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * namespace and default-drop everything except the proxy endpoint. That
+ * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
+ * iptables family) plus unprivileged user and network namespaces the kernel
+ * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * full list. There is deliberately no fallback to the weaker shared-host-network
+ * model, so a request that cannot configure private networking fails rather
+ * than silently degrading. This reports, before launching, whether the host
+ * can satisfy such a policy.
+ */
+export interface BubblewrapNetworkSupport {
+  /** Whether proxy-only egress can be enforced on this host. */
+  proxyEnforcement: 'supported' | 'unsupported';
+  /** Why enforcement is unsupported. Empty when it is supported. */
+  warnings: string[];
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -637,4 +666,10 @@ export interface PlatformSupport {
    * determine them, including on Linux and macOS today.
    */
   uiCapabilities?: UiCapabilitySupport;
+  /**
+   * Bubblewrap host network capability. Omitted on non-Linux platforms and
+   * when bubblewrap itself is unavailable. Reported fail-closed: if the probe
+   * cannot run, `proxyEnforcement` is `'unsupported'`, never absent.
+   */
+  bubblewrapNetwork?: BubblewrapNetworkSupport;
 }

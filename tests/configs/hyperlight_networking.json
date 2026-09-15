@@ -1,5 +1,6 @@
 {
     "version": "0.9.0-alpha",
+    "_comment": "Intentional v0.9 migration rejection: the former example.com hostname allowlist has no lossless directional CIDR equivalent. The parser must reject network.allowedHosts before the workload runs; run_hyperlight_network_migration_test.ps1 asserts that boundary without DNS resolution or broader network access.",
     "process": {
         "commandLine": "import urllib.request; r = urllib.request.urlopen('http://example.com/'); print(r.status)",
         "timeout": 30000

@@ -138,6 +138,9 @@ MXC uses a JSON configuration to define execution parameters. See the [schema do
 
 ### Native Binary
 
+On Windows, `wxc-exec.exe --version` (or `-V`) prints the executor version and
+exits successfully without requiring a configuration file or starting a sandbox.
+
 ```bash
 # File path
 wxc-exec.exe config.json

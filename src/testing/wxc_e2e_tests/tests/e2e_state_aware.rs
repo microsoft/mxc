@@ -72,18 +72,15 @@ fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
 }
 
 #[test]
-fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() {
+fn state_aware_provision_rejects_a_non_state_aware_containment_structurally() {
     if !cached_has_wxc_exe() {
         return;
     }
 
-    // `processcontainer` is a recognised backend with no state-aware impl, so
-    // the dispatcher should emit `unsupported_phase` per design §8 and §10.
-    // This is the smoke-test scenario that protects the generic fallback: the
-    // experimental state-aware backends (`windows_sandbox` / `isolation_session`
-    // / `wslc`) are gated behind `--experimental` and would surface
-    // `backend_unavailable` instead, so a non-experimental GA backend is used
-    // here to exercise the fallback.
+    // The exact provision contract admits only state-aware containments, so a
+    // recognized one-shot-only backend is rejected before dispatch. The
+    // generic unsupported-phase fallback remains covered directly by
+    // state_aware_dispatch unit tests.
     let request = json!({
         "version": "0.9.0-alpha",
         "containment": "processcontainer",
@@ -92,9 +89,16 @@ fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() 
     let result = run_wxc_state_aware("state-aware non-stateful backend", &request, &[]);
     let code = assert_error_envelope_on_stdout(&result);
     assert_eq!(
-        code, "unsupported_phase",
-        "expected unsupported_phase for non-stateful backend, got {:?}; stdout={:?}",
+        code, "malformed_request",
+        "expected malformed_request for non-stateful containment, got {:?}; stdout={:?}",
         code, result.stdout
+    );
+    assert!(
+        result
+            .stdout
+            .contains("Unsupported containment for provision phase"),
+        "expected the exact provision-containment diagnostic; stdout={:?}",
+        result.stdout
     );
     assert_ne!(result.code, Some(0), "non-zero exit expected on error");
 }

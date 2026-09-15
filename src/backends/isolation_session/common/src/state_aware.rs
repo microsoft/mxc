@@ -200,7 +200,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         // Structural only — MXC does not judge what a valid application
         // identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
@@ -347,16 +352,15 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
+    };
     use wxc_common::mxc_error::MxcErrorCode;
 
     // ====== Wire-format constants ======
 
-    // `BACKEND_KEY` names the `experimental.<key>.<phase>` slot the
-    // dispatcher reads via `deserialize_config`. A typo here would
-    // silently swallow every per-phase config (the field would still
-    // deserialize from the containment slot via models.rs's serde
-    // rename — only the experimental block would go missing).
+    // Checked binding verifies BACKEND_KEY before delivering configuration.
     // ====== Stdio topology ======
 
     /// A piped exec must never get a ConPTY — **including on a host whose
@@ -443,16 +447,10 @@ mod tests {
 
     // ====== Wire-model / backend config parity ======
 
-    // The generated JSON schema (`schemas/dev/`) and the SDK wire types
-    // (`sdk/node/src/generated/wire.ts`) are both emitted from
-    // `wxc_common::wire::IsolationSession`, while the phases that actually
-    // accept a config are the associated types on the impl above. On the
-    // state-aware path the wire model is never constructed — the dispatcher
-    // deserializes raw JSON straight into those associated types — so nothing
-    // couples the two at compile time. The tests below pin that contract from
-    // both directions: the key set the wire model advertises, that the `()`
-    // phases reject a payload, and that the phases which do take one still
-    // accept the payload the wire model describes.
+    // Retained rolling schema/type oracles still use wire::IsolationSession.
+    // These tests characterize their configuration compatibility independently
+    // of the exact adapter. Production dispatch uses checked typed binding, not
+    // this deserialization path; common recording-backend tests cover delivery.
 
     #[test]
     fn wire_model_nests_config_only_for_phases_that_take_one() {
@@ -541,8 +539,16 @@ mod tests {
         // unrestricted outbound + inbound, no host rules, no proxy.
         ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -614,7 +620,7 @@ mod tests {
     #[test]
     fn every_id_consuming_hook_accepts_a_well_formed_id() {
         let runner = IsolationSessionRunner::new();
-        let req = request_with_canonical_network();
+        let req = ExecutionRequest::default();
         let id = valid_sandbox_id();
         runner.validate_start(&id, &req, None).unwrap();
         runner.validate_exec(&id, &req, None).unwrap();

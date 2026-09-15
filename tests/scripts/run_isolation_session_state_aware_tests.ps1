@@ -627,46 +627,127 @@ try {
         Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
     } | Out-Null
 
-    # Test 1e: provision rejects non-empty deniedPaths. The backend has no
-    # host-folder-sharing primitive at all, so the whole filesystem policy is
-    # refused at every phase (see the note above Lifecycle B) -- deniedPaths
-    # included. This test pins the deniedPaths arm of that rule. Uses a
-    # separate throwaway sandbox -- never reaches the OS-side service since
-    # validate_provision_policy rejects up-front, so no cleanup needed.
-    Run-StateAwareTest "provision (deniedPaths rejected)" {
+    # The exact IsolationSession provision root excludes filesystem policy.
+    # Backend-level denied-path behavior remains covered in policy unit tests.
+    Run-StateAwareTest "provision (deniedPaths rejected structurally)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_denied.json' -Experimental
-        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
     } | Out-Null
 
-    # Test 1c: provision rejects a non-canonical network policy. The container's
-    # network is unrestricted and cannot be filtered or denied, so only the
-    # canonical acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is
-    # accepted; here defaultPolicy=block is refused up-front (no cleanup needed).
-    Run-StateAwareTest "provision (non-canonical network rejected)" {
+    # Provision requires the exact directional all-allow network posture.
+    Run-StateAwareTest "provision (restrictive network rejected structurally)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
-        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'network.egress.default') "error.message reports the restrictive network path (got '$msg')"
     } | Out-Null
 
-    # Test 1d: provision rejects a `ui` policy. The isolation session isolates
-    # the host's UI from the contained code but does not deny it UI
-    # capabilities (window creation, GDI and the session's own clipboard all
-    # work inside it), so a UI restriction cannot be honored and is refused
-    # rather than accepted and dropped. Refused up-front, so no cleanup needed.
-    Run-StateAwareTest "provision (ui policy rejected)" {
+    # Every legacy network field is rejected even alongside the required
+    # directional all-allow posture.
+    foreach ($field in @('defaultPolicy', 'allowLocalNetwork')) {
+        Run-StateAwareTest "provision (legacy network.$field rejected)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                network = @{
+                    egress = @{ default = 'allow' }
+                    ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+                    $field = if ($field -eq 'defaultPolicy') { 'allow' } else { $true }
+                }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains("network.$field")) "error.message reports the legacy network path (got '$msg')"
+        } | Out-Null
+    }
+
+    foreach ($axis in @('egress', 'ingress')) {
+        Run-StateAwareTest "provision (restrictive $axis default rejected structurally)" {
+            $req = @{
+                phase = 'provision'
+                containment = 'isolation_session'
+                network = @{
+                    egress = @{ default = if ($axis -eq 'egress') { 'deny' } else { 'allow' } }
+                    ingress = @{
+                        default = if ($axis -eq 'ingress') { 'deny' } else { 'allow' }
+                        hostLoopback = 'allow'
+                    }
+                }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains("network.$axis.default")) `
+                "error.message identifies the restrictive network path (got '$msg')"
+        } | Out-Null
+    }
+
+    Run-StateAwareTest "provision (missing network rejected structurally)" {
+        $req = @{
+            phase = 'provision'
+            containment = 'isolation_session'
+            experimental = @{ isolation_session = @{ provision = @{} } }
+        }
+        $r = Invoke-StateAware -Request $req -Experimental -DryRun
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg.Contains('network')) `
+            "error.message identifies the missing network field (got '$msg')"
+    } | Out-Null
+
+    foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+        Run-StateAwareTest "$phase (network redeclaration rejected structurally)" {
+            $req = @{
+                phase = $phase
+                sandboxId = 'iso:unused'
+                network = @{
+                    egress = @{ default = 'allow' }
+                    ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+                }
+            }
+            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'echo NETWORK_MUST_NOT_RUN' } }
+            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains('network') -and $msg.Contains('unknown field `network`')) `
+                "error.message identifies the phase-incompatible network field (got '$msg')"
+        } | Out-Null
+    }
+
+    # The exact IsolationSession provision root excludes UI policy. Backend
+    # policy unit tests retain the capability-honesty validation coverage.
+    Run-StateAwareTest "provision (ui policy rejected structurally)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_ui.json' -Experimental
-        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'unknown field `ui`') "error.message reports the closed ui field (got '$msg')"
     } | Out-Null
 
     # Test 2: start succeeds against the provisioned sandbox. Exercises the
@@ -691,40 +772,43 @@ try {
         }
     }
 
-    # Test 2b: start rejects requests that carry filesystem policy. Filesystem
-    # policy is bound to provision and immutable thereafter; a non-empty
-    # readwritePaths on a start request must be rejected with policy_validation.
+    # Test 2b: the exact IsolationSession start root excludes filesystem policy.
+    # Backend-level immutable-policy behavior remains covered in policy tests.
     if ($startedOk) {
-        Run-StateAwareTest "start (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "start (filesystem policy rejected structurally)" {
             $req = @{
                 phase     = 'start'
                 sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
             $r = Invoke-StateAware -Request $req -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 
-    # Test 2c: start rejects a request that carries a network policy. The
-    # network posture is fixed at provision; ANY network policy on a
-    # post-provision phase is rejected -- even the canonical acknowledgment,
-    # because it is being supplied where the posture is immutable.
+    # Test 2c: the exact IsolationSession start root excludes network policy.
+    # Backend-level immutable-policy behavior remains covered in policy tests.
     if ($startedOk) {
-        Run-StateAwareTest "start (network policy rejected post-provision)" {
+        Run-StateAwareTest "start (network policy rejected structurally)" {
             $req = @{
                 phase     = 'start'
                 sandboxId = $script:sandboxId
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `network`') "error.message reports the closed network field (got '$msg')"
         } | Out-Null
     }
 
@@ -747,10 +831,10 @@ try {
         }
     }
 
-    # Test 3b: exec rejects requests that carry filesystem policy. Same
-    # rationale as the start-rejection check above.
+    # Test 3b: the exact IsolationSession exec root excludes filesystem policy.
+    # Backend-level immutable-policy behavior remains covered in policy tests.
     if ($execedOk) {
-        Run-StateAwareTest "exec (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "exec (filesystem policy rejected structurally)" {
             $req = @{
                 phase     = 'exec'
                 sandboxId = $script:sandboxId
@@ -758,29 +842,35 @@ try {
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
             $r = Invoke-StateAware -Request $req -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 
     # Test 3c: exec rejects a request that carries a network policy. The network
     # posture is fixed at provision; any network policy on a post-provision phase
-    # is rejected -- even the canonical acknowledgment.
+    # is rejected -- even an allow policy.
     if ($execedOk) {
         Run-StateAwareTest "exec (network policy rejected post-provision)" {
             $req = @{
                 phase     = 'exec'
                 sandboxId = $script:sandboxId
                 process   = @{ commandLine = 'echo unused' }
-                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+                network   = @{ egress = @{ default = 'allow' } }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+                "error.message identifies the closed exec network field (got '$msg')"
         } | Out-Null
     }
 
@@ -882,20 +972,23 @@ try {
         } | Out-Null
     }
 
-    # Test 8b: stop rejects requests that carry filesystem policy. Runs
-    # BEFORE the actual stop test so the sandbox is still in started state.
+    # Test 8b: the exact IsolationSession stop root excludes filesystem policy.
+    # Runs before the actual stop test so the sandbox is still started.
     if ($execedOk) {
-        Run-StateAwareTest "stop (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "stop (filesystem policy rejected structurally)" {
             $req = @{
                 phase     = 'stop'
                 sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
             $r = Invoke-StateAware -Request $req -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -920,20 +1013,23 @@ try {
         }
     }
 
-    # Test 9b: deprovision rejects requests that carry filesystem policy.
-    # Runs BEFORE the actual deprovision so the sandbox still exists.
+    # Test 9b: the exact IsolationSession deprovision root excludes filesystem
+    # policy. Runs before the actual deprovision so the sandbox still exists.
     if ($stoppedOk) {
-        Run-StateAwareTest "deprovision (filesystem policy rejected post-provision)" {
+        Run-StateAwareTest "deprovision (filesystem policy rejected structurally)" {
             $req = @{
                 phase     = 'deprovision'
                 sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
             $r = Invoke-StateAware -Request $req -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -1026,16 +1122,18 @@ try {
 
 # ---------------- Lifecycle B: Filesystem policy rejection ----------------
 
-# Filesystem policy is not accepted at any lifecycle phase. Provision with
-# readwrite/readonly policy fails before creating a sandbox, so no cleanup
-# is needed.
-Run-StateAwareTest "filesystem: provision rejected" {
+# Filesystem policy is absent from the exact IsolationSession provision root,
+# so the public JSON surface rejects it before creating a sandbox. Direct
+# backend policy tests retain readwrite/readonly/denied validation coverage.
+Run-StateAwareTest "filesystem: provision rejected structurally" {
     $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
 
     # MXC rejects this before any API call is made, so the fields describing
     # that call must be absent. `remediation` is not one of them, and is

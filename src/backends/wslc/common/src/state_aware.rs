@@ -6,7 +6,7 @@
 //! Each lifecycle phase (`provision` / `start` / `exec` / `stop` /
 //! `deprovision`) runs as a separate short-lived `wxc-exec` process. Because the
 //! WSLc SDK has no cross-process re-attach, this backend does **not** touch the
-//! SDK directly: it translates the public `experimental.wslc.*` wire model plus
+//! SDK directly: it translates runtime-owned phase configuration plus
 //! the cross-cutting `policy` section into [`daemon_protocol`] frames and drives
 //! the long-lived `wxc-wslc-daemon` (which owns the live session/container
 //! handles) over an owner-only named pipe via [`DaemonClient`].
@@ -16,14 +16,15 @@
 use std::io::Write;
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
+#[cfg(test)]
+use wxc_common::models::NetworkPolicy;
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
-use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
-use wxc_common::wire::WslcProvisionPhase;
+use wxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
@@ -53,7 +54,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     const ID_PREFIX: &'static str = "wslc";
     const BACKEND_KEY: &'static str = "wslc";
 
-    type ProvisionConfig = WslcProvisionPhase;
+    type ProvisionConfig = WslcProvisionConfig;
     type StartConfig = ();
     type ExecConfig = ();
     type StopConfig = ();
@@ -66,7 +67,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     fn provision(
         &mut self,
         request: &ExecutionRequest,
-        config: Option<WslcProvisionPhase>,
+        config: Option<WslcProvisionConfig>,
     ) -> Result<ProvisionResult<()>, MxcError> {
         let provision_config = build_provision_config(request, config)?;
 
@@ -229,9 +230,12 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     fn validate_provision(
         &self,
         request: &ExecutionRequest,
-        _config: Option<&WslcProvisionPhase>,
+        _config: Option<&WslcProvisionConfig>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_provision_policy(request)
     }
 
@@ -242,7 +246,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 
@@ -253,7 +260,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_exec_policy(request)
     }
 
@@ -264,7 +274,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 
@@ -275,7 +288,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::policy::network_policy_support(),
+        )?;
         validate_post_provision_policy(request)
     }
 }
@@ -334,7 +350,7 @@ fn validate_sandbox_id(sandbox_id: &str) -> Result<(), MxcError> {
 /// live WSL host.
 fn build_provision_config(
     request: &ExecutionRequest,
-    config: Option<WslcProvisionPhase>,
+    config: Option<WslcProvisionConfig>,
 ) -> Result<ProvisionConfig, MxcError> {
     let image = config
         .as_ref()
@@ -415,9 +431,10 @@ fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, 
 /// mode. Per-host filtering is rejected in validation, so only the default
 /// policy participates: `Block` → isolated, `Allow` → bridged NAT.
 fn map_network(request: &ExecutionRequest) -> NetworkMode {
-    match request.policy.default_network_policy {
-        NetworkPolicy::Block => NetworkMode::None,
-        NetworkPolicy::Allow => NetworkMode::Bridged,
+    if crate::policy::network_is_isolated(request) {
+        NetworkMode::None
+    } else {
+        NetworkMode::Bridged
     }
 }
 
@@ -435,7 +452,9 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+    };
 
     /// A `Piped` exec is refused before the backend touches the daemon.
     ///
@@ -685,8 +704,34 @@ mod tests {
     }
 
     #[test]
+    fn build_provision_config_maps_directional_postures_to_daemon_modes() {
+        for (action, expected) in [
+            (NetworkAction::Deny, NetworkMode::None),
+            (NetworkAction::Allow, NetworkMode::Bridged),
+        ] {
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: action,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(NetworkIngressPolicy {
+                        default: action,
+                        host_loopback: action,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let config = build_provision_config(&request, None).unwrap();
+            assert_eq!(config.network, expected);
+        }
+    }
+
+    #[test]
     fn build_provision_config_forwards_image_and_tar_path() {
-        let phase = WslcProvisionPhase {
+        let phase = WslcProvisionConfig {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
         };
@@ -700,9 +745,45 @@ mod tests {
 
     #[test]
     fn build_provision_config_defaults_image_and_omits_tar_when_absent() {
-        let cfg = build_provision_config(&ExecutionRequest::default(), None).unwrap();
-        assert_eq!(cfg.image, DEFAULT_IMAGE);
-        assert!(cfg.image_tar_path.is_none());
+        for phase in [None, Some(WslcProvisionConfig::default())] {
+            let cfg = build_provision_config(&ExecutionRequest::default(), phase).unwrap();
+            assert_eq!(cfg.image, "alpine:latest");
+            assert!(cfg.image_tar_path.is_none());
+        }
+    }
+
+    #[test]
+    fn build_provision_config_preserves_each_field_and_empty_strings() {
+        for (phase, expected_image, expected_tar_path) in [
+            (
+                WslcProvisionConfig {
+                    image: Some("custom/image:tag".to_string()),
+                    image_tar_path: None,
+                },
+                "custom/image:tag",
+                None,
+            ),
+            (
+                WslcProvisionConfig {
+                    image: None,
+                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                },
+                "alpine:latest",
+                Some("C:\\images\\custom.tar"),
+            ),
+            (
+                WslcProvisionConfig {
+                    image: Some(String::new()),
+                    image_tar_path: Some(String::new()),
+                },
+                "",
+                Some(""),
+            ),
+        ] {
+            let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+            assert_eq!(cfg.image, expected_image);
+            assert_eq!(cfg.image_tar_path.as_deref(), expected_tar_path);
+        }
     }
 
     #[test]

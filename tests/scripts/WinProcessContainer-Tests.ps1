@@ -505,9 +505,11 @@ function Get-HostCapabilities {
         # still be behind a feature flag, which the Phase 4b INJECTION check
         # accounts for separately.
         CanBlockInputInjection         = $canInject
-        # deniedPaths is enforced on T3 via DENY ACEs, and on BaseContainer only
-        # when the SANDBOX_CAP_DENY_PATHS bit is set (lights up when the feature
-        # ships). Detected at runtime so denied tests auto-enable then.
+        # deniedPaths is enforced on T3 via DENY ACEs, and on BaseContainer when
+        # either contract reports native deny support — PSEC's
+        # PSE_SUPPORT_FS_DENY bit or a usable SBOX contract's
+        # SANDBOX_CAP_DENY_PATHS bit (lights up when the feature ships).
+        # Detected at runtime so denied tests auto-enable then.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
     }
 }

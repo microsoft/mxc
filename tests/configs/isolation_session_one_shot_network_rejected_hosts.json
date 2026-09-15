@@ -2,10 +2,24 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-one-shot-network-rejected-hosts",
   "containment": "isolation_session",
+  "_comment": "IsolationSession cannot enforce per-destination rules. Use a documentation CIDR to test that refusal without translating a hostname through transient DNS.",
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true,
-    "allowedHosts": ["api.github.com"]
+    "egress": {
+      "default": "allow",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "192.0.2.0/24"
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
   },
   "process": {
     "commandLine": "echo unreachable",

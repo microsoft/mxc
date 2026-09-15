@@ -786,7 +786,7 @@ fn a_legacy_policy_still_opens_dns() {
 #[test]
 fn a_parsed_legacy_request_keeps_the_dns_exemption() {
     let policy = policy_from_json(
-        r#"{"version": "0.7.0",
+        r#"{"version": "0.7.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "block", "enforcementMode": "firewall"}}"#,
     );

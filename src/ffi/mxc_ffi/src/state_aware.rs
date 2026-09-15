@@ -475,6 +475,69 @@ mod tests {
     }
 
     #[test]
+    fn exact_payload_errors_keep_their_paths_and_source_coordinates() {
+        for fields in [
+            r#""appId":null"#,
+            r#""appId":17"#,
+            r#""appId":"first","appId":"second""#,
+            r#""appIdd":"typo""#,
+        ] {
+            let json = format!(
+                "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+                 \"containment\":\"isolation_session\",\n  \
+                 \"_comment\":\"typed payload diagnostic\",\n  \
+                 \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+            );
+            let mut out = call_opt(&json, true, true);
+            assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST, "{fields}");
+            assert!(out.response_json_utf8.is_null());
+            assert!(!out.error.message_utf8.is_null());
+            // SAFETY: the call returned a non-null owned error string.
+            let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
+                .to_str()
+                .unwrap();
+            assert!(
+                message.contains("experimental.isolation_session.provision"),
+                "{message}"
+            );
+            assert!(message.contains("line "), "{message}");
+            assert!(message.contains("column "), "{message}");
+            assert!(out.error.operation_utf8.is_null());
+            assert!(out.error.native_code_utf8.is_null());
+            // SAFETY: all result strings were allocated by mxc_state_aware.
+            unsafe { mxc_state_aware_result_free(&mut out) };
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+    #[test]
+    fn typed_provision_configuration_reaches_backend_semantic_validation() {
+        let json = serde_json::json!({
+            "version": "0.9.0-alpha",
+            "phase": "provision",
+            "containment": "isolation_session",
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+            "experimental": {"isolation_session": {"provision": {
+                "appId": "x".repeat(257)
+            }}},
+        })
+        .to_string();
+        let mut out = call_opt(&json, true, true);
+        assert_eq!(out.status, crate::MXC_STATUS_POLICY_VALIDATION);
+        assert!(out.response_json_utf8.is_null());
+        assert!(!out.error.message_utf8.is_null());
+        // SAFETY: the failing call returned an owned error string.
+        let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert_eq!(message, "appId must be at most 256 characters (got 257)");
+        assert!(out.error.operation_utf8.is_null());
+        assert!(out.error.native_code_utf8.is_null());
+        // SAFETY: all result strings were allocated by mxc_state_aware.
+        unsafe { mxc_state_aware_result_free(&mut out) };
+    }
+
+    #[test]
     fn non_dry_run_exec_is_rejected() {
         let mut out = call(
             r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
@@ -670,7 +733,7 @@ mod tests {
         // discriminates it from the other refusals, which share this status.
         let (status, outcome, mut err) = attached(
             r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-                "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             true,
         );
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);

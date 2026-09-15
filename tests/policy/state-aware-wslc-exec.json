@@ -8,9 +8,7 @@
     "env": ["A=1", "B=two"],
     "timeout": 1234
   },
-  "network": {
-    "proxy": {
-      "url": "http://proxy.example:8080"
-    }
+  "runtimeConfig": {
+    "networkProxy": "http://proxy.example:8080"
   }
 }

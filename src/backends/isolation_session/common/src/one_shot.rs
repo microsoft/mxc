@@ -58,7 +58,12 @@ impl ScriptRunner for IsolationSessionRunner {
         // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
         validate_provision_policy(request).map_err(ScriptResponse::from)?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
         Ok(())
     }
 
@@ -171,7 +176,9 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, LifecycleConfig, NetworkPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, LifecycleConfig, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+    };
 
     #[test]
     fn validate_runner_one_shot_rejects_default_network() {
@@ -194,8 +201,16 @@ mod tests {
     fn canonical_request() -> ExecutionRequest {
         ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()

@@ -169,9 +169,17 @@ for backend in available_backends() {
     let capture_denials = backend
         .capabilities
         .contains(&BackendCapability::CaptureDenials);
+    let native_denied_paths = backend
+        .capabilities
+        .contains(&BackendCapability::FilesystemDeniedPaths);
+    let ingress_host_loopback_allow = backend
+        .capabilities
+        .contains(&BackendCapability::IngressHostLoopbackAllow);
     match backend.tier {
         Some(tier) => println!(
-            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            "{} (tier: {tier}, captureDenials: {capture_denials}, \
+             filesystemDeniedPaths: {native_denied_paths}, \
+             ingressHostLoopbackAllow: {ingress_host_loopback_allow})",
             backend.backend
         ),
         None => println!("{}", backend.backend),
@@ -181,12 +189,35 @@ for backend in available_backends() {
 
 The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
-`capabilities` reports optional features that passed the host probe, including
-the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
-handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+`capabilities` lists optional features supported by that tier.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
+or could not be detected. Use `wxc-exec --probe` for detailed machine facts.
+Callers must still handle `ErrorCode::BackendUnavailable` if availability
+changes before launch.
 And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
+
+On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
+this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+which runs the sandbox in a private network namespace). That mode has no
+fallback, so check it before building a proxy request:
+
+```rust,no_run
+use mxc_sdk::{platform_support, ProxyEnforcement};
+
+if let Some(network) = platform_support().bubblewrap_network {
+    if network.proxy_enforcement != ProxyEnforcement::Supported {
+        println!("proxy mode unavailable: {:?}", network.warnings);
+    }
+}
+```
+
+Reported fail-closed: when the probe cannot run, the result is `Unsupported`
+with the reason in `warnings`. The field is absent only when Bubblewrap itself
+is unavailable, which [`PlatformSupport::reason`] explains.
 
 ## Denial capture (Windows)
 
@@ -348,11 +379,11 @@ use std::error::Error;
 use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. IsolationSession accepts only the canonical unrestricted-network
-// acknowledgment; an absent policy defaults to `block`, which it refuses.
+// Provision. Describe the backend's unrestricted network posture explicitly.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+        "network":{"egress":{"default":"allow"},
+          "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     false, // dry_run
     true,  // experimental
 )?;

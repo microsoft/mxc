@@ -57,12 +57,33 @@ expect_absent "an ungranted path leaks no content" "FS_SECRET_CONTENT"
 # That the write fails proves nothing on its own: /usr is root-owned and this
 # suite runs unprivileged, so ordinary permissions would refuse it even if the
 # profile granted the write. The probe reports errno instead, which separates
-# the two -- rootless returns EPERM, discretionary permissions return EACCES --
-# and carries both controls in the same run: a granted non-SIP path that must
-# be CREATED, and a mode-555 directory that must be EACCES.
+# the two -- non-discretionary protection answers EPERM or EROFS, discretionary
+# permissions answer EACCES -- and carries both controls in the same run: a
+# granted non-SIP path that must be CREATED, and a mode-555 directory that must
+# be EACCES.
+#
+# Which non-discretionary errno to expect is a property of the host, so it is
+# read from csrutil rather than guessed or skipped: rootless answers EPERM,
+# while on a host with SIP off the sealed read-only system volume still refuses
+# the write and answers EROFS. The grant must not lift either one.
 #
 # The sandbox also denies with EPERM, so the profile is checked separately to
 # confirm the write really was granted.
+SIP_STATUS="$(csrutil status 2>/dev/null)"
+case "$SIP_STATUS" in
+    *enabled*)
+        SIP_EXPECT=("FS_SIP_EPERM")
+        SIP_REFUSER="rootless" ;;
+    *disabled*)
+        # EPERM stays acceptable: SIP is not the only source of it.
+        SIP_EXPECT=("FS_SIP_EROFS" "FS_SIP_EPERM")
+        SIP_REFUSER="the sealed read-only system volume (SIP is off)" ;;
+    *)
+        SIP_EXPECT=("FS_SIP_EROFS" "FS_SIP_EPERM")
+        SIP_REFUSER="the system volume (SIP state unreadable)" ;;
+esac
+echo "Host SIP: ${SIP_STATUS:-<csrutil unavailable>}"
+
 SIP_CFG="$(render seatbelt_fs_sip_beats_grant.json TESTDIR "$TESTDIR")"
 
 run_config "$SIP_CFG" --debug
@@ -74,7 +95,8 @@ run_config "$SIP_CFG"
 expect_marker "the SIP probe ran" "FS_PROBE_DONE"
 expect_marker "the same identity writes a granted non-SIP path" "FS_GRANT_WRITE_CREATED"
 expect_marker "a discretionary denial is distinguishable" "FS_DAC_EACCES"
-expect_marker "the SIP-protected write is refused by rootless, not by mode" "FS_SIP_EPERM"
+expect_marker_any "the SIP-protected write is refused by $SIP_REFUSER, not by mode" \
+    "${SIP_EXPECT[@]}"
 expect_absent "a readwrite grant does not lift SIP" "FS_SIP_CREATED"
 [ ! -f /usr/mxc-sip-probe ] || fail "SIP probe wrote to /usr, which must be impossible"
 pass "the SIP probe left nothing behind"

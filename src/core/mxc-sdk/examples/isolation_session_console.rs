@@ -117,7 +117,7 @@ fn run() -> i32 {
     }
 
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response = mxc_sdk::run_state_aware_json(provision, false, true).expect("provision");
     // The sandbox id is opaque by contract — carried verbatim, never parsed.
     let sandbox_id = response

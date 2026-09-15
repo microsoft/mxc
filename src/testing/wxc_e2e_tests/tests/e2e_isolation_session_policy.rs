@@ -132,7 +132,7 @@ fn one_shot_refuses_destroy_on_exit_false() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
+fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
     if !cached_has_wxc_exe() {
         return;
     }
@@ -141,7 +141,7 @@ fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
         "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
-        "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
+        "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
         "ui": { "disable": true }
     });
     let result = run_wxc_state_aware("iso provision + ui", &request, &["--experimental"]);
@@ -154,9 +154,14 @@ fn state_aware_provision_refuses_ui_policy_with_policy_validation() {
         return;
     }
     assert_eq!(
-        code, "policy_validation",
-        "expected policy_validation for a supplied `ui`, got {:?}; stdout={:?}",
+        code, "malformed_request",
+        "expected malformed_request for a supplied `ui`, got {:?}; stdout={:?}",
         code, result.stdout
+    );
+    assert!(
+        result.stdout.contains("unknown field `ui`"),
+        "expected the exact contract diagnostic, got stdout={:?}",
+        result.stdout
     );
 }
 
@@ -174,7 +179,7 @@ fn state_aware_provision_accepts_canonical_request_shape() {
         "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
-        "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
+        "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
     });
     let result = run_wxc_state_aware(
         "iso provision canonical (dry-run)",

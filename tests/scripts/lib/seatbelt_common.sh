@@ -137,6 +137,20 @@ expect_marker() {
     pass "$label"
 }
 
+# Like expect_marker, but any one of the listed markers satisfies it -- for
+# outcomes a host may legitimately report in more than one way.
+expect_marker_any() {
+    local label="$1" marker
+    shift
+    for marker in "$@"; do
+        if grep -qF "$marker" <<<"$OUT"; then
+            pass "$label"
+            return
+        fi
+    done
+    fail "$label (missing all of: $*)" "$OUT"
+}
+
 # Absence of a marker is only meaningful once the run is known to have reached
 # the probe: a validation error, a failed sandbox launch, or an interpreter that
 # never started all produce the same empty output. Every caller must therefore

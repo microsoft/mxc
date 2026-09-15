@@ -43,12 +43,20 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates the public `experimental.wslc.*` wire schema + cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
 | Policy honor matrix | `src/backends/wslc/common/src/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
 | Daemon client | `src/backends/wslc/common/src/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
 | Daemon | `src/backends/wslc/daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
 | Engine arm | `src/core/mxc_engine/src/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
 | Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
+
+Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
+`experimental.wslc.provision`. Engine-side checked binding preserves an absent
+config, a present empty config, and supplied `image`/`imageTarPath` values
+without reparsing JSON. An omitted image remains `None` until the backend
+chooses its default. The separate rolling `wire::WslcProvisionPhase` survives
+only as schema/type-oracle input and test characterization, not the backend's
+provision associated type.
 
 ## Sandbox IDs
 
@@ -75,45 +83,64 @@ discriminate via the exit code + whether stdout parses as an envelope.
 
 ## Policy honor matrix
 
-WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs `Bridged`); there is
-no per-host filtering (the container lacks `CAP_NET_ADMIN`, so `allowedHosts` / `blockedHosts` iptables
-rules do not apply — see the empirical finding in the plan history). Proxy is env-var only.
+WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
+`Bridged`); there is no per-host filtering or independent ingress/host-loopback
+restriction primitive. Proxy configuration supplies environment variables, not
+a firewall. Exact v0.9 supports two coherent postures:
+
+| Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |
+| --- | --- | --- | --- |
+| Isolated | `deny` | `deny` | `deny` |
+| Bridged, unrestricted | `allow` | `allow` | `allow` |
+
+Omitted directional values default to deny, so an egress-only allow request is
+rejected rather than claiming its implicit ingress/loopback denies are enforced.
+Mixed postures and per-host rules are rejected. Allowing ingress/host-loopback
+does not create host port forwarding or promise reachability across NAT; it
+acknowledges that WSLC cannot independently restrict those directions.
 
 | Field | provision | start / stop / deprovision | exec |
 |-------|-----------|----------------------------|------|
 | `readwritePaths` / `readonlyPaths` | honored → container volumes | rejected | rejected |
 | `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
-| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network` host filtering (`allowedHosts` / `blockedHosts`) | rejected | rejected | rejected |
-| `network.allowLocalNetwork` | rejected if `true` — WSLc networking is all-or-nothing, and the state-aware surface has no port-mapping escape hatch | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network.enforcementMode` | rejected unless `capabilities` — `firewall` / `both` ask for per-rule enforcement the container cannot perform | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
-| `network.proxy` | rejected | rejected | honored — **`url` form only** (`localhost` / `builtinTestServer` forms → `policy_validation`); injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
+| `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
+| Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
+| `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 | `ui` | rejected | rejected | rejected |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-`ui` is rejected by **presence, not value**, on every phase. WSLc has no mechanism to enforce UI
-restrictions on a container, so no phase could honor it. Presence is the only workable test because
-`UiPolicy`'s defaults are full lockdown — an explicitly supplied lockdown `ui` is indistinguishable
-*by value* from an absent one, so a value-based check would let the single most restrictive request
-a caller can write through unenforced. The parse-derived `ContainerPolicy::ui_specified` flag is
-what closes that gap.
+The exact `0.9.0-alpha` request root is selected before backend dispatch.
+Fields absent from that phase's closed root fail structurally with
+`malformed_request`: provision excludes `ui`, start / stop / deprovision admit
+no filesystem, network, UI, or process policy, and exec excludes filesystem and
+UI. These failures do not reach WSLc's presence checks.
 
-Every rejection above **aborts the phase before anything is created**: the dispatcher runs each
-`validate_*` hook ahead of the phase body, and `connect_daemon()` lives inside `provision()`, so a
-refused provision never even spawns the daemon — let alone a VM or container.
+Fields the exact root does admit still receive backend semantic validation.
+Every resulting `policy_validation` above aborts the phase before anything is
+created: the dispatcher runs each `validate_*` hook ahead of the phase body,
+and `connect_daemon()` lives inside `provision()`, so a refused provision never
+spawns the daemon, VM, or container.
 
 Filesystem policy is fixed at `provision` and immutable afterwards.
 
-The network **mode** (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host lists) is
-also fixed at `provision`. Post-provision phases reject the mode by **presence, not value**: any
-explicitly supplied network-mode field is rejected — including an explicit `defaultPolicy: "block"`
-whose value equals the default — because an explicit default is indistinguishable from an omitted
-one by value alone. Only the exec-phase cooperative `proxy` is accepted after provision; a
-proxy-only `network` block (no mode fields) is therefore honored at exec.
+The directional network posture is fixed at `provision`. Post-provision
+phases reject supplied posture by presence, even when values equal defaults.
+Only exec can supply a cooperative proxy through top-level `runtimeConfig`;
+its request omits `network` so proxy-only execution inherits the existing
+posture. Proxy URLs must address a listener reachable from the guest; a host
+loopback listener is not made guest-reachable by spelling its host address
+`localhost`.
+
+The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
+published contracts is not a v0.9 compatibility fallback. The new v0.9
+directional requirements do not change those published contracts.
 
 ## Error mapping
 
+Exact-contract `malformed_request` failures occur before daemon connection and
+are not part of daemon error mapping. Once dispatch reaches the backend,
 `state_aware.rs::map_daemon_error` maps daemon errors to the cross-backend wire error codes:
 
 | Source | Wire error code |

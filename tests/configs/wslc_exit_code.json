@@ -6,7 +6,7 @@
     "commandLine": "sh -c 'echo About to exit with code 42; exit 42'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

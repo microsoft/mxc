@@ -225,11 +225,19 @@ function managedJsonFields(source, className) {
     });
 }
 
-function compareStructFields(label, rustSource, rustName, managedSource, managedName) {
+function compareStructFields(
+  label,
+  rustSource,
+  rustName,
+  managedSource,
+  managedName,
+  ignoredRustFields = []
+) {
+  const ignored = new Set(ignoredRustFields);
   compare(
     `${label} fields`,
     managedJsonFields(managedSource, managedName),
-    rustStructFields(rustSource, rustName)
+    rustStructFields(rustSource, rustName).filter((field) => !ignored.has(field))
   );
 }
 
@@ -262,9 +270,7 @@ const managedPolicy = read(
   "Microsoft.Mxc.Sdk",
   "SandboxPolicy.cs"
 );
-const rustOneShot = enumVariants(rustPolicy, "Containment", "rust").filter(
-  (variant) => variant !== "IsolationSession"
-);
+const rustOneShot = enumVariants(rustPolicy, "Containment", "rust");
 compare(
   "Rust SDK vs managed containment variants",
   managedDerivedTypes(managedRequest, "SandboxContainment").map((name) =>
@@ -350,10 +356,16 @@ compareStructFields(
   "TelemetrySettings"
 );
 
-for (const [label, rustSource, rustName, managedName] of [
+for (const [label, rustSource, rustName, managedName, ignoredRustFields] of [
   ["filesystem policy", rustPolicy, "FilesystemSection", "FilesystemPolicy"],
   ["UI policy", rustPolicy, "UiSection", "UiPolicy"],
-  ["network policy", rustNetworkPolicy, "NetworkSection", "NetworkPolicy"],
+  [
+    "network policy",
+    rustNetworkPolicy,
+    "NetworkSection",
+    "NetworkPolicy",
+    ["legacyFieldsSpecified"],
+  ],
   ["network peer", rustNetworkPolicy, "NetworkPeerSection", "NetworkPeerPolicy"],
   ["network port", rustNetworkPolicy, "NetworkPortSection", "NetworkPortPolicy"],
   ["network rule", rustNetworkPolicy, "NetworkRuleSection", "NetworkRulePolicy"],
@@ -366,7 +378,8 @@ for (const [label, rustSource, rustName, managedName] of [
     rustSource,
     rustName,
     managedPolicy,
-    managedName
+    managedName,
+    ignoredRustFields
   );
 }
 const camelCase = (value) => value[0].toLowerCase() + value.slice(1);

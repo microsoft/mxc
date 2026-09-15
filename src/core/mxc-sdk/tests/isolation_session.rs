@@ -8,11 +8,14 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::policy::{NetworkSection, SandboxPolicy};
-use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
+use mxc_sdk::{
+    build_request_with_containment, Containment, ErrorCode, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection,
+};
 
-/// The network acknowledgment this backend requires; an absent policy is
-/// refused.
+/// The public one-shot API reaches IsolationSession with its required
+/// directional all-allow network posture.
 fn iso_policy() -> SandboxPolicy {
     iso_policy_with_deadline(None)
 }
@@ -21,9 +24,14 @@ fn iso_policy() -> SandboxPolicy {
 /// the harness: if the handshake never lands, the deadline is what ends the run
 /// instead of the test waiting on a process that will not exit.
 fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Allow);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Allow);
+    ingress.host_loopback = Some(NetworkAction::Allow);
     let mut network = NetworkSection::default();
-    network.allow_outbound = true;
-    network.allow_local_network = true;
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
 
     SandboxPolicy {
         version: "0.9.0-alpha".to_string(),
@@ -90,7 +98,7 @@ fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
     enter_sta();
 
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let err = mxc_sdk::run_state_aware_json(provision, false, true)
         .expect_err("a single-threaded apartment must be refused");
 
@@ -160,16 +168,13 @@ fn one_shot_requires_the_experimental_optin() {
 /// caller-fixable refusal into an opaque backend error.
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        // The backend cannot filter the container's network, so it accepts only
-        // an explicit acknowledgment; an absent policy reads as a deny it has no
-        // way to enforce.
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = iso_policy();
+    policy.filesystem = Some(FilesystemSection {
+        readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
     let mut request = build_request_with_containment(
         &policy,
         &Containment::IsolationSession,
@@ -628,8 +633,8 @@ fn one_shot_kill_stops_the_workload() {
         "the workload must be running before the kill, or this test cannot fail"
     );
 
-    // Bounded, because teardown has been seen to block on a platform call that
-    // never returns. The handle comes back so this test, not the worker, decides
+    // Bounded so a kill that never returns fails this test rather than hanging
+    // the suite. The handle comes back so this test, not the worker, decides
     // when it drops.
     let (killed_tx, killed_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -690,7 +695,7 @@ fn state_aware_lifecycle_runs_end_to_end() {
     skip_unless_supported!();
 
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response = mxc_sdk::run_state_aware_json(provision, false, true)
         .expect("provision must succeed on a supported host");
     let parsed: serde_json::Value =
@@ -733,7 +738,7 @@ struct Started {
 
 fn provision_and_start() -> Started {
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response =
         mxc_sdk::run_state_aware_json(provision, false, true).expect("provision must succeed");
     let parsed: serde_json::Value =
@@ -769,6 +774,7 @@ fn provision_and_start() -> Started {
 
 fn exec_capture_stdout(sandbox_id: &str, command: &str) -> String {
     let request = serde_json::json!({
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": sandbox_id,
         "process": { "commandLine": command, "timeout": 30000 }
@@ -876,7 +882,7 @@ fn exec_attached_rejects_a_non_exec_phase() {
     // `provision` is a real phase, so this exercises the guard rather than the
     // parser's unknown-phase rejection.
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#;
+        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let err = mxc_sdk::exec_attached(provision, true)
         .expect_err("an attached exec must reject a non-exec phase");
     assert_eq!(err.code, ErrorCode::MalformedRequest);

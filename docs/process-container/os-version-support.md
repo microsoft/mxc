@@ -118,17 +118,20 @@ fallback chain.
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
-| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when `SANDBOX_CAP_DENY_PATHS` is set, otherwise rejected at launch and dispatched to T3) |
+| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when PSEC reports `PSE_SUPPORT_FS_DENY` or SBOX reports `SANDBOX_CAP_DENY_PATHS`, otherwise rejected at launch and dispatched to T3) |
 | BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
 Notes:
 - On 25H2+, T1 can grant `readwrite`/`readonly` paths natively via the FlatBuffer
   `SandboxSpec` (`fs_read_write` / `fs_read_only`). `deniedPaths` under T1
-  additionally requires the `SANDBOX_CAP_DENY_PATHS` capability bit reported by
-  `Experimental_QuerySandboxSupport`
-  (`BaseContainerRunner::base_container_supports_deny_paths()`); when the bit is
-  clear, `deniedPaths` is rejected and the run relies on default-deny plus
-  explicit grants (or T3 DENY ACEs).
+  additionally requires native deny support from either BaseContainer contract:
+  the PSEC `PSE_SUPPORT_FS_DENY` bit reported by
+  `QueryProcessSecurityEnvironmentSupport`, or the SBOX `SANDBOX_CAP_DENY_PATHS`
+  capability bit reported by `Experimental_QuerySandboxSupport` on a host whose
+  SBOX create contract is usable
+  (`BaseContainerRunner::supports_native_denied_paths()`); when neither contract
+  reports deny support, `deniedPaths` is rejected and the run relies on
+  default-deny plus explicit grants (or T3 DENY ACEs).
 - On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 
