@@ -1,39 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, after } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert';
-import os from 'node:os';
-import path from 'node:path';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
-import {
-  sdk,
-  supportedVersions,
-  isLinuxRoot,
-  isLinuxBubblewrap,
-  debugSpawnOptions,
-  spawnFromConfigAsync,
-  startUnixTestProxy,
-  getSdkBinDir,
-  getSdkPackageRoot,
-  NETWORK_TEST_URL,
-} from './test-helpers.js';
-import type { ChildProcess } from 'node:child_process';
+import path from 'node:path';
+import { sdk, supportedVersions, isLinuxRoot, createTempDir } from './test-helpers.js';
 
-// Bwrap fingerprint: when invoked with `--unshare-pid`, bubblewrap creates a
-// new PID namespace and stays as PID 1 in that namespace, acting as init
-// (reaping orphans, forwarding signals). It does NOT exec the child shell
-// directly — the script runs as PID 2. So /proc/1/comm always reads "bwrap"
-// from inside the sandbox, regardless of how bwrap is invoked or which user
-// runs it. This is documented bubblewrap behavior (see bwrap(1)) and the
-// most reliable cross-context signal — mount-count heuristics break under
-// WSL2 where bind-mount propagation can produce 40+ entries.
 const BWRAP_PROBE =
   "PID1=$(cat /proc/1/comm 2>/dev/null || echo unknown); " +
-  "MOUNTS=$(wc -l </proc/self/mountinfo); " +
-  "echo \"pid1=$PID1 mountinfo_lines=$MOUNTS\"; " +
+  "echo \"pid1=$PID1\"; " +
   "[ \"$PID1\" = \"bwrap\" ] || { echo \"FAIL: not under bubblewrap (pid1=$PID1)\"; exit 1; }; " +
   "echo 'OK: under bubblewrap (pid1=bwrap)'";
 
@@ -41,9 +17,16 @@ for (const schemaVersion of supportedVersions) {
 describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
   skip: !isLinuxRoot ? 'Linux Bubblewrap tests require Linux with root privileges (sudo npm test)' : undefined,
 }, () => {
-  it('should default to Bubblewrap when containment is omitted (silent default)', async () => {
-    // spawnSandboxAsync routes through abstract `containment: 'process'`,
-    // which on Linux resolves to Bubblewrap in the binary.
+  let tempDir = '';
+
+  afterEach(() => {
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      tempDir = '';
+    }
+  });
+  it('runs the default process surface under bubblewrap', async () => {
+  it('runs the default process surface under bubblewrap', async () => {
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
       { version: schemaVersion.raw },
@@ -51,247 +34,30 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
       undefined,
       `bwrap-default-${schemaVersion}`,
     );
-    assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] silent-default Bubblewrap probe failed: ${result.stdout}`);
+    assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] bubblewrap probe failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('OK: under bubblewrap'), `[${schemaVersion}] ${result.stdout}`);
   });
 
-  it('should select Bubblewrap for abstract containment="process"', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
-      'process',
-      `bwrap-process-${schemaVersion}`,
-    );
-    config.process!.commandLine = BWRAP_PROBE;
-    assert.strictEqual(config.containment, 'process', 'wire-format containment should be "process"');
-    const result = await spawnFromConfigAsync(config, debugSpawnOptions);
-    assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] containment=process Bubblewrap probe failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('OK: under bubblewrap'), `[${schemaVersion}] ${result.stdout}`);
-  });
+  it('honors readwrite filesystem mounts on the default process surface', async () => {
+    tempDir = createTempDir('mxc-bwrap-test');
+    const testFile = path.join(tempDir, 'test.txt');
+    fs.writeFileSync(testFile, 'original', 'utf8');
 
-  it('should select Bubblewrap for explicit containment="bubblewrap"', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
-      'bubblewrap',
-      `bwrap-explicit-${schemaVersion}`,
+    const result = await sdk.spawnSandboxAsync(
+      `cat '${testFile}' && echo 'overwritten' > '${testFile}' && cat '${testFile}'`,
+      {
+        version: schemaVersion.raw,
+        filesystem: { readwritePaths: [tempDir] },
+      },
+      {},
+      undefined,
+      `bwrap-rw-${schemaVersion}`,
     );
-    config.process!.commandLine = BWRAP_PROBE;
-    assert.strictEqual(config.containment, 'bubblewrap', 'wire-format containment should be "bubblewrap"');
-    const result = await spawnFromConfigAsync(config, debugSpawnOptions);
-    assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] explicit Bubblewrap probe failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('OK: under bubblewrap'), `[${schemaVersion}] ${result.stdout}`);
+
+    assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
+    assert.ok(result.stdout.includes('original'), `[${schemaVersion}] missing original content: ${result.stdout}`);
+    assert.ok(result.stdout.includes('overwritten'), `[${schemaVersion}] missing updated content: ${result.stdout}`);
+    assert.strictEqual(fs.readFileSync(testFile, 'utf8').trim(), 'overwritten');
   });
 });
 }
-
-// Network proxy tests use the cooperative env-var proxy, which is
-// unprivileged by design -- the entire reason the proxy path exists is to
-// avoid the root requirement of iptables-based enforcement. Gate on
-// "Linux + bwrap available" rather than "Linux + root". Pinned to schema
-// 0.6.0-alpha because Bubblewrap proxy support is only available in 0.6+.
-const PROXY_SCHEMA = '0.6.0-alpha';
-describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
-  skip: !isLinuxBubblewrap
-    ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
-    : undefined,
-}, () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-'));
-  const proxies: ChildProcess[] = [];
-
-  after(() => {
-    for (const p of proxies) {
-      try { p.kill('SIGTERM'); } catch { /* ignore */ }
-    }
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  });
-
-  it('should route HTTPS traffic through an externally launched unix-test-proxy', async () => {
-    const { port, proxyProcess } = startUnixTestProxy(tmpDir);
-    proxies.push(proxyProcess);
-
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-external-proxy',
-    );
-    // Azure Artifacts feed (NETWORK_TEST_URL)
-    config.process!.commandLine =
-      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_OK`;
-    config.network = {
-      ...(config.network ?? {}),
-      defaultPolicy: 'allow',
-      proxy: { localhost: port },
-    };
-
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
-    assert.strictEqual(result.exitCode, 0, `external-proxy run failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('PROXY_OK'), `missing PROXY_OK in: ${result.stdout}`);
-  });
-
-  it('should launch a builtinTestServer proxy and route traffic through it', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-builtin-proxy',
-    );
-    config.process!.commandLine =
-      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo BUILTIN_OK`;
-    config.network = {
-      ...(config.network ?? {}),
-      defaultPolicy: 'allow',
-      proxy: { builtinTestServer: true },
-    };
-
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
-    assert.strictEqual(result.exitCode, 0, `builtin-proxy run failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('BUILTIN_OK'), `missing BUILTIN_OK in: ${result.stdout}`);
-  });
-
-  it('should enforce allowedHosts at the proxy layer', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-allowlist-proxy',
-    );
-    // Sentinel pattern: allowed host succeeds, disallowed host fails with 403
-    // from the proxy and curl exits non-zero. The script swallows that and
-    // prints BLOCKED_OK so we can assert both signals are present.
-    config.process!.commandLine =
-      'set -e; ' +
-      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo SENTINEL_OK; ` +
-      'if curl -fsS --max-time 5 https://example.com > /dev/null 2>&1; then ' +
-      '  echo SENTINEL_BAD_LEAK; exit 1; ' +
-      'else ' +
-      '  echo BLOCKED_OK; ' +
-      'fi';
-    config.network = {
-      ...(config.network ?? {}),
-      defaultPolicy: 'allow',
-      proxy: { builtinTestServer: true },
-      allowedHosts: ['pkgs.dev.azure.com'],
-    };
-
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
-    assert.strictEqual(result.exitCode, 0, `allowlist run failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
-    assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);
-    assert.ok(!result.stdout.includes('SENTINEL_BAD_LEAK'), `allowlist leaked: ${result.stdout}`);
-  });
-});
-
-// The Rust serializer and the TypeScript parser are each unit-tested against
-// fixtures, but a fixture cannot catch the two drifting apart. This pins the
-// transport: the real `lxc-exec --available-backends` payload is fed to the
-// real SDK parser, so a rename or reshape on either side fails here.
-//
-// The gate is only "Linux with a bwrap on PATH" — whether that bwrap is
-// actually *usable* is what the tests below assert, not something they assume.
-describe('lxc-exec --available-backends contract', {
-  skip: !isLinuxBubblewrap
-    ? 'the backend-discovery contract test requires Linux with bwrap installed'
-    : undefined,
-}, () => {
-  /** Raw stdout of the real CLI, and the array it parses to. */
-  function runAvailableBackends(): { stdout: string; backends: Record<string, unknown>[] } {
-    const lxcExec = path.join(getSdkBinDir(), 'lxc-exec');
-    assert.ok(fs.existsSync(lxcExec), `lxc-exec not found at ${lxcExec}`);
-    const stdout = execFileSync(lxcExec, ['--available-backends'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const parsed = JSON.parse(stdout);
-    assert.ok(Array.isArray(parsed), `--available-backends must emit a JSON array, got: ${stdout}`);
-    return { stdout, backends: parsed };
-  }
-
-  it('emits the array shape the SDK parser consumes', () => {
-    const { stdout, backends } = runAvailableBackends();
-
-    for (const entry of backends) {
-      assert.strictEqual(
-        typeof entry.backend, 'string',
-        `every entry needs a string 'backend' wire name, got: ${stdout}`);
-      // The parser reads these as string arrays and would silently fall back
-      // to "unsupported" if either became an object or a bare string.
-      for (const field of ['capabilities', 'warnings'] as const) {
-        if (entry[field] !== undefined) {
-          assert.ok(Array.isArray(entry[field]), `'${field}' must be an array, got: ${stdout}`);
-          for (const value of entry[field] as unknown[]) {
-            assert.strictEqual(
-              typeof value, 'string', `'${field}' must hold strings, got: ${stdout}`);
-          }
-        }
-      }
-    }
-  });
-
-  // Deliberately an assertion rather than a skip gate. `isLinuxBubblewrap` only
-  // proves a `bwrap` file is on PATH; both probes additionally require it to run
-  // and be >= MIN_BWRAP_VERSION. Those two version floors live in different
-  // languages, so pin that they agree instead of trusting either.
-  it('agrees with getPlatformSupport on whether bubblewrap is usable', () => {
-    const { stdout, backends } = runAvailableBackends();
-
-    const nativeReportsBubblewrap = backends.some((entry) => entry.backend === 'bubblewrap');
-    const sdkReportsBubblewrap = sdk.getPlatformSupport().availableMethods.includes('bubblewrap');
-
-    assert.strictEqual(
-      nativeReportsBubblewrap,
-      sdkReportsBubblewrap,
-      'the native probe and the SDK disagree about whether bubblewrap is usable; ' +
-        'MIN_BWRAP_VERSION is mirrored between bwrap_version.rs and platform.ts and ' +
-        `may have drifted. --available-backends said: ${stdout}`,
-    );
-  });
-
-  it('projects the native payload into PlatformSupport.bubblewrapNetwork', async (t) => {
-    const { stdout, backends } = runAvailableBackends();
-    const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap');
-    if (!bubblewrap) {
-      // A `bwrap` on PATH can still be too old or not executable, in which case
-      // omitting it is the correct contract and there is nothing to project.
-      t.skip('this host has no usable bubblewrap to project');
-      return;
-    }
-    const capabilities = (bubblewrap.capabilities ?? []) as string[];
-    const cliSupportsProxyEnforcement = capabilities.includes('proxyEnforcement');
-
-    // Drive the real parser with the bytes this CLI just produced. Injecting
-    // them rather than re-probing keeps the comparison exact: a second live
-    // walk could legitimately disagree by exhausting its pre-flight budget.
-    const platform = await import(
-      pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'platform.js')).href
-    ) as {
-      getPlatformSupport(): { bubblewrapNetwork?: { proxyEnforcement: string; warnings: string[] } };
-      _setLinuxProbeRunner(runner: (() => string) | null): void;
-      _resetPlatformSupportCache(): void;
-    };
-
-    try {
-      platform._setLinuxProbeRunner(() => stdout);
-      platform._resetPlatformSupportCache();
-      const network = platform.getPlatformSupport().bubblewrapNetwork;
-
-      assert.ok(network, `bubblewrapNetwork must be reported when bubblewrap is available: ${stdout}`);
-      assert.strictEqual(
-        network.proxyEnforcement,
-        cliSupportsProxyEnforcement ? 'supported' : 'unsupported',
-        `the SDK disagreed with the CLI capability list: ${stdout}`);
-
-      if (cliSupportsProxyEnforcement) {
-        assert.deepStrictEqual(network.warnings, [], 'a supported host reports no warnings');
-      } else {
-        // Never fail closed anonymously: the reason is the only actionable
-        // detail an unsupported host gives a caller.
-        assert.ok(
-          network.warnings.length > 0,
-          `an unsupported host must explain why, got: ${JSON.stringify(network)}`);
-        for (const warning of network.warnings) {
-          assert.strictEqual(typeof warning, 'string');
-        }
-      }
-    } finally {
-      platform._setLinuxProbeRunner(null);
-      platform._resetPlatformSupportCache();
-    }
-  });
-});

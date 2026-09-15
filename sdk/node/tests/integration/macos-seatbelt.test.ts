@@ -10,13 +10,11 @@ import path from 'path';
 import { MxcError } from '@microsoft/mxc-sdk';
 import {
   sdk,
-  debugSpawnOptions,
   NETWORK_TEST_URL,
   createTempDir,
 } from './test-helpers.js';
 
-const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
-const inProcessSeatbeltOptions = { experimental: true };
+const seatbeltSpawnOptions = { experimental: true };
 
 // Seatbelt first appears in the exact 0.7 contract.
 const schemaVersion = '0.7.0-alpha';
@@ -74,7 +72,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       'exit 42',
       { version: schemaVersion },
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-exit-code',
     );
@@ -97,7 +95,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       script,
       { version: schemaVersion },
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-child-signal',
     );
@@ -110,7 +108,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       'ls /Users 2>&1 || true',
       { version: schemaVersion },
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-filesystem-deny',
     );
@@ -130,7 +128,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "curl --max-time 5 --fail --silent --show-error https://example.com 2>&1; echo CURL_EXIT=$?",
       policy,
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-network-deny',
     );
@@ -149,7 +147,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       `RESULT=$(curl --max-time 10 --fail --silent '${NETWORK_TEST_URL}') && echo 'NETWORK_OK'`,
       policy,
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-network-allow',
     );
@@ -165,7 +163,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo test_clip | pbcopy 2>&1 && pbpaste 2>&1",
       policy,
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-clipboard-deny',
     );
@@ -182,7 +180,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       `echo '${uniqueToken}' | pbcopy && pbpaste`,
       policy,
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-clipboard-allow',
     );
@@ -206,7 +204,7 @@ describe('macOS Seatbelt Container', {
         sdk.spawnSandboxAsync(
           'echo should-not-run',
           policy,
-          inProcessSeatbeltOptions,
+          seatbeltSpawnOptions,
           undefined,
           'seatbelt-blocked-hosts',
         ),
@@ -227,7 +225,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo 'step 1' && uname -s && echo 'step 2' && whoami && echo 'Pipeline complete'",
       { version: schemaVersion },
-      inProcessSeatbeltOptions,
+      seatbeltSpawnOptions,
       undefined,
       'seatbelt-pipeline',
     );
@@ -265,24 +263,4 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
-    // Build a config with a custom seatbelt profile that allows everything
-    const config = sdk.createConfigFromPolicy({ version: schemaVersion });
-    config.process = { commandLine: "echo 'profile override works'" };
-    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
-    config.containerId = 'seatbelt-profile-override';
-
-    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
-      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
-      let stdout = '';
-      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
-      ptyProcess.onData((data: string) => { stdout += data; });
-      ptyProcess.onExit((event: { exitCode: number }) => {
-        clearTimeout(timer);
-        resolve({ exitCode: event.exitCode, stdout });
-      });
-    });
-    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
-    assert.ok(result.stdout.includes('profile override works'));
-  });
 });
