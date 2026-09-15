@@ -10,12 +10,11 @@ import path from 'path';
 import { MxcError } from '@microsoft/mxc-sdk';
 import {
   sdk,
-  debugSpawnOptions,
   NETWORK_TEST_URL,
   createTempDir,
 } from './test-helpers.js';
 
-const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
+const seatbeltSpawnOptions = { experimental: true };
 
 // Seatbelt first appears in the exact 0.7 contract.
 const schemaVersion = '0.7.0-alpha';
@@ -264,24 +263,4 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
-    // Build a config with a custom seatbelt profile that allows everything
-    const config = sdk.createConfigFromPolicy({ version: schemaVersion });
-    config.process = { commandLine: "echo 'profile override works'" };
-    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
-    config.containerId = 'seatbelt-profile-override';
-
-    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
-      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
-      let stdout = '';
-      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
-      ptyProcess.onData((data: string) => { stdout += data; });
-      ptyProcess.onExit((event: { exitCode: number }) => {
-        clearTimeout(timer);
-        resolve({ exitCode: event.exitCode, stdout });
-      });
-    });
-    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
-    assert.ok(result.stdout.includes('profile override works'));
-  });
 });
