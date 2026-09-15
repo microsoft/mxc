@@ -150,7 +150,7 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
-`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
+`getPlatformSupport()` reports backend availability. Its `uiCapabilities` field is reserved for a future native host-services expansion and is currently omitted on all platforms. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
 
 On Linux, when Bubblewrap is available, `getPlatformSupport()` also reports `bubblewrapNetwork`: whether this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode, which runs the sandbox in a private network namespace and default-drops everything except the proxy). That mode has no fallback — a policy the host cannot satisfy fails rather than silently degrading — so check it before spawning:
 
@@ -696,8 +696,8 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 `notApplicable` without invoking the presenter.
 
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
-`'granted'`. Its `error` field is present when the command fails or returns an
-invalid response. A valid native fail-closed response can return
+`'granted'`. Its `error` field is present when the native query fails or
+returns an invalid response. A valid native fail-closed response can return
 `'undetermined'` or a blocked policy without `error`; any accompanying native
 diagnostic is reported once through `console.warn`:
 
