@@ -48,7 +48,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `bwrap-default-${schemaVersion}`,
     );

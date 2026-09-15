@@ -61,7 +61,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo 'Hello from seatbelt'",
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      { experimental: true },
       undefined,
       'seatbelt-hello',
     );
@@ -100,7 +100,7 @@ describe('macOS Seatbelt Container', {
       undefined,
       'seatbelt-child-signal',
     );
-    // `spawnSandboxAsync` merges PTY output into `stdout`; `stderr` is always ''.
+    // The in-process path returns stdout and stderr separately.
     assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
   });
 
