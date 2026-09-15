@@ -12,7 +12,7 @@ import {
   type SandboxWritableBinding,
 } from '../../src/sandbox-process.js';
 import { _setBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
-import type { BindingSandboxRequest } from '../../src/bindings/request.js';
+import type { RequestSpec } from '../../src/bindings/request.js';
 
 class FakeReadable implements SandboxReadableBinding {
   constructor(private readonly chunks: (Buffer | null)[], private readonly events: string[]) {}
@@ -102,7 +102,7 @@ afterEach(() => _setBindingSandboxProcessFactory());
 
 describe('spawnSandboxProcess', () => {
   it('routes through the binding request adapter', () => {
-    let seen: BindingSandboxRequest | undefined;
+    let seen: RequestSpec | undefined;
     _setBindingSandboxProcessFactory((request) => {
       seen = request;
       return _createMxcSandboxProcess(new FakeBinding(42, 0));

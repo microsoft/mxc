@@ -832,7 +832,7 @@ export function spawnSandboxProcess(
   }
 
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  const proc = spawnBindingSandboxProcess(prepareBindingSandboxRequest(config, {
+  const proc = spawnBindingSandboxProcess(prepareRequestSpec(config, {
     experimental: options.experimental,
   }), config.process?.timeout);
   wireAbortToProcess(proc, options);
