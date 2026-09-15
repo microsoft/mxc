@@ -4,7 +4,17 @@
 /**
  * MXC SDK - TypeScript SDK for Microsoft eXecution Containers
  *
- * This package provides a Node.js interface for spawning sandboxed containers.
+ * This package provides a Node.js interface for running MXC sandboxes through
+ * the in-process native runtime.
+ *
+ * One-shot execution is exposed through `spawnSandboxAsync()`, `spawnSandbox()`,
+ * `spawnSandboxFromConfig()`, and `spawnSandboxProcess()`. Live APIs return
+ * pipe-based `MxcSandboxProcess` instances rather than executor-based PTYs.
+ *
+ * The state-aware lifecycle is exposed through `provisionSandbox()`,
+ * `startSandbox()`, `execInSandboxProcess()`, `execInSandboxAsync()`,
+ * `stopSandbox()`, and `deprovisionSandbox()`.
+ *
  * For direct Windows ProcessContainer configs, set
  * `processContainer.learningMode: true` to enable deny-and-record learning
  * mode. Learning-mode capability names are reserved and must not be supplied
@@ -19,17 +29,23 @@
  *
  * @example
  * ```typescript
- * import { spawnSandbox, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import {
+ *   spawnSandboxAsync,
+ *   type SandboxPolicy,
+ *   getPlatformSupport,
+ * } from '@microsoft/mxc-sdk';
  *
  * if (getPlatformSupport().isSupported) {
  *   const policy: SandboxPolicy = {
- *     version: '0.6.0-alpha',
+ *     version: '0.8.0-alpha',
  *     network: { allowOutbound: true },
  *   };
  *
- *   const ptyProcess = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
- *   ptyProcess.onData((data) => console.log(data));
- *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
+ *   const result = await spawnSandboxAsync(
+ *     'python -c "print(\'Hello from sandbox\')"',
+ *     policy,
+ *   );
+ *   console.log(result.stdout);
  * }
  * ```
  *
@@ -68,9 +84,9 @@ export {
 export {
   createConfigFromPolicy,
   spawnSandbox,
+  spawnSandboxFromConfig,
   spawnSandboxAsync,
   spawnSandboxProcess,
-  spawnSandboxFromConfig,
   buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox.js';
@@ -147,7 +163,6 @@ export {
 export {
   provisionSandbox,
   startSandbox,
-  execInSandbox,
   execInSandboxProcess,
   execInSandboxAsync,
   stopSandbox,

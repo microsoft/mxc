@@ -31,9 +31,9 @@ export type ErrorCode =
  * A failure MXC raises before or outside any API call carries neither
  * `operation` nor `nativeCode`; it may still carry a `remediation`.
  *
- * The invariant is guaranteed by the executor, which cannot construct a
- * violating envelope. This interface mirrors the flat wire shape rather than
- * re-encoding the constraint in the type.
+ * The invariant is guaranteed by the native MXC runtime, which cannot
+ * construct a violating envelope. This interface mirrors the flat wire shape
+ * rather than re-encoding the constraint in the type.
  */
 export interface MxcErrorFields {
   /** Machine-readable category. Branch on this first. */
@@ -62,7 +62,7 @@ export interface MxcErrorFields {
 
 /**
  * The `error` arm of a wire response envelope, as received from the
- * executor. Identical to {@link MxcErrorFields} except that `code` is an
+ * native runtime. Identical to {@link MxcErrorFields} except that `code` is an
  * open `string`: an unrecognised code is passed through verbatim rather than
  * being coerced or dropped.
  */
