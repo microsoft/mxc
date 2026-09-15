@@ -222,7 +222,11 @@ pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
-The `await`-friendly version of `spawnSandbox`. Same arguments, same restriction (process-isolation only), but resolves with `{ stdout, stderr, exitCode }` instead of returning an `IPty`. `stderr` is always `''` because the underlying PTY merges streams.
+The `await`-friendly process-isolation API resolves with
+`{ stdout, stderr, exitCode }`. Requests run in-process through `mxc_ffi`, with
+separate stdout and stderr. Executor-only options such as `dryRun`,
+`executablePath`, `usePty: true`, and testing-only proxy support are rejected;
+the API never falls back to an executor.
 
 ```typescript
 import {
@@ -411,7 +415,11 @@ const child = spawnSandboxFromConfig(config, { usePty: false });
 
 ### PTY APIs merge stdout and stderr
 
-`spawnSandbox` and `spawnSandboxAsync` use a PTY, so `stderr` is always empty in their result. Use `spawnSandboxFromConfig(config, { usePty: false })` for separated streams.
+`spawnSandbox` uses a PTY and therefore merges stderr into its data stream.
+`spawnSandboxAsync` always runs in-process and returns separated stdout and
+stderr. The current `mxc_ffi` streaming ABI exposes pipes rather than a PTY, so
+interactive PTY calls remain available only through the explicit
+`spawnSandbox` and `spawnSandboxFromConfig` executor APIs.
 
 ### `createConfigFromPolicy` leaves `commandLine` empty
 

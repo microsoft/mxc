@@ -14,7 +14,9 @@ import {
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
-import { MxcError, mxcErrorFromEnvelope } from './errors.js';
+import { MxcError } from './errors.js';
+import { prepareBindingSandboxRequest } from './bindings/request.js';
+import { runBindingRequestAsync } from './bindings/run-worker.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
@@ -539,6 +541,17 @@ export interface SandboxSpawnOptions {
   signal?: AbortSignal;
 }
 
+function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
+  if (options.debug === true) return 'debug';
+  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.executablePath !== undefined) return 'executablePath';
+  if (options.ptyOptions !== undefined) return 'ptyOptions';
+  if (options.dryRun === true) return 'dryRun';
+  if (options.logDir !== undefined) return 'logDir';
+  if (options.usePty === true) return 'usePty';
+  return undefined;
+}
+
 /**
  * Inject environment variables into the config's `process.env` field as
  * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
@@ -721,7 +734,7 @@ export function spawnSandboxFromConfig(
 
 /**
  * Spawn a sandboxed process and return a promise that resolves with output.
- * Convenience wrapper around spawnSandbox for non-interactive use cases.
+ * Runs non-interactive workloads in-process through mxc_ffi.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -750,59 +763,27 @@ export function spawnSandboxAsync(
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
-      let output = '';
-
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        // Note: wxc-exec doesn't separate stdout/stderr when using PTY
-        // All output is combined
-        //
-        // Check for structured error envelopes from wxc-exec on failure.
-        if (event.exitCode !== 0) {
-          const mxcError = tryParseErrorEnvelopeFromLines(output);
-          if (mxcError) {
-            reject(mxcError);
-            return;
-          }
-        }
-        resolve({
-          stdout: output,
-          stderr: '',
-          exitCode: event.exitCode
-        });
-      });
-    } catch (error) {
-      reject(error);
+  return (async () => {
+    const unsupportedOption = unsupportedInProcessRunOption(options);
+    if (unsupportedOption !== undefined) {
+      throw new MxcError(
+        'malformed_request',
+        `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
+      );
     }
-  });
-}
 
-/**
- * Scans a multi-line string for a JSON error envelope emitted by wxc-exec
- * on stderr. Returns the first matching envelope, or null if none found.
- * The envelope format is: `{"error": {"code": "...", "message": "...", ...}}`
- */
-function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-        const env = parsed.error;
-        if (env && typeof env.code === 'string' && typeof env.message === 'string') {
-          return mxcErrorFromEnvelope(env);
-        }
-      }
-    } catch {
-      // Not valid JSON on this line, continue scanning.
-    }
-  }
-  return null;
+    const request = prepareBindingSandboxRequest({
+      script,
+      policy,
+      workingDirectory,
+      containerName,
+      experimental: options.experimental,
+    });
+    const result = await runBindingRequestAsync(request);
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+    };
+  })();
 }
