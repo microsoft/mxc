@@ -529,11 +529,8 @@ export interface SandboxSpawnOptions {
   usePty?: boolean;
 
   /**
-   * Optional cancellation signal. When it aborts, the SDK kills the
-   * spawned executor process and rejects any pending result promise with
-   * the signal's reason. Honored by the state-aware lifecycle functions;
-   * one-shot spawn currently ignores it (kill the returned IPty /
-   * ChildProcess directly instead).
+   * Optional cancellation signal. Live in-process execution kills the
+   * sandbox when the signal aborts.
    *
    * Cancellation is best-effort: killing the executor mid-call leaves
    * any backend-side state (e.g. a partially-provisioned IsolationSession)
@@ -541,6 +538,29 @@ export interface SandboxSpawnOptions {
    * (or its equivalent) to clean up an orphaned sandbox after an abort.
    */
   signal?: AbortSignal;
+}
+
+function wireAbortToProcess(
+  proc: MxcSandboxProcess,
+  options: SandboxSpawnOptions,
+): void {
+  const signal = options.signal;
+  if (!signal) {
+    return;
+  }
+  const onAbort = () => {
+    try {
+      proc.kill();
+    } catch {
+      // Best-effort cancellation only.
+    }
+  };
+  if (signal.aborted) {
+    onAbort();
+    return;
+  }
+  signal.addEventListener('abort', onAbort, { once: true });
+  proc._registerCleanup(() => signal.removeEventListener('abort', onAbort));
 }
 
 function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
@@ -812,11 +832,14 @@ export function spawnSandboxProcess(
     );
   }
 
-  return spawnBindingSandboxProcess(prepareBindingSandboxRequest({
+  const proc = spawnBindingSandboxProcess(prepareBindingSandboxRequest({
     script,
     policy,
     workingDirectory,
     containerName,
     experimental: options.experimental,
+    containment: options.containment,
   }), policy.timeoutMs);
+  wireAbortToProcess(proc, options);
+  return proc;
 }
