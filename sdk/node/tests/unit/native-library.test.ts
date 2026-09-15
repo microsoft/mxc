@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { afterEach, describe, it } from 'node:test';
+import { afterEach, describe, it, mock } from 'node:test';
 import assert from 'node:assert';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import koffi from 'koffi';
 import { _mxcFfiCandidates, loadMxcFfi } from '../../src/native-library.js';
 
 const oldFfiDir = process.env.MXC_FFI_DIR;
@@ -59,5 +62,38 @@ describe('mxc_ffi library resolution', () => {
       (error: unknown) => error instanceof Error
         && candidates.every((candidate) => error.message.includes(candidate)),
     );
+  });
+
+  it('loads the selected library and binds mxc_version', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-node-loader-'));
+    const libraryPath = path.join(directory, 'mxc_ffi.dll');
+    fs.writeFileSync(libraryPath, '');
+
+    try {
+      let loadedPath: string | null | undefined;
+      let boundDeclaration: string | undefined;
+      const version = () => 'test-version';
+      const load = mock.method(koffi, 'load', (candidate: string | null) => {
+        loadedPath = candidate;
+        return {
+          func(...args: unknown[]) {
+            boundDeclaration = String(args[0]);
+            return version;
+          },
+        };
+      });
+
+      try {
+        const library = loadMxcFfi([libraryPath]);
+
+        assert.strictEqual(loadedPath, libraryPath);
+        assert.strictEqual(boundDeclaration, 'const char *mxc_version(void)');
+        assert.strictEqual(library.version(), 'test-version');
+      } finally {
+        load.mock.restore();
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
