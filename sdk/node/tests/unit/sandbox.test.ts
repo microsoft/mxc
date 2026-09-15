@@ -7,8 +7,7 @@ import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandbox
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
-  _setBwrapVersionRunner,
-  _setLxcAvailabilityProbe,
+  _setPlatformSupportSnapshotReader,
 } from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
@@ -2135,11 +2134,13 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       return;
     }
     try {
-      _setLxcAvailabilityProbe(() => true);
-      _setBwrapVersionRunner(() => ({
-        kind: 'failed',
-        status: null,
-        detail: 'timed out after 5000ms',
+      _setPlatformSupportSnapshotReader(() => ({
+        platformSupportJson: JSON.stringify({
+          isSupported: false,
+          reason: 'timed out after 5000ms',
+          availableMethods: [],
+        }),
+        availableBackendsJson: '[{"backend":"lxc"}]',
       }));
       _resetPlatformSupportCache();
 
@@ -2148,8 +2149,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         { message: /timed out after 5000ms/ },
       );
     } finally {
-      _setLxcAvailabilityProbe(null);
-      _setBwrapVersionRunner(null);
+      _setPlatformSupportSnapshotReader(null);
       _resetPlatformSupportCache();
     }
   });
