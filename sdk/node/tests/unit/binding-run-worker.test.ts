@@ -11,9 +11,9 @@ import {
   type BindingRunWorkerLike,
   type BindingRunWorkerMessage,
 } from '../../src/bindings/run-worker.js';
-import type { BindingSandboxRequest } from '../../src/bindings/request.js';
+import type { RequestSpec } from '../../src/bindings/request.js';
 
-const request: BindingSandboxRequest = {
+const request: RequestSpec = {
   policy: { version: '0.9.0-alpha' },
   command: 'echo hello',
   containment: { type: 'process' },

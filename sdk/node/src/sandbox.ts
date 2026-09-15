@@ -15,7 +15,7 @@ import {
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
-import { prepareBindingSandboxRequest } from './bindings/request.js';
+import { prepareRequestSpec } from './bindings/request.js';
 import { runBindingRequestAsync } from './bindings/run-worker.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -773,7 +773,7 @@ export function spawnSandboxAsync(
     }
 
     const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-    const request = prepareBindingSandboxRequest(config, {
+    const request = prepareRequestSpec(config, {
       experimental: options.experimental,
     });
     const result = await runBindingRequestAsync(request);
