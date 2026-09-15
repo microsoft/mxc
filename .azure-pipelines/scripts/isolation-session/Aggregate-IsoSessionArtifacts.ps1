@@ -149,7 +149,8 @@ function Get-ArchArtifactState {
     $msiPath = Join-Path $ArtifactDirectory "IsoSession_${monthUnderscore}_${Arch}.msi"
     $bundlePath = Join-Path $ArtifactDirectory "IsoSessionSetup_${monthUnderscore}_${Arch}.exe"
     $clientManifestPath = Join-Path $ArtifactDirectory "IsoSessionClient_${monthUnderscore}_${Arch}.manifest"
-    foreach ($path in @($msiPath, $bundlePath, $clientManifestPath)) {
+    $runtimeManifestPath = Join-Path $ArtifactDirectory 'IsoSession.manifest'
+    foreach ($path in @($msiPath, $bundlePath, $clientManifestPath, $runtimeManifestPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Expected $Arch packaged output missing: '$path'."
         }
@@ -177,9 +178,11 @@ function Get-ArchArtifactState {
         msiPath = $msiPath
         bundlePath = $bundlePath
         clientManifestPath = $clientManifestPath
+        runtimeManifestPath = $runtimeManifestPath
         msiHash = Get-RequiredFileHash -Path $msiPath
         bundleHash = Get-RequiredFileHash -Path $bundlePath
         clientManifestHash = Get-RequiredFileHash -Path $clientManifestPath
+        runtimeManifestHash = Get-RequiredFileHash -Path $runtimeManifestPath
         msiVersion = $msiVersion
         bundleVersion = $bundleVersion
     }
@@ -193,6 +196,9 @@ if ($x64State.sourceManifest.buildGuid -ne $arm64State.sourceManifest.buildGuid)
 }
 if ($x64State.sourceManifest.osBranch -ne $arm64State.sourceManifest.osBranch) {
     throw "OS branch mismatch across architectures: x64='$($x64State.sourceManifest.osBranch)', arm64='$($arm64State.sourceManifest.osBranch)'."
+}
+if ($x64State.runtimeManifestHash -ne $arm64State.runtimeManifestHash) {
+    throw "IsoSession.manifest mismatch across architectures: x64='$($x64State.runtimeManifestHash)', arm64='$($arm64State.runtimeManifestHash)'."
 }
 
 foreach ($winmdName in @('windows.ai.isolationsession.winmd', 'windows.ai.isolationsession.preview.winmd')) {
@@ -257,6 +263,10 @@ $releaseMetadata = [ordered]@{
             }
         }
     }
+    runtimeManifest = [ordered]@{
+        fileName = 'IsoSession.manifest'
+        sha256 = $x64State.runtimeManifestHash
+    }
     installers = [ordered]@{
         x64 = [ordered]@{
             msi = [ordered]@{
@@ -297,10 +307,14 @@ $releaseMetadataPath = Join-Path $OutDir 'release-metadata.json'
 $releaseMetadata | ConvertTo-Json -Depth 20 |
     Set-Content -LiteralPath $releaseMetadataPath -Encoding UTF8
 
+$runtimeManifestPath = Join-Path $OutDir 'IsoSession.manifest'
+Copy-Item -LiteralPath $x64State.runtimeManifestPath -Destination $runtimeManifestPath -Force
+
 $nupkg = & $packScript `
     -X64BinDir $x64State.binDirectory `
     -Arm64BinDir $arm64State.binDirectory `
     -MetadataDir $x64State.binDirectory `
+    -RuntimeManifestPath $runtimeManifestPath `
     -ReleaseMetadataPath $releaseMetadataPath `
     -OutDir $OutDir `
     -MonthId $MonthId `

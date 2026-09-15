@@ -25,6 +25,10 @@ function New-ReleaseMetadata {
             fileName = $ReleaseInfo.nugetPackageFileName
         }
         release = $ReleaseInfo
+        runtimeManifest = [ordered]@{
+            fileName = 'IsoSession.manifest'
+            sha256 = $InstallerHashes.runtimeManifest
+        }
         source = [ordered]@{
             buildGuid = '72de6fa1-35ec-8b71-6bd4-6e74b1af57db'
             osBranch = 'ge_current_directwinpd_sf2'
@@ -160,12 +164,18 @@ try {
     }
 
     $releaseMetadataPath = Join-Path $artifactDir 'release-metadata.json'
+    $runtimeManifestPath = Join-Path $artifactDir 'IsoSession.manifest'
+    Set-Content -LiteralPath $runtimeManifestPath `
+        -Value "<assembly><assemblyIdentity name=`"IsoSession.Runtime`" /><file name=`"IsoSessionApp.dll`" /><iso:instance xmlns:iso=`"urn:test`" name=`"$($releaseInfo.monthId)`" /></assembly>" `
+        -Encoding UTF8
+    $hashes.runtimeManifest = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     New-ReleaseMetadata -Path $releaseMetadataPath -ReleaseInfo $releaseInfo -InstallerHashes $hashes
 
     & $packScript `
         -X64BinDir $x64BinDir `
         -Arm64BinDir $arm64BinDir `
         -MetadataDir $metadataDir `
+        -RuntimeManifestPath $runtimeManifestPath `
         -ReleaseMetadataPath $releaseMetadataPath `
         -OutDir $artifactDir `
         -MonthId $releaseInfo.monthId `

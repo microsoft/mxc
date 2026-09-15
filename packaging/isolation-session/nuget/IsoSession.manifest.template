@@ -18,8 +18,9 @@
 
   Contract mirrors MXC regfree.rs.  No activatableClass element is needed --
   both consumers call the DllGetActivationFactory export directly by full path.
-  pack.ps1 and installer/makeinstaller.ps1 stamp the MonthId placeholder from
-  their shared release identity.
+  installer/makeinstaller.ps1 stamps the MonthId placeholder from the shared
+  release identity. The artifacts pipeline carries that completed manifest
+  into the SDK NuGet; consumers must not stamp this template themselves.
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity name="IsoSession.Runtime" version="1.0.0.0" type="win32" />

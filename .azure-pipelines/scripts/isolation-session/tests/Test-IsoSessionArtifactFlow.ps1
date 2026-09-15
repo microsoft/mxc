@@ -10,6 +10,8 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
     'mxc-isosession-flow-test-{0}' -f ([guid]::NewGuid()))
 $failures = @()
 
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) {
@@ -193,7 +195,8 @@ try {
         foreach ($name in @(
             "IsoSession_$($script:releaseInfo.monthUnderscore)_$arch.msi",
             "IsoSessionSetup_$($script:releaseInfo.monthUnderscore)_$arch.exe",
-            "IsoSessionClient_$($script:releaseInfo.monthUnderscore)_$arch.manifest")) {
+            "IsoSessionClient_$($script:releaseInfo.monthUnderscore)_$arch.manifest",
+            "IsoSession.manifest")) {
             Copy-Item -LiteralPath (Join-Path $installerDir $name) -Destination $artifactDir -Force
         }
     }
@@ -212,6 +215,7 @@ try {
             -SigningMode unsigned
 
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir $script:releaseInfo.nugetPackageFileName)) 'final multi-arch NuGet exists'
+        Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'IsoSession.manifest')) 'completed runtime manifest is preserved'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-metadata.json')) 'final release metadata exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'artifact-manifest.json')) 'aggregate artifact manifest exists'
         Assert-True (Test-Path -LiteralPath (Join-Path $outDir 'release-tools\New-IsoSessionWingetManifests.ps1')) 'qualified WinGet release tool is preserved'
@@ -224,6 +228,32 @@ try {
         Assert-True ($manifest.release.canonicalRelease -eq $script:releaseInfo.canonicalRelease) 'artifact manifest records the canonical release'
         Assert-True ($manifest.nuget.packageVersion -eq $script:releaseInfo.nugetVersion) 'artifact manifest records the patch-bearing NuGet version'
         Assert-True (@($manifest.source.winmds).Count -eq 2) 'artifact manifest records both WinMDs'
+
+        $nupkgPath = Join-Path $outDir $script:releaseInfo.nugetPackageFileName
+        $packageZip = [System.IO.Compression.ZipFile]::OpenRead($nupkgPath)
+        try {
+            $entry = $packageZip.GetEntry('runtime/IsoSession.manifest')
+            Assert-True ($null -ne $entry) 'NuGet contains the completed runtime manifest'
+            $reader = [System.IO.StreamReader]::new($entry.Open())
+            try {
+                $packagedRuntimeManifest = $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $packageZip.Dispose()
+        }
+        $standaloneRuntimeManifest = Get-Content -LiteralPath (
+            Join-Path $outDir 'IsoSession.manifest') -Raw
+        Assert-True ($packagedRuntimeManifest -eq $standaloneRuntimeManifest) `
+            'NuGet runtime manifest matches the completed aggregate manifest'
+        Assert-True ($packagedRuntimeManifest -match [regex]::Escape(
+                "name=`"$($script:releaseInfo.monthId)`"")) `
+            'NuGet runtime manifest carries the requested MonthId'
+        Assert-True ($packagedRuntimeManifest -notmatch '\$\(MonthId\)') `
+            'NuGet runtime manifest has no unresolved MonthId placeholder'
 
         $x64MsiName = "IsoSession_$($script:releaseInfo.monthUnderscore)_x64.msi"
         $arm64MsiName = "IsoSession_$($script:releaseInfo.monthUnderscore)_arm64.msi"
@@ -357,6 +387,19 @@ try {
         $armRelease.nugetVersion = '0.202608.999'
         $armRelease | ConvertTo-Json -Depth 20 |
             Set-Content -LiteralPath $armReleasePath -Encoding UTF8
+
+        Invoke-AggregationExpectFailure `
+            -X64ArtifactDirectory $artifacts.x64 `
+            -Arm64ArtifactDirectory $artifacts.arm64 `
+            -OutDir (Join-Path $caseRoot 'final')
+    }
+
+    Test-Case 'Negative: aggregation fails when runtime manifests differ across architectures' {
+        $caseRoot = Join-Path $testRoot 'bad-runtime-manifest'
+        $artifacts = Get-PreparedCaseArtifacts -CaseRoot $caseRoot
+        (Get-Content -LiteralPath (Join-Path $artifacts.arm64 'IsoSession.manifest') -Raw) `
+            -replace [regex]::Escape($script:releaseInfo.monthId), '2026.07' |
+            Set-Content -LiteralPath (Join-Path $artifacts.arm64 'IsoSession.manifest') -Encoding UTF8
 
         Invoke-AggregationExpectFailure `
             -X64ArtifactDirectory $artifacts.x64 `

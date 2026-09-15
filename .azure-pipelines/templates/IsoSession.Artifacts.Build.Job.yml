@@ -467,7 +467,8 @@ jobs:
       foreach ($name in @(
           "IsoSession_${month}_${{ parameters.archTag }}.msi",
           "IsoSessionSetup_${month}_${{ parameters.archTag }}.exe",
-          "IsoSessionClient_${month}_${{ parameters.archTag }}.manifest"
+          "IsoSessionClient_${month}_${{ parameters.archTag }}.manifest",
+          "IsoSession.manifest"
       )) {
           $source = Join-Path '$(installerOutputDirectory)' $name
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {

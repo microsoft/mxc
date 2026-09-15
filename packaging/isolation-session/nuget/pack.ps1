@@ -14,6 +14,7 @@
       - metadata/GENERATION_INFO.toml
       - metadata/RELEASE_INFO.json
       - runtime/IsoSessionApp.dll
+      - runtime/IsoSession.manifest
       - runtime/IsoSessionApp.comClass.manifest
       - runtime/IsoSessionApp.runtimeversion
 
@@ -31,6 +32,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string]$MetadataDir,
+
+    [Parameter(Mandatory = $true)]
+    [string]$RuntimeManifestPath,
 
     [Parameter(Mandatory = $true)]
     [string]$ReleaseMetadataPath,
@@ -66,6 +70,9 @@ if (-not (Test-Path -LiteralPath $sdkGenerationInfoPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $comClassManifestPath -PathType Leaf)) {
     throw "COM activation manifest not found: '$comClassManifestPath'."
+}
+if (-not (Test-Path -LiteralPath $RuntimeManifestPath -PathType Leaf)) {
+    throw "Completed runtime manifest not found: '$RuntimeManifestPath'."
 }
 if (-not (Test-Path -LiteralPath $ReleaseMetadataPath -PathType Leaf)) {
     throw "Release metadata file not found: '$ReleaseMetadataPath'."
@@ -205,6 +212,22 @@ $x64AppDllBytes = Get-RequiredFileBytes -Path $x64AppDllPath -Label 'x64 runtime
 [void](Get-RequiredFileBytes -Path $arm64AppDllPath -Label 'arm64 runtime')
 $winmdBytes = Get-RequiredFileBytes -Path $winmdPath -Label 'primary WinMD'
 $previewWinmdBytes = Get-RequiredFileBytes -Path $previewWinmdPath -Label 'preview WinMD'
+$runtimeManifestBytes = Get-RequiredFileBytes -Path $RuntimeManifestPath -Label 'completed runtime manifest'
+$runtimeManifestContent = [System.Text.Encoding]::UTF8.GetString($runtimeManifestBytes)
+
+if ($runtimeManifestContent -match '\$\(MonthId\)') {
+    throw 'Completed runtime manifest still contains the unresolved $(MonthId) placeholder.'
+}
+if ($runtimeManifestContent -notmatch [regex]::Escape("name=`"$MonthId`"")) {
+    throw "Completed runtime manifest does not carry MonthId '$MonthId'."
+}
+foreach ($requiredFragment in @(
+        '<assemblyIdentity name="IsoSession.Runtime"',
+        '<file name="IsoSessionApp.dll"')) {
+    if ($runtimeManifestContent -notmatch [regex]::Escape($requiredFragment)) {
+        throw "Completed runtime manifest is missing '$requiredFragment'."
+    }
+}
 
 if ($releaseMetadata.release.canonicalRelease -ne $releaseInfo.canonicalRelease) {
     throw "Release metadata canonical release '$($releaseMetadata.release.canonicalRelease)' does not match '$($releaseInfo.canonicalRelease)'."
@@ -221,6 +244,12 @@ if ($releaseMetadata.package.version -ne $releaseInfo.nugetVersion) {
 }
 if ($releaseMetadata.package.fileName -ne $releaseInfo.nugetPackageFileName) {
     throw "Release metadata package file name '$($releaseMetadata.package.fileName)' does not match '$($releaseInfo.nugetPackageFileName)'."
+}
+if ($releaseMetadata.runtimeManifest.fileName -ne 'IsoSession.manifest') {
+    throw "Release metadata runtime manifest file name '$($releaseMetadata.runtimeManifest.fileName)' is invalid."
+}
+if ($releaseMetadata.runtimeManifest.sha256 -ne (Get-Sha256Hex -Bytes $runtimeManifestBytes)) {
+    throw 'Release metadata runtime manifest hash does not match the completed manifest bytes.'
 }
 
 $primaryWinmdMetadata = Get-ReleaseWinmdRecord -Metadata $releaseMetadata -WinmdName 'windows.ai.isolationsession.winmd'
@@ -276,8 +305,8 @@ $nuspec = @"
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <description>Pipeline-generated SDK for Windows.AI.IsolationSession. Contains both WinMD metadata files plus the signed x64 IsoSessionApp activation shim, reg-free COM manifest, and runtime-version sidecar consumed by MXC.</description>
-    <summary>Windows.AI.IsolationSession SDK metadata and version-pinned MXC activation assets.</summary>
+    <description>Pipeline-generated SDK for Windows.AI.IsolationSession. Contains both WinMD metadata files plus the signed x64 IsoSessionApp activation shim, completed runtime manifest, reg-free COM manifest, and runtime-version sidecar consumed by MXC.</description>
+    <summary>Windows.AI.IsolationSession SDK metadata and pipeline-completed MXC activation assets.</summary>
     <tags>Windows IsolationSession WinRT WinMD MXC AgenticRuntime sdk</tags>
     <readme>README.md</readme>
   </metadata>
@@ -331,6 +360,7 @@ try {
     Add-TextEntry -Archive $zip -EntryName 'metadata/GENERATION_INFO.toml' -Text $generationInfo
     Add-BytesEntry -Archive $zip -EntryName 'metadata/RELEASE_INFO.json' -Bytes ([System.IO.File]::ReadAllBytes($ReleaseMetadataPath))
     Add-BytesEntry -Archive $zip -EntryName 'runtime/IsoSessionApp.dll' -Bytes $x64AppDllBytes
+    Add-BytesEntry -Archive $zip -EntryName 'runtime/IsoSession.manifest' -Bytes $runtimeManifestBytes
     Add-BytesEntry -Archive $zip -EntryName 'runtime/IsoSessionApp.comClass.manifest' -Bytes $comClassManifestBytes
     Add-BytesEntry -Archive $zip -EntryName 'runtime/IsoSessionApp.runtimeversion' -Bytes $runtimeVersionBytes
     Add-TextEntry -Archive $zip -EntryName '_rels/.rels' -Text $rels
@@ -349,6 +379,7 @@ try {
         'metadata/GENERATION_INFO.toml',
         'metadata/RELEASE_INFO.json',
         'runtime/IsoSessionApp.dll',
+        'runtime/IsoSession.manifest',
         'runtime/IsoSessionApp.comClass.manifest',
         'runtime/IsoSessionApp.runtimeversion',
         'README.md',
@@ -372,6 +403,11 @@ try {
     $runtimeVersion = Get-ZipEntryText -Archive $verify -EntryName 'runtime/IsoSessionApp.runtimeversion'
     if ($runtimeVersion -ne $releaseInfo.monthUnderscore) {
         throw "Runtime sidecar '$runtimeVersion' does not match '$($releaseInfo.monthUnderscore)'."
+    }
+    $packagedRuntimeManifest = Get-ZipEntryText -Archive $verify -EntryName 'runtime/IsoSession.manifest'
+    if ($packagedRuntimeManifest -match '\$\(MonthId\)' -or
+        $packagedRuntimeManifest -notmatch [regex]::Escape("name=`"$MonthId`"")) {
+        throw 'Packaged runtime manifest is not completed for the requested MonthId.'
     }
     $comClassManifest = Get-ZipEntryText -Archive $verify -EntryName 'runtime/IsoSessionApp.comClass.manifest'
     foreach ($clsid in @(

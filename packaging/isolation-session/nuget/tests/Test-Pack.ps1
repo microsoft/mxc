@@ -94,7 +94,8 @@ function New-ReleaseMetadata {
         [int]$Patch,
         [string]$BuildGuid = '72de6fa1-35ec-8b71-6bd4-6e74b1af57db',
         [string]$PrimaryWinmdHash,
-        [string]$PreviewWinmdHash
+        [string]$PreviewWinmdHash,
+        [string]$RuntimeManifestHash
     )
 
     $releaseInfo = & $releaseInfoScript -MonthId $MonthId -Patch $Patch
@@ -107,6 +108,10 @@ function New-ReleaseMetadata {
             fileName = $releaseInfo.nugetPackageFileName
         }
         release = $releaseInfo
+        runtimeManifest = [ordered]@{
+            fileName = 'IsoSession.manifest'
+            sha256 = $RuntimeManifestHash
+        }
         source = [ordered]@{
             buildGuid = $BuildGuid
             osBranch = 'ge_current_directwinpd_sf2'
@@ -237,11 +242,17 @@ try {
     $primaryWinmdHash = (Get-FileHash -LiteralPath (Join-Path $metadataDir 'windows.ai.isolationsession.winmd') -Algorithm SHA256).Hash.ToLowerInvariant()
     $previewWinmdHash = (Get-FileHash -LiteralPath (Join-Path $metadataDir 'windows.ai.isolationsession.preview.winmd') -Algorithm SHA256).Hash.ToLowerInvariant()
     $releaseMetadataPath = Join-Path $testRoot 'release-metadata.json'
+    $runtimeManifestPath = Join-Path $testRoot 'IsoSession.manifest'
+    $runtimeManifestBytes = [System.Text.Encoding]::UTF8.GetBytes(
+        "<assembly><assemblyIdentity name=`"IsoSession.Runtime`" /><file name=`"IsoSessionApp.dll`" /><iso:instance xmlns:iso=`"urn:test`" name=`"$monthId`" /></assembly>")
+    [System.IO.File]::WriteAllBytes($runtimeManifestPath, $runtimeManifestBytes)
+    $runtimeManifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     New-ReleaseMetadata -Path $releaseMetadataPath `
         -MonthId $monthId `
         -Patch $patch `
         -PrimaryWinmdHash $primaryWinmdHash `
-        -PreviewWinmdHash $previewWinmdHash
+        -PreviewWinmdHash $previewWinmdHash `
+        -RuntimeManifestHash $runtimeManifestHash
 
     Test-Case 'Happy path: package carries OS metadata and MXC activation assets' {
         $outDir = Join-Path $testRoot 'out-happy'
@@ -249,6 +260,7 @@ try {
             -X64BinDir $x64BinDir `
             -Arm64BinDir $arm64BinDir `
             -MetadataDir $metadataDir `
+            -RuntimeManifestPath $runtimeManifestPath `
             -ReleaseMetadataPath $releaseMetadataPath `
             -OutDir $outDir `
             -MonthId $monthId `
@@ -264,6 +276,7 @@ try {
                 'metadata/GENERATION_INFO.toml',
                 'metadata/RELEASE_INFO.json',
                 'runtime/IsoSessionApp.dll',
+                'runtime/IsoSession.manifest',
                 'runtime/IsoSessionApp.comClass.manifest',
                 'runtime/IsoSessionApp.runtimeversion')) {
             Assert-True ($entries -contains $entry) "entry '$entry' is present"
@@ -278,6 +291,20 @@ try {
             -EntryName 'runtime/IsoSessionApp.runtimeversion'
         Assert-True ($runtimeVersion -eq $releaseInfo.monthUnderscore) `
             'runtime sidecar uses the MSI registry token'
+
+        $packagedRuntimeManifestBytes = Get-ZipEntryBytesFromPath `
+            -NupkgPath $expectedNupkg `
+            -EntryName 'runtime/IsoSession.manifest'
+        Assert-True (
+            [Convert]::ToBase64String($packagedRuntimeManifestBytes) -eq
+            [Convert]::ToBase64String($runtimeManifestBytes)) `
+            'completed runtime manifest is packaged without modification'
+        $packagedRuntimeManifest = [System.Text.Encoding]::UTF8.GetString(
+            $packagedRuntimeManifestBytes)
+        Assert-True ($packagedRuntimeManifest -match [regex]::Escape("name=`"$monthId`"")) `
+            'completed runtime manifest carries the dotted MonthId'
+        Assert-True ($packagedRuntimeManifest -notmatch '\$\(MonthId\)') `
+            'completed runtime manifest contains no unresolved placeholder'
 
         $comClassManifest = Get-ZipEntryTextFromPath `
             -NupkgPath $expectedNupkg `
@@ -307,6 +334,7 @@ try {
             -X64BinDir $x64BinDir `
             -Arm64BinDir $arm64BinDir `
             -MetadataDir $metadataDir `
+            -RuntimeManifestPath $runtimeManifestPath `
             -ReleaseMetadataPath $releaseMetadataPath `
             -OutDir $outDir `
             -MonthId $monthId `
@@ -327,7 +355,8 @@ try {
             -MonthId $monthId `
             -Patch 9 `
             -PrimaryWinmdHash $primaryWinmdHash `
-            -PreviewWinmdHash $previewWinmdHash
+            -PreviewWinmdHash $previewWinmdHash `
+            -RuntimeManifestHash $runtimeManifestHash
 
         $outDir = Join-Path $testRoot 'out-bad-version'
         $threw = $false
@@ -336,6 +365,7 @@ try {
                 -X64BinDir $x64BinDir `
                 -Arm64BinDir $arm64BinDir `
                 -MetadataDir $metadataDir `
+                -RuntimeManifestPath $runtimeManifestPath `
                 -ReleaseMetadataPath $badMetadataPath `
                 -OutDir $outDir `
                 -MonthId $monthId `
@@ -353,7 +383,8 @@ try {
             -MonthId $monthId `
             -Patch $patch `
             -PrimaryWinmdHash ('f' * 64) `
-            -PreviewWinmdHash $previewWinmdHash
+            -PreviewWinmdHash $previewWinmdHash `
+            -RuntimeManifestHash $runtimeManifestHash
 
         $outDir = Join-Path $testRoot 'out-bad-hash'
         $threw = $false
@@ -362,6 +393,7 @@ try {
                 -X64BinDir $x64BinDir `
                 -Arm64BinDir $arm64BinDir `
                 -MetadataDir $metadataDir `
+                -RuntimeManifestPath $runtimeManifestPath `
                 -ReleaseMetadataPath $badMetadataPath `
                 -OutDir $outDir `
                 -MonthId $monthId `
@@ -383,6 +415,7 @@ try {
                 -X64BinDir $x64BinDir `
                 -Arm64BinDir $missingArm64Dir `
                 -MetadataDir $metadataDir `
+                -RuntimeManifestPath $runtimeManifestPath `
                 -ReleaseMetadataPath $releaseMetadataPath `
                 -OutDir $outDir `
                 -MonthId $monthId `
@@ -392,6 +425,30 @@ try {
             $threw = $true
         }
         Assert-True $threw 'pack.ps1 must fail when either runtime architecture is missing'
+    }
+
+    Test-Case 'Strict failure: runtime manifest has the wrong MonthId' {
+        $badRuntimeManifestPath = Join-Path $testRoot 'IsoSession-wrong-month.manifest'
+        Set-Content -LiteralPath $badRuntimeManifestPath `
+            -Value '<assembly><assemblyIdentity name="IsoSession.Runtime" /><file name="IsoSessionApp.dll" /><iso:instance xmlns:iso="urn:test" name="2026.05" /></assembly>' `
+            -Encoding UTF8
+        $outDir = Join-Path $testRoot 'out-bad-runtime-manifest'
+        $threw = $false
+        try {
+            & $packScript `
+                -X64BinDir $x64BinDir `
+                -Arm64BinDir $arm64BinDir `
+                -MetadataDir $metadataDir `
+                -RuntimeManifestPath $badRuntimeManifestPath `
+                -ReleaseMetadataPath $releaseMetadataPath `
+                -OutDir $outDir `
+                -MonthId $monthId `
+                -Patch $patch | Out-Null
+        }
+        catch {
+            $threw = $true
+        }
+        Assert-True $threw 'pack.ps1 must reject a completed runtime manifest for another MonthId'
     }
 }
 finally {

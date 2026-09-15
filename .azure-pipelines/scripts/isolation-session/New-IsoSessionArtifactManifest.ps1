@@ -178,12 +178,24 @@ if ($nupkgs[0].Name -ne $releaseInfo.nugetPackageFileName) {
 }
 
 $standaloneReleaseMetadataBytes = [System.IO.File]::ReadAllBytes($releaseMetadataPath)
+$standaloneRuntimeManifestPath = Join-Path $ArtifactDirectory 'IsoSession.manifest'
+if (-not (Test-Path -LiteralPath $standaloneRuntimeManifestPath -PathType Leaf)) {
+    throw "Completed runtime manifest is missing: '$standaloneRuntimeManifestPath'."
+}
+$standaloneRuntimeManifestBytes = [System.IO.File]::ReadAllBytes($standaloneRuntimeManifestPath)
 $releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
 if ($releaseMetadata.release.canonicalRelease -ne $releaseInfo.canonicalRelease) {
     throw 'Release metadata canonical release does not match the expected release contract.'
 }
 if ($releaseMetadata.package.version -ne $releaseInfo.nugetVersion) {
     throw 'Release metadata package version does not match the expected NuGet version.'
+}
+if ($releaseMetadata.runtimeManifest.fileName -ne 'IsoSession.manifest') {
+    throw 'Release metadata runtime manifest file name is invalid.'
+}
+if ($releaseMetadata.runtimeManifest.sha256 -ne (
+        Get-Sha256Hex -Bytes $standaloneRuntimeManifestBytes)) {
+    throw 'Release metadata runtime manifest hash does not match the standalone manifest.'
 }
 
 $packageZip = [System.IO.Compression.ZipFile]::OpenRead($nupkgs[0].FullName)
@@ -203,6 +215,27 @@ try {
     Assert-BytesEqual -Expected $standaloneReleaseMetadataBytes `
         -Actual $packageReleaseMetadataBytes `
         -Label 'Standalone and embedded release metadata'
+
+    $packageRuntimeManifestBytes = Get-ZipEntryBytes -Archive $packageZip `
+        -EntryName 'runtime/IsoSession.manifest'
+    if (-not $packageRuntimeManifestBytes) {
+        throw "NuGet package '$($nupkgs[0].Name)' is missing runtime/IsoSession.manifest."
+    }
+    Assert-BytesEqual -Expected $standaloneRuntimeManifestBytes `
+        -Actual $packageRuntimeManifestBytes `
+        -Label 'Standalone and embedded runtime manifest'
+    $runtimeManifest = [System.Text.Encoding]::UTF8.GetString($packageRuntimeManifestBytes)
+    if ($runtimeManifest -match '\$\(MonthId\)' -or
+        $runtimeManifest -notmatch [regex]::Escape("name=`"$MonthId`"")) {
+        throw 'NuGet runtime manifest is not completed for the expected MonthId.'
+    }
+    foreach ($requiredFragment in @(
+            '<assemblyIdentity name="IsoSession.Runtime"',
+            '<file name="IsoSessionApp.dll"')) {
+        if ($runtimeManifest -notmatch [regex]::Escape($requiredFragment)) {
+            throw "NuGet runtime manifest is missing '$requiredFragment'."
+        }
+    }
 
     $generationInfo = Get-ZipEntryText -Archive $packageZip -EntryName 'metadata/GENERATION_INFO.toml'
     if (-not $generationInfo) {
