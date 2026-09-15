@@ -12,8 +12,6 @@ import {
   stopSandbox,
 } from '../../src/state-aware.js';
 import {
-  _resetSpawnImpl,
-  _setSpawnImpl,
   buildStateAwareEnvelope,
   parseNonExecResponse,
 } from '../../src/state-aware-helper.js';
@@ -22,10 +20,16 @@ import {
   type BindingStateAwareWorkerLike,
   type BindingStateAwareWorkerMessage,
 } from '../../src/bindings/state-aware-worker.js';
+import { _setStateAwareBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
 import type { BindingStateAwareRequest } from '../../src/bindings/state-aware.js';
 import { MxcError } from '../../src/errors.js';
 import { SandboxId } from '../../src/state-aware-types.js';
-import { fakeSpawn, ffiTestOptions, testOptions, platformSkip } from './test-helpers.js';
+import {
+  _createMxcSandboxProcess,
+  type SandboxProcessBinding,
+  type SandboxReadableBinding,
+} from '../../src/sandbox-process.js';
+import { ffiTestOptions, platformSkip } from './test-helpers.js';
 
 class FakeStateAwareWorker extends EventEmitter implements BindingStateAwareWorkerLike {
   reply(message: BindingStateAwareWorkerMessage): void {
@@ -65,7 +69,118 @@ function installStateAwareError(
   });
 }
 
+class FakeExecReadable implements SandboxReadableBinding {
+  constructor(
+    private readonly chunks: (Buffer | null)[],
+    private readonly events: string[],
+  ) {}
+
+  read(buffer: Buffer): Promise<number> {
+    const next = this.chunks.shift() ?? null;
+    if (next !== null) {
+      next.copy(buffer);
+    }
+    return Promise.resolve(next === null ? 0 : next.length);
+  }
+
+  close(): void {
+    this.events.push('close');
+  }
+
+  free(): void {
+    this.events.push('free');
+  }
+}
+
+class FakeStateAwareExecBinding implements SandboxProcessBinding {
+  readonly warnings: readonly string[];
+  readonly stdoutEvents: string[] = [];
+  readonly stderrEvents: string[] = [];
+  killed = false;
+  freed = false;
+  polls = 0;
+
+  constructor(
+    readonly id: number,
+    stdout: string,
+    stderr: string,
+    private readonly runningPolls = 0,
+    private readonly waitResult = { exitCode: 0, timedOut: false },
+    warnings: readonly string[] = [],
+  ) {
+    this.warnings = warnings;
+    this.stdoutBinding = new FakeExecReadable([Buffer.from(stdout), null], this.stdoutEvents);
+    this.stderrBinding = new FakeExecReadable([Buffer.from(stderr), null], this.stderrEvents);
+  }
+
+  private readonly stdoutBinding: SandboxReadableBinding;
+  private readonly stderrBinding: SandboxReadableBinding;
+
+  takeStdin() {
+    return null;
+  }
+
+  takeStdout() {
+    return this.stdoutBinding;
+  }
+
+  takeStderr() {
+    return this.stderrBinding;
+  }
+
+  tryWait() {
+    this.polls += 1;
+    return {
+      running: this.polls <= this.runningPolls,
+      exitCode: 0,
+      timedOut: false,
+    };
+  }
+
+  wait() {
+    return this.waitResult;
+  }
+
+  outputMetadata() {
+    return undefined;
+  }
+
+  kill(): void {
+    this.killed = true;
+  }
+
+  free(): void {
+    this.freed = true;
+  }
+}
+
+function installStateAwareExecBinding(
+  createBinding: () => FakeStateAwareExecBinding,
+): { binding: () => FakeStateAwareExecBinding; request: () => Record<string, unknown>; timeout: () => number | undefined } {
+  let binding: FakeStateAwareExecBinding | undefined;
+  let requestJson: string | undefined;
+  let timeoutMs: number | undefined;
+  _setStateAwareBindingSandboxProcessFactory((request, _experimental, timeout) => {
+    requestJson = request;
+    timeoutMs = timeout;
+    binding = createBinding();
+    return _createMxcSandboxProcess(binding, timeout);
+  });
+  return {
+    binding: () => {
+      assert.ok(binding, 'expected a state-aware exec binding');
+      return binding;
+    },
+    request: () => {
+      assert.ok(requestJson, 'expected a state-aware exec request');
+      return JSON.parse(requestJson) as Record<string, unknown>;
+    },
+    timeout: () => timeoutMs,
+  };
+}
+
 afterEach(() => _setBindingStateAwareWorkerFactory());
+afterEach(() => _setStateAwareBindingSandboxProcessFactory());
 
 describe('buildStateAwareEnvelope', () => {
   it('lifts telemetry to the top-level envelope', () => {
@@ -484,71 +599,92 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
 });
 
 describe('execInSandboxAsync', { skip: platformSkip }, () => {
-  afterEach(() => { _resetSpawnImpl(); });
-
   it('returns ExecResult on successful script run', async () => {
-    const fake = fakeSpawn({ stdout: 'hello\n', stderr: '', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(17, 'hello\n', '', 1, { exitCode: 0, timedOut: false }),
+    );
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     const result = await execInSandboxAsync(
       id,
-      { process: { commandLine: 'echo hello' } },
-      testOptions(),
+      { process: { commandLine: 'echo hello', timeout: 250 } },
+      ffiTestOptions(),
     );
     assert.deepStrictEqual(result, { stdout: 'hello\n', stderr: '', exitCode: 0 });
+    assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello', timeout: 250 });
+    assert.strictEqual(exec.request().correlationVector, undefined);
+    assert.strictEqual(exec.timeout(), 250);
+    assert.strictEqual(exec.binding().freed, true);
   });
 
   it('returns ExecResult on script exit != 0 when stdout is plain script output (not an error envelope)', async () => {
-    const fake = fakeSpawn({ stdout: 'oops\n', stderr: 'err\n', exitCode: 7 });
-    _setSpawnImpl(fake.spawn);
+    installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(18, 'oops\n', 'err\n', 0, { exitCode: 7, timedOut: false }),
+    );
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     const result = await execInSandboxAsync(
       id,
       { process: { commandLine: 'fail' } },
-      testOptions(),
+      ffiTestOptions(),
     );
     assert.deepStrictEqual(result, { stdout: 'oops\n', stderr: 'err\n', exitCode: 7 });
   });
 
-  it('throws the typed MxcError on dispatch failure (exit != 0 and stdout is a complete error envelope)', async () => {
-    const fake = fakeSpawn({
-      stdout: '{"error":{"code":"stale_id","message":"id expired"}}',
-      stderr: '',
-      exitCode: 1,
+  it('throws the typed MxcError on dispatch failure before a process is returned', async () => {
+    _setStateAwareBindingSandboxProcessFactory(() => {
+      throw new MxcError('stale_id', 'id expired');
     });
-    _setSpawnImpl(fake.spawn);
     const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
     await assert.rejects(
-      () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
+      () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, ffiTestOptions()),
       (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
   });
 
-  it('closes the child stdin so a stdin-reading command sees EOF instead of hanging', async () => {
-    // Regression for the buffered-exec hang: the Rust state-aware path waits
-    // for stdin EOF before closing guest stdin, so spawnAndCollect must end()
-    // the child's write end when it supplies no input.
-    const fake = fakeSpawn({ stdout: '', stderr: '', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+  it('returns the dry-run response envelope instead of spawning a live process', async () => {
+    const request = installStateAwareReply('{"result":{"validated":true}}');
+    _setStateAwareBindingSandboxProcessFactory(() => {
+      throw new Error('dry-run should not create a live process');
+    });
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await execInSandboxAsync(id, { process: { commandLine: 'cat' } }, testOptions());
-    assert.strictEqual(
-      fake.stdinEnded(),
-      true,
-      'buffered exec must close the child stdin (end()) so stdin reads see EOF',
+    const result = await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'cat' } },
+      ffiTestOptions({ dryRun: true }),
     );
+    assert.deepStrictEqual(result, {
+      stdout: '{"result":{"validated":true}}',
+      stderr: '',
+      exitCode: 0,
+    });
+    assert.strictEqual(requestEnvelope(request()).phase, 'exec');
   });
 
-  it('does not serialize correlationVector onto the exec envelope', async () => {
-    const fake = fakeSpawn({ stdout: 'hi\n', stderr: '', exitCode: 0 });
-    _setSpawnImpl(fake.spawn);
+  it('kills and disposes the live process when AbortSignal fires', async () => {
+    const ac = new AbortController();
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(19, '', '', Number.MAX_SAFE_INTEGER),
+    );
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await execInSandboxAsync(
+    const promise = execInSandboxAsync(
       id,
       { process: { commandLine: 'echo hi' } },
-      testOptions(),
+      ffiTestOptions({ signal: ac.signal }),
     );
-    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+    ac.abort();
+    await assert.rejects(promise);
+    assert.strictEqual(exec.binding().killed, true);
+    assert.strictEqual(exec.binding().freed, true);
+  });
+
+  it('rejects executor-only options instead of falling back', async () => {
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await assert.rejects(
+      () => execInSandboxAsync(id, { process: { commandLine: 'echo hi' } }, {
+        ...ffiTestOptions(),
+        executablePath: 'wxc-exec.exe',
+      }),
+      (err: unknown) => err instanceof MxcError && err.message.includes('executor-only option'),
+    );
   });
 });
 
@@ -578,8 +714,6 @@ describe('windows_sandbox state-aware lifecycle', () => {
   });
 
   describe('round-trip via the typed API', { skip: platformSkip }, () => {
-    afterEach(() => { _resetSpawnImpl(); });
-
     it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
       const request = installStateAwareReply('{"result":{"sandboxId":"wsb:prov-1"}}');
       const result = await provisionSandbox(
@@ -606,16 +740,17 @@ describe('windows_sandbox state-aware lifecycle', () => {
     });
 
     it('execInSandboxAsync places process at top-level for a wsb: id', async () => {
-      const fake = fakeSpawn({ stdout: 'hello-from-wsb\n', stderr: '', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const exec = installStateAwareExecBinding(
+        () => new FakeStateAwareExecBinding(20, 'hello-from-wsb\n', '', 0, { exitCode: 0, timedOut: false }),
+      );
       const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
       const result = await execInSandboxAsync(
         id,
         { process: { commandLine: 'echo hello-from-wsb' } },
-        testOptions(),
+        ffiTestOptions(),
       );
       assert.deepStrictEqual(result, { stdout: 'hello-from-wsb\n', stderr: '', exitCode: 0 });
-      assert.deepStrictEqual(fake.captured.envelope?.process, { commandLine: 'echo hello-from-wsb' });
+      assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello-from-wsb' });
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
@@ -701,8 +836,6 @@ describe('wslc state-aware lifecycle', () => {
   });
 
   describe('round-trip via the typed API', { skip: platformSkip }, () => {
-    afterEach(() => { _resetSpawnImpl(); });
-
     it('provisionSandbox builds a wslc envelope and routes back via the wslc: prefix', async () => {
       const request = installStateAwareReply('{"result":{"sandboxId":"wslc:0123abcd"}}');
       const result = await provisionSandbox(
@@ -728,16 +861,17 @@ describe('wslc state-aware lifecycle', () => {
     });
 
     it('execInSandboxAsync places process at top-level for a wslc: id', async () => {
-      const fake = fakeSpawn({ stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
-      _setSpawnImpl(fake.spawn);
+      const exec = installStateAwareExecBinding(
+        () => new FakeStateAwareExecBinding(21, 'hello-from-wslc\n', '', 0, { exitCode: 0, timedOut: false }),
+      );
       const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
       const result = await execInSandboxAsync(
         id,
         { process: { commandLine: 'echo hello-from-wslc' } },
-        testOptions(),
+        ffiTestOptions(),
       );
       assert.deepStrictEqual(result, { stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
-      assert.deepStrictEqual(fake.captured.envelope?.process, { commandLine: 'echo hello-from-wslc' });
+      assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello-from-wslc' });
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {
