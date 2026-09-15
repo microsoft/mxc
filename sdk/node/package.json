@@ -32,8 +32,7 @@
     "sandbox",
     "security",
     "processcontainer",
-    "windows",
-    "node-pty"
+    "windows"
   ],
   "author": "Microsoft Corporation",
   "license": "MIT",
@@ -46,7 +45,6 @@
   },
   "dependencies": {
     "koffi": "^3.2.1",
-    "node-pty": "^1.2.0-beta.12",
     "semver": "^7.7.4"
   },
   "engines": {

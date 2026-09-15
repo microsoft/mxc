@@ -5,6 +5,31 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0]
+
+### ⚠️ Breaking changes
+
+- The Node SDK now exposes **only in-process `mxc_ffi` execution surfaces**.
+  Removed APIs:
+  - `spawnSandbox`
+  - `spawnSandboxFromConfig`
+  - `execInSandbox`
+- The Node-only `IPty` contract and `node-pty` dependency are removed. Use
+  `spawnSandboxProcess` or `execInSandboxProcess` for separate stdin, stdout,
+  and stderr pipes. Terminal resize and terminal-mode behavior are no longer
+  available through the Node SDK.
+- Removed executor-only options from the public Node execution surfaces:
+  `debug`, `logDir`, `executablePath`, `ptyOptions`, `usePty`,
+  `allowTestingFeatures`, `skipPlatformCheck`, and one-shot/state-aware
+  `dryRun`. Use `spawnSandboxAsync`, `spawnSandboxProcess`,
+  `execInSandboxAsync`, or `execInSandboxProcess` directly.
+- `createConfigFromPolicy` and `buildSandboxPayload` remain available as
+  explicit conversion utilities, but the Node SDK no longer implies that it
+  can execute arbitrary executor JSON / `ContainerConfig` payloads.
+- `network.proxy.builtinTestServer` is no longer part of the supported Node
+  surface. Use `network.proxy.localhost`, `network.proxy.url`, or
+  `runtimeConfig.networkProxy`.
+
 ## [0.7.0]
 
 ### Added (additive — no breaking changes)
