@@ -189,6 +189,27 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   );
 }
 
+function wireAbortToStateAwareProcess(
+  proc: MxcSandboxProcess,
+  signal: AbortSignal | undefined,
+): void {
+  if (!signal) {
+    return;
+  }
+  const onAbort = () => {
+    try {
+      proc.kill();
+    } catch {
+      // Best-effort cancellation only.
+    }
+  };
+  if (signal.aborted) {
+    onAbort();
+    return;
+  }
+  signal.addEventListener('abort', onAbort, { once: true });
+}
+
 function collectStream(stream: Readable | null): Promise<string> {
   if (stream === null) {
     return Promise.resolve('');
@@ -292,11 +313,13 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Streams a script execution inside a started sandbox. Returns an
- * `IPty` for live stdout/stderr/exit handling, mirroring `spawnSandbox`.
+ * Legacy PTY-backed exec surface. Returns an `IPty` for live
+ * stdout/stderr/exit handling, mirroring `spawnSandbox`.
+ *
  * On dispatch failure the executor emits a single error envelope on stdout;
  * the SDK does not parse it here — callers consuming `IPty.onData` see the
- * raw bytes. Use `execInSandboxAsync` when typed-error throwing is needed.
+ * raw bytes. Prefer `execInSandboxProcess` for in-process pipe streaming or
+ * `execInSandboxAsync` when typed-error throwing is needed.
  */
 export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
@@ -333,6 +356,30 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
+ * Streams a script execution inside a started sandbox over Node pipes backed
+ * by `mxc_ffi`, returning the shared `MxcSandboxProcess` controller used by
+ * `spawnSandboxProcess()`.
+ *
+ * Unlike the legacy `execInSandbox()` PTY API, this never launches an
+ * executor process and keeps stdout and stderr separate.
+ */
+export function execInSandboxProcess<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
+  options: SandboxSpawnOptions = {},
+): MxcSandboxProcess {
+  if (options.dryRun === true) {
+    throw new MxcError(
+      'malformed_request',
+      'execInSandboxProcess does not support dryRun; use execInSandboxAsync to validate exec requests.',
+    );
+  }
+  const proc = spawnStateAwareExecProcess(sandboxId, config, options, 'execInSandboxProcess');
+  wireAbortToStateAwareProcess(proc, options.signal);
+  return proc;
+}
+
+/**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Throws an `MxcError` (with the wire-format `code`
  * field set) when the executor reports a dispatch failure (recognised by
@@ -352,7 +399,7 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
     };
   }
 
-  const proc = spawnStateAwareExecProcess(sandboxId, config, options, 'execInSandboxAsync');
+  const proc = execInSandboxProcess(sandboxId, config, { ...options, signal: undefined });
   const stdoutPromise = collectStream(proc.stdout);
   const stderrPromise = collectStream(proc.stderr);
   const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
