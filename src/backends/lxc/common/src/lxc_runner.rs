@@ -25,6 +25,79 @@ use crate::signal_cleanup;
 /// distribution's.
 const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 
+/// `PATH` for the contained child, from schema 0.9.
+///
+/// The script runs with `lxc-attach` in clear-env mode, which supplies a small
+/// baseline of its own. Setting `PATH` explicitly makes command resolution the
+/// same on every distribution instead of depending on the liblxc default, and
+/// names the `sbin` directories so tools kept there resolve on RHEL too.
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// `HOME` when the request resolves no working directory. Every container image
+/// has a `/tmp`.
+const FALLBACK_HOME: &str = "/tmp";
+
+/// `TERM` for the contained child. Curses-based tools error out when it is
+/// unset; it does not make a tool believe it has a terminal, which is `isatty`.
+const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Whether this schema version supplies a default environment.
+fn supports_default_env(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
+}
+
+/// The default environment, from schema 0.9: `PATH`, `HOME`, and `TERM`.
+///
+/// `HOME` names the directory the child actually runs in, so it is a path the
+/// container has rather than a host path that was never mounted.
+fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
+    let home = request
+        .resolved_working_directory()
+        .map(|dir| dir.path.to_string())
+        .unwrap_or_else(|| FALLBACK_HOME.to_string());
+
+    vec![
+        ("PATH".to_string(), DEFAULT_PATH.to_string()),
+        ("HOME".to_string(), home),
+        ("TERM".to_string(), DEFAULT_TERM.to_string()),
+    ]
+}
+
+/// The entries the child should get, as `KEY=VALUE` strings.
+///
+/// From schema 0.9 the four states of `process.env` stay distinct: omitted
+/// takes the default, `[]` is empty, a supplied environment is used verbatim,
+/// and `inheritDefaultEnv` layers a supplied environment over the default.
+/// Below 0.9 the caller's entries are passed through untouched and the
+/// `lxc-attach` baseline is the only default.
+fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
+    if !supports_default_env(&request.schema_version) {
+        return request.env_entries().to_vec();
+    }
+
+    let entries = match (&request.env, request.inherit_default_env) {
+        (None, _) => default_env(request),
+        (Some(supplied), false) => return supplied.clone(),
+        (Some(supplied), true) => {
+            let mut entries = default_env(request);
+            // A caller entry replaces the same-named default rather than being
+            // appended: `lxc-attach` takes the last `-v` for a name, so a
+            // duplicate would silently depend on ordering.
+            for (key, value) in supplied.iter().filter_map(|kv| kv.split_once('=')) {
+                match entries.iter_mut().find(|(name, _)| name == key) {
+                    Some(slot) => *slot = (key.to_string(), value.to_string()),
+                    None => entries.push((key.to_string(), value.to_string())),
+                }
+            }
+            entries
+        }
+    };
+
+    entries
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
 /// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
 /// builtins and must never inherit the script's own timeout budget.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -467,7 +540,7 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
-        let mut exec_env = request.env_entries().to_vec();
+        let mut exec_env = resolved_env(request);
         // Scrub every inherited proxy variable and, when the policy carries a
         // proxy, point HTTP(S)_PROXY at it.
         wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
@@ -713,6 +786,97 @@ fn uuid_simple() -> String {
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
+
+    /// `process.env` resolution, which schema 0.9 gave a default block.
+    mod env {
+        use super::*;
+
+        fn request(version: &str) -> ExecutionRequest {
+            ExecutionRequest {
+                schema_version: version.into(),
+                ..Default::default()
+            }
+        }
+
+        fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
+            entries
+                .iter()
+                .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        }
+
+        #[test]
+        fn below_0_9_the_caller_env_passes_through_untouched() {
+            // Pre-0.9 the only default is whatever `lxc-attach` supplies.
+            for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "bogus"] {
+                let mut r = request(version);
+                r.env = None;
+                assert!(resolved_env(&r).is_empty(), "{version}");
+
+                r.env = Some(vec!["FOO=bar".into()]);
+                assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()], "{version}");
+            }
+        }
+
+        #[test]
+        fn an_omitted_env_gets_the_default_block() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            let entries = resolved_env(&r);
+            assert_eq!(value(&entries, "PATH"), Some(DEFAULT_PATH));
+            assert_eq!(value(&entries, "HOME"), Some(FALLBACK_HOME));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+        }
+
+        #[test]
+        fn the_default_path_covers_sbin() {
+            for dir in ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] {
+                assert!(
+                    DEFAULT_PATH.split(':').any(|entry| entry == dir),
+                    "{dir} must be on the default PATH"
+                );
+            }
+        }
+
+        #[test]
+        fn an_explicitly_empty_env_stays_empty() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec![]);
+            assert!(resolved_env(&r).is_empty());
+        }
+
+        #[test]
+        fn a_supplied_env_is_used_verbatim() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec!["FOO=bar".into()]);
+            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
+        }
+
+        #[test]
+        fn inherit_default_env_layers_over_the_default_block() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "FOO"), Some("bar"));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+            // Replaced, not appended: `lxc-attach` takes the last -v for a
+            // name, so a duplicate would silently depend on ordering.
+            assert_eq!(value(&entries, "PATH"), Some("/only/mine"));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
+                1
+            );
+        }
+
+        #[test]
+        fn home_follows_the_resolved_working_directory() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            r.working_directory = "/workspace".into();
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+    }
 
     #[test]
     fn uuid_simple_is_8_chars() {

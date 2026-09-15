@@ -1004,26 +1004,27 @@ pub struct ExecutionRequest {
     /// Three states, deliberately distinct:
     ///
     /// * `None` — the caller supplied no environment. Backends provide a
-    ///   default: on Windows, the user's profile block.
+    ///   default: on Windows, the user's profile block; on LXC, Bubblewrap, and
+    ///   Seatbelt, `PATH` + `HOME` + `TERM`.
     /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
     ///   not the same as `None`, and on the Windows process container it is
     ///   expected to fail at process creation, because the OS requires certain
     ///   names to be present (see `REQUIRED_CHILD_ENV_VARS`).
     /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
-    ///   not add to it; callers that want the profile block or the calling
-    ///   process's variables must merge them in themselves.
+    ///   not add to it; callers that want the default block or the calling
+    ///   process's variables must merge them in themselves, or set
+    ///   [`ExecutionRequest::inherit_default_env`].
     ///
-    /// The distinction is currently honored only by the Windows process
-    /// container. The LXC, Bubblewrap, Seatbelt, and WSLc backends treat `None`
-    /// and `Some(vec![])` alike, as they did before the field became optional.
+    /// The distinction is honored from schema 0.9 by the Windows process
+    /// container, LXC, Bubblewrap, and Seatbelt. Below 0.9, and on IsolationSession
+    /// and WSLc at every version, `None` and `Some(vec![])` are treated alike.
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
     /// environment instead of replacing it (from `process.inheritDefaultEnv`).
     ///
     /// Only meaningful when `env` is `Some`: with `None` the child already gets
-    /// the default. Only the Windows process container has a non-empty default
-    /// (the user's profile block), so elsewhere this is inert.
+    /// the default. Rejected below schema 0.9 by the config parser.
     pub inherit_default_env: bool,
     pub script_code: String,
     pub working_directory: String,
@@ -1078,15 +1079,11 @@ impl ExecutionRequest {
     /// The caller's environment entries, with "not supplied" and "supplied but
     /// empty" flattened to the same empty slice.
     ///
-    /// For backends that build the child's environment additively from a
-    /// cleared base — LXC, Bubblewrap, Seatbelt, WSLc — the two cases are
-    /// already indistinguishable in the result, so they use this and keep the
-    /// behavior they had before [`ExecutionRequest::env`] became optional.
-    ///
-    /// The Windows process container must *not* use this: there, `None` means
-    /// "give the child the user's profile block" and `Some(vec![])` means "give
-    /// the child nothing", which are very different outcomes. It matches on
-    /// [`ExecutionRequest::env`] directly.
+    /// Only for backends that have no default environment to distinguish them
+    /// against — IsolationSession and WSLc, plus every backend below schema
+    /// 0.9. A backend with a default block must match on
+    /// [`ExecutionRequest::env`] directly, since `None` means "give the child
+    /// the default" and `Some(vec![])` means "give the child nothing".
     pub fn env_entries(&self) -> &[String] {
         self.env.as_deref().unwrap_or(&[])
     }

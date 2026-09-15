@@ -91,11 +91,20 @@ The `process.cwd` and `process.env` fields from the standard schema are honored 
 | `process.cwd` | `cd -- "$1" && exec /bin/sh -c "$2"` wrapper prelude, with the cwd passed as a positional argument | Empty string preserves the container default cwd. A nonexistent or non-permitted path surfaces as a generic non-zero exit (typically `1`, from `cd`'s own status); callers needing strong cwd validation should pre-check the path. The positional-arg trick means cwd values with spaces, quotes, `$vars`, or backticks pass through verbatim with no shell escaping. |
 | `process.env` | Each `KEY=VAL` entry becomes a repeated `--set-var=KEY=VAL` flag to `lxc-attach` | Malformed entries — those without `=` (e.g. `"BADENTRY"`) or with an empty key (e.g. `"=foo"`) — are silently skipped. Embedded `=` in the value (e.g. `"X=a=b=c"`) is preserved. |
 
-**Replace semantics.** When `process.env` is non-empty, `lxc-exec` also passes `--clear-env` to `lxc-attach` so the host environment does **not** leak into the sandbox, regardless of how many entries survive the malformed-skip. This is the posture `lxc-attach(1)` recommends for sandbox-spawn callers. If a variable is set in both the host and `process.env`, the `process.env` value wins.
-
-When `process.env` is empty (or absent), the legacy keep-env behavior is preserved and the host environment is inherited.
+**Replace semantics.** `lxc-exec` always passes `--clear-env` to `lxc-attach` so the host environment does **not** leak into the sandbox, including when `process.env` is empty or absent — otherwise `lxc-attach` falls back to keep-env mode and inherits the MXC host process environment, proxy variables and credentials included. This is the posture `lxc-attach(1)` recommends for sandbox-spawn callers.
 
 **Residual baseline.** Even with `--clear-env`, `lxc-attach` injects a small baseline (`container`, `HOME`, `TERM`, a default `PATH`, `USER`) and applies any `lxc.environment` entries from the container config. These layers sit below the user vars from `process.env`.
+
+**Default block (schema 0.9+).** The backend supplies `PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the resolved working directory, else `/tmp`), and `TERM` (`xterm-256color`), overriding the `lxc-attach` baseline so command resolution is the same on every image:
+
+| `process.env` | `inheritDefaultEnv` | Result |
+| --- | --- | --- |
+| omitted | — | the default block |
+| `[]` | — | the `lxc-attach` baseline only |
+| `["FOO=bar"]` | `false` (default) | `FOO` only |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is rejected.
 
 ## Filesystem Policy
 

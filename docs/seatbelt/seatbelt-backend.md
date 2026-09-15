@@ -364,12 +364,34 @@ baseline `/Library` and `/System` allows.
 cleared environment, so host secrets (cloud credentials, API tokens) can't leak
 into untrusted code. This is unconditional.
 
-- `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin`
-- `process.env` is an array of `"KEY=VALUE"` strings, not an object. Each entry
-  adds to or overrides that baseline.
-- Tools installed outside the default `PATH` need both an env entry **and** a
-  `readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
-  `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
+`process.env` is an array of `"KEY=VALUE"` strings, not an object.
+
+### Schema 0.9 and later
+
+The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
+`HOME` (the resolved working directory, else `/tmp`), and `TERM`
+(`xterm-256color`). What you supply decides what happens to it:
+
+| `process.env` | `inheritDefaultEnv` | Result |
+| --- | --- | --- |
+| omitted | — | the default block |
+| `[]` | — | nothing at all |
+| `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+> ⚠️ **Behavior change.** Before 0.9 a supplied `process.env` was layered onto
+> the baseline `PATH`. At 0.9 it is used verbatim. Set
+> `"inheritDefaultEnv": true` to get the old behavior, or supply `PATH`
+> yourself.
+
+Tools installed outside the default `PATH` need both an env entry **and** a
+`readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
+`"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
+
+### Before schema 0.9
+
+`PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin` and each `process.env` entry
+adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 
 > ⚠️ **`$HOME` is unset inside the sandbox unless you set it.** Policy paths
 > still accept `~` (expanded against the *host's* `$HOME` when the config is

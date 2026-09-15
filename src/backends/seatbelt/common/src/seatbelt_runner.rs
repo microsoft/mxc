@@ -41,6 +41,7 @@ use wxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
+use crate::default_env::{resolved_env, supports_default_env, DEFAULT_SANDBOX_PATH};
 use crate::profile_builder::build_profile_with_proxy;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
@@ -832,26 +833,24 @@ fn build_helper_script(
     )
 }
 
-/// Baseline `PATH` for the sandboxed child. We always start from a cleared
-/// environment (so the host process's env — cloud creds, API tokens — never
-/// leaks into untrusted sandboxed code), which means we must supply a default
-/// `PATH` for the `/bin/sh` wrapper and common tools to resolve.
-const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-
 /// Populate `command`'s environment from a cleared baseline: never inherit the
 /// host environment (matching the bubblewrap `--clearenv` and AppContainer
-/// clean-block behaviour). Sets a default `PATH`, then the resolved request
-/// vars (which may override `PATH`). When a proxy is active its
-/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` vars are injected and
-/// caller-supplied proxy vars stripped (see [`resolve_environment`]). `PWD` is set separately
-/// alongside the cwd.
+/// clean-block behaviour). Below schema 0.9 a default `PATH` is set first and
+/// the request vars may override it; from 0.9 [`resolved_env`] owns the whole
+/// environment. When a proxy is active its `HTTP_PROXY` / `HTTPS_PROXY` /
+/// `ALL_PROXY` vars are injected and caller-supplied proxy vars stripped (see
+/// [`resolve_environment`]). `PWD` is set separately alongside the cwd.
 fn apply_clean_environment(
     command: &mut Command,
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) {
     command.env_clear();
-    command.env("PATH", DEFAULT_SANDBOX_PATH);
+    // From 0.9 `resolved_env` carries `PATH`, and an explicitly empty
+    // `process.env` must stay empty rather than keep a floor under it.
+    if !supports_default_env(&request.schema_version) {
+        command.env("PATH", DEFAULT_SANDBOX_PATH);
+    }
     for (key, value) in resolve_environment(request, proxy_address) {
         command.env(key, value);
     }
@@ -871,7 +870,7 @@ fn resolve_environment(
     proxy_address: Option<&ProxyAddress>,
 ) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for kv in request.env_entries() {
+    for kv in resolved_env(request) {
         if let Some((key, value)) = kv.split_once('=') {
             if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
                 continue;
@@ -955,6 +954,28 @@ mod tests {
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
+    }
+
+    #[test]
+    fn the_default_block_survives_the_proxy_rewrite() {
+        // The 0.9 default block must not bypass the proxy stripping in
+        // `resolve_environment`.
+        let mut request = base_request();
+        request.schema_version = "0.9.0-alpha".into();
+        request.env = Some(vec!["HTTP_PROXY=http://attacker.example:9999".into()]);
+        request.inherit_default_env = true;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
+        let pairs = resolve_environment(&request, Some(&addr));
+
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "PATH" && v == DEFAULT_SANDBOX_PATH));
+        let proxies: Vec<_> = pairs
+            .iter()
+            .filter(|(k, _)| k == "HTTP_PROXY")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(proxies, vec!["http://127.0.0.1:8888"]);
     }
 
     /// Capture what `log_generated_profile` puts into a buffering logger.

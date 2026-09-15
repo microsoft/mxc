@@ -1408,6 +1408,7 @@ dependencies = [
  "libc",
  "mxc_pty",
  "nix",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2129,6 +2130,7 @@ name = "seatbelt_common"
 version = "0.8.0"
 dependencies = [
  "libc",
+ "semver",
  "wxc_common",
 ]
 

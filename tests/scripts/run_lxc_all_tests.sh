@@ -132,6 +132,7 @@ run_test "LXC Network Bridge Fail-Closed" "$SCRIPT_DIR/run_lxc_network_bridge_fa
 run_test "LXC Inbound Default-Deny" "$SCRIPT_DIR/run_lxc_inbound_deny_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
+run_test "LXC Environment (0.9)" "$SCRIPT_DIR/run_lxc_env_09_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped, $DISABLED disabled"

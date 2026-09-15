@@ -9,9 +9,12 @@
 //! - [`seatbelt_policy`] owns the backend's network invariants and effective-
 //!   policy helpers. Also platform-agnostic, so the rules are unit-tested
 //!   everywhere even though only macOS can execute them.
+//! - [`default_env`] resolves the schema-0.9 default `process.env` block.
+//!   Platform-agnostic for the same reason.
 //! - [`seatbelt_runner`] is gated to `target_os = "macos"` since it spawns
 //!   `/usr/bin/sandbox-exec`.
 
+pub mod default_env;
 pub mod profile_builder;
 pub mod seatbelt_policy;
 

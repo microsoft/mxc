@@ -33,4 +33,29 @@ expect_ok "process.env supplies a variable" "MYVAR=[hello]"
 expect_ok "process.env overrides the default PATH" "PATH=[/custom/bin:/usr/bin:/bin]"
 expect_ok "process.env can supply HOME" "HOME=[/private/tmp]"
 
+# Schema 0.9 gave `process.env` a four-state contract against a default block
+# of PATH + HOME + TERM. The assertions above pin the pre-0.9 behavior, which
+# stays as it was.
+
+run_config "$(render seatbelt_env_09_default_block.json)"
+expect_ok "0.9: an omitted env gets the default PATH" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"
+expect_ok "0.9: an omitted env gets HOME" "HOME=[/tmp]"
+expect_ok "0.9: an omitted env gets TERM" "TERM=[xterm-256color]"
+
+run_config "$(render seatbelt_env_09_empty.json)"
+expect_ok "0.9: an empty env runs" "ENV_PROBE_DONE"
+expect_ok "0.9: an empty env suppresses the default PATH" "PATH=[]"
+expect_ok "0.9: an empty env suppresses HOME" "HOME=[]"
+expect_ok "0.9: an empty env suppresses TERM" "TERM=[]"
+
+run_config "$(render seatbelt_env_09_verbatim.json)"
+expect_ok "0.9: a supplied env is honored" "FOO=[bar]"
+expect_ok "0.9: a supplied env is verbatim, with no implicit PATH" "PATH=[]"
+
+run_config "$(render seatbelt_env_09_inherit.json)"
+expect_ok "0.9: inheritDefaultEnv keeps the default PATH" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"
+expect_ok "0.9: inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
+expect_ok "0.9: inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
+expect_ok "0.9: a caller entry overrides the same-named default" "TERM=[dumb]"
+
 summary "Seatbelt environment"
