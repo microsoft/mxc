@@ -5,7 +5,7 @@
 
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';
-import type { BindingSandboxRequest } from './request.js';
+import type { RequestSpec } from './request.js';
 import {
   AbiErrorDetailType,
   decodeString,
@@ -53,7 +53,7 @@ interface StreamingApi {
 }
 
 let sharedApi: StreamingApi | undefined;
-let sandboxProcessFactory: ((request: BindingSandboxRequest, timeoutMs?: number) => MxcSandboxProcess)
+let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
   | undefined;
 
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
@@ -354,7 +354,7 @@ class StreamingProcessBinding implements SandboxProcessBinding {
   }
 }
 
-function spawnRealBinding(request: BindingSandboxRequest, timeoutMs?: number): MxcSandboxProcess {
+function spawnRealBinding(request: RequestSpec, timeoutMs?: number): MxcSandboxProcess {
   const api = getStreamingApi();
   const outHandle = [null] as Pointer[];
   const error = {} as AbiErrorDetail;
@@ -376,13 +376,13 @@ function spawnRealBinding(request: BindingSandboxRequest, timeoutMs?: number): M
 }
 
 export function _setBindingSandboxProcessFactory(
-  factory?: (request: BindingSandboxRequest, timeoutMs?: number) => MxcSandboxProcess,
+  factory?: (request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess,
 ): void {
   sandboxProcessFactory = factory;
 }
 
 export function spawnBindingSandboxProcess(
-  request: BindingSandboxRequest,
+  request: RequestSpec,
   timeoutMs?: number,
 ): MxcSandboxProcess {
   return (sandboxProcessFactory ?? spawnRealBinding)(request, timeoutMs);
