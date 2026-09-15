@@ -809,7 +809,6 @@ export function spawnSandboxAsync(
 
 /**
  * Spawn a sandboxed process with pipe-based stdin/stdout/stderr streams.
- * Runs in-process through `mxc_ffi` and never falls back to the executor.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -832,14 +831,10 @@ export function spawnSandboxProcess(
     );
   }
 
-  const proc = spawnBindingSandboxProcess(prepareBindingSandboxRequest({
-    script,
-    policy,
-    workingDirectory,
-    containerName,
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const proc = spawnBindingSandboxProcess(prepareBindingSandboxRequest(config, {
     experimental: options.experimental,
-    containment: options.containment,
-  }), policy.timeoutMs);
+  }), config.process?.timeout);
   wireAbortToProcess(proc, options);
   return proc;
 }

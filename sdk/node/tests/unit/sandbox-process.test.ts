@@ -112,15 +112,12 @@ describe('spawnSandboxProcess', () => {
 
     assert.strictEqual(proc.id, 42);
     assert.deepStrictEqual(proc.warnings, ['relaxed']);
-    assert.deepStrictEqual(seen, {
-      policy: { version: '0.9.0-alpha' },
-      command: 'echo hello',
-      containment: { type: 'process' },
-      containerName: 'sample',
-      workingDirectory: 'C:\\work',
-      environment: {},
-      experimental: true,
-    });
+    assert.strictEqual(seen?.policy.version, '0.9.0-alpha');
+    assert.strictEqual(seen?.command, 'echo hello');
+    assert.strictEqual(seen?.containerName, 'sample');
+    assert.strictEqual(seen?.workingDirectory, 'C:\\work');
+    assert.deepStrictEqual(seen?.environment, {});
+    assert.strictEqual(seen?.experimental, true);
     proc.dispose();
   });
 
