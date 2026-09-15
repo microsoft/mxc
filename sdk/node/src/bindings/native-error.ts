@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Shared decoding for native status codes, owned strings, and error details.
+
 import koffi from 'koffi';
 import { MxcError, type ErrorCode } from '../errors.js';
 
@@ -49,7 +51,7 @@ export function _errorCodeForNativeStatus(status: number): ErrorCode {
 export function nativeStatusError(
   status: number,
   detail: Partial<AbiErrorDetail> = {},
-  fallback = `mxc_ffi failed with status ${status}`,
+  fallback = `native runtime failed with status ${status}`,
 ): MxcError {
   return new MxcError({
     code: _errorCodeForNativeStatus(status),
@@ -63,7 +65,7 @@ export function nativeStatusError(
 
 export function parseStringArray(
   json: string | undefined,
-  message = 'mxc_ffi returned malformed warnings',
+  message = 'native runtime returned malformed warnings',
 ): string[] {
   if (json === undefined) return [];
   const value: unknown = JSON.parse(json);

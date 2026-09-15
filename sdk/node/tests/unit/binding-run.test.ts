@@ -5,7 +5,7 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { _errorCodeForNativeStatus } from '../../src/bindings/run.js';
 
-describe('mxc_ffi run binding', () => {
+describe('native run binding', () => {
   it('maps SDK status codes', () => {
     assert.strictEqual(_errorCodeForNativeStatus(1), 'malformed_request');
     assert.strictEqual(_errorCodeForNativeStatus(2), 'unsupported_containment');
