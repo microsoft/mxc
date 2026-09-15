@@ -289,6 +289,9 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
+        filesystem: policy.processContainer?.filesystem?.enumeratePaths?.length
+            ? { enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths] }
+            : undefined,
         network: policy.processContainer?.network?.allowedProxyPeer !== undefined
             ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
             : undefined,
@@ -355,6 +358,12 @@ function buildMicroVmConfig(
             readonlyPaths: policy.filesystem?.readonlyPaths,
             deniedPaths: policy.filesystem?.deniedPaths,
         };
+    }
+    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
+        throw new Error(
+            'The microvm backend does not support processContainer.filesystem.enumeratePaths. ' +
+            'Remove it or use the Windows ProcessContainer backend.'
+        );
     }
     config.containment = 'microvm';
     return config;
@@ -428,6 +437,13 @@ export function createConfigFromPolicy(
         readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
+    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
+        config.processContainer = {
+            filesystem: {
+                enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths],
+            },
+        };
+    }
 
     // UI mapping (cross-platform)
     config.ui = {
@@ -451,6 +467,7 @@ export function createConfigFromPolicy(
         }
         if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
             config.processContainer = {
+                ...config.processContainer,
                 network: {
                     allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
                 },

@@ -57,6 +57,7 @@ const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~s
 const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
     c"api-win-appmodel-processmodel~securityenvironment";
 const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+const PSE_SUPPORT_FS_ENUMERATE: u64 = 0x0000_0000_0000_0004;
 const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
 
 /// No special behaviour when creating the security environment
@@ -491,6 +492,11 @@ impl SecurityEnvironmentApi {
         self.query_support(PSE_SUPPORT_FS_DENY)
     }
 
+    /// Whether the official PSEC API supports enumeration-only filesystem paths.
+    pub fn supports_enumerate_paths(&self) -> Result<bool, LearningModeError> {
+        self.query_support(PSE_SUPPORT_FS_ENUMERATE)
+    }
+
     /// Whether the official PSEC API supports the ingress policy table.
     pub fn supports_network_ingress(&self) -> Result<bool, LearningModeError> {
         self.query_support(PSE_SUPPORT_NETWORK_INGRESS)
@@ -850,11 +856,19 @@ mod tests {
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         assert!(api.supports_deny_paths().unwrap());
+        assert!(!api.supports_enumerate_paths().unwrap());
+        assert!(!api.supports_network_ingress().unwrap());
+
+        reset_query_fakes();
+        QUERY_FLAGS.store(PSE_SUPPORT_FS_ENUMERATE, Ordering::SeqCst);
+        assert!(!api.supports_deny_paths().unwrap());
+        assert!(api.supports_enumerate_paths().unwrap());
         assert!(!api.supports_network_ingress().unwrap());
 
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_NETWORK_INGRESS, Ordering::SeqCst);
         assert!(!api.supports_deny_paths().unwrap());
+        assert!(!api.supports_enumerate_paths().unwrap());
         assert!(api.supports_network_ingress().unwrap());
     }
 

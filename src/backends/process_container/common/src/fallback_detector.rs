@@ -232,6 +232,13 @@ pub enum FallbackError {
         /// Human-readable description of why resolution failed.
         reason: String,
     },
+
+    /// Enumeration-only access cannot be represented by AppContainer fallback tiers.
+    #[error(
+        "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
+         enumeration-only access requires native ProcessContainer support"
+    )]
+    EnumeratePathsUnsupported,
 }
 
 /// Decide which isolation tier to use for a run.
@@ -271,11 +278,14 @@ pub fn detect(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
 ) -> Result<TierDecision, FallbackError> {
+    let supports_enumerate_paths = policy.enumerate_paths.is_empty()
+        || crate::base_container_runner::BaseContainerRunner::supports_enumerate_paths();
     detect_with_base_container_capabilities(
         policy,
         prefer_base_container,
         is_base_container_usable(),
         base_container_supports_deny_paths(),
+        supports_enumerate_paths,
     )
 }
 
@@ -287,10 +297,22 @@ pub(crate) fn detect_with_base_container_capabilities(
     prefer_base_container: bool,
     base_container_usable: bool,
     base_container_supports_deny_paths: bool,
+    base_container_supports_enumerate_paths: bool,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
-    let has_fs_policy =
-        !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty() || denied;
+    let enumerate = !policy.enumerate_paths.is_empty();
+    let has_fs_policy = !policy.readwrite_paths.is_empty()
+        || !policy.readonly_paths.is_empty()
+        || enumerate
+        || denied;
+
+    if enumerate
+        && !(prefer_base_container
+            && base_container_usable
+            && base_container_supports_enumerate_paths)
+    {
+        return Err(FallbackError::EnumeratePathsUnsupported);
+    }
 
     // Test-executor injection seam. An invalid value is silently ignored and
     // we proceed with the real probe chain.

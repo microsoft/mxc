@@ -197,6 +197,9 @@ that can be executed independently.
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
         "capabilities": ["internetClient"],
+        "filesystem": {
+            "enumeratePaths": ["C:\\tools"] // Query/list entries without reading file contents
+        },
         "captureDenials": {                // Windows-only: record the process's access
             "mode": "block",               // "block" (default): access stays denied and
                                            // is logged (deny-by-default preserved). "allow":
@@ -293,6 +296,12 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
+The ProcessContainer-only `processContainer.filesystem` section contains:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. |
+
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
 containment tier selected at runtime:
 
@@ -350,10 +359,10 @@ for a session-isolated sandbox (see
 [`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
 [`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
-The Windows
-`processContainer.ui` sub-block carries additional ProcessContainer-only fields
-(`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
-when `containment` is `processcontainer`.
+The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
+fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
+`processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
+valid only when `containment` is `processcontainer`.
 
 ### Fallback Policy
 

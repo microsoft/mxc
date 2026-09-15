@@ -73,6 +73,7 @@ fn extern_discovery_returns_owned_json() {
             Some(
                 "captureDenials"
                     | "filesystemDeniedPaths"
+                    | "filesystemEnumeratePaths"
                     | "ingressHostLoopbackAllow"
                     | "proxyEnforcement"
             )

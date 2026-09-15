@@ -119,9 +119,21 @@ public sealed class ProcessContainerContainment : SandboxContainment
     [JsonPropertyName("ui")]
     public ProcessContainerUiPolicy? Ui { get; set; } = new();
 
+    /// <summary>ProcessContainer-specific filesystem settings.</summary>
+    [JsonPropertyName("filesystem")]
+    public ProcessContainerFilesystemPolicy? Filesystem { get; set; }
+
     /// <summary>ProcessContainer-specific directional network settings.</summary>
     [JsonPropertyName("network")]
     public ProcessContainerNetworkPolicy? Network { get; set; }
+}
+
+/// <summary>ProcessContainer-specific filesystem settings.</summary>
+public sealed class ProcessContainerFilesystemPolicy
+{
+    /// <summary>Paths that may be enumerated without granting file-content reads.</summary>
+    [JsonPropertyName("enumeratePaths")]
+    public List<string> EnumeratePaths { get; set; } = new();
 }
 
 /// <summary>ProcessContainer desktop-resource isolation level.</summary>

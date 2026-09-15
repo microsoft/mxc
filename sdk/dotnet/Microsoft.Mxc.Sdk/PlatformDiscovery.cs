@@ -70,6 +70,11 @@ public enum BackendCapability
     FilesystemDeniedPaths,
 
     /// <summary>
+    /// Native filesystem enumeration-only access at the reported tier.
+    /// </summary>
+    FilesystemEnumeratePaths,
+
+    /// <summary>
     /// Host-loopback allow enforcement at the reported tier.
     /// </summary>
     IngressHostLoopbackAllow,

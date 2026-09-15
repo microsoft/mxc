@@ -726,6 +726,21 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
   });
 
+  it('should pass enumerate-only filesystem paths through for 0.9', () => {
+    const config = createConfigFromPolicy({
+      version: '0.9.0-alpha',
+      processContainer: {
+        filesystem: {
+          enumeratePaths: ['C:\\tools'],
+        },
+      },
+    });
+    assert.deepStrictEqual(
+      config.processContainer!.filesystem!.enumeratePaths,
+      ['C:\\tools'],
+    );
+  });
+
   it('should map UI fields correctly', () => {
     const config = createConfigFromPolicy({
       version: '0.6.0-alpha',

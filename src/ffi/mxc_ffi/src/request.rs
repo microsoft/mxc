@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use mxc_sdk::configs::{
-    CaptureDenials, ProcessContainer, ProcessContainerNetwork, ProcessContainerSystemSettings,
-    ProcessContainerUi, ProcessContainerUiIsolation,
+    CaptureDenials, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
+    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation,
 };
 use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
@@ -138,6 +138,8 @@ enum RequestContainment {
         #[serde(default = "default_process_container_ui")]
         ui: Option<ProcessContainerUiSpec>,
         #[serde(default)]
+        filesystem: Option<ProcessContainerFilesystemSpec>,
+        #[serde(default)]
         network: Option<ProcessContainerNetworkSpec>,
     },
     Wslc {
@@ -210,6 +212,13 @@ struct ProcessContainerNetworkSpec {
     allowed_proxy_peer: Option<String>,
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessContainerFilesystemSpec {
+    #[serde(default)]
+    enumerate_paths: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WslcPortMappingSpec {
@@ -239,6 +248,7 @@ impl RequestContainment {
                 capabilities,
                 capture_denials,
                 ui,
+                filesystem,
                 network,
             } => {
                 let mut process_container = ProcessContainer::default();
@@ -247,6 +257,8 @@ impl RequestContainment {
                 process_container.capabilities = capabilities;
                 process_container.capture_denials = capture_denials;
                 process_container.ui = ui.map(ProcessContainerUiSpec::into_sdk);
+                process_container.filesystem =
+                    filesystem.map(ProcessContainerFilesystemSpec::into_sdk);
                 process_container.network = network.map(ProcessContainerNetworkSpec::into_sdk);
                 Containment::ProcessContainer(process_container)
             }
@@ -274,6 +286,14 @@ impl RequestContainment {
             }
             Self::IsolationSession {} => Containment::IsolationSession,
         }
+    }
+}
+
+impl ProcessContainerFilesystemSpec {
+    fn into_sdk(self) -> ProcessContainerFilesystem {
+        let mut filesystem = ProcessContainerFilesystem::default();
+        filesystem.enumerate_paths = self.enumerate_paths;
+        filesystem
     }
 }
 
@@ -378,6 +398,36 @@ fn malformed_request(error: serde_json::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_container_filesystem_is_accepted_by_native_contract() {
+        let spec: RequestSpec = serde_json::from_str(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo parity",
+                "containment": {
+                    "type": "processContainer",
+                    "filesystem": {
+                        "enumeratePaths": ["C:\\input"]
+                    }
+                }
+            }"#,
+        )
+        .expect("ProcessContainer filesystem request parses");
+
+        match spec.containment.into_sdk() {
+            Containment::ProcessContainer(process_container) => {
+                assert_eq!(
+                    process_container
+                        .filesystem
+                        .expect("filesystem settings are preserved")
+                        .enumerate_paths,
+                    ["C:\\input"]
+                );
+            }
+            _ => panic!("request selected the wrong containment"),
+        }
+    }
 
     #[test]
     fn managed_full_request_goldens_are_accepted_by_native_contract() {

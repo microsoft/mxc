@@ -601,6 +601,10 @@ export interface ProcessContainer {
    */
   captureDenials?: CaptureDenials;
   /**
+   * Optional ProcessContainer-specific filesystem policy.
+   */
+  filesystem?: ProcessContainerFilesystem;
+  /**
    * Optional learning-mode (deny-and-record)
    */
   learningMode?: boolean;
@@ -619,6 +623,16 @@ export interface ProcessContainer {
 }
 
 export type ProcessContainerCapability = string;
+
+/**
+ * ProcessContainer-specific filesystem policy.
+ */
+export interface ProcessContainerFilesystem {
+  /**
+   * Optional paths that may be queried or enumerated without granting file-content reads.
+   */
+  enumeratePaths?: string[];
+}
 
 /**
  * ProcessContainer-specific network settings.

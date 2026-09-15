@@ -167,6 +167,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities: capabilities.into_option(),
         capture_denials: None,
         ui: ui.into_option().map(convert_process_container_ui),
+        filesystem: None,
         network: None,
     }
 }

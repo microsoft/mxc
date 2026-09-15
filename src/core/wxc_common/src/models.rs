@@ -751,6 +751,7 @@ pub struct ContainerPolicy {
     pub capabilities: Vec<String>,
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
+    pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,

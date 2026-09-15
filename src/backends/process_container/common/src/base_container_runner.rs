@@ -40,7 +40,7 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::base_container_helpers::{
     build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
-    PsecContract,
+    unrestricted_host_loopback_allowed, PsecContract,
 };
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -256,6 +256,11 @@ const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
      QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; this OS \
      build does not support that policy, and the process-security-environment path \
      cannot fall back to AppContainer or host-DACL enforcement";
+const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
+    "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
+     and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
+     build does not support that policy, and enumeration-only access cannot fall back to SBOX \
+     or AppContainer enforcement";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
@@ -340,6 +345,9 @@ trait CaptureSessionFactory: Send + Sync {
 trait CapturePlatformSupport: Send + Sync {
     fn check_apis(&self, require_learning_mode: bool) -> Result<(), String>;
     fn supports_deny_paths(&self) -> Result<bool, String>;
+    fn supports_enumerate_paths(&self) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 struct RealCaptureSessionFactory;
@@ -381,6 +389,19 @@ impl CapturePlatformSupport for RealCapturePlatformSupport {
             .map_err(|error| {
                 format!("could not query process security-environment support: {error}")
             })
+    }
+
+    fn supports_enumerate_paths(&self) -> Result<bool, String> {
+        let api = SecurityEnvironmentApi::load()
+            .map_err(|error| format!("process security-environment API unavailable: {error}"))?;
+        if !api.supports_version(1, 1).map_err(|error| {
+            format!("could not query process security-environment version: {error}")
+        })? {
+            return Ok(false);
+        }
+        api.supports_enumerate_paths().map_err(|error| {
+            format!("could not query process security-environment support: {error}")
+        })
     }
 }
 
@@ -683,6 +704,12 @@ impl BaseContainerRunner {
         Self::native_denied_paths_supported(psec_supported, sbox_capabilities)
     }
 
+    /// Whether PSEC can enforce `processContainer.filesystem.enumeratePaths` on this host.
+    pub fn supports_enumerate_paths() -> bool {
+        Self::is_process_security_environment_usable()
+            && Self::query_psec_enumerate_support().unwrap_or(false)
+    }
+
     fn native_denied_paths_supported(psec_supported: bool, sbox_capabilities: Option<u64>) -> bool {
         psec_supported
             || sbox_capabilities.is_some_and(|capabilities| {
@@ -748,6 +775,9 @@ impl BaseContainerRunner {
         request: &ExecutionRequest,
         queried_capabilities: Option<u64>,
     ) -> bool {
+        if !request.policy.enumerate_paths.is_empty() {
+            return false;
+        }
         if requires_psec_networking(&request.policy) {
             return false;
         }
@@ -766,31 +796,77 @@ impl BaseContainerRunner {
 
     fn resolve_psec_contract(request: &ExecutionRequest) -> Result<PsecContract, ScriptResponse> {
         let contract = PsecContract::for_request(request);
-        // PSEC 1.0 preserves the default ingress posture through capability
-        // mapping; only unrestricted host-loopback access requires PSEC 1.1.
+        // PSEC 1.0 preserves the default ingress posture through capability mapping.
+        // Enumeration-only access and unrestricted host-loopback access require PSEC 1.1.
         if contract == PsecContract::V1_0 {
             return Ok(contract);
         }
 
-        // PSEC 1.1 is usable only when the OS reports both the contract version
-        // and the ingress capability bit.
-        let psec_ingress_contract_supported =
-            Self::query_psec_ingress_support().map_err(|error| ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&format!(
-                    "failed to query Process Security Environment ingress support: {error}"
-                ))
-            })?;
-        if psec_ingress_contract_supported {
-            return Ok(contract);
+        let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..ScriptResponse::error(&format!(
+                "failed to load Process Security Environment support APIs: {error}"
+            ))
+        })?;
+        let version_supported = api.supports_version(1, 1).map_err(|error| ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..ScriptResponse::error(&format!(
+                "failed to query Process Security Environment contract support: {error}"
+            ))
+        })?;
+        if !version_supported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "the request requires Process Security Environment contract version 1.1, \
+                     which this OS build does not support",
+                )
+            });
         }
-        Err(ScriptResponse {
-            failure_phase: FailurePhase::Rejected,
-            ..ScriptResponse::error(
-                "network.ingress.hostLoopback='allow' requires Process Security Environment \
-                 contract version 1.1 with ingress support",
-            )
-        })
+
+        let requires_enumerate_paths = !request.policy.enumerate_paths.is_empty();
+        let enumerate_paths_supported = if requires_enumerate_paths {
+            api
+                .supports_enumerate_paths()
+                .map_err(|error| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "failed to query Process Security Environment filesystem enumeration support: {error}"
+                    ))
+                })?
+        } else {
+            true
+        };
+        if requires_enumerate_paths && !enumerate_paths_supported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG)
+            });
+        }
+
+        let requires_unrestricted_host_loopback =
+            unrestricted_host_loopback_allowed(&request.policy);
+        let network_ingress_supported = if requires_unrestricted_host_loopback {
+            api.supports_network_ingress()
+                .map_err(|error| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "failed to query Process Security Environment ingress support: {error}"
+                    ))
+                })?
+        } else {
+            true
+        };
+        if requires_unrestricted_host_loopback && !network_ingress_supported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "network.ingress.hostLoopback='allow' requires Process Security Environment \
+                     contract version 1.1 with ingress support",
+                )
+            });
+        }
+        Ok(contract)
     }
 
     fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
@@ -799,6 +875,14 @@ impl BaseContainerRunner {
             return Ok(false);
         }
         api.supports_network_ingress()
+    }
+
+    fn query_psec_enumerate_support() -> Result<bool, learning_mode_windows::LearningModeError> {
+        let api = SecurityEnvironmentApi::load()?;
+        if !api.supports_version(1, 1)? {
+            return Ok(false);
+        }
+        api.supports_enumerate_paths()
     }
 
     /// Transitional guard for the legacy SBOX fallback. Remove it with the
@@ -908,18 +992,28 @@ impl BaseContainerRunner {
         request: &ExecutionRequest,
         psec_usable: bool,
         psec_supports_deny_paths: bool,
+        psec_supports_enumerate_paths: bool,
     ) -> bool {
         if !psec_usable {
             return false;
         }
-        Self::psec_policy_compatible(request, psec_supports_deny_paths)
+        Self::psec_policy_compatible(
+            request,
+            psec_supports_deny_paths,
+            psec_supports_enumerate_paths,
+        )
     }
 
-    fn psec_policy_compatible(request: &ExecutionRequest, psec_supports_deny_paths: bool) -> bool {
+    fn psec_policy_compatible(
+        request: &ExecutionRequest,
+        psec_supports_deny_paths: bool,
+        psec_supports_enumerate_paths: bool,
+    ) -> bool {
         !request.policy.least_privilege_mode
             && (!request.policy.network_proxy.is_enabled()
                 || request.policy.runtime_network_proxy_specified)
             && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
+            && (request.policy.enumerate_paths.is_empty() || psec_supports_enumerate_paths)
     }
 
     fn process_security_environment_usable(&self) -> bool {
@@ -955,6 +1049,8 @@ impl BaseContainerRunner {
                 request,
                 request.policy.denied_paths.is_empty()
                     || support.supports_deny_paths().unwrap_or(false),
+                request.policy.enumerate_paths.is_empty()
+                    || support.supports_enumerate_paths().unwrap_or(false),
             )
     }
 
@@ -968,10 +1064,16 @@ impl BaseContainerRunner {
         }
         let supports_deny_paths = request.policy.denied_paths.is_empty()
             || self.capture_support.supports_deny_paths().unwrap_or(false);
+        let supports_enumerate_paths = request.policy.enumerate_paths.is_empty()
+            || self
+                .capture_support
+                .supports_enumerate_paths()
+                .unwrap_or(false);
         Self::should_use_process_security_environment(
             request,
             self.process_security_environment_usable(),
             supports_deny_paths,
+            supports_enumerate_paths,
         )
     }
 
@@ -997,10 +1099,13 @@ impl BaseContainerRunner {
             || SecurityEnvironmentApi::load()
                 .and_then(|api| api.supports_deny_paths())
                 .unwrap_or(false);
+        let psec_supports_enumerate_paths = request.policy.enumerate_paths.is_empty()
+            || Self::query_psec_enumerate_support().unwrap_or(false);
         if Self::should_use_process_security_environment(
             request,
             psec_usable,
             psec_supports_deny_paths,
+            psec_supports_enumerate_paths,
         ) {
             return true;
         }
@@ -1023,11 +1128,19 @@ impl BaseContainerRunner {
                 request,
                 Self::is_process_security_environment_usable(),
                 psec_supports_deny_paths,
+                request.policy.enumerate_paths.is_empty()
+                    || Self::query_psec_enumerate_support().unwrap_or(false),
             )
         {
             return true;
         }
         crate::fallback_detector::base_container_supports_deny_paths()
+    }
+
+    pub(crate) fn supports_enumerate_paths_for_request(request: &ExecutionRequest) -> bool {
+        request.policy.enumerate_paths.is_empty()
+            || (Self::is_process_security_environment_usable()
+                && Self::query_psec_enumerate_support().unwrap_or(false))
     }
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
@@ -2330,6 +2443,12 @@ impl SandboxBackend for BaseContainerRunner {
                     ScriptResponse::error(wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG)
                 });
             }
+        }
+        if !request.policy.enumerate_paths.is_empty() && !use_process_security_environment {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG)
+            });
         }
         if use_process_security_environment {
             return Ok(());
@@ -4262,6 +4381,22 @@ mod tests {
     }
 
     #[test]
+    fn build_process_security_environment_spec_serializes_enumerate_paths_as_v1_1() {
+        let mut request = ExecutionRequest::default();
+        request.policy.enumerate_paths = vec!["C:\\tools".into()];
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(spec.version().major(), 1);
+        assert_eq!(spec.version().minor(), 1);
+        assert_eq!(
+            spec.fs_enumerate().unwrap().iter().collect::<Vec<_>>(),
+            vec!["C:\\tools"]
+        );
+    }
+
+    #[test]
     fn build_process_security_environment_spec_ignores_empty_capability() {
         let mut request = ExecutionRequest::default();
         request.policy.capabilities = vec![String::new()];
@@ -4617,7 +4752,9 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                BaseContainerRunner::should_use_process_security_environment(&request, true, true),
+                BaseContainerRunner::should_use_process_security_environment(
+                    &request, true, true, true,
+                ),
                 "PSEC should be preferred for schema version {version}"
             );
         }
@@ -4630,9 +4767,15 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+            BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, true
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, false, true, true
+            )
         );
     }
 
@@ -4650,9 +4793,15 @@ mod tests {
             host_loopback: NetworkAction::Allow,
         });
 
-        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+            BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, true
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, false, true, true
+            )
         );
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
@@ -4741,7 +4890,9 @@ mod tests {
 
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, true
+            )
         );
         assert!(
             !runner.uses_process_security_environment(&request),
@@ -4784,7 +4935,9 @@ mod tests {
         request.policy.least_privilege_mode = true;
 
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, true
+            )
         );
     }
 
@@ -4794,8 +4947,31 @@ mod tests {
         request.policy.denied_paths = vec![r"C:\secret".to_string()];
 
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(&request, true, false)
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, true, false, true
+            )
         );
+    }
+
+    #[test]
+    fn enumerate_paths_require_supported_psec_and_reject_sbox() {
+        let mut request = ExecutionRequest::default();
+        request.policy.enumerate_paths = vec![r"C:\tools".to_string()];
+
+        assert!(
+            BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, true
+            )
+        );
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(
+                &request, true, true, false
+            )
+        );
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
+        ));
     }
 
     #[test]
