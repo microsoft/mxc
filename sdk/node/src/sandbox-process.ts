@@ -179,6 +179,7 @@ export class MxcSandboxProcess {
   private stdoutState: ReadState = 'untaken';
   private stderrValue?: ReadPipe | null;
   private stderrState: ReadState = 'untaken';
+  private readonly cleanupCallbacks = new Set<() => void>();
   private disposed = false;
 
   private constructor(binding: SandboxProcessBinding, timeoutMs?: number) {
@@ -263,6 +264,15 @@ export class MxcSandboxProcess {
     this.binding.kill();
   }
 
+  /** @internal Register cleanup tied to terminal completion or disposal. */
+  _registerCleanup(callback: () => void): void {
+    if (this.disposed || this.waitResult !== undefined) {
+      callback();
+      return;
+    }
+    this.cleanupCallbacks.add(callback);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -272,6 +282,7 @@ export class MxcSandboxProcess {
     }
     this.waitReject?.(new Error('sandbox process disposed'));
     this.waitReject = undefined;
+    this.runCleanups();
     try {
       this.binding.free();
     } finally {
@@ -285,9 +296,20 @@ export class MxcSandboxProcess {
     this.waitTimer = undefined;
     this.waitReject = undefined;
     this.waitResult = result;
-    this.outputMetadataValue = this.binding.outputMetadata();
-    this.outputMetadataReady = true;
+    try {
+      this.outputMetadataValue = this.binding.outputMetadata();
+      this.outputMetadataReady = true;
+    } finally {
+      this.runCleanups();
+    }
     return result;
+  }
+
+  private runCleanups(): void {
+    for (const callback of this.cleanupCallbacks) {
+      callback();
+    }
+    this.cleanupCallbacks.clear();
   }
 
   private takeReadable(which: 'stdout' | 'stderr'): Readable | null {
