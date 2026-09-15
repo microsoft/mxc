@@ -281,9 +281,11 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 interface IsolationSessionProvisionConfig {
   version?: StateAwareSchemaVersion;
   // IsolationSession cannot filter or deny the container network, so provision
-  // requires the canonical unrestricted-network acknowledgment — the only accepted
-  // value. filesystem policy is rejected by this backend (§10.3).
-  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
+  // requires this exact unrestricted posture. Filesystem policy is rejected (§10.3).
+  network: {
+    egress: { default: 'allow' };
+    ingress: { default: 'allow'; hostLoopback: 'allow' };
+  };
 }
 
 interface IsolationSessionStartConfig {
@@ -422,13 +424,13 @@ interface ExecResult {
 wire-format-aligned interfaces from `sdk/node/src/types.ts`, reused unchanged as field
 types inside the per-(backend, phase) Configs. State-aware deliberately does not use
 `SandboxPolicy`; consumers spell out wire-format-aligned values directly (e.g.,
-`network: { defaultPolicy: 'block' }` instead of `network: { allowOutbound: false }`).
+`network: { egress: { default: 'deny' } }` for a backend that supports it).
 
 A backend's per-(backend, phase) Config declares each cross-cutting field exactly once,
 and only in the phase where the backend's policy honor matrix (§10.3) marks it as
-`applied`. For IsolationSession, that means `IsolationSessionProvisionConfig` carries
-`filesystem` / `network` / `ui` and the other four phase Configs do not — the type
-system rejects callers passing those fields to start, exec, stop, or deprovision (§10.3
+`applied`. IsolationSession provision carries the backend-specific acknowledgment
+and optional `appId`, not filesystem/network/UI policy. Its phase types reject
+those policy fields (§10.3
 explains how the matrix lands at compile time on the SDK and at runtime in Rust).
 Phases with no backend-specific or cross-cutting fields declare a Config carrying only
 `version?` — explicit and minimal. Adding a future state-aware backend is a localised
@@ -520,8 +522,11 @@ import {
 
 const provisionConfig: IsolationSessionProvisionConfig = {
   // IsolationSession cannot filter or deny the container network, so provision
-  // requires the canonical unrestricted-network acknowledgment (the only accepted value).
-  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+  // requires this exact unrestricted posture.
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
 };
 
 // IsolationSession is experimental, so every call carries `experimental: true`.
@@ -841,7 +846,10 @@ shape, across all five phases.
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -856,20 +864,17 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.9.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  }
 }
 ```
 
 ```rust
-// Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allow_local_network = true
-//   request.policy.network_specified = true
-// (and the other top-level wire fields populated as today's one-shot path
-// already populates them). No filesystem policy appears because this backend
-// refuses it at every phase, and the network policy must be exactly the
-// canonical acknowledgment shown above. The dispatcher then calls:
-backend.provision(&request, /* config */ None)
+// Exact adaptation carries the all-allow network policy on the request. After
+// checked binding and backend validation, the dispatcher calls:
+backend.provision(&request, Some(provision_config))
 // returns Ok(ProvisionResult {
 //     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
@@ -1005,7 +1010,7 @@ backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTI
 The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>` when
 serialising state-aware calls — consumers write `appId` directly on the
 `IsolationSessionProvisionConfig`, the SDK builds the nested wire form. Cross-cutting
-fields (`filesystem` / `network` / `ui`) on a per-(backend, phase) Config map directly
+fields (`filesystem` / `network` / `runtimeConfig` / `ui`) on a per-(backend, phase) Config map directly
 to top-level wire fields — they are already wire-format-aligned in the Config, so the
 SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
 `env`, `timeout`) flow through the top-level `process` block, not through
@@ -1664,17 +1669,20 @@ pub struct IsolationSessionProvisionConfig {
 interface IsolationSessionProvisionConfig {
   version?: StateAwareSchemaVersion;
   appId?: string;
-  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
+  network: {
+    egress: { default: 'allow' };
+    ingress: { default: 'allow'; hostLoopback: 'allow' };
+  };
 }
 ```
 
 The TypeScript Config carries `version` (which the SDK serialises to the top-level
 wire `version` field) plus any cross-cutting fields the matrix marks as honored for
-that phase (for IsolationSession's `provision`, the required `network`
-acknowledgment). The Rust struct receives only what the wire's
-`experimental.isolation_session.provision` block carries —
-`{ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }` — through exact adaptation and checked
-binding to `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
+that phase. IsolationSession's required all-allow posture is a top-level network
+policy. The Rust struct receives the `appId` from the wire's
+`experimental.isolation_session.provision` block through exact adaptation and checked
+binding to `Self::ProvisionConfig` (§9.3), while the network policy remains on the
+execution request. The SDK is responsible for splitting
 the consumer Config into top-level wire fields (cross-cutting, `version`) and the
 experimental sub-block; Rust sees only the post-split shape.
 
@@ -1695,14 +1703,13 @@ backend; the authoritative statement lives in
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
 | `filesystem` | rejected | rejected | rejected | rejected | rejected |
-| `network` | required | rejected | rejected | rejected | rejected |
+| `network` | rejected | rejected | rejected | rejected | rejected |
+| Backend-specific acknowledgment | required | rejected | rejected | rejected | rejected |
 | `ui` | rejected | rejected | rejected | rejected | rejected |
 
-`network` at provision is `required` rather than `applied`: the backend cannot filter
-or deny the container network, so nothing is enforced — the caller must supply the
-canonical unrestricted-network acknowledgment (`defaultPolicy=allow` +
-`allowLocalNetwork=true`, no host rules, no proxy) and every other value, including an
-absent policy, is refused. `ui` is `rejected` rather than `ignored`: an isolation
+The backend cannot filter or deny networking, so the caller must supply
+`network.egress`/`network.ingress` all-allow posture in the provision payload instead of
+requesting a network policy. `ui` is `rejected` rather than `ignored`: an isolation
 session isolates the *host's* UI from contained code but does not deny that code UI
 capabilities, so no `ui` posture would be truthful and the section is refused rather
 than silently dropped. An omitted `ui` is accepted and applies no restriction.
@@ -1728,10 +1735,8 @@ unconditionally by the in-guest agent).
   *and* that the runtime currently honors. TypeScript rejects callers passing fields
   the backend does not honor at that phase, and also fields the matrix would mark as
   `applied` but the runtime does not yet implement. For IsolationSession's matrix
-  above, `IsolationSessionProvisionConfig` is the only Config that carries any
-  cross-cutting fields. The SDK exposes `network` at provision — the required
-  unrestricted-network acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork:
-  true }`), the only value the backend accepts; `filesystem` is rejected.
+  above, `IsolationSessionProvisionConfig` carries the required backend-specific
+  the directional all-allow network posture field; filesystem/network/UI policy is rejected.
   The start, exec, stop, and deprovision Configs carry none of these fields. Callers
   cannot accidentally pass them.
 - **Runtime enforcement at Rust.** The exact phase contract structurally
@@ -1980,10 +1985,15 @@ calls (and the executor stops gating them behind `--experimental`). For example,
   "version": "0.9.0-alpha",
   "phase": "provision",
   "containment": "isolation_session",
-  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
   "experimental": {
     "isolation_session": {
-      "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
+      "provision": {
+        "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
+      }
     }
   }
 }
@@ -2000,9 +2010,14 @@ future contract.
   "version": "<future-graduated-version>",
   "phase": "provision",
   "containment": "isolation_session",
-  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
   "isolation_session": {
-    "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
+    "provision": {
+      "appId": "PFN:Contoso.App_8wekyb3d8bbwe"
+    }
   }
 }
 ```

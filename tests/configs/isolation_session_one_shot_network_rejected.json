@@ -3,7 +3,9 @@
   "containerId": "isolation-session-one-shot-network-rejected",
   "containment": "isolation_session",
   "network": {
-    "defaultPolicy": "block"
+    "egress": {
+      "default": "deny"
+    }
   },
   "process": {
     "commandLine": "echo unreachable",

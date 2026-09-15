@@ -53,6 +53,5 @@ $probeExit = $LASTEXITCODE
 $runExit = $LASTEXITCODE
 
 [pscustomobject]@{ ProbeExitCode = $probeExit; RunExitCode = $runExit }
-Write-Host "Issue reproduces when probe succeeds but execution fails." -ForegroundColor Yellow
-$reproduced = $probeExit -eq 0 -and $runExit -ne 0
-Complete-RegressionTest -Passed $reproduced -SuccessMessage "The probe/runtime disagreement reproduced." -FailureMessage "The expected probe/runtime disagreement was not observed."
+$probeRuntimeDisagree = $probeExit -eq 0 -and $runExit -ne 0
+Complete-RegressionTest -Passed (-not $probeRuntimeDisagree) -SuccessMessage "The probe did not report success for a run that failed." -FailureMessage "The captureDenials probe succeeded, but execution failed."

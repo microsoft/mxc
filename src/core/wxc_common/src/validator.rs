@@ -28,7 +28,7 @@ impl NetworkPolicySupport {
     /// Support for bidirectional host-loopback access.
     pub const HOST_LOOPBACK: Self = Self(1 << 2);
 
-    /// Support for the runtime loopback proxy endpoint.
+    /// Support for the runtime proxy endpoint, with backend-specific reachability constraints.
     pub const RUNTIME_PROXY: Self = Self(1 << 3);
 
     /// Support for restricting a ProcessContainer proxy to a named peer.

@@ -133,11 +133,11 @@ jobs:
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
-      # unix_test_proxy is a separate workspace member, not a dep of lxc.
-      - name: Build unix-test-proxy
+      # These are separate workspace members, not dependencies of lxc.
+      - name: Build Node runtime dependencies
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }}
-             -p unix_test_proxy
+             -p unix_test_proxy -p mxc_ffi
 
       # Exercises the real binary against the real dependencies: launches the
       # slirp4netns supervisor, joins its user namespace, and asserts the
@@ -157,5 +157,6 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
+            src/target/${{ matrix.target }}/release/libmxc_ffi.so
           if-no-files-found: error
           retention-days: 1

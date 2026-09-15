@@ -13,7 +13,7 @@ surfaces the resulting denial events is layered on top in later work.
 
 > **Platform support.** Learning-mode capabilities are **Windows-only** and
 > apply to the AppContainer-based backends (classic AppContainer and
-> BaseContainer, which share `backends/appcontainer/common`). On other platforms
+> BaseContainer, which share `backends/process_container/common`). On other platforms
 > the capability strings are ignored.
 
 ## The two capabilities

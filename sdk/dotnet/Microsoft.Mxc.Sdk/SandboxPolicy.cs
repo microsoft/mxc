@@ -153,24 +153,93 @@ public sealed class FilesystemPolicy
     public bool? ClearPolicyOnExit { get; set; }
 }
 
-/// <summary>Network section of a <see cref="SandboxPolicy"/>. All flags default to deny.</summary>
+/// <summary>
+/// Network authoring section. Schema 0.9 requires Egress/Ingress and
+/// RuntimeConfig; legacy properties remain available for published 0.6–0.8.
+/// Omission retains native default-deny without synthesizing legacy fields.
+/// </summary>
+[JsonConverter(typeof(NetworkPolicyJsonConverter))]
 public sealed class NetworkPolicy
 {
+    private bool? _allowOutbound;
+    private bool? _allowLocalNetwork;
+    private List<string> _allowedHosts = new();
+    private List<string> _blockedHosts = new();
+    private NetworkProxyPolicy? _proxy;
+    private string? _legacyFieldSpecified;
+    private readonly HashSet<string> _legacyFields = new(StringComparer.Ordinal);
+
+    internal string? LegacyFieldSpecified =>
+        _legacyFieldSpecified
+        ?? (_allowedHosts is { Count: > 0 } ? "allowedHosts" : null)
+        ?? (_blockedHosts is { Count: > 0 } ? "blockedHosts" : null);
+
+    internal bool? AuthoredAllowOutbound
+    {
+        get => _allowOutbound;
+        set { _allowOutbound = value; MarkLegacyField("allowOutbound"); }
+    }
+
+    internal bool? AuthoredAllowLocalNetwork
+    {
+        get => _allowLocalNetwork;
+        set { _allowLocalNetwork = value; MarkLegacyField("allowLocalNetwork"); }
+    }
+
+    internal bool HasLegacyField(string field) =>
+        _legacyFields.Contains(field)
+        || (field == "allowedHosts" && _allowedHosts is { Count: > 0 })
+        || (field == "blockedHosts" && _blockedHosts is { Count: > 0 });
+
+    internal void RecordLegacyWireField(string field) => MarkLegacyField(field);
+
+    private void MarkLegacyField(string field)
+    {
+        _legacyFieldSpecified ??= field;
+        _legacyFields.Add(field);
+    }
+
     /// <summary>Allow outbound network access.</summary>
     [JsonPropertyName("allowOutbound")]
-    public bool AllowOutbound { get; set; }
+    public bool AllowOutbound
+    {
+        get => _allowOutbound ?? false;
+        set => AuthoredAllowOutbound = value;
+    }
 
     /// <summary>Allow access to the local network.</summary>
     [JsonPropertyName("allowLocalNetwork")]
-    public bool AllowLocalNetwork { get; set; }
+    public bool AllowLocalNetwork
+    {
+        get => _allowLocalNetwork ?? false;
+        set => AuthoredAllowLocalNetwork = value;
+    }
 
     /// <summary>Hosts explicitly allowed.</summary>
     [JsonPropertyName("allowedHosts")]
-    public List<string> AllowedHosts { get; set; } = new();
+    public List<string> AllowedHosts
+    {
+        get => _allowedHosts;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _allowedHosts = value;
+            MarkLegacyField("allowedHosts");
+        }
+    }
 
     /// <summary>Hosts explicitly blocked.</summary>
     [JsonPropertyName("blockedHosts")]
-    public List<string> BlockedHosts { get; set; } = new();
+    public List<string> BlockedHosts
+    {
+        get => _blockedHosts;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _blockedHosts = value;
+            MarkLegacyField("blockedHosts");
+        }
+    }
 
     /// <summary>
     /// HTTP/HTTPS proxy used by the sandbox. Raw-socket clients may bypass
@@ -178,7 +247,11 @@ public sealed class NetworkPolicy
     /// proxy-only egress.
     /// </summary>
     [JsonPropertyName("proxy")]
-    public NetworkProxyPolicy? Proxy { get; set; }
+    public NetworkProxyPolicy? Proxy
+    {
+        get => _proxy;
+        set { _proxy = value; MarkLegacyField("proxy"); }
+    }
 
     /// <summary>Schema-0.8 outbound network policy.</summary>
     [JsonPropertyName("egress")]
@@ -297,7 +370,10 @@ public sealed class NetworkIngressPolicy
 /// <summary>Schema-0.8 runtime network values.</summary>
 public sealed class NetworkRuntimeConfig
 {
-    /// <summary>HTTP/S loopback proxy URL supplied at runtime.</summary>
+    /// <summary>
+    /// HTTP/S proxy URL supplied at runtime. WSLC accepts guest-routable URLs;
+    /// host-loopback restrictions apply only to backends that require them.
+    /// </summary>
     [JsonPropertyName("networkProxy")]
     public string? NetworkProxy { get; set; }
 }
