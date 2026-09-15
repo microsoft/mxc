@@ -148,6 +148,7 @@ export {
   provisionSandbox,
   startSandbox,
   execInSandbox,
+  execInSandboxProcess,
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
