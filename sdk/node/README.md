@@ -512,9 +512,9 @@ You must set `config.process!.commandLine = '…'` before calling `spawnSandboxF
 
 No `network` field → no network. No `readwritePaths` → process can't write `%TEMP%`. No `ui` → no GUI. Use the discovery helpers to compose a sensible baseline.
 
-### `process.cwd` doesn't grant filesystem access
+### `process.cwd`
 
-Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly.
+Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly. On `0.9.0-alpha` it must also be absolute — `C:\workspace` for the Windows backends, `/workspace` for the Unix ones.
 
 ---
 

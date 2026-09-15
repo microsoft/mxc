@@ -893,7 +893,7 @@ mod tests {
         let mut r = runner();
         let request = ExecutionRequest {
             script_code: "print('x')".to_string(),
-            working_directory: "C:/tmp".to_string(),
+            working_directory: "/tmp".to_string(),
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);

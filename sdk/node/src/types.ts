@@ -13,7 +13,11 @@
 export interface ProcessConfig {
   /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
   commandLine: string;
-  /** Working directory for the process */
+  /**
+   * Working directory for the process. From schema `0.9.0-alpha` it must be
+   * absolute for the backend that receives it — see `docs/schema.md`
+   * ("Working Directory").
+   */
   cwd?: string;
   /**
    * Environment variables as KEY=VALUE strings.

@@ -349,7 +349,8 @@ also structurally refused as `malformed_request`.
 - `process.commandLine` — required for one-shot and for state-aware exec;
   rejected structurally at non-exec state-aware phases.
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
-  honoured per-process (each exec receives its own block).
+  honoured per-process (each exec receives its own block). A supplied `cwd`
+  must be an absolute Windows path.
 
 ### Policy fields and mode parity
 

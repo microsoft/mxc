@@ -162,7 +162,9 @@ Common consequences of this default:
 - `/opt` and `/usr/local` tooling is not on PATH; list either path under
   `readonlyPaths` if the script depends on it.
 - `working_directory` must live under the baseline or a policy path — a
-  `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
+  `cwd` of `/home/alice/project` without a matching `readonlyPaths` entry
+  will fail. From `0.9.0-alpha` it must also be absolute: `--chdir` does not
+  expand `~`.
 - DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
   because the corresponding `/run/...` directories are bound. The common
   symlink targets *outside* `/run` are covered too: `/var/run/...`-routed

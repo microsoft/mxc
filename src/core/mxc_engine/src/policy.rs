@@ -655,7 +655,8 @@ pub struct SandboxRequest {
 
 impl SandboxRequest {
     /// Override the working directory the sandboxed child starts in. Left unset,
-    /// it defaults to the policy's resolution.
+    /// it defaults to the policy's resolution. Must be absolute for the target
+    /// backend from schema `0.9.0-alpha` on.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
         self.inner.working_directory = working_directory.into();
         self

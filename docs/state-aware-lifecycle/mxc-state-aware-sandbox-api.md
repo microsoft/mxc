@@ -1586,8 +1586,9 @@ Exact structural errors carry the full field path and source coordinates before
 the successful request is constructed. Semantic errors remain backend-owned.
 `validate_exec_common`
 is a free function in `validator.rs` that checks cross-backend per-phase invariants
-(e.g., `request.script_code` non-empty); other phases have no cross-backend common
-checks today and skip directly to the backend's `validate_<phase>` hook.
+(`request.script_code` non-empty, and an absolute `process.cwd` from `0.9.0-alpha`);
+other phases have no cross-backend common checks today and skip directly to the
+backend's `validate_<phase>` hook.
 
 Helper functions for handle-validation, envelope wrapping, and
 empty-envelope construction are mechanical and elided. The executor's outer driver
@@ -1630,7 +1631,7 @@ shapes.
 |---|---|---|
 | SDK (TypeScript) | Recognised `containment` (provision); branded `SandboxId<C>` (other phases); required cross-backend fields (`process.commandLine` for exec); typed config shape (autocompletion + compile-time check) | Thrown at the call site, before any subprocess runs |
 | MXC parser (Rust) | Exact registered version and closed request root; required phase fields; phase-inappropriate, unknown, and recursively unknown experimental fields | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
-| MXC dispatch common (Rust) | Cross-backend per-phase invariants (e.g., `validate_exec_common` checks `process.commandLine` non-empty) | `error.code: malformed_request`, `policy_validation` |
+| MXC dispatch common (Rust) | Cross-backend per-phase invariants (`validate_exec_common` checks `process.commandLine` non-empty and an absolute `process.cwd`) | `error.code: malformed_request`, `policy_validation` |
 | Backend `validate_<phase>` hooks (Rust) | Per-backend per-phase invariants: config field values, cross-cutting policy honor (per the matrix in §10.3), id format checks beyond prefix matching | `error.code: policy_validation`, `malformed_id`, `stale_id`, `backend_error`, `backend_unavailable` |
 
 The native CLI template form is resolved before these layers: a trailing
