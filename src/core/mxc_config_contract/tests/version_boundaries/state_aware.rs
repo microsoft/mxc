@@ -1,14 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{parse_request, ProvisionRequest, Request};
 use mxc_config_contract::published::v0_8_0_alpha::Request as V08Request;
+use mxc_config_contract::published::v0_9_0_alpha::{parse_request, ProvisionRequest, Request};
 
 #[derive(Clone, Copy)]
 enum ExpectedRoot {
-    WindowsSandboxProvision,
     IsolationSessionProvision,
-    WslcProvision,
     Start,
     Exec,
     Stop,
@@ -20,14 +18,8 @@ impl ExpectedRoot {
         matches!(
             (self, request),
             (
-                Self::WindowsSandboxProvision,
-                Request::Provision(ProvisionRequest::WindowsSandbox(_)),
-            ) | (
                 Self::IsolationSessionProvision,
                 Request::Provision(ProvisionRequest::IsolationSession(_)),
-            ) | (
-                Self::WslcProvision,
-                Request::Provision(ProvisionRequest::Wslc(_))
             ) | (Self::Start, Request::Start(_))
                 | (Self::Exec, Request::Exec(_))
                 | (Self::Stop, Request::Stop(_))
@@ -44,23 +36,6 @@ struct StateAwareCase {
 
 const CASES: &[StateAwareCase] = &[
     StateAwareCase {
-        name: "Windows Sandbox provision",
-        json: r#"{
-            "$schema": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-            "_comment": "Provision a Windows Sandbox with fixed filesystem policy.",
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "windows_sandbox",
-            "filesystem": {
-                "readwritePaths": ["C:\\work"],
-                "readonlyPaths": ["C:\\inputs"],
-                "deniedPaths": ["C:\\secrets"]
-            },
-            "telemetry": {"enabled": true}
-        }"#,
-        expected: ExpectedRoot::WindowsSandboxProvision,
-    },
-    StateAwareCase {
         name: "IsolationSession provision",
         json: r#"{
             "version": "0.9.0-alpha",
@@ -71,42 +46,13 @@ const CASES: &[StateAwareCase] = &[
                 "egress": {"default": "allow"},
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {
-                        "appId": "Contoso.Sample_1234567890abc"
-                    }
+            "isolationSession": {
+                "provision": {
+                    "appId": "Contoso.Sample_1234567890abc"
                 }
             }
         }"#,
         expected: ExpectedRoot::IsolationSessionProvision,
-    },
-    StateAwareCase {
-        name: "WSLC provision",
-        json: r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "wslc",
-            "filesystem": {
-                "readwritePaths": ["/workspace"],
-                "readonlyPaths": ["/inputs"],
-                "deniedPaths": ["/secrets"]
-            },
-            "network": {
-                "egress": {"default": "deny"},
-                "ingress": {"default": "deny", "hostLoopback": "deny"}
-            },
-            "telemetry": {"enabled": true},
-            "experimental": {
-                "wslc": {
-                    "provision": {
-                        "image": "ubuntu:24.04",
-                        "imageTarPath": "C:\\images\\ubuntu.tar"
-                    }
-                }
-            }
-        }"#,
-        expected: ExpectedRoot::WslcProvision,
     },
     StateAwareCase {
         name: "start",

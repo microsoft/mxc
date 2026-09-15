@@ -61,23 +61,20 @@ fn target(args: &GenerateArgs) -> Result<Target, String> {
     }
 }
 
-fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
+fn exact_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
     let descriptor = descriptor(version);
-    if !descriptor.is_development() {
-        return Err(format!(
-            "published contract generation for {} is not supported",
-            version.as_str()
-        ));
-    }
-
-    // Keep this exhaustive after the status gate so every future development
-    // contract must explicitly wire its schema source into the generator.
     let mut schema = match version {
-        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::development_schema(),
-        ContractVersion::V0_8_0Alpha
-        | ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha => {
-            unreachable!("published contracts were rejected above")
+        ContractVersion::V0_9_0Alpha => {
+            mxc_config_contract::published::v0_9_0_alpha::published_schema()
+        }
+        ContractVersion::V0_10_0Alpha => mxc_config_contract::dev::development_schema(),
+        ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_8_0Alpha => {
+            return Err(format!(
+                "published contract {} has no renderable exact model",
+                version.as_str()
+            ));
         }
     };
     mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
@@ -91,7 +88,7 @@ fn schema_content(target: Target) -> Result<String, String> {
             wxc_common::wire::generate_config_schema_json()
         )),
         Target::Contract(version) => {
-            let (schema, _) = development_schema(version)?;
+            let (schema, _) = exact_schema(version)?;
             let root = schema
                 .as_object()
                 .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
@@ -107,7 +104,7 @@ fn types_content(target: Target) -> Result<String, String> {
     match target {
         Target::LegacyWire => Ok(wxc_common::wire::generate_sdk_types_ts()),
         Target::Contract(version) => {
-            let (schema, _) = development_schema(version)?;
+            let (schema, _) = exact_schema(version)?;
             Ok(mxc_schema_support::emit_contract_ts(
                 &schema,
                 version.as_str(),
@@ -212,23 +209,41 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|record| record["version"] == "0.9.0-alpha")
+            .find(|record| record["version"] == "0.10.0-alpha")
             .unwrap();
 
         assert_eq!(development["status"], "development");
         assert_eq!(
             development["schemaPath"],
-            "schemas/dev/mxc-config.schema.0.9.0-alpha.json"
+            "schemas/dev/mxc-config.schema.0.10.0-alpha.json"
         );
         assert_eq!(
             development["typescriptPath"],
-            "sdk/node/src/generated/v0_9_0_alpha/wire.ts"
+            "sdk/node/src/generated/v0_10_0_alpha/wire.ts"
         );
     }
 
     #[test]
-    fn published_generation_is_rejected() {
-        let error = development_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
-        assert!(error.contains("not supported"), "{error}");
+    fn published_v0_9_generation_is_supported() {
+        let (schema, descriptor) = exact_schema(ContractVersion::V0_9_0Alpha).unwrap();
+
+        assert_eq!(descriptor.status().as_str(), "published");
+        assert_eq!(
+            schema["$id"],
+            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.9.0-alpha.json"
+        );
+        assert!(schema["definitions"]["OneShotRequest"].is_object());
+        let types = types_content(Target::Contract(ContractVersion::V0_9_0Alpha)).unwrap();
+        assert!(types.contains("Emitted from the exact MXC 0.9.0-alpha contract"));
+        assert!(types.contains("export type OneShotRequest"));
+    }
+
+    #[test]
+    fn older_non_renderable_published_generation_is_rejected() {
+        let error = exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
+        assert!(
+            error.contains("published contract 0.8.0-alpha has no renderable exact model"),
+            "{error}"
+        );
     }
 }

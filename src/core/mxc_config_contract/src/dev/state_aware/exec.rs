@@ -9,12 +9,6 @@ string_marker! {
     pub struct ExecPhase => "exec";
 }
 
-/// Experimental settings accepted by the `exec` phase.
-#[derive(Debug, serde::Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExecExperimental {}
-
 /// A complete state-aware `exec` request.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -47,8 +41,4 @@ pub struct ExecRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-
-    /// Optional closed exec experimental settings.
-    #[serde(default)]
-    pub experimental: OptionalField<ExecExperimental>,
 }

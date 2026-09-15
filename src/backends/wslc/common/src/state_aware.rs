@@ -36,7 +36,7 @@ use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
 
-/// Default image when a provision request omits `experimental.wslc.provision.image`.
+/// Default image when a provision request omits `wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh

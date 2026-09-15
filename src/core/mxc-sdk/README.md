@@ -366,10 +366,9 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 Both take the same request JSON and differ only in where the workload's stdio
 goes.
 
-Every state-aware backend is experimental, so `experimental` is the in-process
-equivalent of the executor's `--experimental` flag: without it the request is
-refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
-API parameter, not a field in the request JSON.
+Windows Sandbox and WSLC require `experimental`; IsolationSession does not.
+The parameter is the in-process equivalent of the executor's `--experimental`
+flag and is not a field in the request JSON.
 
 The example needs this crate's `isolation_session` feature and a host running the
 OS-side service.
@@ -440,8 +439,8 @@ default):
 Constructing the listed variants is unaffected.
 
 `Containment::IsolationSession` names the isolation-session backend, served by
-`run` and `spawn_sandbox` with piped stdio. It is experimental, so the request
-must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
+`run` and `spawn_sandbox` with piped stdio. It requires the
+`isolation_session` build feature but no runtime experimental opt-in. Its exec has no host
 process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
 dropping the handle tears the session down synchronously rather than in the
 background. Reach its multi-call lifecycle through

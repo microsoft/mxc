@@ -1,0 +1,46 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use crate::published::v0_9_0_alpha::{
+    Network, OptionalField, Process, RuntimeConfig, Telemetry, Version,
+};
+use serde::Deserialize;
+
+string_marker! {
+    /// The `exec` phase of the state-aware configuration contract.
+    pub struct ExecPhase => "exec";
+}
+
+/// A complete state-aware `exec` request.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// Exact published contract version.
+    pub version: Version,
+    /// Exact `exec` phase marker.
+    pub phase: ExecPhase,
+    /// Identifier of the sandbox to execute in.
+    pub sandbox_id: String,
+
+    /// Process to execute in the sandbox.
+    pub process: Process,
+
+    /// Optional per-execution network settings.
+    #[serde(default)]
+    pub network: OptionalField<Network>,
+
+    /// Optional per-execution runtime values, including the cooperative proxy URL.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
+
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+}

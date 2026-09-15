@@ -10,10 +10,8 @@
     ],
     "timeout": 30000
   },
-  "experimental": {
-    "isolation_session": {
-      "configurationId": "medium"
-    }
+  "isolationSession": {
+    "configurationId": "medium"
   },
   "network": {
     "egress": {

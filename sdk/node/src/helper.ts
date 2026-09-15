@@ -218,10 +218,13 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  const legacyExperimental = (config as ContainerConfig & {
+    experimental?: unknown;
+  }).experimental;
   if (
-    config.experimental !== null
-    && typeof config.experimental === 'object'
-    && 'telemetry' in config.experimental
+    legacyExperimental !== null
+    && typeof legacyExperimental === 'object'
+    && 'telemetry' in legacyExperimental
   ) {
     throw new Error(
       "'experimental.telemetry' is no longer accepted; use top-level 'telemetry' instead.",

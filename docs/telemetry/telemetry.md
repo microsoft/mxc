@@ -630,14 +630,13 @@ Excluded, and why:
 |---|---|
 | `script_code` | The command line is *what runs*, not the policy it runs under; it routinely embeds credentials. |
 | `env` | Environment variables are the classic secret carrier. |
-| `experimental.telemetry`, `experimental.test` | No enforcement effect. |
-| `experimental.*.user` | Carries identity credentials. Stripped recursively; the rest of the isolation-session section *is* hashed. |
+| `telemetry`, internal `test` feature | No enforcement effect. |
 | proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
 | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
 
-The rest of `experimental` **is** hashed — `windows_sandbox`, `wslc`, and
-`isolation_session` carry those backends' entire enforcement policy, so omitting
-them would make two materially different policies hash identically.
+The enforcement-relevant parts of internal experimental configuration are
+hashed. Today, `windows_sandbox` and `wslc` carry backend policy there;
+IsolationSession has no domain-level experimental configuration.
 
 `config_schema_version` is named for the *schema*: it does not change when the
 policy changes and must never be read as a policy version.

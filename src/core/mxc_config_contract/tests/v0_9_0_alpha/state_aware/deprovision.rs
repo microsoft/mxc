@@ -4,7 +4,7 @@
 use super::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
-use mxc_config_contract::dev::DeprovisionRequest;
+use mxc_config_contract::published::v0_9_0_alpha::DeprovisionRequest;
 
 fn assert_valid(json: &str) {
     assert_valid_request::<DeprovisionRequest>(json);
@@ -51,15 +51,7 @@ fn accepts_deprovision_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_deprovision_experimental_objects() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "deprovision",
-        "sandboxId": "test123456",
-        "experimental": {}
-    }"#;
-    assert_valid(json);
-
+fn accepts_empty_deprovision_telemetry_object() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "phase": "deprovision",

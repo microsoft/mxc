@@ -1231,7 +1231,7 @@ mod tests {
     fn directional_filter_requests_are_rejected_before_execution() {
         for rules in ["allow", "deny"] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","containment":"microvm",
+                r#"{{"version":"0.10.0-alpha","containment":"microvm",
                     "process":{{"commandLine":"print(1)"}},
                     "network":{{"egress":{{"default":"allow","{rules}":[{{"to":[{{"cidr":"203.0.113.0/24"}}]}}]}},
                                "ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#

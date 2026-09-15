@@ -92,7 +92,7 @@ cost once per image, not once per run.
 
 > **Storage path consistency:** the cache lives under the WSLC
 > `storage_path` (default `%TEMP%\mxc-wslc-sessions`). If your runtime
-> configs override `experimental.wslc.storagePath`, pass the same
+> configs override `wslc.storagePath`, pass the same
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
 > pulled.
@@ -214,7 +214,7 @@ let mut sandbox = spawn_sandbox(request)?;
 let stdout = sandbox.take_stdout().expect("stdout");
 ```
 
-`WslcSection` mirrors the `experimental.wslc` block below;
+`WslcSection` mirrors the `wslc` block below;
 `WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
 through the same parser the executor uses, so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at
@@ -236,7 +236,7 @@ Notes and limits:
 
 ### JSON config
 
-WSLC-specific settings go under `experimental.wslc` in the JSON config:
+WSLC-specific settings go under `wslc` in the JSON config:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -260,7 +260,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "alpine:latest" } }
+"wslc": { "image": "alpine:latest" }
 ```
 
 **2. Pre-pulled from a custom registry (no auth):**
@@ -270,7 +270,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" } }
+"wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" }
 ```
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
@@ -278,11 +278,9 @@ Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
 **3. Import from a local tar file (no pre-pull needed):**
 
 ```json
-"experimental": {
-  "wslc": {
-    "image": "my-image:latest",
-    "imageTarPath": "C:\\path\\to\\image.tar"
-  }
+"wslc": {
+  "image": "my-image:latest",
+  "imageTarPath": "C:\\path\\to\\image.tar"
 }
 ```
 
@@ -343,7 +341,7 @@ address the container can reach:
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "runtimeConfig": { "networkProxy": "http://proxy.example:8080" },
-  "experimental": { "wslc": { "image": "alpine:latest" } }
+  "wslc": { "image": "alpine:latest" }
 }
 ```
 
@@ -391,7 +389,7 @@ rather than refused merely for being present.
 inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
 container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
 inbound-listen grant — only explicit host→container forwards via
-`experimental.wslc` `portMappings` have any inbound effect, so accepting the
+`wslc` `portMappings` have any inbound effect, so accepting the
 flag would silently promise reachability the backend never delivers. Expose
 specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
 default, is a no-op and is accepted.)
@@ -452,7 +450,7 @@ explicit `provision` / `deprovision` phases rather than by per-run flags.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
+| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |

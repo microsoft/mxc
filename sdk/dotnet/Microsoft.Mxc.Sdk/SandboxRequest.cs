@@ -90,10 +90,10 @@ public abstract class SandboxContainment;
 public sealed class ProcessContainment : SandboxContainment;
 
 /// <summary>
-/// Experimental Windows IsolationSession backend, which runs the workload under
+/// Windows IsolationSession backend, which runs the workload under
 /// an isolated agent user account.
 /// </summary>
-/// <remarks>Requires <see cref="SandboxRequest.Experimental"/>.</remarks>
+/// <remarks>The native library must be built with IsolationSession support.</remarks>
 public sealed class IsolationSessionContainment : SandboxContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>

@@ -480,15 +480,13 @@ const rustStateAware = read(
   "src",
   "state_aware.rs"
 ).split("#[cfg(test)]")[0];
-const stateAwareMatch = /matches!\(\s*backend,\s*([\s\S]*?)\)\s*&&/.exec(
-  rustStateAware
-);
-if (!stateAwareMatch) {
-  errors.push("state_aware.rs: could not find experimental backend registry");
+const runStateAwareBody = namedBody(rustStateAware, "fn", "run_state_aware");
+const rustBackends = [
+  ...runStateAwareBody.matchAll(/ContainmentBackend::(\w+)\s*=>/g),
+].map((match) => match[1]);
+if (rustBackends.length === 0) {
+  errors.push("state_aware.rs: could not find state-aware backend dispatch");
 } else {
-  const rustBackends = [
-    ...stateAwareMatch[1].matchAll(/ContainmentBackend::(\w+)/g),
-  ].map((match) => match[1]);
   const managedStateAware = read(
     "sdk",
     "dotnet",

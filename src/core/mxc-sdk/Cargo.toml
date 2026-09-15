@@ -14,7 +14,7 @@ default = []
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
-# IsolationSession backend (Windows only, experimental).
+# IsolationSession backend (Windows only).
 isolation_session = ["mxc_engine/isolation_session"]
 # Exposes the debug-only telemetry test seams to downstream binding tests.
 test-support = ["wxc_common/test-support"]

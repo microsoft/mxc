@@ -13,8 +13,10 @@ pub enum ContractVersion {
     V0_7_0Alpha,
     /// The `0.8.0-alpha` contract.
     V0_8_0Alpha,
-    /// The `0.9.0-alpha` development contract.
+    /// The `0.9.0-alpha` contract.
     V0_9_0Alpha,
+    /// The `0.10.0-alpha` development contract.
+    V0_10_0Alpha,
 }
 
 impl ContractVersion {
@@ -25,6 +27,7 @@ impl ContractVersion {
             ContractVersion::V0_7_0Alpha => "0.7.0-alpha",
             ContractVersion::V0_8_0Alpha => "0.8.0-alpha",
             ContractVersion::V0_9_0Alpha => "0.9.0-alpha",
+            ContractVersion::V0_10_0Alpha => "0.10.0-alpha",
         }
     }
 
@@ -37,6 +40,7 @@ impl ContractVersion {
             "0.7.0-alpha" => Some(ContractVersion::V0_7_0Alpha),
             "0.8.0-alpha" => Some(ContractVersion::V0_8_0Alpha),
             "0.9.0-alpha" => Some(ContractVersion::V0_9_0Alpha),
+            "0.10.0-alpha" => Some(ContractVersion::V0_10_0Alpha),
             _ => None,
         }
     }
@@ -117,6 +121,13 @@ mod tests {
         let json = r#"{"version": "0.9.0-alpha"}"#;
         let version = probe_version(json).unwrap();
         assert_eq!(version.as_str(), "0.9.0-alpha");
+    }
+
+    #[test]
+    fn probe_accepts_0_10_0_alpha() {
+        let json = r#"{"version": "0.10.0-alpha"}"#;
+        let version = probe_version(json).unwrap();
+        assert_eq!(version.as_str(), "0.10.0-alpha");
     }
 
     #[test]

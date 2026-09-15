@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::OneShotRequest as V09Request;
+use mxc_config_contract::dev::OneShotRequest as V10Request;
 use mxc_config_contract::published::v0_6_0_alpha::Request as V06Request;
 use mxc_config_contract::published::v0_7_0_alpha::Request as V07Request;
 use mxc_config_contract::published::v0_8_0_alpha::Request as V08Request;
+use mxc_config_contract::published::v0_9_0_alpha::OneShotRequest as V09Request;
 
 fn assert_v07_valid(json: &str) {
     serde_json::from_str::<V07Request>(json).unwrap();
@@ -16,6 +17,10 @@ fn assert_v08_valid(json: &str) {
 
 fn assert_v09_valid(json: &str) {
     serde_json::from_str::<V09Request>(json).unwrap();
+}
+
+fn assert_v10_valid(json: &str) {
+    serde_json::from_str::<V10Request>(json).unwrap();
 }
 
 fn one_shot_request(version: &str, additional_fields: &str) -> String {
@@ -73,4 +78,13 @@ pub(crate) fn assert_v09_introduces(additional_fields: &str) {
     let v08_json = one_shot_request("0.8.0-alpha", additional_fields);
     let v09_json = one_shot_request("0.9.0-alpha", additional_fields);
     assert_v08_rejects_v09_accepts(&v08_json, &v09_json);
+}
+
+pub(crate) fn assert_v10_introduces(additional_fields: &str) {
+    let v09_json = one_shot_request("0.9.0-alpha", additional_fields);
+    let v10_json = one_shot_request("0.10.0-alpha", additional_fields);
+    assert_well_formed(&v09_json, "0.9 boundary input");
+    assert_well_formed(&v10_json, "0.10 boundary input");
+    assert!(serde_json::from_str::<V09Request>(&v09_json).is_err());
+    assert_v10_valid(&v10_json);
 }

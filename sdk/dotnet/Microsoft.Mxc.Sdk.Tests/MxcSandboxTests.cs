@@ -45,7 +45,7 @@ public class MxcSandboxTests
     [Theory]
     [InlineData("")]
     [InlineData("0.9.0")]
-    [InlineData("0.10.0-alpha")]
+    [InlineData("0.11.0-alpha")]
     [InlineData("invalid")]
     public void Serialization_LegacyNetworkRejectsUnsupportedVersion(string version)
     {
@@ -377,7 +377,7 @@ public class MxcSandboxTests
             "echo network");
 
         var wslc = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+            new SandboxPolicy { Version = "0.10.0-alpha" },
             "printf parity")
         {
             Containment = new WslcContainment
@@ -923,7 +923,7 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void SandboxRequest_IsolationSessionWithoutExperimental_IsRefused()
+    public void SandboxRequest_IsolationSessionDoesNotEnableExperimentalMode()
     {
         var request = new SandboxRequest(
             new SandboxPolicy { Version = "0.9.0-alpha" },
@@ -932,18 +932,8 @@ public class MxcSandboxTests
             Containment = new IsolationSessionContainment(),
         };
 
-        var exception = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
-
-        // Both refusals name the backend. Which of the two fires depends on
-        // whether the native library was built with the backend.
-        Assert.Contains(
-            nameof(ContainmentBackend.IsolationSession),
-            exception.Message,
-            StringComparison.Ordinal);
-        Assert.True(
-            exception.Code is ErrorCode.MalformedRequest
-                or ErrorCode.UnsupportedContainment,
-            $"unexpected refusal: {exception.Code}: {exception.Message}");
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        Assert.False(document.RootElement.GetProperty("experimental").GetBoolean());
     }
 
     [Fact]

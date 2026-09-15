@@ -6,9 +6,7 @@
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
-  "experimental": {
-    "isolation_session": {
-      "provision": { "appId": "" }
-    }
+  "isolationSession": {
+    "provision": { "appId": "" }
   }
 }

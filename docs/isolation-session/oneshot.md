@@ -16,9 +16,9 @@ session. Use cases that need this — per the broader claw-on-MXC scenario — c
 
 ## Proposed Solution
 
-Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
+Add an **IsolationSession runner** to `wxc-exec.exe`.
 When the JSON config specifies `"containment": "isolation_session"` and the
-experimental flag is set, the binary routes to a new `IsolationSessionRunner`
+the backend is selected, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
 full lifecycle against the OS-side Isolation Session API: provision an
 agent user, start a session, run the script (capturing stdout / stderr /
@@ -36,13 +36,13 @@ reuse the manager's methods individually.
 ## How It Works
 
 ```
-User: wxc-exec.exe --experimental config.json
+User: wxc-exec.exe config.json
        (config.json sets containment = "isolation_session")
    │
    ▼
 wxc-exec.exe (Rust — single binary, multiple backends)
    ├── Parses JSON config → sees containment = "isolation_session"
-   ├── Checks --experimental flag → instantiates IsolationSessionRunner
+   ├── Instantiates IsolationSessionRunner
    ├── Calls IsolationSessionManager methods 1:1 with the OS-side service:
    │     add_user(...)               → Step 1 — creates agent user
    │     start_session(...)          → Step 2 — boots session
@@ -67,14 +67,9 @@ Dispatch in `wxc/src/main.rs`:
 ```rust
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-    // ... existing stable + experimental backends ...
-    ContainmentBackend::IsolationSession => {
-        if !request.experimental_enabled {
-            eprintln!("Error: IsolationSession is experimental. Use --experimental.");
-            process::exit(1);
-        }
-        Box::new(IsolationSessionRunner::new(/* ... */))
-    }
+    // ... other containment backends ...
+    ContainmentBackend::IsolationSession =>
+        Box::new(IsolationSessionRunner::new(/* ... */)),
 };
 ```
 
@@ -115,7 +110,7 @@ invocations, without changing the manager's interface. See
 | `src/core/wxc_common/src/models.rs` | Add `IsolationSession` to `ContainmentBackend` |
 | `src/core/wxc_common/src/config_parser.rs` | Parse the `"isolation_session"` containment value |
 | `src/core/wxc/Cargo.toml` | Add `isolation_session` Cargo feature |
-| `src/core/wxc/src/main.rs` | Dispatch `IsolationSession` behind `--experimental`; call `CoInitializeEx(COINIT_MULTITHREADED)` at top of `main` (required for any WinRT activation, benign for other backends) |
+| `src/core/wxc/src/main.rs` | Dispatch `IsolationSession`; call `CoInitializeEx(COINIT_MULTITHREADED)` at top of `main` (required for any WinRT activation, benign for other backends) |
 
 ## Configuration
 
@@ -147,7 +142,7 @@ Legacy network fields are rejected.
 rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
 in the top-level `process` section.
 
-Run with: `wxc-exec.exe --experimental config.json`.
+Run with: `wxc-exec.exe config.json`.
 
 ## OS API Dependency
 
@@ -213,7 +208,7 @@ versions and stating that the bindings must be regenerated.
 **Implemented:**
 
 - Single-shot `provision → start → run → stop → deprovision` lifecycle,
-  gated by `--experimental`.
+  selected directly by the exact v0.9 contract.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
 - `process.cwd` (working directory inside the session).
@@ -253,7 +248,7 @@ the rationale for each disposition, and the error mapping live in
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
+| `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
@@ -281,8 +276,8 @@ The full field-by-field table is in
 **Deferred to follow-up work:**
 
 - **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
-  `spawn_sandbox` behind the `isolation_session` feature and experimental
-  opt-in. The Node JSON/config path (`spawnSandboxFromConfig`) and
+  `spawn_sandbox` behind the `isolation_session` feature. The Node JSON/config
+  path (`spawnSandboxFromConfig`) and
   `wxc-exec` support the required network posture. The C# SDK still reaches
   IsolationSession only through the state-aware lifecycle APIs.
 
@@ -314,7 +309,7 @@ Two end-to-end configs live under `tests/configs/`:
   exit code 42 propagates to `ScriptResponse.exit_code`.
 
 A test runner at `tests/scripts/run_isolation_session_tests.ps1` invokes
-both configs via `wxc-exec.exe --experimental`, validates exit codes and
+both configs via `wxc-exec.exe`, validates exit codes and
 expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.
 `run_microvm_tests.ps1`, `run_wslc_all_tests.ps1`).
@@ -355,7 +350,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
-| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
+| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
 | Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user |
 
 ## Prerequisites
@@ -380,7 +375,7 @@ The following were observed during VM testing and are accepted for v0.1.
 
 ```powershell
 # Minimal config: print the agent identity inside the session
-wxc-exec.exe --experimental hello.json
+wxc-exec.exe hello.json
 ```
 
 `hello.json`:

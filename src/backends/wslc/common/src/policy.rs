@@ -230,7 +230,7 @@ pub(crate) fn reject_unsupported_enforcement_mode(
 }
 
 /// Reject inbound local networking at provision. Separate from the one-shot
-/// message, which points at `experimental.wslc.portMappings` — a primitive the
+/// message, which points at `wslc.portMappings` — a primitive the
 /// state-aware surface does not have.
 fn reject_provision_allow_local_network(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.allow_local_network {
@@ -316,7 +316,7 @@ mod tests {
             for ingress in ["allow", "deny"] {
                 for loopback in ["allow", "deny"] {
                     let source = format!(
-                        r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
+                        r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
                     );
                     let request = parsed(&source);
                     assert_eq!(network_is_isolated(&request), egress == "deny");
@@ -329,7 +329,7 @@ mod tests {
             }
         }
         let defaults =
-            parsed(r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#);
+            parsed(r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#);
         assert!(network_is_isolated(&defaults));
         validate_provision_policy(&defaults).unwrap();
     }
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn runtime_proxy_only_exec_inherits_mode_and_retains_guest_routable_url() {
         let request = parsed(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
         );
         assert!(!request.policy.network_specified);
         assert!(!request.policy.network_mode_specified);
@@ -354,7 +354,7 @@ mod tests {
 
         for network in [r#"{}"#, r#"{"egress":{"default":"deny"}}"#] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{{"commandLine":"echo"}},"network":{network},"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{{"commandLine":"echo"}},"network":{network},"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
             );
             assert_policy_validation(
                 validate_exec_policy(&parsed(&source)).unwrap_err(),
@@ -366,12 +366,12 @@ mod tests {
     #[test]
     fn one_shot_runtime_proxy_requires_a_real_route_not_a_proxy_only_firewall_promise() {
         let bridged = parsed(
-            r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+            r#"{"version":"0.10.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
         );
         validate_directional_network(&bridged).unwrap();
         assert_eq!(exec_proxy_url(&bridged), Some("http://proxy.example:8080"));
         let isolated = parsed(
-            r#"{"version":"0.9.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+            r#"{"version":"0.10.0-alpha","containment":"wslc","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
         );
         assert_policy_validation(
             validate_directional_network(&isolated).unwrap_err(),
@@ -385,7 +385,7 @@ mod tests {
         assert!(!network_policy_support().contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
         for action in ["allow", "deny"] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
             );
             assert_policy_validation(
                 validate_provision_policy(&parsed(&source)).unwrap_err(),

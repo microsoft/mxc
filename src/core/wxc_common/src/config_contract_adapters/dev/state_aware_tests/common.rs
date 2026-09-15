@@ -2,12 +2,10 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::{adapt_request, AdaptedWireRequest};
-use crate::config_parser::parse_rolling_state_aware_wire_input;
 use crate::state_aware_operation::StateAwareOperation;
 use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
-use serde_json::value::RawValue;
 
 pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
     let AdaptedWireRequest::StateAware(input) =
@@ -17,27 +15,6 @@ pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
     };
     input.into_parts()
 }
-
-pub(super) fn assert_common_matches_legacy(source: &str, common: &wire::MxcConfig) {
-    #[derive(serde::Deserialize)]
-    struct Probe<'a> {
-        #[serde(borrow, default)]
-        experimental: Option<&'a RawValue>,
-    }
-    let probe: Probe<'_> = serde_json::from_str(source).unwrap();
-    let mut legacy = parse_rolling_state_aware_wire_input(source, probe.experimental)
-        .unwrap()
-        .config;
-    // Routing and payload observations are asserted separately, not serialized.
-    legacy.phase = None;
-    legacy.containment = None;
-    legacy.sandbox_id = None;
-    assert_eq!(
-        serde_json::to_value(common).unwrap(),
-        serde_json::to_value(legacy).unwrap()
-    );
-}
-
 pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
     assert!(common.phase.is_none());
     assert!(common.sandbox_id.is_none());
@@ -90,13 +67,12 @@ pub(super) fn assert_no_config_phase(phase: &str) {
     ] {
         for fields in [
             "",
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","telemetry":{"enabled":false},"_comment":null"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":true}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(operation.phase().as_str(), phase);
@@ -106,8 +82,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.process.is_none());
             assert!(common.filesystem.is_none());
             assert!(common.network.is_none());
-            assert_eq!(common.version.as_deref(), Some("0.9.0-alpha"));
-            assert_common_matches_legacy(&source, &common);
+            assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));
                 assert_eq!(common.comment, Some(serde_json::json!("comment")));

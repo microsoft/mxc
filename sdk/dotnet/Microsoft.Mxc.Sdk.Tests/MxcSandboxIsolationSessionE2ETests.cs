@@ -42,7 +42,6 @@ public class MxcSandboxIsolationSessionE2ETests
             },
             command)
         {
-            Experimental = true,
             Containment = new IsolationSessionContainment(),
         };
 

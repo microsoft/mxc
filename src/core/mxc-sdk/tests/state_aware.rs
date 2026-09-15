@@ -58,13 +58,11 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
             "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
              \"containment\":\"isolation_session\",\n  \
              \"_comment\":\"typed payload diagnostic\",\n  \
-             \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+             \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
         );
         let error = run_state_aware_json(&json, true, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
-        assert!(error
-            .message
-            .contains("experimental.isolation_session.provision"));
+        assert!(error.message.contains("isolationSession.provision"));
         assert!(error.message.contains("line "));
         assert!(error.message.contains("column "));
         assert!(error.operation.is_none());
@@ -81,9 +79,9 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-            "experimental": {"isolation_session": {"provision": {
+            "isolationSession": {"provision": {
                 "appId": app_id
-            }}},
+            }},
         })
         .to_string();
         let result = run_state_aware_json(&json, true, true).unwrap();
@@ -97,9 +95,9 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
         "phase": "provision",
         "containment": "isolation_session",
         "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-        "experimental": {"isolation_session": {"provision": {
+        "isolationSession": {"provision": {
             "appId": "x".repeat(257)
-        }}},
+        }},
     })
     .to_string();
     let error = run_state_aware_json(&json, true, true).unwrap_err();
@@ -152,7 +150,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 /// before backend dispatch on every platform.
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
@@ -173,7 +171,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 /// this fails. A dry run keeps it side-effect-free.
 #[test]
 fn the_optin_admits_an_experimental_backend() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     if let Err(err) = run_state_aware_json(json, true, true) {
         assert_ne!(
             err.code,
@@ -189,7 +187,7 @@ fn the_optin_admits_an_experimental_backend() {
 /// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
@@ -208,7 +206,7 @@ fn the_refusal_carries_no_api_call_detail() {
 /// `backend_unavailable`, which is the very code the gate returns.)
 #[test]
 fn exec_honours_the_optin_on_its_own_path() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
     match exec_sandbox(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),

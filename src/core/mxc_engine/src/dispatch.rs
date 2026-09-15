@@ -13,7 +13,7 @@
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
-//! (Linux), Seatbelt (macOS), WSLC and IsolationSession (Windows, experimental,
+//! (Linux), Seatbelt (macOS), experimental WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
 //! including the remaining experimental ones (Windows Sandbox, MicroVM,
 //! Hyperlight) and LXC (no streaming path suitable for the library) — returns
@@ -269,10 +269,6 @@ fn spawn_wslc(
     }
 }
 
-/// Spawn the IsolationSession backend. Experimental, so it refuses to run
-/// unless the request opted in — the library-side equivalent of the executor's
-/// `--experimental` flag.
-///
 /// Serves piped stdio. Goes through the backend's own launch rather than the
 /// `SandboxBackend` trait so a lifecycle failure keeps the API call and status
 /// the trait's `ScriptResponse` cannot carry; a refusal has no such detail, so
@@ -284,12 +280,6 @@ fn spawn_isolation_session(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use isolation_session_common::OneShotSpawnFailure;
 
-    if !request.experimental_enabled {
-        return Err(MxcError::malformed_request(
-            "IsolationSession is an experimental backend; enable experimental features on the \
-             request (SandboxRequest::set_experimental(true)) to use it",
-        ));
-    }
     isolation_session_common::spawn_one_shot(request, logger).map_err(|e| match e {
         OneShotSpawnFailure::Refused(resp) => map_spawn_error(resp),
         OneShotSpawnFailure::Launch(err) => err,

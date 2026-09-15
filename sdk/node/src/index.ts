@@ -109,6 +109,8 @@ export {
 export {
   Phase,
   STATE_AWARE_VERSION,
+  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
+  WSLC_STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
   StateAwareSchemaVersion,
   SandboxId,

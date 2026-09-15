@@ -76,7 +76,6 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
           ingress: { default: 'allow', hostLoopback: 'allow' },
         },
       },
-      { experimental: true },
     );
     const sandboxId = provisionResult.sandboxId;
     assert.ok(
@@ -102,12 +101,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     );
 
     try {
-      await startSandbox(sandboxId, {}, { experimental: true });
+      await startSandbox(sandboxId, {});
 
       const result = await execInSandboxAsync(
         sandboxId,
         { process: { commandLine: 'cmd /c echo hello' } },
-        { experimental: true },
       );
 
       assert.strictEqual(result.exitCode, 0, `exec exit code: stdout=${result.stdout}, stderr=${result.stderr}`);
@@ -116,7 +114,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         `stdout did not contain 'hello': ${result.stdout}`,
       );
 
-      await stopSandbox(sandboxId, undefined, { experimental: true });
+      await stopSandbox(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
@@ -126,7 +124,6 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     const provisionResult = await provisionSandbox(
       'isolation_session',
       { network: isolationSessionNetwork },
-      { experimental: true },
     );
     const sandboxId = provisionResult.sandboxId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
@@ -138,7 +135,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     const ws = workspace as string;
 
     try {
-      await startSandbox(sandboxId, {}, { experimental: true });
+      await startSandbox(sandboxId, {});
 
       // Caller -> session: the test (the calling user) stages a file into the
       // shared workspace and the session reads it back. Proves the SDK surfaces
@@ -148,7 +145,6 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       const readResult = await execInSandboxAsync(
         sandboxId,
         { process: { commandLine: `cmd /c type "${ws}\\caller_to_session.txt"` } },
-        { experimental: true },
       );
       assert.strictEqual(
         readResult.exitCode,
@@ -165,7 +161,6 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       const writeResult = await execInSandboxAsync(
         sandboxId,
         { process: { commandLine: `cmd /c echo from-session> "${ws}\\session_to_caller.txt"` } },
-        { experimental: true },
       );
       assert.strictEqual(
         writeResult.exitCode,
@@ -180,7 +175,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         'caller could not read the session output',
       );
 
-      await stopSandbox(sandboxId, undefined, { experimental: true });
+      await stopSandbox(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
@@ -190,22 +185,20 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     const provisionResult = await provisionSandbox(
       'isolation_session',
       { network: isolationSessionNetwork },
-      { experimental: true },
     );
     const sandboxId = provisionResult.sandboxId;
 
     try {
-      await startSandbox(sandboxId, {}, { experimental: true });
+      await startSandbox(sandboxId, {});
 
       const result = await execInSandboxAsync(
         sandboxId,
         { process: { commandLine: 'cmd /c exit 7' } },
-        { experimental: true },
       );
 
       assert.strictEqual(result.exitCode, 7, `expected exit 7, got ${result.exitCode}`);
 
-      await stopSandbox(sandboxId, undefined, { experimental: true });
+      await stopSandbox(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
@@ -246,7 +239,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
 
   it('exact contract rejects a provision that omits the network acknowledgment', async () => {
     await assert.rejects(
-      () => provisionUntyped('isolation_session', {}, { experimental: true }),
+      () => provisionUntyped('isolation_session', {}, {}),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
   });
@@ -256,7 +249,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         { network: { defaultPolicy: 'block' } },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
@@ -267,7 +260,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         { network: { defaultPolicy: 'allow' } },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
@@ -290,7 +283,6 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
           network: isolationSessionNetwork,
           appId: 'x'.repeat(257),
         },
-        { experimental: true },
       ),
       (err: unknown) => {
         assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
@@ -326,7 +318,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
           network: isolationSessionNetwork,
           ui: { disable: true },
         },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
@@ -342,7 +334,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
           network: isolationSessionNetwork,
           ui: {},
         },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
@@ -355,7 +347,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => startUntyped(
         wellFormedSandboxId('not-a-real-sandbox'),
         { ui: { disable: false, clipboard: 'all', injection: true } },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
     );
@@ -365,7 +357,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
     // With no unknown request fields, exact parsing succeeds and the invalid id
     // reaches the sandbox-id decoder.
     await assert.rejects(
-      () => startUntyped('iso:not-a-real-sandbox', {}, { experimental: true }),
+      () => startUntyped('iso:not-a-real-sandbox', {}, {}),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
     );
   });
@@ -376,7 +368,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       'utf8',
     ).toString('base64url');
     await assert.rejects(
-      () => startUntyped(`iso:${payload}`, {}, { experimental: true }),
+      () => startUntyped(`iso:${payload}`, {}, {}),
       (err: unknown) =>
         err instanceof MxcError &&
         err.code === 'malformed_id' &&

@@ -215,9 +215,8 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
 
 /// Parse caller-supplied raw config JSON and redact secret-bearing fields
 /// (same closed set of markers as [`crate::config_deserialize`]'s error-path
-/// redaction, e.g. `token`, `secret`, and the whole `user` credential bundle
-/// used by `experimental.isolationSession.user.{upn,wamToken}`) before it is
-/// safe to write to a diagnostic sink.
+/// redaction, e.g. `token`, `secret`, and whole `user` credential bundles)
+/// before it is safe to write to a diagnostic sink.
 ///
 /// This must run *before* any policy validation: an `IsolationSession`
 /// one-shot request's credential bundle is only rejected by the runner after

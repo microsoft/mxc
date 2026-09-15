@@ -398,10 +398,8 @@ from the config:
   "containment": "wslc",
   "process": { "commandLine": "echo hello" },
   "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }
 ```
@@ -422,10 +420,8 @@ future WSLC SDK release.
   "containment": "wslc",
   "process": { "commandLine": "cat /etc/os-release" },
   "network": { "defaultPolicy": "allow" },
-  "experimental": {
-    "wslc": {
-      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
-    }
+  "wslc": {
+    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
   }
 }
 ```
@@ -441,7 +437,7 @@ local Docker daemon is needed — the WSLC SDK handles the pull internally.
 > **Note on storage path:** the setup script and the runner must share
 > the same `storage_path`. The runner default is
 > `%TEMP%\mxc-wslc-sessions`; if your config sets
-> `experimental.wslc.storagePath`, pass the same path to the setup
+> `wslc.storagePath`, pass the same path to the setup
 > script with `-StoragePath`.
 
 ### 3. Import from a local tar file
@@ -456,11 +452,9 @@ format is auto-detected.
   "containment": "wslc",
   "process": { "commandLine": "echo 'Hello from tar!'" },
   "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "my-image:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
-    }
+  "wslc": {
+    "image": "my-image:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }
 ```

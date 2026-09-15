@@ -50,14 +50,17 @@ import type {
 
 import type {
   IsolationSessionProvision as WireProvisionPhase,
-  WslcProvision as WireWslcProvisionPhase,
   IsolationSessionProvisionRequest,
-  WslcProvisionRequest,
   ExecRequest,
   StartRequest,
   StopRequest,
   DeprovisionRequest,
 } from '../../src/generated/v0_9_0_alpha/wire.js';
+import type {
+  WslcProvision as WireWslcProvisionPhase,
+  WslcProvisionRequest,
+  ExecRequest as V010ExecRequest,
+} from '../../src/generated/v0_10_0_alpha/wire.js';
 
 import type {
   AssertTrue,
@@ -78,7 +81,10 @@ type _ExactWslcNetwork = AssertTrue<
   Equivalent<NonNullable<WslcProvisionConfig['network']>, NonNullable<WslcProvisionRequest['network']>>
 >;
 type _ExactExecRuntime = AssertTrue<
-  Equivalent<NonNullable<WslcExecConfig['runtimeConfig']>, NonNullable<ExecRequest['runtimeConfig']>>
+  Equivalent<
+    NonNullable<WslcExecConfig['runtimeConfig']>,
+    NonNullable<V010ExecRequest['runtimeConfig']>
+  >
 >;
 type _ExactIsoNetwork = AssertTrue<
   Equivalent<

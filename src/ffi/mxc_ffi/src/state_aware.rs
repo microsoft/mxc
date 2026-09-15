@@ -486,7 +486,7 @@ mod tests {
                 "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
                  \"containment\":\"isolation_session\",\n  \
                  \"_comment\":\"typed payload diagnostic\",\n  \
-                 \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+                 \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
             );
             let mut out = call_opt(&json, true, true);
             assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST, "{fields}");
@@ -496,10 +496,7 @@ mod tests {
             let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
                 .to_str()
                 .unwrap();
-            assert!(
-                message.contains("experimental.isolation_session.provision"),
-                "{message}"
-            );
+            assert!(message.contains("isolationSession.provision"), "{message}");
             assert!(message.contains("line "), "{message}");
             assert!(message.contains("column "), "{message}");
             assert!(out.error.operation_utf8.is_null());
@@ -517,9 +514,9 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-            "experimental": {"isolation_session": {"provision": {
+            "isolationSession": {"provision": {
                 "appId": "x".repeat(257)
-            }}},
+            }},
         })
         .to_string();
         let mut out = call_opt(&json, true, true);
@@ -619,7 +616,7 @@ mod tests {
     #[test]
     fn experimental_backend_is_refused_without_the_optin() {
         let mut out = call_opt(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             true,
             false,
         );

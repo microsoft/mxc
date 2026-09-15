@@ -25,7 +25,7 @@ semver = "1"
 # not beside the application host, so the managed package must stage
 # wxc-wslc-daemon.exe and wslcsdk.dll there.
 wslc = ["mxc-sdk/wslc"]
-# IsolationSession backend (Windows only, experimental). Needed by the
+# IsolationSession backend (Windows only). Needed by the
 # `attached_console_ffi` example.
 isolation_session = ["mxc-sdk/isolation_session"]
 # Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by

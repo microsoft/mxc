@@ -148,7 +148,7 @@ pub enum Containment {
     /// macOS Seatbelt.
     #[serde(alias = "macos_sandbox")]
     Seatbelt,
-    /// Windows IsolationSession (experimental).
+    /// Windows IsolationSession.
     IsolationSession,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
@@ -751,7 +751,7 @@ mod schema_gen {
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
     const SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
+        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.10.0-dev.json";
 
     /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
     /// model. The schema is post-processed to (a) inject the canonical `$id`,

@@ -122,7 +122,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 Subsequent phases use the returned `sandboxId`.
 
-The legacy `experimental.windows_sandbox.idleTimeoutMs`, `idleTimeout`, and
+The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not
 affect either execution surface. One-shot emits a targeted warning only for
 non-default values.
