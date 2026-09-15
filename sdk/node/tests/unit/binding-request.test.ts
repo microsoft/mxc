@@ -5,13 +5,13 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import {
   bindingRequestUnsupportedReason,
-  prepareBindingSandboxRequest,
+  prepareRequestSpec,
 } from '../../src/bindings/request.js';
 import type { ContainerConfig } from '../../src/types.js';
 
 describe('native binding request', () => {
   it('projects an existing ContainerConfig at the binding boundary', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       containerId: 'sample',
       process: {
@@ -63,7 +63,7 @@ describe('native binding request', () => {
   });
 
   it('preserves explicit block policy and empty collections', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       process: { commandLine: 'echo hello' },
       network: { defaultPolicy: 'block', allowedHosts: [] },
@@ -75,7 +75,7 @@ describe('native binding request', () => {
   });
 
   it('preserves lifecycle policy through the request policy projection', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       process: { commandLine: 'echo hello' },
       lifecycle: { preservePolicy: true },
@@ -86,7 +86,7 @@ describe('native binding request', () => {
 
   it('does not silently drop ProcessContainer settings from process intent', () => {
     assert.throws(
-      () => prepareBindingSandboxRequest({
+      () => prepareRequestSpec({
         version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hello' },
@@ -97,7 +97,7 @@ describe('native binding request', () => {
   });
 
   it('normalizes legacy containment aliases privately', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       containment: 'appcontainer' as 'processcontainer',
       process: { commandLine: 'echo hello' },
@@ -111,7 +111,7 @@ describe('native binding request', () => {
   });
 
   it('defaults a partial UI config to no window access', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       process: { commandLine: 'echo hello' },
       ui: { clipboard: 'read' } as NonNullable<ContainerConfig['ui']>,
@@ -121,7 +121,7 @@ describe('native binding request', () => {
   });
 
   it('moves ProcessContainer configuration onto tagged containment', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       containment: 'processcontainer',
       process: { commandLine: 'echo hello' },
@@ -158,7 +158,7 @@ describe('native binding request', () => {
   });
 
   it('moves WSLC configuration onto tagged containment', () => {
-    const request = prepareBindingSandboxRequest({
+    const request = prepareRequestSpec({
       version: '0.9.0-alpha',
       containment: 'wslc',
       process: { commandLine: 'echo hello' },
