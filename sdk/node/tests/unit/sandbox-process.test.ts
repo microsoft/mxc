@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
 import { afterEach, describe, it } from 'node:test';
 import { spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import {
@@ -186,5 +186,23 @@ describe('native streaming spawn APIs', () => {
     assert.deepStrictEqual(result, { exitCode: -1, timedOut: true });
     assert.strictEqual(binding.killed, true);
     assert.strictEqual(binding.waitCalls, 1);
+  });
+
+  it('removes the abort listener after terminal completion', async () => {
+    const controller = new AbortController();
+    _setBindingSandboxProcessFactory(() =>
+      _createMxcSandboxProcess(new FakeBinding(4, 0)));
+
+    const proc = spawnSandbox(
+      'echo hello',
+      { version: '0.9.0-alpha' },
+      { signal: controller.signal },
+    );
+    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
+
+    await proc.wait();
+
+    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
+    proc.dispose();
   });
 });
