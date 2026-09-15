@@ -27,10 +27,6 @@
     ],
     "extraResources": [
       {
-        "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-exec.exe",
-        "to": "bin/x64/wxc-exec.exe"
-      },
-      {
         "from": "../src/target/x86_64-pc-windows-msvc/release/wxc-test-proxy.exe",
         "to": "bin/x64/wxc-test-proxy.exe"
       },
@@ -103,7 +99,6 @@
     "global-agent": "^4.1.3"
   },
   "dependencies": {
-    "@microsoft/mxc-sdk": "file:../../sdk/node",
-    "node-pty": "^1.0.0"
+    "@microsoft/mxc-sdk": "file:../../sdk/node"
   }
 }
