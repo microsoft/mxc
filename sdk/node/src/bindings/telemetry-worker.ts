@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Main-thread bridge for telemetry calls that block in the native runtime.
+// Consent presentation remains on this thread while persistence runs in a worker.
+
 import { Worker } from 'node:worker_threads';
 import { MxcError, type MxcErrorFields } from '../errors.js';
 import {
@@ -80,7 +83,7 @@ function runTelemetryWorker<T>(
     worker.on('error', (error) => finish(() => reject(error)));
     worker.on('exit', (code) => finish(() => reject(new MxcError({
       code: 'backend_error',
-      message: `mxc_telemetry worker exited before returning a result (code ${code})`,
+      message: `telemetry worker exited before returning a result (code ${code})`,
     }))));
   });
 }
@@ -187,7 +190,7 @@ export function runTelemetryConsentRequestAsync(
     worker.on('error', (error) => finish(() => reject(error)));
     worker.on('exit', (code) => finish(() => reject(presenterError ?? new MxcError({
       code: 'backend_error',
-      message: `mxc_telemetry worker exited before returning a result (code ${code})`,
+      message: `telemetry worker exited before returning a result (code ${code})`,
     }))));
   });
 }
