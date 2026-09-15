@@ -1,12 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import pty from 'node-pty';
 import { Readable } from 'node:stream';
-import { resolveBinaryAndCommonArgs } from './helper.js';
+import { removedExecutorOptionName } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { MxcError } from './errors.js';
-import { diagLog } from './diagnostic.js';
 import { runBindingStateAwareRequestAsync } from './bindings/state-aware-worker.js';
 import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
 import {
@@ -43,30 +41,15 @@ export type ProvisionArgs<C extends StateAwareContainmentBackend> =
     ? [config?: ProvisionConfigFor<C>, options?: SandboxSpawnOptions]
     : [config: ProvisionConfigFor<C>, options?: SandboxSpawnOptions];
 
-function unsupportedStateAwareFfiOption(
-  options: SandboxSpawnOptions,
-  allowDryRun: boolean,
-): string | undefined {
-  if (options.debug === true) return 'debug';
-  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
-  if (options.executablePath !== undefined) return 'executablePath';
-  if (options.ptyOptions !== undefined) return 'ptyOptions';
-  if (!allowDryRun && options.dryRun === true) return 'dryRun';
-  if (options.logDir !== undefined) return 'logDir';
-  if (options.usePty === true) return 'usePty';
-  return undefined;
-}
-
 function assertStateAwareFfiOptions(
   apiName: string,
   options: SandboxSpawnOptions,
-  allowDryRun: boolean,
 ): void {
-  const unsupportedOption = unsupportedStateAwareFfiOption(options, allowDryRun);
+  const unsupportedOption = removedExecutorOptionName(options);
   if (unsupportedOption !== undefined) {
     throw new MxcError(
       'malformed_request',
-      `${apiName} does not support executor-only option '${unsupportedOption}'`,
+      `${apiName} no longer supports legacy option '${unsupportedOption}'`,
     );
   }
 }
@@ -109,7 +92,7 @@ async function runStateAwareEnvelopeRequest(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
 ): Promise<string> {
-  assertStateAwareFfiOptions(apiName, options, true);
+  assertStateAwareFfiOptions(apiName, options);
 
   const signal = options.signal;
   if (signal?.aborted) {
@@ -119,7 +102,7 @@ async function runStateAwareEnvelopeRequest(
   const experimental = options.experimental === true;
   const request = runBindingStateAwareRequestAsync({
     requestJson: JSON.stringify(envelope),
-    dryRun: options.dryRun === true,
+    dryRun: false,
     experimental,
   });
 
@@ -181,7 +164,7 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   options: SandboxSpawnOptions,
   apiName: string,
 ): MxcSandboxProcess {
-  assertStateAwareFfiOptions(apiName, options, false);
+  assertStateAwareFfiOptions(apiName, options);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
     options.experimental === true,
@@ -314,67 +297,15 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Legacy PTY-backed exec surface. Returns an `IPty` for live
- * stdout/stderr/exit handling, mirroring `spawnSandbox`.
- *
- * On dispatch failure the executor emits a single error envelope on stdout;
- * the SDK does not parse it here — callers consuming `IPty.onData` see the
- * raw bytes. Prefer `execInSandboxProcess` for in-process pipe streaming or
- * `execInSandboxAsync` when typed-error throwing is needed.
- */
-export function execInSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
-  options: SandboxSpawnOptions = {},
-): pty.IPty {
-  const backendKey = backendForSandboxId(sandboxId) as C;
-  const envelope = buildStateAwareEnvelope({
-    phase: 'exec',
-    backendKey,
-    sandboxId,
-    config: config as unknown as Record<string, unknown>,
-  });
-  const { executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options);
-  diagLog(`state-aware: spawning exec via PTY`);
-  const ptyProcess = pty.spawn(executablePath, args, {
-    name: 'xterm-color',
-    cols: 120,
-    rows: 80,
-    cwd: process.cwd(),
-    ...options.ptyOptions,
-  });
-  const signal = options.signal;
-  if (signal) {
-    if (signal.aborted) {
-      ptyProcess.kill();
-    } else {
-      const onAbort = () => ptyProcess.kill();
-      signal.addEventListener('abort', onAbort, { once: true });
-      ptyProcess.onExit(() => signal.removeEventListener('abort', onAbort));
-    }
-  }
-  return ptyProcess;
-}
-
-/**
- * Streams a script execution inside a started sandbox over Node pipes,
- * returning the shared `MxcSandboxProcess` controller used by
+ * Streams a script execution inside a started sandbox over Node pipes backed
+ * by the native runtime, returning the shared `MxcSandboxProcess` controller used by
  * `spawnSandbox()`.
- *
- * Unlike the legacy `execInSandbox()` PTY API, this never launches an
- * executor process and keeps stdout and stderr separate.
  */
 export function execInSandboxProcess<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
 ): MxcSandboxProcess {
-  if (options.dryRun === true) {
-    throw new MxcError(
-      'malformed_request',
-      'execInSandboxProcess does not support dryRun; use execInSandboxAsync to validate exec requests.',
-    );
-  }
   const proc = spawnStateAwareExecProcess(sandboxId, config, options, 'execInSandboxProcess');
   wireAbortToStateAwareProcess(proc, options.signal);
   return proc;
@@ -383,23 +314,13 @@ export function execInSandboxProcess<C extends StateAwareContainmentBackend>(
 /**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Throws an `MxcError` (with the wire-format `code`
- * field set) when the executor reports a dispatch failure (recognised by
- * exit != 0 and stdout being a complete `{error}` envelope).
+ * field set) when the FFI layer reports a dispatch failure.
  */
 export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
 ): Promise<ExecResult> {
-  const envelope = buildExecEnvelope(sandboxId, config);
-  if (options.dryRun === true) {
-    return {
-      stdout: await runStateAwareEnvelopeRequest('execInSandboxAsync', envelope, options),
-      stderr: '',
-      exitCode: 0,
-    };
-  }
-
   const proc = execInSandboxProcess(sandboxId, config, { ...options, signal: undefined });
   const stdoutPromise = collectStream(proc.stdout);
   const stderrPromise = collectStream(proc.stderr);
