@@ -185,9 +185,9 @@ export const lxcNetworkSkipReason = skipLxcNetworkTests
 
 /**
  * Wraps a state-aware SDK call, skipping the test (rather than failing) when
- * the executor reports `backend_unavailable` or `unsupported_phase` — either
- * indicates this environment cannot exercise the lifecycle. Other errors
- * propagate.
+ * the native runtime reports `backend_unavailable` or `unsupported_phase` —
+ * either indicates this environment cannot exercise the lifecycle. Other
+ * errors propagate.
  */
 export async function runOrSkipIfBackendUnavailable<T>(
   t: TestContext,
@@ -202,11 +202,11 @@ export async function runOrSkipIfBackendUnavailable<T>(
       return undefined;
     }
     if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      // wxc-exec was built without the backend's feature flag, so the
-      // state-aware dispatch path is compiled out. Same outcome from the
-      // test's perspective as a host without the runtime: cannot exercise
-      // the lifecycle, skip rather than fail.
-      t.skip(`${label}: wxc-exec lacks the backend feature; rebuild with the feature flag to run this test`);
+      // The native runtime was built without the backend's feature flag, so
+      // the state-aware dispatch path is compiled out. Same outcome from the
+      // test's perspective as a host without the runtime: cannot exercise the
+      // lifecycle, skip rather than fail.
+      t.skip(`${label}: the native runtime lacks the backend feature; rebuild with the feature flag to run this test`);
       return undefined;
     }
     throw err;
@@ -296,14 +296,14 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
       return `${containment} runtime unavailable on this host`;
     }
     if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      return `wxc-exec lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
+      return `the native runtime lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
     }
     throw err;
   }
 }
 
 /**
- * Probes whether `wxc-exec` was built WITH the IsolationSession feature,
+ * Probes whether the native runtime was built with the IsolationSession feature,
  * independently of whether this host can activate a real session. Returns a
  * skip-reason string when the feature is absent, `undefined` when it is
  * present. Other errors propagate so genuine failures aren't masked as
@@ -340,7 +340,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
     provisioned = result.sandboxId;
   } catch (err) {
     if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      return 'wxc-exec lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
+      return 'the native runtime lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
     }
     if (err instanceof MxcError && err.code === 'policy_validation') {
       return undefined;
