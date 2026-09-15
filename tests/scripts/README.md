@@ -78,6 +78,8 @@ Pass the backend id exactly as it appears in the catalog — there is no separat
 handler name. Ids that share a suite have their own case in the dispatcher:
 `process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
 determines the tier it expects from the host's own `wxc-exec --probe`.
+`process-t1` additionally fails the job up front if `--probe` does not report
+`base-container`, so a host that fell back to another tier cannot report green.
 `process-t3` additionally runs `T3-Workloads.ps1`; both suites run even if the
 first one fails, and the job reports their exit codes together.
 

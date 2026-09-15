@@ -7,6 +7,14 @@ requiring root privileges or a container runtime.
 
 > **Status:** Experimental — requires the `--experimental` CLI flag.
 
+> **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
+> requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
+> `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy` are
+> no longer accepted in v0.9. The legacy examples and compatibility discussion
+> below apply to their declared older contracts; they do not authorize those
+> fields in v0.9. The existing private-namespace prerequisites and backend
+> capability checks still apply. See [schema migration](../schema.md).
+
 ## Prerequisites
 
 - **Linux** host with kernel 3.8+ (user namespace support)
@@ -406,9 +414,12 @@ Schema `0.8.0-alpha` adds a directional network shape that replaces the
 `defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
 `egress` and `ingress` section. The two shapes are **mutually exclusive**: a
 config that mixes legacy and directional fields is a parse error, and one that
-uses directional fields on a pre-0.8 schema is refused by the parser with
-`network.egress, network.ingress, runtimeConfig, and processContainer.network
-require schema version 0.8 or later`.
+uses directional fields on a pre-0.8 schema is refused at deserialization —
+the declared version selects a closed contract with no directional fields, so
+the error names the unknown field at `network.egress`. Callers that build an
+`ExecutionRequest` programmatically skip the parser and hit the backend's own
+twin of this check, which reports `Bubblewrap: network.egress/network.ingress
+require schema 0.8.0-alpha or later.`
 
 A config carrying *any* legacy field takes the legacy path described above and
 is byte-identical to what it was before directional support existed. This

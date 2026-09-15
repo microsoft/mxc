@@ -2,10 +2,6 @@
   "version": "0.9.0-alpha",
   "containerId": "isolation-session-one-shot-stray-config-rejected",
   "containment": "isolation_session",
-  "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
   "process": {
     "commandLine": "echo ONE_SHOT_STRAY_CONFIG_MUST_NOT_RUN",
     "cwd": "C:\\",
@@ -18,6 +14,15 @@
         "nested": "value",
         "futureField": true
       }
+    }
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
     }
   }
 }

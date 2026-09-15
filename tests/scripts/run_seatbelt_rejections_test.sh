@@ -67,9 +67,11 @@ expect_rejected "a proxy combined with enforcementMode=firewall is refused" \
 
 # --- Schema gating ----------------------------------------------------------
 
+# The declared version selects a closed 0.7 contract with no `egress` field, so
+# this is refused at deserialization rather than by a Seatbelt rule.
 expect_rejected "a directional network section before 0.8 is refused" \
     "seatbelt_reject_directional_pre08.json" \
-    "require schema version 0.8 or later" "$S"
+    "Invalid configuration at \`network.egress\`" "$S"
 
 # Documented as rejected because peer identity pinning is unsupported. In
 # practice the shared multi-backend guard fires first, since processContainer

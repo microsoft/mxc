@@ -106,6 +106,7 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-wslc-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
+            src/target/${{ matrix.target }}/release/mxc_ffi.dll
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe

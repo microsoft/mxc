@@ -61,6 +61,23 @@ fn extern_discovery_returns_owned_json() {
     let backends_json = unsafe { CStr::from_ptr(backends) }.to_str().unwrap();
     let backends_value: serde_json::Value = serde_json::from_str(backends_json).unwrap();
     assert!(backends_value.is_array());
+    for capability in backends_value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|backend| backend.get("capabilities"))
+        .flat_map(|capabilities| capabilities.as_array().into_iter().flatten())
+    {
+        assert!(matches!(
+            capability.as_str(),
+            Some(
+                "captureDenials"
+                    | "filesystemDeniedPaths"
+                    | "ingressHostLoopbackAllow"
+                    | "proxyEnforcement"
+            )
+        ));
+    }
 
     let support = mxc_platform_support_json();
     assert!(!support.is_null());

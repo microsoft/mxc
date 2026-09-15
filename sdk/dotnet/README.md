@@ -123,20 +123,29 @@ if (!support.IsSupported)
 foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
 {
     Console.WriteLine($"{backend.Backend}: tier={backend.Tier}");
+    bool canUseDeniedPaths = backend.Capabilities.Contains(
+        BackendCapability.FilesystemDeniedPaths);
+    bool canAllowHostLoopback = backend.Capabilities.Contains(
+        BackendCapability.IngressHostLoopbackAllow);
+    Console.WriteLine(
+        $"  deniedPaths={canUseDeniedPaths}, hostLoopback.allow={canAllowHostLoopback}");
 }
 ```
 
 `GetPlatformSupport()` reports whether this public SDK can launch a sandbox and
 the backends it can launch. `GetAvailableBackends()` is broader: it reports
 every backend the host can run, including lifecycle-only backends such as
-Windows Sandbox. Its ProcessContainer `Tier` is the strongest tier the host can
-reach; policy can still select a weaker tier.
+Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
+strongest tier the host can reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
 `BackendCapability.CaptureDenials` and `BackendCapability.ProxyEnforcement`.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`.
 `Warnings` carries diagnostics for a capability the host cannot offer — but not
 for every absent one: only checks that produce a reason contribute. Bubblewrap's
 `ProxyEnforcement` does (see below); Windows omits `CaptureDenials` without a
-warning.
+warning. Missing capabilities otherwise are unavailable or could not be detected.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
@@ -339,8 +348,12 @@ var request = new SandboxRequest(
         Version = "0.9.0-alpha",
         Network = new NetworkPolicy
         {
-            AllowOutbound = true,
-            AllowLocalNetwork = true,
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
         },
     },
     "echo hello")
@@ -704,11 +717,9 @@ deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
 IsolationSession requires a `StateAwareNetworkPolicy` describing its actual
-unrestricted posture. Prefer directional allow defaults for egress, ingress,
-and host loopback. The canonical legacy allow pair remains accepted during the
-additive v0.9 transition. Empty, restrictive, mixed, rule-bearing, or
-proxy-bearing policies are rejected. This does not add IsolationSession to the
-public one-shot run/spawn surface.
+unrestricted posture, with directional allow defaults for egress, ingress, and
+host loopback. Legacy fields are rejected. Empty, restrictive, mixed,
+rule-bearing, or proxy-bearing policies are also rejected.
 
 ```csharp
 var provisioned = MxcLifecycle.ProvisionSandbox(
@@ -781,7 +792,12 @@ var wslc = new WslcProvisionOptions
     ImageTarPath = @"C:\images\alpine.tar", // optional local import
     Network = new StateAwareNetworkPolicy
     {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
+        Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+        Ingress = new NetworkIngressPolicy
+        {
+            Default = NetworkAction.Allow,
+            HostLoopback = NetworkAction.Allow,
+        },
     },
 };
 ```

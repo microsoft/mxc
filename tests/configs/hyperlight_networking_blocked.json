@@ -1,5 +1,6 @@
 {
     "version": "0.9.0-alpha",
+    "_comment": "Intentional v0.9 migration rejection: preserve the former example.com allowlist/httpbin.org denial request as rejected input rather than replacing hostname filtering with unrestricted access or all-network denial. run_hyperlight_network_migration_test.ps1 asserts network.allowedHosts is rejected before the workload runs.",
     "process": {
         "commandLine": "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/', timeout=5)\n    print('FAIL: request should have been blocked')\nexcept Exception as e:\n    print('BLOCKED:', type(e).__name__)",
         "timeout": 30000

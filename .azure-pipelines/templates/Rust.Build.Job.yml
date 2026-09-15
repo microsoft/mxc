@@ -57,6 +57,7 @@ jobs:
             wxc-wslc-daemon.exe
             wxc-test-proxy.exe
             mxc-diagnostic-console.exe
+            mxc_ffi.dll
 
       # Linux specific variables
       ${{ if eq(item.os, 'linux') }}:
@@ -67,6 +68,7 @@ jobs:
         signPattern: |
           lxc-exec
           unix-test-proxy
+          libmxc_ffi.so
 
       # Paths
       targetTriple: $(triplet)
@@ -127,13 +129,11 @@ jobs:
             ${{ else }}:
               enableTest: 'false'
 
-      # unix_test_proxy is a separate workspace member (not a dep of lxc), so
-      # the workspace-member-scoped build above doesn't pick it up. Build it
-      # explicitly here so it lands alongside lxc-exec in the target dir and
-      # gets copied into the artifact via signPattern.
+      # These are separate workspace members (not deps of lxc), so the
+      # workspace-member-scoped build above doesn't pick them up.
       - script: |
-          cargo build --release --target $(triplet) -p unix_test_proxy --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
-        displayName: Build unix-test-proxy
+          cargo build --release --target $(triplet) -p unix_test_proxy -p mxc_ffi --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+        displayName: Build Node runtime dependencies
         condition: eq('${{ item.os }}', 'linux')
 
       # plm (Permissive Learning Mode) is functionally Windows-only, but it

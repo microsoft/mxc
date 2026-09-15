@@ -133,12 +133,15 @@ if (-not $SkipSetup) {
 
 # Encode a state-aware request envelope and run wxc-exec against it. The request
 # comes from a static JSON fixture under tests/configs (with `{{SANDBOX_ID}}`
-# substitution) or an inline hashtable. Returns @{ ExitCode; Stdout; Stderr }.
+# substitution) or an inline hashtable. A `wslc:{{SANDBOX_ID}}` placeholder
+# retains backend identity during static corpus parsing and is replaced as one
+# unit by the full real ID. Returns @{ ExitCode; Stdout; Stderr }.
 function Invoke-StateAware {
     param(
         [hashtable]$Request,
         [string]$ConfigFile,
-        [string]$SandboxId
+        [string]$SandboxId,
+        [switch]$DryRun
     )
 
     if ($ConfigFile) {
@@ -149,6 +152,10 @@ function Invoke-StateAware {
             if (-not $SandboxId) {
                 throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
             }
+            if ($json -match 'wslc:\{\{SANDBOX_ID\}\}' -and -not $SandboxId.StartsWith('wslc:')) {
+                throw "Fixture $ConfigFile requires a wslc: sandbox ID"
+            }
+            $json = $json -replace 'wslc:\{\{SANDBOX_ID\}\}', $SandboxId
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
     } elseif ($Request) {
@@ -164,6 +171,7 @@ function Invoke-StateAware {
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 
     $argList = @('--experimental')
+    if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $b64)
 
@@ -223,6 +231,10 @@ function Invoke-StateAwareStreaming {
             if (-not $SandboxId) {
                 throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
             }
+            if ($json -match 'wslc:\{\{SANDBOX_ID\}\}' -and -not $SandboxId.StartsWith('wslc:')) {
+                throw "Fixture $ConfigFile requires a wslc: sandbox ID"
+            }
+            $json = $json -replace 'wslc:\{\{SANDBOX_ID\}\}', $SandboxId
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
     } elseif ($Request) {
@@ -646,8 +658,10 @@ try {
 
 # ---------------- Lifecycle C: bridged network + cooperative proxy ----------------
 
-# Provisioned with network=allow (bridged) so the container has connectivity;
-# exec injects HTTP(S)_PROXY cooperatively from a url-form proxy. Asserts the
+# Provisioned with egress, ingress and hostLoopback all allow (bridged).
+# WSLc cannot enforce a deny on either inbound axis while bridged;
+# exec injects HTTP(S)_PROXY from runtimeConfig.networkProxy without restating
+# the immutable network posture. Asserts the
 # proxy env reaches the container (the full functional proxy round-trip is
 # covered by the one-shot run_wslc_proxy_test.ps1).
 $script:netSandboxId = $null
@@ -719,12 +733,113 @@ Run-StateAwareTest "D: provision (host filtering rejected)" {
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
-Run-StateAwareTest "D: provision (proxy at provision rejected)" {
-    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_proxy.json'
+# NONE can enforce only all-deny; BRIDGED can truthfully advertise only
+# all-allow. No partially restricted posture may silently become bridged.
+foreach ($egress in @('deny', 'allow')) {
+    foreach ($ingress in @('deny', 'allow')) {
+        foreach ($hostLoopback in @('deny', 'allow')) {
+            if ($egress -eq $ingress -and $ingress -eq $hostLoopback) { continue }
+            Run-StateAwareTest "D: provision (mixed posture $egress/$ingress/$hostLoopback rejected)" {
+                $req = @{
+                    phase = 'provision'
+                    containment = 'wslc'
+                    network = @{
+                        egress = @{ default = $egress }
+                        ingress = @{ default = $ingress; hostLoopback = $hostLoopback }
+                    }
+                    experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+                }
+                $r = Invoke-StateAware -Request $req -DryRun
+                Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+                Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            } | Out-Null
+        }
+    }
+}
+
+Run-StateAwareTest "D: provision (bridged with omitted ingress deny defaults rejected)" {
+    $req = @{
+        phase = 'provision'
+        containment = 'wslc'
+        network = @{ egress = @{ default = 'allow' } }
+        experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+    }
+    $r = Invoke-StateAware -Request $req -DryRun
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+} | Out-Null
+
+Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
+    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_proxy.json'
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
+        "error.message identifies the closed runtimeConfig path (got '$msg')"
+} | Out-Null
+
+# No legacy member remains legal on either exact v0.9 network-bearing
+# state-aware root, including empty lists and legacy default-valued fields.
+$legacyNetworkFields = [ordered]@{
+    defaultPolicy = 'block'
+    enforcementMode = 'capabilities'
+    allowedHosts = @()
+    blockedHosts = @()
+    allowLocalNetwork = $false
+    proxy = @{ url = 'http://proxy.example:8080' }
+}
+foreach ($phase in @('provision', 'exec')) {
+    foreach ($field in $legacyNetworkFields.Keys) {
+        Run-StateAwareTest "D: $phase (legacy network.$field rejected structurally)" {
+            $req = @{
+                phase = $phase
+                network = @{ $field = $legacyNetworkFields[$field] }
+            }
+            if ($phase -eq 'provision') {
+                $req.containment = 'wslc'
+                $req.experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+            } else {
+                $req.sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
+                $req.process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
+            }
+            $r = Invoke-StateAware -Request $req -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg.Contains("network.$field") -and $msg.Contains("unknown field ``$field``")) `
+                "error.message identifies the removed network.$field path (got '$msg')"
+        } | Out-Null
+    }
+}
+
+# The exact exec root rejects a directional posture before dispatch, preserving
+# the provision-time network mode across later process invocations.
+Run-StateAwareTest "D: exec (directional network change rejected structurally)" {
+    $req = @{
+        phase = 'exec'
+        sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
+        process = @{ commandLine = 'echo DIRECTIONAL_NETWORK_MUST_NOT_RUN' }
+        network = @{
+            egress = @{ default = 'allow' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+    }
+    $r = Invoke-StateAware -Request $req -DryRun
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+        "error.message identifies immutable exec network policy (got '$msg')"
 } | Out-Null
 
 # The exact start/stop contracts reject these policy sections before backend
@@ -738,22 +853,28 @@ Run-StateAwareTest "D: start (filesystem rejected by exact contract)" {
     Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
 } | Out-Null
 
-Run-StateAwareTest "D: start (network.proxy rejected by exact contract)" {
-    $req = @{ phase = 'start'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
+Run-StateAwareTest "D: start (runtimeConfig rejected by exact contract)" {
+    $req = @{ phase = 'start'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' } }
     $r = Invoke-StateAware -Request $req
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (request rejected structurally)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
+        "error.message identifies the closed runtimeConfig path (got '$msg')"
 } | Out-Null
 
-Run-StateAwareTest "D: stop (network.proxy rejected by exact contract)" {
-    $req = @{ phase = 'stop'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
+Run-StateAwareTest "D: stop (runtimeConfig rejected by exact contract)" {
+    $req = @{ phase = 'stop'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; runtimeConfig = @{ networkProxy = 'http://proxy.example:8080' } }
     $r = Invoke-StateAware -Request $req
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (request rejected structurally)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg -match 'at `runtimeConfig`.*unknown field `runtimeConfig`') `
+        "error.message identifies the closed runtimeConfig path (got '$msg')"
 } | Out-Null
 
 # ---------------- Lifecycle E: restart cycle (stop -> start again) ----------------
