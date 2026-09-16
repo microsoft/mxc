@@ -52,7 +52,7 @@ The npm package no longer ships the standalone executor binaries
 `mxc-release-binaries`.
 
 - **One-shot APIs:** `spawnSandboxAsync`, `spawnSandbox`,
-  `spawnSandboxFromConfig`, `spawnSandboxProcess`
+  `spawnSandboxFromConfig`
 - **State-aware APIs:** `provisionSandbox`, `startSandbox`,
   `execInSandboxProcess`, `execInSandboxAsync`, `stopSandbox`,
   `deprovisionSandbox`
@@ -66,11 +66,10 @@ native request only at the binding boundary.
 The native library is resolved from:
 
 1. `MXC_FFI_DIR`
-2. `MXC_BIN_DIR/<arch>/`
-3. the packaged `bin/<arch>/` directory
-4. local Cargo outputs under `src/target/...` during development
+2. the packaged `bin/<arch>/` directory
+3. local Cargo outputs under `src/target/...` during development
 
-The npm package keeps `mxc_ffi` and the backend runtime dependencies it needs,
+The npm package keeps the native shared library and the backend runtime dependencies it needs,
 such as Windows Sandbox, WSLC, PLM, and NanVix assets when present.
 
 ## Compatibility
@@ -118,15 +117,15 @@ const result = await spawnSandboxAsync(
 console.log(result.stdout);
 ```
 
-### `spawnSandboxProcess`
+### `spawnSandbox`
 
-`spawnSandboxProcess()` keeps the sandbox live and exposes Node streams through
+`spawnSandbox()` keeps the sandbox live and exposes Node streams through
 `MxcSandboxProcess`.
 
 ```typescript
-import { spawnSandboxProcess } from '@microsoft/mxc-sdk';
+import { spawnSandbox } from '@microsoft/mxc-sdk';
 
-const proc = spawnSandboxProcess(
+const proc = spawnSandbox(
   'python -c "print(\'hello\')"',
   { version: '0.8.0-alpha' },
 );
@@ -324,9 +323,9 @@ falling back.
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `mxc_ffi native library was not found...` | The SDK could not resolve `mxc_ffi`. | Stage the packaged `bin/<arch>/` files, set `MXC_FFI_DIR`, or build the native library under `src/target`. |
+| `native library was not found...` | The SDK could not resolve its native shared library. | Stage the packaged `bin/<arch>/` files, set `MXC_FFI_DIR`, or build the native library under `src/target`. |
 | `'<backend>' containment requires experimental mode` | You selected an experimental backend without opt-in. | Pass `{ experimental: true }`. |
-| `...no longer supports legacy option...` | Caller passed an executor-only option to an in-process API. | Remove the option and use `spawnSandboxAsync`, `spawnSandboxProcess`, or the state-aware process APIs directly. |
+| `...no longer supports legacy option...` | Caller passed an executor-only option to an in-process API. | Remove the option and use `spawnSandboxAsync`, `spawnSandbox`, or the state-aware process APIs directly. |
 | `builtinTestServer is not supported by the in-process Node SDK` | The request used the removed testing-only proxy shape. | Use `network.proxy: { localhost: <port> }`, `network.proxy: { url: ... }`, or `runtimeConfig.networkProxy` as appropriate. |
 
 For backend-specific behavior, see the backend guides under
@@ -341,7 +340,6 @@ buildSandboxPayload(script, policy, workingDirectory?, containerName?, containme
 spawnSandboxAsync(script, policy, options?, workingDirectory?, containerName?) => Promise<{ stdout, stderr, exitCode }>
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, environment?) => MxcSandboxProcess
 spawnSandboxFromConfig(config, options?, workingDirectory?, environment?) => MxcSandboxProcess
-spawnSandboxProcess(script, policy, options?, workingDirectory?, containerName?) => MxcSandboxProcess
 
 provisionSandbox(containment, config, options?) => Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?) => Promise<StartResult>
