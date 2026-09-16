@@ -928,6 +928,7 @@ export function spawnSandboxAsync(
 
     const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
     const request = prepareRequestSpec(config, {
+      inheritDefaultEnv: options.inheritDefaultEnv,
       experimental: options.experimental,
     });
     const result = await runBindingRequestAsync(request);

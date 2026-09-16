@@ -42,7 +42,7 @@ describe('in-process async run routing', () => {
     const result = await spawnSandboxAsync(
       'echo hello',
       { version: '0.9.0-alpha' },
-      { experimental: true },
+      { experimental: true, inheritDefaultEnv: true },
       'C:\\work',
       'sample',
     );
@@ -53,6 +53,7 @@ describe('in-process async run routing', () => {
     assert.strictEqual(bindingRequest?.containerName, 'sample');
     assert.strictEqual(bindingRequest?.workingDirectory, 'C:\\work');
     assert.deepStrictEqual(bindingRequest?.environment, {});
+    assert.strictEqual(bindingRequest?.inheritDefaultEnv, true);
     assert.strictEqual(bindingRequest?.experimental, true);
   });
 
