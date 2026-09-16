@@ -787,18 +787,26 @@ describe('createConfigFromPolicy', () => {
   });
 
   it('should pass enumerate-only filesystem paths through for 0.9', () => {
-    const config = createConfigFromPolicy({
-      version: '0.9.0-alpha',
-      processContainer: {
-        filesystem: {
-          enumeratePaths: ['C:\\tools'],
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const config = createConfigFromPolicy({
+        version: '0.9.0-alpha',
+        processContainer: {
+          filesystem: {
+            enumeratePaths: ['C:\\tools'],
+          },
         },
-      },
-    });
-    assert.deepStrictEqual(
-      config.processContainer!.filesystem!.enumeratePaths,
-      ['C:\\tools'],
-    );
+      });
+      assert.deepStrictEqual(
+        config.processContainer!.filesystem!.enumeratePaths,
+        ['C:\\tools'],
+      );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    }
   });
 
   it('should map UI fields correctly', () => {
