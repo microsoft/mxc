@@ -123,7 +123,7 @@ ipcMain.handle('run-sandbox', (_event, scriptText: string, policyJson: string, _
 
   try {
     const policy = JSON.parse(policyJson);
-    const sandboxProcess = sdk.spawnSandboxProcess(scriptText, policy, { experimental });
+    const sandboxProcess = sdk.spawnSandbox(scriptText, policy, { experimental });
     attachProcessListeners(sandboxProcess);
     return { success: true };
   } catch (err: any) {
@@ -140,7 +140,7 @@ ipcMain.handle('run-sandbox-advanced', (_event, scriptText: string, policyJson: 
     const policy = JSON.parse(policyJson);
     const config = sdk.createConfigFromPolicy(policy);
     config.process!.commandLine = scriptText;
-    const sandboxProcess = sdk.spawnSandboxProcess(scriptText, policy, { experimental });
+    const sandboxProcess = sdk.spawnSandboxFromConfig(config, { experimental });
     attachProcessListeners(sandboxProcess);
     return { success: true, config: JSON.stringify(config, null, 2) };
   } catch (err: any) {
