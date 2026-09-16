@@ -13,14 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Removed APIs:
   - `execInSandbox`
 - The Node-only `IPty` contract and `node-pty` dependency are removed. Use
-  `spawnSandbox`, `spawnSandboxFromConfig`, `spawnSandboxProcess`, or
-  `execInSandboxProcess` for separate stdin, stdout, and stderr pipes.
+  `spawnSandbox`, `spawnSandboxFromConfig`, or `execInSandboxProcess` for
+  separate stdin, stdout, and stderr pipes.
   `spawnSandbox` and `spawnSandboxFromConfig` now return `MxcSandboxProcess`.
   Terminal resize and terminal-mode behavior are no longer available.
 - Removed executor-only options from the public Node execution surfaces:
   `debug`, `logDir`, `executablePath`, `ptyOptions`, `usePty`,
   `allowTestingFeatures`, `skipPlatformCheck`, and one-shot/state-aware
-  `dryRun`. Use `spawnSandboxAsync`, `spawnSandboxProcess`,
+  `dryRun`. Use `spawnSandboxAsync`, `spawnSandbox`,
   `execInSandboxAsync`, or `execInSandboxProcess` directly.
 - Existing `ContainerConfig` workflows remain supported:
   `spawnSandboxFromConfig` converts the public config into the private native
@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface. Use `network.proxy.localhost`, `network.proxy.url`, or
   `runtimeConfig.networkProxy`.
 - The npm package no longer ships `wxc-exec.exe`, `lxc-exec`,
-  `mxc-exec-mac`, or `unix-test-proxy`. It packages `mxc_ffi` and required
-  backend runtime dependencies instead. The standalone executors remain in
-  `mxc-release-binaries`.
+  `mxc-exec-mac`, or `unix-test-proxy`. It packages the native shared library
+  and required backend runtime dependencies instead. The standalone executors
+  remain in `mxc-release-binaries`.
 
 ## [0.7.0]
 
