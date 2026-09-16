@@ -92,14 +92,30 @@ function hasExplicitProcessContainerSettings(
     || hasCustomCapabilities;
 }
 
+function resolveContainmentName(
+  config: ContainerConfig,
+  processContainer = config.processContainer ?? config.appContainer,
+): string {
+  let rawContainment = config.containment;
+  if (rawContainment === undefined) {
+    rawContainment = 'process';
+    if (processContainer !== undefined) {
+      rawContainment = 'processcontainer';
+    }
+  }
+  return LegacyContainmentAliases[rawContainment] ?? rawContainment;
+}
+
+function hasCustomSeatbeltSettings(config: ContainerConfig): boolean {
+  return config.seatbelt !== undefined
+    && Object.keys(config.seatbelt).length > 0;
+}
+
 export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
     return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
   }
-  const rawContainment = config.containment ?? (config.processContainer || config.appContainer
-    ? 'processcontainer'
-    : 'process');
-  const containment = LegacyContainmentAliases[rawContainment] ?? rawContainment;
+  const containment = resolveContainmentName(config);
   if (
     containment !== 'process'
     && containment !== 'processcontainer'
@@ -122,10 +138,114 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   ) {
     return "ProcessContainer-specific settings require containment 'processcontainer'";
   }
-  if (config.seatbelt !== undefined && Object.keys(config.seatbelt).length > 0) {
-    return 'custom seatbelt settings are not supported by the in-process Node SDK';
+  // The native RequestSpec has no Seatbelt payload and rejects unknown fields.
+  // Refuse custom settings here rather than silently running a weaker policy.
+  if (hasCustomSeatbeltSettings(config)) {
+    return 'custom seatbelt settings cannot be represented by the native request contract';
   }
   return null;
+}
+
+function projectNetwork(config: ContainerConfig): RequestPolicy['network'] {
+  if (config.network === undefined && config.runtimeConfig === undefined) {
+    return undefined;
+  }
+
+  let allowOutbound: boolean | undefined;
+  if (config.network?.defaultPolicy !== undefined) {
+    allowOutbound = config.network.defaultPolicy === 'allow';
+  }
+
+  return {
+    allowOutbound,
+    allowLocalNetwork: config.network?.allowLocalNetwork,
+    allowedHosts: config.network?.allowedHosts,
+    blockedHosts: config.network?.blockedHosts,
+    proxy: config.network?.proxy,
+    egress: config.network?.egress,
+    ingress: config.network?.ingress,
+    runtimeConfig: config.runtimeConfig,
+  };
+}
+
+function resolveClearPolicyOnExit(config: ContainerConfig): boolean | undefined {
+  if (config.filesystem?.clearPolicyOnExit !== undefined) {
+    return config.filesystem.clearPolicyOnExit;
+  }
+  if (config.network?.removeRulesOnExit !== undefined) {
+    return config.network.removeRulesOnExit;
+  }
+  if (config.lifecycle?.preservePolicy !== undefined) {
+    return !config.lifecycle.preservePolicy;
+  }
+  return undefined;
+}
+
+function projectFilesystem(config: ContainerConfig): RequestPolicy['filesystem'] {
+  const clearPolicyOnExit = resolveClearPolicyOnExit(config);
+  if (config.filesystem === undefined && clearPolicyOnExit === undefined) {
+    return undefined;
+  }
+  return {
+    ...(config.filesystem ?? {}),
+    clearPolicyOnExit,
+  };
+}
+
+function projectUi(config: ContainerConfig): RequestPolicy['ui'] {
+  if (config.ui === undefined) {
+    return undefined;
+  }
+  return {
+    allowWindows: config.ui.disable === false,
+    clipboard: config.ui.clipboard,
+    allowInputInjection: config.ui.injection,
+  };
+}
+
+function parseEnvironmentEntry(entry: string): [string, string] {
+  const separator = entry.indexOf('=');
+  if (separator === -1) {
+    return [entry, ''];
+  }
+  return [entry.slice(0, separator), entry.slice(separator + 1)];
+}
+
+function projectEnvironment(
+  config: ContainerConfig,
+  options: RequestSpecOptions,
+): Record<string, string> {
+  const configEntries = (config.process?.env ?? []).map(parseEnvironmentEntry);
+  const optionEntries = Object.entries(options.environment ?? {})
+    .filter((entry): entry is [string, string] => entry[1] !== undefined);
+  return Object.fromEntries([...configEntries, ...optionEntries]);
+}
+
+function projectContainment(
+  config: ContainerConfig,
+  processContainer: ProcessContainerConfig | undefined,
+): RequestContainment {
+  const containmentName = resolveContainmentName(config, processContainer);
+  if (containmentName === 'wslc') {
+    const {
+      targetOs: _targetOs,
+      portMappings,
+      ...wslc
+    } = config.experimental?.wslc ?? {};
+    return {
+      type: 'wslc',
+      ...wslc,
+      portMappings: portMappings?.map(({ windowsPort, containerPort }) => ({
+        windowsPort,
+        containerPort,
+      })),
+    };
+  }
+  if (containmentName === 'processcontainer') {
+    const { name: _legacyName, ...settings } = processContainer ?? {};
+    return { type: 'processContainer', ...settings };
+  }
+  return { type: 'process' };
 }
 
 /**
@@ -148,92 +268,24 @@ export function prepareRequestSpec(
     );
   }
 
-  const network = config.network === undefined && config.runtimeConfig === undefined
-    ? undefined
-    : {
-        allowOutbound: config.network?.defaultPolicy === undefined
-          ? undefined
-          : config.network.defaultPolicy === 'allow',
-        allowLocalNetwork: config.network?.allowLocalNetwork,
-        allowedHosts: config.network?.allowedHosts,
-        blockedHosts: config.network?.blockedHosts,
-        proxy: config.network?.proxy,
-        egress: config.network?.egress,
-        ingress: config.network?.ingress,
-        runtimeConfig: config.runtimeConfig,
-      };
-  const clearPolicyOnExit = config.filesystem?.clearPolicyOnExit
-    ?? config.network?.removeRulesOnExit
-    ?? (config.lifecycle?.preservePolicy === undefined
-      ? undefined
-      : !config.lifecycle.preservePolicy);
-  const filesystem = config.filesystem === undefined && clearPolicyOnExit === undefined
-    ? undefined
-    : {
-        ...(config.filesystem ?? {}),
-        clearPolicyOnExit,
-      };
   const policy: RequestPolicy = {
     version: config.version,
-    filesystem,
-    network,
-    ui: config.ui === undefined
-      ? undefined
-      : {
-          allowWindows: config.ui.disable === false,
-          clipboard: config.ui.clipboard,
-          allowInputInjection: config.ui.injection,
-        },
+    filesystem: projectFilesystem(config),
+    network: projectNetwork(config),
+    ui: projectUi(config),
     timeoutMs: config.process.timeout,
     telemetry: config.telemetry,
   };
-  const environment = Object.fromEntries(
-    [
-      ...(config.process.env ?? []).map((entry): [string, string] => {
-        const separator = entry.indexOf('=');
-        return separator === -1
-          ? [entry, '']
-          : [entry.slice(0, separator), entry.slice(separator + 1)];
-      }),
-      ...Object.entries(options.environment ?? {})
-        .filter((entry): entry is [string, string] => entry[1] !== undefined),
-    ],
-  );
 
   const processContainer = config.processContainer ?? config.appContainer;
-  const rawContainment = config.containment ?? (processContainer === undefined
-    ? 'process'
-    : 'processcontainer');
-  const containmentName = LegacyContainmentAliases[rawContainment] ?? rawContainment;
-  let containment: RequestContainment;
-  if (containmentName === 'wslc') {
-    const {
-      targetOs: _targetOs,
-      portMappings,
-      ...wslc
-    } = config.experimental?.wslc ?? {};
-    containment = {
-      type: 'wslc',
-      ...wslc,
-      portMappings: portMappings?.map(({ windowsPort, containerPort }) => ({
-        windowsPort,
-        containerPort,
-      })),
-    };
-  } else if (containmentName === 'processcontainer') {
-    const { name: _legacyName, ...processContainerContainment } = processContainer ?? {};
-    containment = { type: 'processContainer', ...processContainerContainment };
-  } else {
-    containment = { type: 'process' };
-  }
 
   return {
     policy,
     command: config.process.commandLine,
-    containment,
+    containment: projectContainment(config, processContainer),
     containerName: config.containerId,
     workingDirectory: options.workingDirectory ?? config.process.cwd,
-    environment,
+    environment: projectEnvironment(config, options),
     experimental: options.experimental ?? false,
   };
 }
