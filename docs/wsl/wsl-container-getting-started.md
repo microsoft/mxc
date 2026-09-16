@@ -355,17 +355,23 @@ inherits its provisioned network posture.
 
 ### Per-host filtering is not supported
 
-WSLC **cannot** enforce per-host egress filtering. Directional allow/deny rules
-would require in-container `iptables`
+WSLC **cannot** enforce per-host egress filtering. Directional allow/deny rules —
+and, on the published contracts, any allowlist (`allowedHosts` with
+`defaultPolicy: "block"`) or blocklist (`blockedHosts` with
+`defaultPolicy: "allow"`) — would require in-container `iptables`
 rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
 `Privileged` flag does not grant it), so those rules cannot be applied — and MXC
 has no VM-level enforcement hook either (WSLC cannot expose one without breaking
-other security promises such as MDE). Rather than fail the run at exec time,
-such configs are **rejected at config-parse time**:
+other security promises such as Microsoft Defender for Endpoint). Because the
+lists cannot be honoured, **any** non-empty `allowedHosts` or `blockedHosts` is
+rejected — including a list that is redundant with the default (`blockedHosts`
+under `block`, `allowedHosts` under `allow`), which would otherwise be silently
+ignored. Rather than fail the run at exec time, such configs are **rejected up
+front** (a config-parse error for one-shot runs; a `policy_validation` error for
+the state-aware lifecycle):
 
 ```
-WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
-blockedHosts with defaultPolicy='allow') is not supported. ...
+WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not supported. ...
 ```
 
 Use a runtime proxy with unrestricted bridged networking for cooperative host

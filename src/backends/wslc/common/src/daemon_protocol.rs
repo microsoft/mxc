@@ -37,13 +37,13 @@ pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
 /// install. Bump only for incompatible changes to framing or message shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Per-phase config structs (daemon-internal; NOT the public wire schema)
 // ---------------------------------------------------------------------------
 
-/// One host→container directory mount, mirroring the one-shot runner's volume
+/// One host -> container directory mount, mirroring the one-shot runner's volume
 /// handling. Paths are host-absolute; `container` is the in-container mount
 /// point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +51,15 @@ pub struct VolumeMount {
     pub host: String,
     pub container: String,
     pub read_only: bool,
+}
+
+/// One host -> container port forward, mirroring the one-shot runner's port
+/// handling. Only TCP is supported (the wire model rejects `udp`), so no
+/// protocol field is carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortMapping {
+    pub windows_port: u16,
+    pub container_port: u16,
 }
 
 /// Container network mode. Mirrors exactly what the one-shot WSLc runner
@@ -84,6 +93,9 @@ pub struct ProvisionConfig {
     /// Container network mode.
     #[serde(default)]
     pub network: NetworkMode,
+    /// Host↔container port forwards (TCP).
+    #[serde(default)]
+    pub port_mappings: Vec<PortMapping>,
 }
 
 /// Inputs to `start`: the container was created at provision; start boots it.
@@ -330,6 +342,10 @@ mod tests {
                 read_only: true,
             }],
             network: NetworkMode::Bridged,
+            port_mappings: vec![PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+            }],
         }));
     }
 

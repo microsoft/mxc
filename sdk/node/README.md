@@ -407,8 +407,11 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Inject a cooperative proxy during exec with
-`runtimeConfig.networkProxy`:
+`imageTarPath` / `portMappings`. `portMappings` wires host → container TCP
+forwards (`{ windowsPort, containerPort, protocol: 'tcp' }`), applied at
+provision and fixed for the life of the sandbox; `protocol` defaults to `'tcp'`
+and `'udp'` is rejected, and `windowsPort` must be unique and non-zero. Inject a
+cooperative proxy during exec with `runtimeConfig.networkProxy`:
 
 ```typescript
 await execInSandboxAsync(provisioned.sandboxId, {
@@ -417,8 +420,9 @@ await execInSandboxAsync(provisioned.sandboxId, {
 });
 ```
 
-All state-aware requests default to the exact development schema
-`0.9.0-alpha`. See
+Per-host egress filtering (`allowedHosts` / `blockedHosts`) is not supported on
+WSLc and is rejected rather than ignored. All state-aware requests default to
+the exact development schema `0.9.0-alpha`. See
 [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
 for the per-phase config matrix.
 

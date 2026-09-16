@@ -24,13 +24,15 @@ use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
-use wxc_common::validator::validate_state_aware_network_policy_support;
+use wxc_common::validator::{
+    validate_state_aware_network_policy_support, validate_wslc_port_mappings,
+};
 
 use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
 use crate::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
-    VolumeMount,
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, PortMapping, ProvisionConfig, StartConfig,
+    StopConfig, VolumeMount,
 };
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
@@ -230,12 +232,15 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     fn validate_provision(
         &self,
         request: &ExecutionRequest,
-        _config: Option<&WslcProvisionConfig>,
+        config: Option<&WslcProvisionConfig>,
     ) -> Result<(), MxcError> {
         validate_state_aware_network_policy_support(
             request,
             crate::policy::network_policy_support(),
         )?;
+        // `--dry-run` stops here, so it must reject the same port mappings
+        // `provision` does.
+        map_provision_port_mappings(config)?;
         validate_provision_policy(request)
     }
 
@@ -356,6 +361,7 @@ fn build_provision_config(
         .as_ref()
         .and_then(|c| c.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let port_mappings = map_provision_port_mappings(config.as_ref())?;
     let image_tar_path = config.and_then(|c| c.image_tar_path);
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -384,7 +390,27 @@ fn build_provision_config(
         image_tar_path,
         volumes,
         network,
+        port_mappings,
     })
+}
+
+/// Map and validate the provision phase's port mappings (wire → daemon).
+fn map_provision_port_mappings(
+    config: Option<&WslcProvisionConfig>,
+) -> Result<Vec<PortMapping>, MxcError> {
+    let Some(mappings) = config.and_then(|c| c.port_mappings.as_ref()) else {
+        return Ok(Vec::new());
+    };
+    let validated =
+        validate_wslc_port_mappings(mappings, "experimental.wslc.provision.portMappings")
+            .map_err(MxcError::policy_validation)?;
+    Ok(validated
+        .into_iter()
+        .map(|pm| PortMapping {
+            windows_port: pm.windows_port,
+            container_port: pm.container_port,
+        })
+        .collect())
 }
 
 /// State-aware adapter over the shared WSLc provision policy gate
@@ -455,6 +481,7 @@ mod tests {
     use wxc_common::models::{
         ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
     };
+    use wxc_common::wire::{PortMapping as WirePortMapping, TransportProtocol};
 
     /// A `Piped` exec is refused before the backend touches the daemon.
     ///
@@ -734,6 +761,7 @@ mod tests {
         let phase = WslcProvisionConfig {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+            port_mappings: None,
         };
         let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
         assert_eq!(cfg.image, "custom/image:tag");
@@ -741,6 +769,153 @@ mod tests {
             cfg.image_tar_path.as_deref(),
             Some("C:\\images\\custom.tar")
         );
+        assert!(cfg.port_mappings.is_empty());
+    }
+
+    #[test]
+    fn build_provision_config_forwards_port_mappings() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                    protocol: Some(TransportProtocol::Tcp),
+                },
+            ]),
+        };
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        assert_eq!(cfg.port_mappings.len(), 2);
+        assert_eq!(cfg.port_mappings[0].windows_port, 8080);
+        assert_eq!(cfg.port_mappings[0].container_port, 80);
+        assert_eq!(cfg.port_mappings[1].windows_port, 8443);
+        assert_eq!(cfg.port_mappings[1].container_port, 443);
+    }
+
+    #[test]
+    fn build_provision_config_rejects_duplicate_windows_port() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 8080,
+                    protocol: None,
+                },
+            ]),
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("duplicate windowsPort"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn build_provision_config_rejects_zero_port() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 0,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("windowsPort"), "got: {}", err.message);
+    }
+
+    /// `--dry-run` stops after `validate_provision`, so the port checks must
+    /// fire there too — not only inside `provision`.
+    #[test]
+    fn validate_provision_rejects_duplicate_windows_port() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 8080,
+                    protocol: None,
+                },
+            ]),
+        };
+        let err = WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("duplicate windowsPort"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validate_provision_rejects_zero_port() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 0,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        let err = WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("windowsPort"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn validate_provision_accepts_valid_port_mappings() {
+        let phase = WslcProvisionConfig {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap();
     }
 
     #[test]
@@ -749,6 +924,7 @@ mod tests {
             let cfg = build_provision_config(&ExecutionRequest::default(), phase).unwrap();
             assert_eq!(cfg.image, "alpine:latest");
             assert!(cfg.image_tar_path.is_none());
+            assert!(cfg.port_mappings.is_empty());
         }
     }
 
@@ -759,6 +935,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 "custom/image:tag",
                 None,
@@ -767,6 +944,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: None,
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    port_mappings: None,
                 },
                 "alpine:latest",
                 Some("C:\\images\\custom.tar"),
@@ -775,6 +953,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some(String::new()),
                     image_tar_path: Some(String::new()),
+                    port_mappings: None,
                 },
                 "",
                 Some(""),

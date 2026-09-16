@@ -3,7 +3,7 @@
 
 use crate::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
+    convert_telemetry, convert_version, convert_wslc_port_mapping,
 };
 use crate::error::WxcError;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
@@ -75,10 +75,17 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
     let contract::WslcProvision {
         image,
         image_tar_path,
+        port_mappings,
     } = value;
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        port_mappings: port_mappings.into_option().map(|mappings| {
+            mappings
+                .into_iter()
+                .map(convert_wslc_port_mapping)
+                .collect()
+        }),
     }
 }
 
@@ -149,7 +156,7 @@ pub(super) fn provision_into_input(
         contract::ProvisionRequest::WindowsSandbox(request) => {
             windows_sandbox_provision_into_input(request)
         }
-        contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
+        contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(*request),
     }
 }
 

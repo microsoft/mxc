@@ -137,6 +137,14 @@ The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
 published contracts is not a v0.9 compatibility fallback. The new v0.9
 directional requirements do not change those published contracts.
 
+## Port forwarding
+
+`experimental.wslc.provision.portMappings` forwards host (Windows) ports to the container, mirroring
+the one-shot `experimental.wslc.portMappings` surface. Each entry is `{ windowsPort, containerPort }`
+(both 1–65535; `protocol` defaults to and only accepts `tcp` — `udp` is rejected because the WSLC
+SDK runtime returns `E_NOTIMPL`). Port mappings are per-container, applied at `WslcCreateContainer`
+during `provision`, and frozen for the sandbox's lifetime. A duplicate `windowsPort` is rejected with
+`policy_validation`. Post-provision phases carry no port config.
 ## Error mapping
 
 Exact-contract `malformed_request` failures occur before daemon connection and
@@ -195,6 +203,20 @@ and does the `{{SANDBOX_ID}}` substitution from each provision's output), which 
 should be exercised **through the harness**, not by pointing `wxc-exec --config` at them directly.
 
 ## Known limitations
+
+- **No per-sandbox session sizing.** `cpuCount`, `memoryMb`, `gpu`, and `storagePath` are absent from
+  the provision contract and rejected as unknown fields. They configure the WSLc *session*, and the
+  daemon shares one session across every sandbox, so no phase caller can set them per sandbox. MXC
+  calls none of the optional `WslcSetSessionSettings*` entry points on this path, so every sandbox
+  runs on the SDK session defaults: **2 CPUs, 2000 MB**, a 300,000 ms boot timeout, and a ~1 GB VHD.
+  The one-shot surface still honors all four, since each run owns its session.
+
+- **The image store is pinned** to `%TEMP%\mxc-wslc-sessions`. Pre-pull images there: a one-shot
+  config can point `experimental.wslc.storagePath` at another location and match it with
+  `setup-wslc.ps1 -StoragePath`, but state-aware has no such field, and images cached elsewhere are
+  not found. A store also admits only one live session, so while a sandbox is provisioned a one-shot
+  run on the same store fails with `ERROR_SHARING_VIOLATION` until the daemon idles out; give the
+  one-shot run its own `storagePath` to run the two concurrently.
 
 - **Serialized exec (deferred).** Because the daemon's single worker thread blocks on
   `WaitForSingleObject` for the whole `exec`, no other sandbox can provision or exec while one

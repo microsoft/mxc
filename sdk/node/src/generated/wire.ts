@@ -327,7 +327,7 @@ export interface NetworkRule {
 export type Phase = "provision" | "start" | "exec" | "stop" | "deprovision";
 
 /**
- * A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
+ * A single host -> container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
  */
 export interface PortMapping {
   /**
@@ -566,7 +566,7 @@ export interface Wslc {
    */
   memoryMb?: number | null;
   /**
-   * Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.
+   * Host -> container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.
    */
   portMappings?: PortMapping[] | null;
   /**
@@ -585,9 +585,9 @@ export interface Wslc {
 }
 
 /**
- * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries what the amortized daemon session honors: the container image (or a local tarball to import) and the host -> container port forwards.
  *
- * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
+ * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot fields `cpuCount` / `memoryMb` / `gpu` / `storagePath` are deliberately absent: they are properties of the WSLC session, and the daemon shares one session across every sandbox, so no phase caller can set them per sandbox. `portMappings`, by contrast, is per-container, so it is honored here, matching the one-shot surface. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
  */
 export interface WslcProvisionPhase {
   /**
@@ -598,6 +598,10 @@ export interface WslcProvisionPhase {
    * Path to a local image tarball to import instead of pulling.
    */
   imageTarPath?: string | null;
+  /**
+   * Host -> container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings. Mirrors the one-shot `Wslc::port_mappings`.
+   */
+  portMappings?: PortMapping[] | null;
   [k: string]: unknown;
 }
 
