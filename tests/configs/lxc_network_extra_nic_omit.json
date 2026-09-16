@@ -1,0 +1,15 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Extra-Nic",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"ls /sys/class/net | sed 's/^/IFACE=/'\""
+  },
+  "lifecycle": {
+    "destroyOnExit": false
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}

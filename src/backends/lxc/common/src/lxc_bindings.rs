@@ -162,11 +162,21 @@ pub enum StartNetwork {
 }
 
 impl StartNetwork {
-    fn to_start_args(self) -> &'static [&'static str] {
+    fn to_start_args(self, configured_interfaces: usize) -> Vec<String> {
         match self {
-            StartNetwork::FromContainerConfig => &[],
+            StartNetwork::FromContainerConfig => Vec::new(),
             StartNetwork::NoInterface => {
-                &["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"]
+                // Index 0 is emitted even for a container that configures no
+                // interface at all: without an `lxc.net` entry LXC leaves the
+                // container in the host's network namespace.
+                let mut args = Vec::new();
+                for index in 0..configured_interfaces.max(1) {
+                    args.push("-s".to_string());
+                    args.push(format!("lxc.net.{index}.type=empty"));
+                    args.push("-s".to_string());
+                    args.push(format!("lxc.net.{index}.flags=up"));
+                }
+                args
             }
         }
     }
@@ -325,8 +335,27 @@ impl LxcContainer {
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
-        cmd.args(network.to_start_args());
+        cmd.args(network.to_start_args(self.configured_interface_count()));
         Self::run_tool(cmd)
+    }
+
+    /// How many `lxc.net.N` interfaces the container's config declares.
+    fn configured_interface_count(&self) -> usize {
+        let Ok(config) = std::fs::read_to_string(self.config_file_path()) else {
+            return 0;
+        };
+        Self::highest_interface_index(&config).map_or(0, |index| index + 1)
+    }
+
+    fn highest_interface_index(config: &str) -> Option<usize> {
+        config
+            .lines()
+            .filter_map(|line| {
+                let key = line.split('=').next()?.trim();
+                let index = key.strip_prefix("lxc.net.")?.split('.').next()?;
+                index.parse::<usize>().ok()
+            })
+            .max()
     }
 
     pub fn exec(
@@ -487,7 +516,7 @@ mod tests {
     #[test]
     fn a_run_with_no_interface_states_that_to_lxc_start() {
         assert_eq!(
-            StartNetwork::NoInterface.to_start_args(),
+            StartNetwork::NoInterface.to_start_args(1),
             ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
             "lxc-start reads each config item from the -s that precedes it, \
              and loopback stays up for a workload that binds 127.0.0.1"
@@ -495,9 +524,63 @@ mod tests {
     }
 
     #[test]
+    fn every_configured_interface_is_emptied_not_just_the_first() {
+        assert_eq!(
+            StartNetwork::NoInterface.to_start_args(3),
+            [
+                "-s",
+                "lxc.net.0.type=empty",
+                "-s",
+                "lxc.net.0.flags=up",
+                "-s",
+                "lxc.net.1.type=empty",
+                "-s",
+                "lxc.net.1.flags=up",
+                "-s",
+                "lxc.net.2.type=empty",
+                "-s",
+                "lxc.net.2.flags=up",
+            ],
+            "an interface nobody names keeps its link, and a policy that permits \
+             no network installs no chain to filter it"
+        );
+    }
+
+    #[test]
+    fn a_container_configuring_no_interface_still_gets_one_emptied() {
+        assert_eq!(
+            StartNetwork::NoInterface.to_start_args(0),
+            ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
+            "LXC leaves a container with no lxc.net entry in the host's network namespace"
+        );
+    }
+
+    #[test]
+    fn the_interface_count_comes_from_the_highest_index_the_config_names() {
+        for (config, expected) in [
+            ("", None),
+            ("lxc.net.0.type = veth\n", Some(0)),
+            ("lxc.net.0.type = veth\nlxc.net.1.type = veth\n", Some(1)),
+            ("lxc.net.4.type = veth\nlxc.net.1.type = veth\n", Some(4)),
+            ("  lxc.net.2.link = lxcbr0\n", Some(2)),
+            // Keys that only look like an interface entry.
+            ("lxc.network.0.type = veth\n", None),
+            ("lxc.net.x.type = veth\n", None),
+        ] {
+            assert_eq!(
+                LxcContainer::highest_interface_index(config),
+                expected,
+                "config {config:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_run_that_keeps_the_container_config_states_nothing() {
         assert!(
-            StartNetwork::FromContainerConfig.to_start_args().is_empty(),
+            StartNetwork::FromContainerConfig
+                .to_start_args(2)
+                .is_empty(),
             "the container's own config must be left to decide its interfaces"
         );
     }
