@@ -51,6 +51,7 @@ export function getSdkBinDir(): string {
 // Expected package binaries
 
 export const EXPECTED_WINDOWS_BINARIES = [
+  'mxc_ffi.dll',
   'wxc-exec.exe',
   'plm.exe',
   'wxc-host-prep.exe',
@@ -62,11 +63,13 @@ export const EXPECTED_WINDOWS_BINARIES = [
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
+  'libmxc_ffi.so',
   'lxc-exec',
   'unix-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
+  'libmxc_ffi.dylib',
   'mxc-exec-mac',
   'unix-test-proxy',
 ];

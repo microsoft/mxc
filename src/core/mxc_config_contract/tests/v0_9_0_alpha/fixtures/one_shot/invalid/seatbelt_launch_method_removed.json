@@ -2,9 +2,9 @@
   "version": "0.9.0-alpha",
   "containment": "seatbelt",
   "process": {
-    "commandLine": "echo invalid launch"
+    "commandLine": "echo removed launch method"
   },
   "seatbelt": {
-    "launchMethod": "invalid"
+    "launchMethod": "open"
   }
 }

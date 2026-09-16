@@ -210,7 +210,6 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         contract::OptionalField::present(contract::Seatbelt {
             profile_override: Default::default(),
             gui_access: Default::default(),
-            launch_method: Default::default(),
             nested_pty: Default::default(),
             keychain_access: Default::default(),
             extra_mach_lookups: Default::default(),

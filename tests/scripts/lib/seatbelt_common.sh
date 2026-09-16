@@ -43,10 +43,25 @@ fi
 if [ -n "${MXC_EXEC_MAC:-}" ]; then
     [ -f "$MXC_EXEC_MAC" ] || fail "MXC_EXEC_MAC is set to '$MXC_EXEC_MAC', which does not exist"
 else
-    MXC_EXEC_MAC="$REPO_DIR/src/target/release/mxc-exec-mac"
-    [ -f "$MXC_EXEC_MAC" ] || MXC_EXEC_MAC="$REPO_DIR/src/target/debug/mxc-exec-mac"
-    [ -f "$MXC_EXEC_MAC" ] || fail "mxc-exec-mac not found. Run ./build-mac.sh first."
+    MXC_EXEC_CANDIDATES=(
+        "$REPO_DIR/src/target/aarch64-apple-darwin/release/mxc-exec-mac"
+        "$REPO_DIR/src/target/release/mxc-exec-mac"
+        "$REPO_DIR/src/target/aarch64-apple-darwin/debug/mxc-exec-mac"
+        "$REPO_DIR/src/target/debug/mxc-exec-mac"
+    )
+
+    MXC_EXEC_MAC=""
+    for _candidate in "${MXC_EXEC_CANDIDATES[@]}"; do
+        if [ -f "$_candidate" ]; then
+            MXC_EXEC_MAC="$_candidate"
+            break
+        fi
+    done
+    [ -n "$MXC_EXEC_MAC" ] || fail "mxc-exec-mac not found. Run ./build-mac.sh first, or set
+      MXC_EXEC_MAC to a built binary. Searched:$(printf '\n        %s' "${MXC_EXEC_CANDIDATES[@]}")"
 fi
+
+echo "Using mxc-exec-mac: $MXC_EXEC_MAC"
 
 SEATBELT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/mxc-seatbelt.XXXXXX")"
 trap 'rm -rf "$SEATBELT_TMP"' EXIT

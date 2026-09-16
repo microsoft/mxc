@@ -244,10 +244,9 @@ pub use request::{parse_request, validate_one_shot_request, Request, RequestPars
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;
 pub use stable::{
-    CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
-    Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
-    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Telemetry, Ui,
-    UiClipboard,
+    CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, Lifecycle, Lxc, Process,
+    ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork, ProcessContainerUi,
+    ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Telemetry, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};
