@@ -105,6 +105,15 @@ jobs:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION bash tests/scripts/run_lxc_all_tests.sh
 
+      # The shell suite above does not cover the capability confinement, and the
+      # Linux build lane runs this crate without LXC installed, so these tests
+      # skip everywhere else.
+      - name: Run LXC Rust E2E tests
+        working-directory: src
+        env:
+          MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
+        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p wxc_e2e_tests --test e2e_lxc_network_capability
+
       - name: Show leftover firewall state on failure
         if: failure()
         run: |

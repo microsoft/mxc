@@ -197,13 +197,19 @@ pub fn has_lxc_exe() -> bool {
 ///
 /// [`has_lxc_exe`] is not enough: the Linux build lane builds the binary and
 /// never installs LXC.
+///
+/// A lane provisioned to run these tests reports a skip as success, so the gate
+/// would go green having tested nothing. `MXC_LXC_TESTS_REQUIRE_EXECUTION` is
+/// the same switch the shell suite reads.
 pub fn has_lxc_host() -> bool {
     match Command::new("lxc-start").arg("--version").output() {
         Ok(output) if output.status.success() => true,
         _ => {
-            println!(
-                "SKIPPED: lxc-start not installed — this host cannot start a system container"
-            );
+            let reason = "lxc-start not installed — this host cannot start a system container";
+            if std::env::var("MXC_LXC_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+                panic!("strict mode: {reason}");
+            }
+            println!("SKIPPED: {reason}");
             false
         }
     }
