@@ -25,7 +25,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
       tempDir = '';
     }
   });
-  it('runs the default process surface under bubblewrap', async () => {
+
   it('runs the default process surface under bubblewrap', async () => {
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
