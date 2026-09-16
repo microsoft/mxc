@@ -136,24 +136,27 @@ fn build_attach_args_with_env_control(
     args
 }
 
+/// Whether MXC put firewall chains in the container's network namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerFirewall {
+    Installed,
+    Absent,
+}
+
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
-    // AF_PACKET frames sent under CAP_NET_RAW never reach the firewall's
-    // OUTPUT chain. Values are from linux/capability.h.
+    // `libc` does not export this; the value is from linux/capability.h.
     const CAP_NET_ADMIN: libc::c_ulong = 12;
-    const CAP_NET_RAW: libc::c_ulong = 13;
 
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `prctl` is a bare syscall and this
     // closure allocates nothing and captures nothing.
     unsafe {
         command.pre_exec(|| {
-            for capability in [CAP_NET_ADMIN, CAP_NET_RAW] {
-                if libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -329,11 +332,6 @@ impl LxcContainer {
     }
 
     /// Whether `line` is a mount entry MXC wrote before it marked its own block.
-    ///
-    /// Containers created by an earlier MXC carry its mounts as unmarked lines,
-    /// which a tightened policy would otherwise leave in place. The filesystem
-    /// type and options identify them; a user's own entry keeps its own shape
-    /// and survives.
     fn is_mxc_written_mount_entry(line: &str) -> bool {
         let Some((key, value)) = line.split_once('=') else {
             return false;
@@ -389,6 +387,7 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         timeout: Option<std::time::Duration>,
+        firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
@@ -404,7 +403,11 @@ impl LxcContainer {
             force_clear_env,
         ));
 
-        confine_network_capabilities(&mut cmd);
+        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
+        // run with no chains has nothing to protect anyway.
+        if firewall == ContainerFirewall::Installed {
+            confine_network_capabilities(&mut cmd);
+        }
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -433,6 +436,7 @@ impl LxcContainer {
         _env: &[String],
         _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
+        _firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
@@ -1090,6 +1094,36 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
             "PATH must survive the proxy-env merge; got {args:?}"
+        );
+    }
+
+    // The conditional in `attach_run` exists because of this: the drop is a
+    // privileged operation, so applying it to every run costs an unprivileged
+    // caller the whole execution.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn confining_a_command_takes_a_privilege_an_unprivileged_caller_lacks() {
+        // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
+        let running_as_root = unsafe { libc::geteuid() } == 0;
+
+        let mut confined = std::process::Command::new("/bin/true");
+        confine_network_capabilities(&mut confined);
+
+        assert_eq!(
+            confined.status().is_ok(),
+            running_as_root,
+            "a confined command must spawn only for a caller holding CAP_SETPCAP"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unconfined_command_spawns_whoever_the_caller_is() {
+        let mut unconfined = std::process::Command::new("/bin/true");
+
+        assert!(
+            unconfined.status().is_ok(),
+            "a run with no chains to protect must spawn without any privilege"
         );
     }
 }

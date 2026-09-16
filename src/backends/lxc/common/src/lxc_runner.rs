@@ -14,7 +14,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
-use crate::lxc_bindings::{LxcContainer, StartNetwork};
+use crate::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
     needs_network, plan_network, uses_directional_keys, EgressHookPoint, NetworkIptablesManager,
@@ -452,6 +452,12 @@ impl LxcScriptRunner {
         };
 
         let mut pinned = false;
+        let firewall = container_firewall(
+            fw_manager.rules_applied(),
+            ingress_manager
+                .as_ref()
+                .is_some_and(|mgr| mgr.rules_applied()),
+        );
 
         // A proxied chain opens no port 53; without this pin the container has
         // no resolver to reach its proxy.
@@ -463,8 +469,14 @@ impl LxcScriptRunner {
                 pin.hostname(),
                 pin.ip()
             );
-            let pin_outcome =
-                container.attach_run(&command, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT));
+            let pin_outcome = container.attach_run(
+                &command,
+                "/",
+                &[],
+                true,
+                Some(HOSTS_COMMAND_TIMEOUT),
+                firewall,
+            );
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
 
@@ -488,6 +500,7 @@ impl LxcScriptRunner {
                 &[],
                 true,
                 Some(HOSTS_COMMAND_TIMEOUT),
+                firewall,
             ) {
                 Ok((0, _, _)) => None,
                 Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
@@ -523,6 +536,7 @@ impl LxcScriptRunner {
             &exec_env,
             true,
             timeout,
+            firewall,
         );
 
         let response = match result {
@@ -544,6 +558,7 @@ impl LxcScriptRunner {
                 &[],
                 true,
                 Some(HOSTS_COMMAND_TIMEOUT),
+                firewall,
             ) {
                 Ok((0, _, _)) => None,
                 Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
@@ -684,6 +699,15 @@ fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<
         Some(pid) => Some(EgressHookPoint::ContainerNetns(pid)),
         None if installs_firewall => None,
         None => Some(EgressHookPoint::Unhooked),
+    }
+}
+
+/// Whether the workload must be kept away from chains in its own namespace.
+fn container_firewall(egress_applied: bool, ingress_applied: bool) -> ContainerFirewall {
+    if egress_applied || ingress_applied {
+        ContainerFirewall::Installed
+    } else {
+        ContainerFirewall::Absent
     }
 }
 
@@ -858,6 +882,27 @@ mod tests {
             egress_hook_point(None, false),
             Some(EgressHookPoint::Unhooked)
         ));
+    }
+
+    #[test]
+    fn either_installed_chain_confines_the_workload() {
+        for (egress, ingress) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                container_firewall(egress, ingress),
+                ContainerFirewall::Installed,
+                "egress={egress} ingress={ingress} leaves a chain the workload could flush"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_that_installs_no_chain_leaves_the_capability_alone() {
+        // Dropping it needs CAP_SETPCAP, which an unprivileged caller lacks.
+        assert_eq!(
+            container_firewall(false, false),
+            ContainerFirewall::Absent,
+            "a run with no firewall must not be confined"
+        );
     }
 
     #[test]

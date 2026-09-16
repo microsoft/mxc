@@ -21,7 +21,9 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
-- Root privileges (or unprivileged LXC configured)
+- Root privileges, or unprivileged LXC for a policy that asks for no network.
+  Filtering egress or ingress installs iptables rules in the container's
+  network namespace, which requires root.
 
 ### Installation
 
