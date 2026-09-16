@@ -910,32 +910,30 @@ export function spawnSandboxFromConfig(
  * console.log('Exit code:', result.exitCode);
  * ```
  */
-export function spawnSandboxAsync(
+export async function spawnSandboxAsync(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return (async () => {
-    const unsupportedOption = unsupportedInProcessRunOption(options);
-    if (unsupportedOption !== undefined) {
-      throw new MxcError(
-        'malformed_request',
-        `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
-      );
-    }
+  const unsupportedOption = unsupportedInProcessRunOption(options);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
+    );
+  }
 
-    const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-    const request = prepareRequestSpec(config, {
-      inheritDefaultEnv: options.inheritDefaultEnv,
-      experimental: options.experimental,
-    });
-    const result = await runBindingRequestAsync(request);
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-    };
-  })();
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const request = prepareRequestSpec(config, {
+    inheritDefaultEnv: options.inheritDefaultEnv,
+    experimental: options.experimental,
+  });
+  const result = await runBindingRequestAsync(request);
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+  };
 }
