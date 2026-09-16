@@ -390,7 +390,7 @@ force a particular backend.
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
-| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
+| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
 
 Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a
