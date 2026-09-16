@@ -20,6 +20,10 @@ import type {
   SandboxReadableBinding,
   SandboxWritableBinding,
 } from './streaming-types.js';
+import {
+  _createMxcSandboxProcess,
+  type MxcSandboxProcess,
+} from '../sandbox-process.js';
 
 type Pointer = unknown;
 type TakeReadResult = { stream: Pointer; closer: Pointer | null } | null;
@@ -53,6 +57,8 @@ interface StreamingApi {
 }
 
 let sharedApi: StreamingApi | undefined;
+let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
+  | undefined;
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
 const AbiReadStream = koffi.opaque('MxcNodeReadStream');
 const AbiWriteStream = koffi.opaque('MxcNodeWriteStream');
@@ -493,4 +499,23 @@ export function spawnStreamingProcessBinding(
   } finally {
     if (spawned) api.freeError(error);
   }
+}
+
+export function _setBindingSandboxProcessFactory(
+  factory?: (request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess,
+): void {
+  sandboxProcessFactory = factory;
+}
+
+export function spawnBindingSandboxProcess(
+  request: RequestSpec,
+  timeoutMs?: number,
+): MxcSandboxProcess {
+  if (sandboxProcessFactory !== undefined) {
+    return sandboxProcessFactory(request, timeoutMs);
+  }
+  return _createMxcSandboxProcess(
+    spawnStreamingProcessBinding(request),
+    timeoutMs,
+  );
 }
