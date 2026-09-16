@@ -73,16 +73,6 @@ pub use process_lifetime::{
 /// behind a stringified surrogate.
 #[derive(Debug, Clone, Error)]
 pub enum LearningModeError {
-    /// The named API-set group for an API surface is not implemented by this
-    /// Windows build.
-    #[error("API set `{api_set}` is not implemented; this OS build lacks the required {api} API")]
-    ApiSetUnavailable {
-        /// The API surface guarded by the named group.
-        api: &'static str,
-        /// The API-set contract queried with `IsApiSetImplemented`.
-        api_set: &'static str,
-    },
-
     /// `processmodel.dll` itself could not be loaded from System32.
     #[error("failed to load processmodel.dll: {0}")]
     DllLoad(String),
@@ -154,23 +144,5 @@ mod stub_tests {
         let msg = e.to_string();
         assert!(msg.contains("StartLearningModeTrace"));
         assert!(msg.contains("Learning Mode trace API"));
-    }
-}
-
-#[cfg(test)]
-mod error_tests {
-    use super::*;
-
-    #[test]
-    fn missing_export_identifies_the_api_surface() {
-        let error = LearningModeError::ExportMissing {
-            api: "process security-environment",
-            export: "CreateProcessSecurityEnvironment",
-            detail: "GetLastError = 127".to_string(),
-        };
-
-        let message = error.to_string();
-        assert!(message.contains("process security-environment API"));
-        assert!(!message.contains("lacks the Learning Mode trace API"));
     }
 }

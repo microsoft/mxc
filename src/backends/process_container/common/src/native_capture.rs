@@ -31,7 +31,20 @@ use windows::Win32::Foundation::HANDLE;
 
 use learning_mode_windows::{LearningModeApi, LearningModeError, LearningModeTraceHandle};
 
-use crate::secenv::{ProcessSecurityEnvironment, SecurityEnvironmentApi};
+use crate::secenv::{
+    ProcessSecurityEnvironment, ProcessSecurityEnvironmentError, SecurityEnvironmentApi,
+};
+
+/// Errors that can occur while starting a native Learning Mode capture.
+#[derive(Debug, thiserror::Error)]
+pub enum NativeCaptureError {
+    /// The process security environment could not be created.
+    #[error(transparent)]
+    ProcessSecurityEnvironment(#[from] ProcessSecurityEnvironmentError),
+    /// The Learning Mode trace could not be started.
+    #[error(transparent)]
+    LearningMode(#[from] LearningModeError),
+}
 
 /// An in-flight Learning Mode capture: a live security environment with a trace already
 /// started against it.
@@ -55,7 +68,8 @@ impl CaptureSession {
     /// `flags` is normally [`crate::secenv::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
-    /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
+    /// - [`ProcessSecurityEnvironmentError::HResultCall`] if
+    ///   `CreateProcessSecurityEnvironment` fails.
     /// - [`LearningModeError::HResultCall`] if `StartLearningModeTrace` fails — in which
     ///   case the just-created environment is closed before returning so it is not leaked.
     pub fn begin(
@@ -63,7 +77,7 @@ impl CaptureSession {
         learning_mode_api: LearningModeApi,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Self, LearningModeError> {
+    ) -> Result<Self, NativeCaptureError> {
         let environment = secenv_api.create(sandbox_specification, flags)?;
 
         // SAFETY: `environment` was just created by `secenv_api.create` and is live for
@@ -72,7 +86,7 @@ impl CaptureSession {
             Ok(trace) => trace,
             Err(start_err) => {
                 environment.close();
-                return Err(start_err);
+                return Err(start_err.into());
             }
         };
 
@@ -236,7 +250,7 @@ mod tests {
         LearningModeApi::from_raw_parts(fake_start, fake_stop, fake_trace_close)
     }
 
-    fn begin_session() -> Result<CaptureSession, LearningModeError> {
+    fn begin_session() -> Result<CaptureSession, NativeCaptureError> {
         CaptureSession::begin(
             fake_secenv_api(),
             fake_learning_mode_api(),
@@ -266,10 +280,10 @@ mod tests {
         let error = begin_session().expect_err("start failure must propagate");
         assert!(matches!(
             error,
-            LearningModeError::HResultCall {
+            NativeCaptureError::LearningMode(LearningModeError::HResultCall {
                 function: "StartLearningModeTrace",
                 code
-            } if code == E_FAIL.0
+            }) if code == E_FAIL.0
         ));
 
         // The just-created environment is torn down; the trace was never created so
