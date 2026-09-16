@@ -350,6 +350,58 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(emitted_path);
 }
 
+/// PSEC capture must preserve the runtime proxy's unrestricted loopback peer;
+/// omitting that sentinel makes CreateProcessSecurityEnvironment reject the
+/// otherwise valid policy with E_INVALIDARG.
+fn processcontainer_proxy_capture_uses_native_capture() {
+    let config = serde_json::json!({
+        "version": "0.9.0-alpha",
+        "process": {
+            "commandLine": "cmd.exe /d /c echo proxy-capture-launched",
+            "timeout": 30000
+        },
+        "containment": "processcontainer",
+        "network": {
+            "egress": { "default": "deny" },
+            "ingress": { "default": "allow", "hostLoopback": "allow" }
+        },
+        "runtimeConfig": {
+            "networkProxy": "http://127.0.0.1:8080"
+        },
+        "processContainer": {
+            "captureDenials": { "mode": "block" }
+        }
+    });
+
+    let result = run_wxc_config_value(
+        "processcontainer_proxy_capture_uses_native_capture",
+        &config,
+        &["--debug"],
+    );
+    let combined = result.combined_output_with_decoded_base64();
+
+    if combined.contains("captureDenials requires either") {
+        println!(
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires native capture \
+             APIs"
+        );
+        return;
+    }
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires local sandbox \
+             runtime prerequisites not available here"
+        );
+        return;
+    }
+
+    assert_success(&result);
+    assert!(
+        combined.contains("proxy-capture-launched"),
+        "the native proxy-capture child did not launch\n--- combined output ---\n{combined}"
+    );
+}
+
 /// Exercises timeout -> capture teardown -> retained metadata end to end.
 fn processcontainer_capture_denials_timeout_retention() {
     let output_path = std::env::temp_dir().join(format!(
@@ -478,6 +530,15 @@ fn test_processcontainer_capture_denials_output_file() {
         return;
     }
     with_test_lock(processcontainer_capture_denials_output_file);
+}
+
+#[test]
+#[ignore] // Live capture needs the brokered learning-mode API + PSEC 1.1 on a compatible host
+fn test_processcontainer_proxy_capture_uses_native_capture() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(processcontainer_proxy_capture_uses_native_capture);
 }
 
 #[test]
