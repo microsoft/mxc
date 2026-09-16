@@ -38,7 +38,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       'cmd.exe /c echo Container test successful',
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-1-${schemaVersion}`,
     );
@@ -158,8 +158,21 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Open('GET','https://api.github.com/zen',$false); ` +
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await sdk.spawnSandboxAsync(
-        script, policy, { debug: true, allowTestingFeatures: true }, undefined, `proxy-builtin-${schemaVersion}`,
+      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
+        (resolve) => {
+          const process = sdk.spawnSandbox(
+            script,
+            policy,
+            { debug: true, allowTestingFeatures: true },
+            undefined,
+            `proxy-builtin-${schemaVersion}`,
+          );
+          let stdout = '';
+          process.onData((data: string) => { stdout += data; });
+          process.onExit(({ exitCode }: { exitCode: number }) => {
+            resolve({ stdout, stderr: '', exitCode });
+          });
+        },
       );
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -184,7 +197,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
       const result = await sdk.spawnSandboxAsync(
-        script, policy, { debug: true }, undefined, `proxy-ext-${schemaVersion}`,
+        script, policy, {}, undefined, `proxy-ext-${schemaVersion}`,
       );
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);

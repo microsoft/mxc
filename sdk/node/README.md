@@ -248,7 +248,11 @@ implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
-The `await`-friendly version of `spawnSandbox`. Same arguments, same restriction (process-isolation only), but resolves with `{ stdout, stderr, exitCode }` instead of returning an `IPty`. `stderr` is always `''` because the underlying PTY merges streams.
+The `await`-friendly process-isolation API resolves with
+`{ stdout, stderr, exitCode }`. Requests run in-process through `mxc_ffi`, with
+separate stdout and stderr. Executor-only options such as `dryRun`,
+`executablePath`, and testing-only proxy support are rejected; the API never
+falls back to an executor.
 
 ```typescript
 import {
@@ -500,9 +504,9 @@ config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
 const child = spawnSandboxFromConfig(config, { usePty: false });
 ```
 
-### PTY APIs merge stdout and stderr
+### Buffered output keeps stdout and stderr separate
 
-`spawnSandbox` and `spawnSandboxAsync` use a PTY, so `stderr` is always empty in their result. Use `spawnSandboxFromConfig(config, { usePty: false })` for separated streams.
+`spawnSandboxAsync` returns separate `stdout` and `stderr` strings.
 
 ### `createConfigFromPolicy` leaves `commandLine` empty
 
