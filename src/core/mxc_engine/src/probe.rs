@@ -88,18 +88,18 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
-        use processcontainer_common::fallback_detector::is_base_container_usable;
+        use appcontainer_common::fallback_detector::is_base_container_usable;
 
         let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
         windows_backends(
             tier,
             ProcessContainerCapabilities {
                 capture_denials: capture_denials_available(
-                    processcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                    appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
                     guarded_capture::is_available(),
                 ),
-                filesystem_denied_paths: processcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
-                ingress_host_loopback_allow: processcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
+                filesystem_denied_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+                ingress_host_loopback_allow: appcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
             },
         )
     }
@@ -173,7 +173,7 @@ fn capture_denials_available(native_capture: bool, guarded_capture: bool) -> boo
 
 #[cfg(target_os = "windows")]
 fn windows_backends(
-    tier: processcontainer_common::fallback_detector::IsolationTier,
+    tier: appcontainer_common::fallback_detector::IsolationTier,
     support: ProcessContainerCapabilities,
 ) -> Vec<AvailableBackend> {
     // `processcontainer` is always present and the only backend with a tier
@@ -182,7 +182,7 @@ fn windows_backends(
     if support.capture_denials {
         capabilities.push(BackendCapability::CaptureDenials);
     }
-    if tier == processcontainer_common::fallback_detector::IsolationTier::BaseContainer {
+    if tier == appcontainer_common::fallback_detector::IsolationTier::BaseContainer {
         if support.filesystem_denied_paths {
             capabilities.push(BackendCapability::FilesystemDeniedPaths);
         }
@@ -248,8 +248,8 @@ fn windows_backends(
 fn select_tier(
     base_container_usable: bool,
     tier2_bfs_enabled: bool,
-) -> processcontainer_common::fallback_detector::IsolationTier {
-    use processcontainer_common::fallback_detector::IsolationTier;
+) -> appcontainer_common::fallback_detector::IsolationTier {
+    use appcontainer_common::fallback_detector::IsolationTier;
     if base_container_usable {
         IsolationTier::BaseContainer
     } else if tier2_bfs_enabled {
@@ -442,7 +442,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn canonical_tier_strings_match_isolation_tier() {
-        use processcontainer_common::fallback_detector::IsolationTier;
+        use appcontainer_common::fallback_detector::IsolationTier;
         assert_eq!(IsolationTier::BaseContainer.as_str(), CANONICAL_TIERS[0]);
         assert_eq!(IsolationTier::AppContainerBfs.as_str(), CANONICAL_TIERS[1]);
         assert_eq!(IsolationTier::AppContainerDacl.as_str(), CANONICAL_TIERS[2]);
@@ -479,7 +479,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_capture_denials_from_combined_provider_result() {
-        use processcontainer_common::fallback_detector::IsolationTier;
+        use appcontainer_common::fallback_detector::IsolationTier;
 
         for capture_denials_available in [false, true] {
             let backends = windows_backends(
@@ -505,7 +505,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_policy_capabilities_for_base_container() {
-        use processcontainer_common::fallback_detector::IsolationTier;
+        use appcontainer_common::fallback_detector::IsolationTier;
 
         let backends = windows_backends(
             IsolationTier::BaseContainer,
@@ -532,7 +532,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_omits_base_container_capabilities_from_lower_tiers() {
-        use processcontainer_common::fallback_detector::IsolationTier;
+        use appcontainer_common::fallback_detector::IsolationTier;
 
         for tier in [
             IsolationTier::AppContainerBfs,
@@ -558,7 +558,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
-        use processcontainer_common::fallback_detector::IsolationTier;
+        use appcontainer_common::fallback_detector::IsolationTier;
         // BaseContainer wins whenever usable, regardless of tier2_bfs.
         assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
         assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);

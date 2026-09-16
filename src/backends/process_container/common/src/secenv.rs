@@ -50,6 +50,8 @@ use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::string_util;
 
+use learning_mode_windows::LearningModeError;
+
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
 const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~securityenvironment";
@@ -65,52 +67,6 @@ const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
 /// declared here: explicit [`ProcessSecurityEnvironment::close`] after the child
 /// has exited already provides deterministic teardown.
 pub const PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE: u32 = 0;
-
-/// Errors surfaced while loading or invoking the process security-environment API.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ProcessSecurityEnvironmentError {
-    /// The process security-environment API-set group is unavailable.
-    #[error("API set `{api_set}` is not implemented; this OS build lacks the required {api} API")]
-    ApiSetUnavailable {
-        /// The API surface guarded by the named group.
-        api: &'static str,
-        /// The API-set contract queried with `IsApiSetImplemented`.
-        api_set: &'static str,
-    },
-
-    /// `processmodel.dll` could not be loaded from System32.
-    #[error("failed to load processmodel.dll: {0}")]
-    DllLoad(String),
-
-    /// `processmodel.dll` loaded, but a required export is missing.
-    #[error("export `{export}` not found in processmodel.dll ({detail}); this OS build lacks the required {api} API")]
-    ExportMissing {
-        /// The API surface that requires the export.
-        api: &'static str,
-        /// The undecorated export name that failed to resolve.
-        export: &'static str,
-        /// Additional diagnostic detail.
-        detail: String,
-    },
-
-    /// An API call returned a failing HRESULT.
-    #[error("{function} failed (HRESULT = 0x{code:08X})")]
-    HResultCall {
-        /// The API operation that failed.
-        function: &'static str,
-        /// The raw HRESULT value.
-        code: i32,
-    },
-
-    /// A Win32 API call failed and set the thread's last-error value.
-    #[error("{function} failed (Win32 error = {code})")]
-    ApiCall {
-        /// The API operation that failed.
-        function: &'static str,
-        /// The raw `GetLastError` value.
-        code: u32,
-    },
-}
 
 /// `HRESULT CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
 /// DWORD sandboxSpecificationSize, PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
@@ -208,7 +164,7 @@ impl SecurityEnvironmentStartupInfo {
         mut startup_info: STARTUPINFOW,
         environment: HANDLE,
         inherited_handles: &[HANDLE],
-    ) -> Result<Self, ProcessSecurityEnvironmentError> {
+    ) -> Result<Self, LearningModeError> {
         let attribute_count = 1 + u32::from(!inherited_handles.is_empty());
         let mut byte_count = 0usize;
         // SAFETY: the documented sizing call uses a null list and writes only
@@ -218,7 +174,7 @@ impl SecurityEnvironmentStartupInfo {
         };
         let sizing_error = last_error();
         if sizing_result.is_ok() || sizing_error != ERROR_INSUFFICIENT_BUFFER.0 || byte_count == 0 {
-            return Err(ProcessSecurityEnvironmentError::ApiCall {
+            return Err(LearningModeError::ApiCall {
                 function: "InitializeProcThreadAttributeList(size)",
                 code: sizing_error,
             });
@@ -238,7 +194,7 @@ impl SecurityEnvironmentStartupInfo {
                 &mut byte_count,
             )
         }
-        .map_err(|_| ProcessSecurityEnvironmentError::ApiCall {
+        .map_err(|_| LearningModeError::ApiCall {
             function: "InitializeProcThreadAttributeList",
             code: last_error(),
         })?;
@@ -262,7 +218,7 @@ impl SecurityEnvironmentStartupInfo {
             let code = last_error();
             // SAFETY: balances the successful initialization above.
             unsafe { DeleteProcThreadAttributeList(attribute_list) };
-            return Err(ProcessSecurityEnvironmentError::ApiCall {
+            return Err(LearningModeError::ApiCall {
                 function: "UpdateProcThreadAttribute(SecurityEnvironment)",
                 code,
             });
@@ -286,14 +242,14 @@ impl SecurityEnvironmentStartupInfo {
             let code = last_error();
             // SAFETY: balances the successful initialization above.
             unsafe { DeleteProcThreadAttributeList(attribute_list) };
-            return Err(ProcessSecurityEnvironmentError::ApiCall {
+            return Err(LearningModeError::ApiCall {
                 function: "UpdateProcThreadAttribute(HANDLE_LIST)",
                 code,
             });
         }
 
         startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(|_| {
-            ProcessSecurityEnvironmentError::ApiCall {
+            LearningModeError::ApiCall {
                 function: "STARTUPINFOEXW size",
                 code: windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
             }
@@ -411,25 +367,24 @@ impl SecurityEnvironmentApi {
     /// process: `processmodel.dll` is a resident system DLL whose export set does
     /// not change while the process runs, so repeated probes would only repeat the
     /// same work and return the same answer. The cached error is cloned (see
-    /// [`ProcessSecurityEnvironmentError`]), preserving the original diagnostic on every call. The
+    /// [`LearningModeError`]), preserving the original diagnostic on every call. The
     /// cached surface is marked cacheable so its
     /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
     ///
     /// # Errors
-    /// - [`ProcessSecurityEnvironmentError::ApiSetUnavailable`] if the security-environment
+    /// - [`LearningModeError::ApiSetUnavailable`] if the security-environment
     ///   API-set named group is not implemented.
-    /// - [`ProcessSecurityEnvironmentError::DllLoad`] if `processmodel.dll` cannot be loaded.
-    /// - [`ProcessSecurityEnvironmentError::ExportMissing`] if any required export is absent.
-    pub fn load() -> Result<Self, ProcessSecurityEnvironmentError> {
-        static CACHE: OnceLock<Result<SecurityEnvironmentApi, ProcessSecurityEnvironmentError>> =
-            OnceLock::new();
+    /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
+    /// - [`LearningModeError::ExportMissing`] if any required export is absent.
+    pub fn load() -> Result<Self, LearningModeError> {
+        static CACHE: OnceLock<Result<SecurityEnvironmentApi, LearningModeError>> = OnceLock::new();
         CACHE.get_or_init(Self::load_uncached).clone()
     }
 
     /// Perform the actual DLL load and export resolution, bypassing the cache.
-    fn load_uncached() -> Result<Self, ProcessSecurityEnvironmentError> {
+    fn load_uncached() -> Result<Self, LearningModeError> {
         if !is_security_environment_api_set_implemented() {
-            return Err(ProcessSecurityEnvironmentError::ApiSetUnavailable {
+            return Err(LearningModeError::ApiSetUnavailable {
                 api: "process security-environment",
                 api_set: SECURITY_ENVIRONMENT_API_SET_NAME,
             });
@@ -444,7 +399,7 @@ impl SecurityEnvironmentApi {
         // declaration of the corresponding export exactly.
         unsafe {
             let hmodule = LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
-                .map_err(|e| ProcessSecurityEnvironmentError::DllLoad(e.to_string()))?;
+                .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
             let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
@@ -520,9 +475,9 @@ impl SecurityEnvironmentApi {
     /// The answer is a fixed host capability, so for the real (cacheable) API the
     /// result — including a typed error — is memoized once per process. Non-cacheable
     /// test fakes always query directly and never touch the process-wide cache.
-    pub fn supports_deny_paths(&self) -> Result<bool, ProcessSecurityEnvironmentError> {
+    pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
         if self.cacheable {
-            static CACHE: OnceLock<Result<bool, ProcessSecurityEnvironmentError>> = OnceLock::new();
+            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
             self.supports_deny_paths_cached(&CACHE)
         } else {
             self.query_deny_paths_support()
@@ -531,8 +486,8 @@ impl SecurityEnvironmentApi {
 
     fn supports_deny_paths_cached(
         &self,
-        cache: &OnceLock<Result<bool, ProcessSecurityEnvironmentError>>,
-    ) -> Result<bool, ProcessSecurityEnvironmentError> {
+        cache: &OnceLock<Result<bool, LearningModeError>>,
+    ) -> Result<bool, LearningModeError> {
         cache
             .get_or_init(|| self.query_deny_paths_support())
             .clone()
@@ -540,21 +495,17 @@ impl SecurityEnvironmentApi {
 
     /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
     /// without consulting or populating the process-wide cache.
-    fn query_deny_paths_support(&self) -> Result<bool, ProcessSecurityEnvironmentError> {
+    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
         self.query_support(PSE_SUPPORT_FS_DENY)
     }
 
     /// Whether the official PSEC API supports the ingress policy table.
-    pub fn supports_network_ingress(&self) -> Result<bool, ProcessSecurityEnvironmentError> {
+    pub fn supports_network_ingress(&self) -> Result<bool, LearningModeError> {
         self.query_support(PSE_SUPPORT_NETWORK_INGRESS)
     }
 
     /// Whether the requested PSEC contract version is supported.
-    pub fn supports_version(
-        &self,
-        major: u32,
-        minor: u32,
-    ) -> Result<bool, ProcessSecurityEnvironmentError> {
+    pub fn supports_version(&self, major: u32, minor: u32) -> Result<bool, LearningModeError> {
         let Some(version_support) = self.version_support else {
             return Ok(major == 1 && minor == 0);
         };
@@ -562,13 +513,13 @@ impl SecurityEnvironmentApi {
             .map(|supported| supported.is_some_and(|supported| supported >= minor))
     }
 
-    fn query_support(&self, capability: u64) -> Result<bool, ProcessSecurityEnvironmentError> {
+    fn query_support(&self, capability: u64) -> Result<bool, LearningModeError> {
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
         // `support_flags` is a valid out-pointer.
         let result = unsafe { (self.query_support)(&mut support_flags) };
         if result.is_err() {
-            return Err(ProcessSecurityEnvironmentError::HResultCall {
+            return Err(LearningModeError::HResultCall {
                 function: "QueryProcessSecurityEnvironmentSupport",
                 code: result.0,
             });
@@ -580,15 +531,15 @@ impl SecurityEnvironmentApi {
     /// blob. `flags` is currently always [`PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
-    /// [`ProcessSecurityEnvironmentError::HResultCall`] if the export returns a failing HRESULT.
+    /// [`LearningModeError::HResultCall`] if the export returns a failing HRESULT.
     pub fn create(
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<ProcessSecurityEnvironment, ProcessSecurityEnvironmentError> {
+    ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
         let mut env = HANDLE(ptr::null_mut());
         let spec_len = u32::try_from(sandbox_specification.len()).map_err(|_| {
-            ProcessSecurityEnvironmentError::HResultCall {
+            LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: windows::Win32::Foundation::E_INVALIDARG.0,
             }
@@ -607,13 +558,13 @@ impl SecurityEnvironmentApi {
             )
         };
         if result.is_err() {
-            return Err(ProcessSecurityEnvironmentError::HResultCall {
+            return Err(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: result.0,
             });
         }
         if env.0.is_null() {
-            return Err(ProcessSecurityEnvironmentError::HResultCall {
+            return Err(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: windows::Win32::Foundation::E_UNEXPECTED.0,
             });
@@ -628,14 +579,14 @@ impl SecurityEnvironmentApi {
 fn query_supported_minor_version_with(
     major: u32,
     version_support: PfnIsProcessSecurityEnvironmentVersionSupported,
-) -> Result<Option<u32>, ProcessSecurityEnvironmentError> {
+) -> Result<Option<u32>, LearningModeError> {
     let mut available = 0u8;
     let mut minor = 0u32;
     // SAFETY: `version_support` has the documented OS ABI and both output
     // pointers remain valid for the duration of the call.
     let result = unsafe { version_support(major, &mut available, &mut minor) };
     if result.is_err() {
-        return Err(ProcessSecurityEnvironmentError::HResultCall {
+        return Err(LearningModeError::HResultCall {
             function: "IsProcessSecurityEnvironmentVersionSupported",
             code: result.0,
         });
@@ -650,7 +601,7 @@ fn query_supported_minor_version_with(
 unsafe fn resolve_any(
     hmodule: HMODULE,
     names: &[&'static core::ffi::CStr],
-) -> Result<unsafe extern "system" fn() -> isize, ProcessSecurityEnvironmentError> {
+) -> Result<unsafe extern "system" fn() -> isize, LearningModeError> {
     let mut last_detail = String::new();
     for name in names {
         // SAFETY: `name` is a valid null-terminated C string; `hmodule` is valid per
@@ -663,7 +614,7 @@ unsafe fn resolve_any(
             last_error()
         );
     }
-    Err(ProcessSecurityEnvironmentError::ExportMissing {
+    Err(LearningModeError::ExportMissing {
         api: "process security-environment",
         export: names
             .first()
@@ -810,9 +761,9 @@ mod tests {
             Err(e) => assert!(
                 matches!(
                     e,
-                    ProcessSecurityEnvironmentError::ApiSetUnavailable { .. }
-                        | ProcessSecurityEnvironmentError::DllLoad(_)
-                        | ProcessSecurityEnvironmentError::ExportMissing { .. }
+                    LearningModeError::ApiSetUnavailable { .. }
+                        | LearningModeError::DllLoad(_)
+                        | LearningModeError::ExportMissing { .. }
                 ),
                 "unexpected error variant: {e}"
             ),
@@ -840,7 +791,7 @@ mod tests {
                 );
                 assert!(!extended.startup_info().lpAttributeList.is_invalid());
             }
-            Err(ProcessSecurityEnvironmentError::ApiCall { code, .. })
+            Err(LearningModeError::ApiCall { code, .. })
                 if code == windows::Win32::Foundation::ERROR_NOT_SUPPORTED.0
                     || code == windows::Win32::Foundation::ERROR_CALL_NOT_IMPLEMENTED.0 =>
             {
@@ -928,7 +879,7 @@ mod tests {
         let error = query_supported_minor_version_with(1, fake_version).unwrap_err();
         assert!(matches!(
             error,
-            ProcessSecurityEnvironmentError::HResultCall {
+            LearningModeError::HResultCall {
                 function: "IsProcessSecurityEnvironmentVersionSupported",
                 code
             } if code == E_FAIL.0
@@ -954,7 +905,7 @@ mod tests {
         let error = api.supports_deny_paths().unwrap_err();
         assert!(matches!(
             error,
-            ProcessSecurityEnvironmentError::HResultCall {
+            LearningModeError::HResultCall {
                 function: "QueryProcessSecurityEnvironmentSupport",
                 code
             } if code == E_FAIL.0

@@ -20,7 +20,7 @@
 //! Run on a feature-enabled Windows build (elevated):
 //!
 //! ```text
-//! cargo run -p processcontainer_common --example lm_capture
+//! cargo run -p appcontainer_common --example lm_capture
 //! ```
 //!
 //! Exit codes: `0` = ETL produced; `2` = API unavailable / off-feature build; `1` = a
@@ -41,14 +41,14 @@ fn main() {
 mod windows_impl {
     use std::path::PathBuf;
 
+    use appcontainer_common::{
+        CaptureSession, ProcessSecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    };
     use learning_mode_windows::LearningModeApi;
     use process_security_environment_spec::process_security_environment_layout::{
         finish_process_security_environment_buffer, ProcessSecurityEnvironment,
         ProcessSecurityEnvironmentArgs, SchemaVersion,
-    };
-    use processcontainer_common::{
-        CaptureSession, ProcessSecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
-        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     };
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{

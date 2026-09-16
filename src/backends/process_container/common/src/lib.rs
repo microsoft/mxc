@@ -48,13 +48,13 @@ pub mod sandbox_tracking;
 #[cfg(target_os = "windows")]
 mod secenv;
 #[cfg(target_os = "windows")]
-pub use native_capture::{CaptureSession, NativeCaptureError};
+pub use native_capture::CaptureSession;
 #[cfg(target_os = "windows")]
 pub use secenv::{
     is_security_environment_api_available, probe_security_environment_exports,
-    ProcessSecurityEnvironment, ProcessSecurityEnvironmentError,
-    SecurityEnvironmentApi as ProcessSecurityEnvironmentApi, SecurityEnvironmentExportReport,
-    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    ProcessSecurityEnvironment, SecurityEnvironmentApi as ProcessSecurityEnvironmentApi,
+    SecurityEnvironmentExportReport, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 /// Working-directory resolution for both Windows launch paths. Deliberately
 /// **not** `cfg`-gated: the mapping is pure, and keeping it portable means its

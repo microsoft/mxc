@@ -54,12 +54,12 @@ use crate::launch_diagnostics::{
     diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
     validate_required_child_env,
 };
-use crate::native_capture::{CaptureSession, NativeCaptureError};
+use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use crate::secenv::{
-    ProcessSecurityEnvironment, ProcessSecurityEnvironmentError, SecurityEnvironmentApi,
-    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 use sandbox_spec::base_container_layout::IntegrityLevel;
 use wxc_common::audit::{
@@ -299,32 +299,14 @@ fn is_proxy_fallback_unavailable(
 
 fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
     match error {
-        learning_mode_windows::LearningModeError::DllLoad(_)
+        learning_mode_windows::LearningModeError::ApiSetUnavailable { .. }
+        | learning_mode_windows::LearningModeError::DllLoad(_)
         | learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
         learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
         learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
             is_api_not_implemented(*code)
         }
         _ => false,
-    }
-}
-
-fn security_environment_api_not_implemented(error: &ProcessSecurityEnvironmentError) -> bool {
-    match error {
-        ProcessSecurityEnvironmentError::ApiSetUnavailable { .. }
-        | ProcessSecurityEnvironmentError::DllLoad(_)
-        | ProcessSecurityEnvironmentError::ExportMissing { .. } => true,
-        ProcessSecurityEnvironmentError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
-        ProcessSecurityEnvironmentError::ApiCall { code, .. } => is_api_not_implemented(*code),
-    }
-}
-
-fn native_capture_api_not_implemented(error: &NativeCaptureError) -> bool {
-    match error {
-        NativeCaptureError::ProcessSecurityEnvironment(error) => {
-            security_environment_api_not_implemented(error)
-        }
-        NativeCaptureError::LearningMode(error) => learning_mode_api_not_implemented(error),
     }
 }
 
@@ -354,7 +336,7 @@ trait CaptureSessionFactory: Send + Sync {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, NativeCaptureError>;
+    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
 }
 
 trait CapturePlatformSupport: Send + Sync {
@@ -369,7 +351,7 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, NativeCaptureError> {
+    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
         let security_environment_api = SecurityEnvironmentApi::load()?;
         let learning_mode_api = LearningModeApi::load()?;
         CaptureSession::begin(
@@ -655,19 +637,16 @@ impl BaseContainerRunner {
             ..Default::default()
         };
         let specification = build_psec_spec(&request);
-        let Ok(security_environment_api) = SecurityEnvironmentApi::load() else {
-            return false;
-        };
-        let Ok(learning_mode_api) = LearningModeApi::load() else {
-            return false;
-        };
-        CaptureSession::begin(
-            security_environment_api,
-            learning_mode_api,
-            &specification,
-            PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
-        )
-        .is_ok()
+        SecurityEnvironmentApi::load()
+            .and_then(|security_environment_api| {
+                CaptureSession::begin(
+                    security_environment_api,
+                    LearningModeApi::load()?,
+                    &specification,
+                    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                )
+            })
+            .is_ok()
     }
 
     /// Whether the transitional SBOX BaseContainer contract is usable.
@@ -816,7 +795,7 @@ impl BaseContainerRunner {
         })
     }
 
-    fn query_psec_ingress_support() -> Result<bool, ProcessSecurityEnvironmentError> {
+    fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
         let api = SecurityEnvironmentApi::load()?;
         if !api.supports_version(1, 1)? {
             return Ok(false);
@@ -1679,7 +1658,7 @@ impl BaseContainerRunner {
                         let msg =
                             format!("captureDenials: failed to start learning-mode capture: {e}");
                         let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if native_capture_api_not_implemented(&e) {
+                        let failure_phase = if learning_mode_api_not_implemented(&e) {
                             FailurePhase::BackendUnavailable
                         } else {
                             FailurePhase::LaunchFailed
@@ -1709,7 +1688,7 @@ impl BaseContainerRunner {
                         let msg =
                             format!("failed to create the process security environment: {error}");
                         let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if security_environment_api_not_implemented(&error) {
+                        let failure_phase = if learning_mode_api_not_implemented(&error) {
                             FailurePhase::BackendUnavailable
                         } else {
                             FailurePhase::LaunchFailed
@@ -1767,7 +1746,7 @@ impl BaseContainerRunner {
                         );
                     }
                     let _ = writeln!(logger, "Error: {msg}");
-                    let failure_phase = if security_environment_api_not_implemented(&primary)
+                    let failure_phase = if learning_mode_api_not_implemented(&primary)
                         || cleanup_error
                             .as_ref()
                             .is_some_and(learning_mode_api_not_implemented)
@@ -3347,12 +3326,13 @@ mod tests {
             &self,
             _sandbox_specification: &[u8],
             _flags: u32,
-        ) -> Result<Box<dyn CaptureSessionOps>, NativeCaptureError> {
+        ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
-                return Err(NativeCaptureError::LearningMode(
-                    learning_mode_windows::LearningModeError::HResultCall { function, code },
-                ));
+                return Err(learning_mode_windows::LearningModeError::HResultCall {
+                    function,
+                    code,
+                });
             }
             Ok(Box::new(FakeCaptureSession {
                 finish_error: self.finish_error,
@@ -3811,7 +3791,7 @@ mod tests {
     }
 
     #[test]
-    fn api_not_implemented_checks_primary_failure() {
+    fn learning_mode_api_not_implemented_checks_primary_failure() {
         use learning_mode_windows::LearningModeError;
 
         let disabled = LearningModeError::HResultCall {
@@ -3835,19 +3815,6 @@ mod tests {
         ));
         assert!(learning_mode_api_not_implemented(
             &LearningModeError::DllLoad("missing processmodel.dll".to_string())
-        ));
-
-        assert!(security_environment_api_not_implemented(
-            &ProcessSecurityEnvironmentError::ApiSetUnavailable {
-                api: "process security-environment",
-                api_set: "api-win-appmodel-processmodel~securityenvironment",
-            }
-        ));
-        assert!(!security_environment_api_not_implemented(
-            &ProcessSecurityEnvironmentError::HResultCall {
-                function: "CreateProcessSecurityEnvironment",
-                code: windows::Win32::Foundation::E_INVALIDARG.0,
-            }
         ));
     }
 

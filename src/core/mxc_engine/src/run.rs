@@ -73,7 +73,7 @@ impl ResolvedRunner {
 /// run-to-completion [`ScriptRunner`].
 ///
 /// On Windows the ProcessContainer backend drives
-/// [`dispatch_with_fallback`](processcontainer_common::dispatcher::dispatch_with_fallback),
+/// [`dispatch_with_fallback`](appcontainer_common::dispatcher::dispatch_with_fallback),
 /// logging the selected isolation tier and any tier-selection warnings to
 /// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
 ///
@@ -169,7 +169,7 @@ fn resolve_runner_inner_windows(
             // WPR fallback factory to the dispatcher so an AppContainer
             // fallback tier can still honor it instead of failing closed.
             let capture_factory = crate::guarded_capture::factory_for_request(request);
-            match processcontainer_common::dispatcher::dispatch_with_fallback_and_capture(
+            match appcontainer_common::dispatcher::dispatch_with_fallback_and_capture(
                 request,
                 capture_factory,
             ) {
@@ -192,9 +192,8 @@ fn resolve_runner_inner_windows(
                 Err(e) => {
                     // Surface any retained-entry DACL warnings through the
                     // logger so the caller's buffer flush still reports them.
-                    if let processcontainer_common::dispatcher::DispatchError::Dacl {
-                        warnings,
-                        ..
+                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                        warnings, ..
                     } = &e
                     {
                         for w in warnings {
