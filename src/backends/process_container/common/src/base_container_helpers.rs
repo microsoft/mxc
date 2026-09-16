@@ -20,7 +20,7 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy_helpers::add_default_network_capabilities;
+use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
 
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
@@ -92,7 +92,13 @@ pub(super) fn build_psec_spec(
     resolution: ResolvedPsecContract,
 ) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let capabilities = effective_capabilities(&request.policy);
+    let mut capabilities = effective_capabilities(&request.policy);
+    if request.policy.network_proxy.is_enabled()
+        && unrestricted_host_loopback_allowed(&request.policy)
+    {
+        // Proxy mode cannot carry the native ingress table that grants loopback.
+        ensure_capability(&mut capabilities, "networkLoopback");
+    }
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -207,19 +213,19 @@ fn build_psec_network_policy(
         }
         network.egress = Some(Box::new(egress));
     }
-    let ingress_policy = if supports_network_ingress {
+    // Proxy mode uses the private-network capability and peer for ingress.
+    // PSEC rejects a proxy combined with the native ingress table.
+    let ingress_policy = if supports_network_ingress && !policy.network_proxy.is_enabled() {
         policy.network_ingress.as_ref()
     } else {
         None
     };
+    network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
     if let Some(ingress_policy) = ingress_policy {
-        network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
         let mut ingress = PsecIngressPolicy::default();
         ingress.default_action = psec_filter_action(ingress_policy.default);
         ingress.host_loopback = psec_filter_action(ingress_policy.host_loopback);
         network.ingress = Some(Box::new(ingress));
-    } else {
-        network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
     }
     network
 }
@@ -349,3 +355,6 @@ fn psec_endpoint_rules(rules: &[NetworkRule]) -> Vec<PsecEndpointRuleT> {
     }
     endpoints
 }
+
+#[cfg(test)]
+mod tests;
