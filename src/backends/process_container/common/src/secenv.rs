@@ -3,7 +3,8 @@
 
 //! Windows runtime FFI for the `processmodel.dll` **process security-environment**
 //! exports — the 2-phase sandbox launch model that produces the
-//! `HPROCESS_SECURITY_ENVIRONMENT` handle that [`crate::LearningModeApi::start_trace`]
+//! `HPROCESS_SECURITY_ENVIRONMENT` handle that
+//! [`learning_mode_windows::LearningModeApi::start_trace`]
 //! keys the Learning Mode trace on.
 //!
 //! `StartLearningModeTrace` is keyed on a security-environment handle (the broker
@@ -49,7 +50,7 @@ use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::string_util;
 
-use crate::LearningModeError;
+use learning_mode_windows::LearningModeError;
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
@@ -477,12 +478,19 @@ impl SecurityEnvironmentApi {
     pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
         if self.cacheable {
             static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
-            CACHE
-                .get_or_init(|| self.query_deny_paths_support())
-                .clone()
+            self.supports_deny_paths_cached(&CACHE)
         } else {
             self.query_deny_paths_support()
         }
+    }
+
+    fn supports_deny_paths_cached(
+        &self,
+        cache: &OnceLock<Result<bool, LearningModeError>>,
+    ) -> Result<bool, LearningModeError> {
+        cache
+            .get_or_init(|| self.query_deny_paths_support())
+            .clone()
     }
 
     /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
@@ -919,16 +927,17 @@ mod tests {
 
     #[test]
     fn cacheable_api_memoizes_support_query() {
-        // The only test that drives the cacheable (process-wide) support cache, so
-        // the `OnceLock` initializer runs deterministically here.
-        let _guard = QUERY_LOCK.lock().unwrap();
+        let _guard = QUERY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         let api =
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
+        let cache = OnceLock::new();
 
-        let first = api.supports_deny_paths().unwrap();
-        let second = api.supports_deny_paths().unwrap();
+        let first = api.supports_deny_paths_cached(&cache).unwrap();
+        let second = api.supports_deny_paths_cached(&cache).unwrap();
         assert_eq!(first, second);
         // The result is memoized for the process: the query runs at most once.
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);

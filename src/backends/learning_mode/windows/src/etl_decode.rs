@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Sealed-ETL decoder: turns the `.etl` that [`crate::CaptureSession::finish`]
+//! Sealed-ETL decoder: turns the `.etl` delivered by the Learning Mode trace API
 //! produces into cross-platform [`DeniedResource`]s.
 //!
 //! The trace is opened in **file mode** (`EVENT_TRACE_LOGFILEW.LogFileName`,

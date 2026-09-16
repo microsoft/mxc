@@ -17,10 +17,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use learning_mode_core::DenialAnalyzer;
-use learning_mode_windows::{
-    CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
-    SecurityEnvironmentApi, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
-};
+use learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
     ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -57,8 +54,13 @@ use crate::launch_diagnostics::{
     diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
     validate_required_child_env,
 };
+use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
+use crate::secenv::{
+    ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+};
 use sandbox_spec::base_container_layout::IntegrityLevel;
 use wxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
