@@ -74,7 +74,7 @@ describe('in-process async run routing', () => {
   it('rejects testing-only policy instead of falling back', async () => {
     await assert.rejects(
       spawnSandboxAsync('echo hello', {
-        version: '0.9.0-alpha',
+        version: '0.8.0-alpha',
         network: { proxy: { builtinTestServer: true } },
       } as unknown as { version: string }),
       /not supported by the in-process Node SDK/,

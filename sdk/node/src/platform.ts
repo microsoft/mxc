@@ -1,7 +1,6 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync, execFileSync } from 'child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -10,7 +9,12 @@ import {
   readPlatformSupportSnapshotJson,
   type PlatformSupportSnapshotJson,
 } from './bindings/platform-support.js';
-import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import {
+  ContainmentBackend,
+  IsolationTier,
+  PlatformSupport,
+  UiCapabilitySupport,
+} from './types.js';
 import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,6 +43,8 @@ const bwrapProbeScriptDirectory = fs.existsSync(
 )
   ? __dirname
   : path.join(getSdkPackageRoot(), 'dist');
+let wxcExecutableCache: { binDir: string | undefined; executable: string } | undefined;
+let wxcExecutableVerifier = verifyWxcExecutable;
 
 const KNOWN_BACKENDS: readonly ContainmentBackend[] = [
   'processcontainer',
@@ -57,10 +63,10 @@ const KNOWN_TIERS: readonly IsolationTier[] = ['base-container', 'appcontainer-b
  * Get platform support information.
  *
  * This projects the native host-services exports onto the SDK's existing
- * `PlatformSupport` shape. `availableMethods`, Linux
- * `unavailableReasons`, and the Windows `isolationTier` are preserved; the
- * narrower FFI surface does not currently expose `isolationWarnings` or
- * `uiCapabilities`, so those fields stay omitted.
+ * `PlatformSupport` shape. `availableMethods`, Linux `unavailableReasons`
+ * and `bubblewrapNetwork`, and the Windows `isolationTier` are preserved.
+ * The narrower FFI surface does not currently expose `isolationWarnings` or
+ * `uiCapabilities`, so those fields remain omitted.
  *
  * The result is cached for the lifetime of the SDK module — the underlying
  * machine state is not expected to change at runtime.
@@ -149,15 +155,17 @@ function parseAvailableBackendsPayload(json: string): NativeAvailableBackendPayl
     if (value.tier !== undefined && !isIsolationTier(value.tier)) {
       throw new Error('mxc_available_backends_json returned malformed JSON');
     }
+    const capabilities = Array.isArray(value.capabilities)
+      ? value.capabilities.filter((item): item is string => typeof item === 'string')
+      : [];
+    const warnings = Array.isArray(value.warnings)
+      ? value.warnings.filter((item): item is string => typeof item === 'string')
+      : [];
     return {
       backend: value.backend,
       tier: value.tier,
-      capabilities: Array.isArray(value.capabilities)
-        ? value.capabilities.filter((item): item is string => typeof item === 'string')
-        : [],
-      warnings: Array.isArray(value.warnings)
-        ? value.warnings.filter((item): item is string => typeof item === 'string')
-        : [],
+      capabilities,
+      warnings,
     };
   });
 }
@@ -246,25 +254,6 @@ function computeSupport(): PlatformSupport {
       availableMethods: [],
     };
   }
-}
-
-/**
- * Check if LXC is available on the system
- */
-function defaultLxcAvailabilityProbe(): boolean {
-  try {
-    execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-let lxcAvailabilityProbe = defaultLxcAvailabilityProbe;
-
-/** @internal Test-only: override the LXC availability probe. */
-export function _setLxcAvailabilityProbe(fn: (() => boolean) | null): void {
-  lxcAvailabilityProbe = fn ?? defaultLxcAvailabilityProbe;
 }
 
 let platformDiagnosticLogger: (message: string) => void = diagLog;
@@ -675,4 +664,230 @@ function isSeatbeltAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Get the simplified architecture name used for SDK bin directory layout.
+ * @returns 'arm64' or 'x64'
+ */
+function getSdkArch(): string {
+  return os.arch() === 'arm64' ? 'arm64' : 'x64';
+}
+
+/**
+ * Get the Rust target triple for the current machine architecture.
+ * @returns The Rust target triple string
+ */
+function getRustTargetTriple(): string {
+  const arch = os.arch();
+  const platform = os.platform();
+  if (platform === 'linux') {
+    return arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+  }
+  // Windows
+  return arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+}
+
+/**
+ * Get the Rust target triple for the current Linux machine architecture.
+ */
+function getLinuxRustTargetTriple(): string {
+  const arch = os.arch();
+  switch (arch) {
+    case 'arm64':
+      return 'aarch64-unknown-linux-gnu';
+    case 'x64':
+    default:
+      return 'x86_64-unknown-linux-gnu';
+  }
+}
+
+/**
+ * Get the Rust target triple for the current macOS machine architecture.
+ */
+function getDarwinRustTargetTriple(): string {
+  const arch = os.arch();
+  return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+}
+
+/**
+ * Find the wxc-exec executable
+ * Searches in common locations relative to the SDK package,
+ * selecting the build matching the current machine architecture.
+ * @returns Path to wxc-exec.exe if found, null otherwise
+ */
+export function findWxcExecutable(): string | null {
+  const binDir = process.env.MXC_BIN_DIR;
+  const overridePath = binDir
+    ? path.join(binDir, getSdkArch(), 'wxc-exec.exe')
+    : undefined;
+  const cached = wxcExecutableCache;
+  if (
+    cached !== undefined
+    && cached.binDir === binDir
+    && (overridePath === undefined || cached.executable === overridePath)
+    && wxcExecutableVerifier(cached.executable)
+  ) {
+    return cached.executable;
+  }
+  wxcExecutableCache = undefined;
+
+  // Allow override for bundled deployments (debugging/testing)
+  if (overridePath !== undefined) {
+    if (wxcExecutableVerifier(overridePath)) {
+      wxcExecutableCache = { binDir, executable: overridePath };
+      return overridePath;
+    }
+  }
+
+  const pkgRoot = getSdkPackageRoot();
+  const targetTriple = getRustTargetTriple();
+  const targetDir = path.join(pkgRoot, '..', '..', 'src', 'target');
+
+  const possiblePaths = [
+    // Bundled in the SDK package (e.g. when installed via npm)
+    path.join(pkgRoot, 'bin', getSdkArch(), 'wxc-exec.exe'),
+    // Architecture-specific release build output (monorepo dev)
+    path.join(targetDir, targetTriple, 'release', 'wxc-exec.exe'),
+    // Architecture-specific debug build output (monorepo dev)
+    path.join(targetDir, targetTriple, 'debug', 'wxc-exec.exe'),
+    // Fallback: default Cargo release build output (no explicit --target)
+    path.join(targetDir, 'release', 'wxc-exec.exe'),
+    // Fallback: default Cargo debug build output (no explicit --target)
+    path.join(targetDir, 'debug', 'wxc-exec.exe'),
+  ];
+
+  for (const wxcPath of possiblePaths) {
+    if (wxcExecutableVerifier(wxcPath)) {
+      wxcExecutableCache = { binDir, executable: wxcPath };
+      return wxcPath;
+    }
+  }
+
+  return null;
+}
+
+/** @internal Test-only: clear the resolved executable path. */
+export function _resetWxcExecutableCache(): void {
+  wxcExecutableCache = undefined;
+}
+
+/** @internal Test-only: override executable verification. */
+export function _setWxcExecutableVerifier(
+  verifier: ((execPath: string) => boolean) | null,
+): void {
+  wxcExecutableVerifier = verifier ?? verifyWxcExecutable;
+}
+
+/**
+ * Verify that an executable exists at the given path
+ * @param execPath - Path to verify
+ * @returns true if the executable exists and is a file, false otherwise
+ */
+function verifyExecutable(execPath: string): boolean {
+  try {
+    // Paths inside Electron's app.asar exist to fs but can't be executed
+    if (execPath.includes('.asar')) {
+      return false;
+    }
+    if (!fs.existsSync(execPath) || !fs.statSync(execPath).isFile()) {
+      return false;
+    }
+    // On non-Windows platforms, also verify execute permission
+    if (process.platform !== 'win32') {
+      fs.accessSync(execPath, fs.constants.X_OK);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify that a wxc-exec executable exists at the given path
+ * @param wxcPath - Path to verify
+ * @returns true if the executable exists and is a file, false otherwise
+ */
+function verifyWxcExecutable(wxcPath: string): boolean {
+  return verifyExecutable(wxcPath);
+}
+
+/**
+ * Find the lxc-exec executable on Linux
+ * Searches in common locations relative to the SDK package.
+ * @returns Path to lxc-exec if found, null otherwise
+ */
+export function findLxcExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'lxc-exec');
+    if (verifyExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
+  const pkgRoot = getSdkPackageRoot();
+  const targetTriple = getLinuxRustTargetTriple();
+  const targetDir = path.join(pkgRoot, '..', '..', 'src', 'target');
+
+  const possiblePaths = [
+    // Bundled in the SDK package
+    path.join(pkgRoot, 'bin', getSdkArch(), 'lxc-exec'),
+    // Architecture-specific release build
+    path.join(targetDir, targetTriple, 'release', 'lxc-exec'),
+    // Architecture-specific debug build
+    path.join(targetDir, targetTriple, 'debug', 'lxc-exec'),
+    // Default Cargo release build
+    path.join(targetDir, 'release', 'lxc-exec'),
+    // Default Cargo debug build
+    path.join(targetDir, 'debug', 'lxc-exec'),
+  ];
+
+  for (const lxcPath of possiblePaths) {
+    if (verifyExecutable(lxcPath)) {
+      return lxcPath;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Find the mxc-exec-mac executable on macOS.
+ * Searches in the SDK bin directory (npm install path) and Cargo build
+ * output directories (monorepo dev path).
+ * @returns Path to mxc-exec-mac if found, null otherwise
+ */
+export function findSeatbeltExecutable(): string | null {
+  // Allow override for bundled deployments (debugging/testing)
+  if (process.env.MXC_BIN_DIR) {
+    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');
+    if (verifyExecutable(overridePath)) {
+      return overridePath;
+    }
+  }
+
+  const targetTriple = getDarwinRustTargetTriple();
+  const targetDir = path.join(__dirname, '..', '..', '..', 'src', 'target');
+
+  const possiblePaths = [
+    // Bundled in the SDK package
+    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-mac'),
+    // Architecture-specific release build
+    path.join(targetDir, targetTriple, 'release', 'mxc-exec-mac'),
+    // Architecture-specific debug build
+    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-mac'),
+    // Default Cargo release build
+    path.join(targetDir, 'release', 'mxc-exec-mac'),
+    // Default Cargo debug build
+    path.join(targetDir, 'debug', 'mxc-exec-mac'),
+  ];
+
+  for (const darwinPath of possiblePaths) {
+    if (verifyExecutable(darwinPath)) {
+      return darwinPath;
+    }
+  }
+
+  return null;
 }
