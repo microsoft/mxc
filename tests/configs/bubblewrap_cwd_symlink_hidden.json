@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-SymlinkHidden",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo CWD_SYMLINK_COMMAND_RAN",
+    "cwd": "/tmp/mxc_bwrap_cwd/links/cwd"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/tmp/mxc_bwrap_cwd/links"]
+  }
+}

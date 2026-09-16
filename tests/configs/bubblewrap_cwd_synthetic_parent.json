@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-SyntheticParent",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd)\" = /tmp/mxc_bwrap_cwd/masked ]; then echo CWD_SYNTHETIC_OK; else echo CWD_SYNTHETIC_BAD:$(pwd); fi; cat child/visible.txt",
+    "cwd": "/tmp/mxc_bwrap_cwd/masked"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/tmp/mxc_bwrap_cwd/masked/child"],
+    "deniedPaths": ["/tmp/mxc_bwrap_cwd/masked"]
+  }
+}

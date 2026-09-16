@@ -1,0 +1,9 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-Virtual-Descendant",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = /proc/sys ]; then echo CWD_VIRTUAL_DESCENDANT_OK; else echo CWD_VIRTUAL_DESCENDANT_BAD:$(pwd -P); fi",
+    "cwd": "/proc/sys"
+  }
+}
