@@ -33,6 +33,7 @@ use windows::Win32::System::Threading::{
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::capture_output;
+use crate::fallback_detector::FallbackError;
 use crate::guarded_capture::{
     finalize_guarded_capture, validate_retain_etl_supported, GuardedCaptureFactory,
     GuardedCaptureSession, GuardedStop,
@@ -1733,9 +1734,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.enumerate_paths.is_empty() {
             return Err(ScriptResponse::error(
-                "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
-                 enumeration-only access requires native ProcessContainer support and cannot \
-                 be enforced by an AppContainer fallback",
+                &FallbackError::EnumeratePathsUnsupported.to_string(),
             ));
         }
         if request

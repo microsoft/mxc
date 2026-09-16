@@ -353,6 +353,16 @@ mod tests {
     }
 
     #[test]
+    fn enumerate_paths_rejected() {
+        let err = plan_policy(&request_with(ContainerPolicy {
+            enumerate_paths: vec!["C:\\tools".to_string()],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "processContainer.filesystem.enumeratePaths");
+    }
+
+    #[test]
     fn proxy_rejected() {
         let err = plan_policy(&request_with(ContainerPolicy {
             network_proxy: ProxyConfig {

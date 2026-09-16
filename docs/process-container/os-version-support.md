@@ -139,6 +139,9 @@ Notes:
   queries and listing under the caller's user access without granting file
   content reads. SBOX, BFS, and DACL fallback tiers cannot represent this
   distinction, so MXC rejects the request when the PSEC capability is absent.
+  It is also incompatible with `processContainer.leastPrivilege`, which requires
+  the legacy SBOX path; MXC rejects that combination instead of broadening access
+  through fallback.
 - On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 

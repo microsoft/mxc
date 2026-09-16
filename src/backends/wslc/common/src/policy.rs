@@ -341,6 +341,19 @@ mod tests {
     }
 
     #[test]
+    fn provision_rejects_enumerate_paths() {
+        let request = request_with_policy(ContainerPolicy {
+            enumerate_paths: vec!["C:\\tools".to_string()],
+            ..Default::default()
+        });
+
+        assert_policy_validation(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_ENUMERATE_PATHS,
+        );
+    }
+
+    #[test]
     fn runtime_proxy_only_exec_inherits_mode_and_retains_guest_routable_url() {
         let request = parsed(
             r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,

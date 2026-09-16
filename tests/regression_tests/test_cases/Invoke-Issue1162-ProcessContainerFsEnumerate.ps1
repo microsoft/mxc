@@ -3,7 +3,8 @@
 
 param(
     [string]$WxcExec,
-    [string]$WorkDirectory = (Join-Path $env:TEMP "mxc-issue-1162")
+    [string]$WorkDirectory = (Join-Path $env:TEMP "mxc-issue-1162"),
+    [switch]$CheckPrerequisites
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,11 +59,23 @@ Write-Host "Issue #1162: ProcessContainer PSEC fs_enumerate." -ForegroundColor C
 $probeOutput = & $WxcExec --probe --config-base64 $enumerateBase64
 $probeExitCode = $LASTEXITCODE
 $probeOutput | Out-Host
+$probe = $probeOutput | ConvertFrom-Json
+if (-not $probe.probes.baseContainerSupportsEnumeratePaths) {
+    Write-Host "SKIPPED: This host does not advertise ProcessContainer filesystem enumeration support." -ForegroundColor Yellow
+    exit 77
+}
+if ($CheckPrerequisites) {
+    if ($probeExitCode -ne 0) {
+        Write-Error "The host advertises filesystem enumeration support, but the request probe failed."
+        exit $probeExitCode
+    }
+    exit 0
+}
 if ($probeExitCode -ne 0) {
     Complete-RegressionTest -Passed $false -SuccessMessage "Unused" -FailureMessage "The fs_enumerate config was rejected during probing." -FailureExitCode $probeExitCode
 }
 
-$selectedTier = ($probeOutput | ConvertFrom-Json).tier
+$selectedTier = $probe.tier
 if ($selectedTier -ne "base-container") {
     Complete-RegressionTest -Passed $false -SuccessMessage "Unused" -FailureMessage "Issue #1162 requires base-container, but the selected tier was '$selectedTier'."
 }

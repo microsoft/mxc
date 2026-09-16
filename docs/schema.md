@@ -300,7 +300,7 @@ The ProcessContainer-only `processContainer.filesystem` section contains:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. |
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. It cannot be combined with `processContainer.leastPrivilege`; that combination fails rather than falling back. |
 
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
 containment tier selected at runtime:

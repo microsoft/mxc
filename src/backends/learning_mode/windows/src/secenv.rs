@@ -471,24 +471,7 @@ impl SecurityEnvironmentApi {
     }
 
     /// Whether the official V2 API supports native deny paths.
-    ///
-    /// The answer is a fixed host capability, so for the real (cacheable) API the
-    /// result — including a typed error — is memoized once per process. Non-cacheable
-    /// test fakes always query directly and never touch the process-wide cache.
     pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
-        if self.cacheable {
-            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
-            CACHE
-                .get_or_init(|| self.query_deny_paths_support())
-                .clone()
-        } else {
-            self.query_deny_paths_support()
-        }
-    }
-
-    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
-    /// without consulting or populating the process-wide cache.
-    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
         self.query_support(PSE_SUPPORT_FS_DENY)
     }
 
@@ -512,6 +495,24 @@ impl SecurityEnvironmentApi {
     }
 
     fn query_support(&self, capability: u64) -> Result<bool, LearningModeError> {
+        self.support_flags()
+            .map(|support_flags| support_flags & capability != 0)
+    }
+
+    /// Return the immutable support flags advertised by the official PSEC API.
+    ///
+    /// The real API is process-wide and immutable, so both successful flags and
+    /// typed failures are memoized. Injected test surfaces remain uncached.
+    fn support_flags(&self) -> Result<u64, LearningModeError> {
+        if self.cacheable {
+            static CACHE: OnceLock<Result<u64, LearningModeError>> = OnceLock::new();
+            CACHE.get_or_init(|| self.query_support_flags()).clone()
+        } else {
+            self.query_support_flags()
+        }
+    }
+
+    fn query_support_flags(&self) -> Result<u64, LearningModeError> {
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
         // `support_flags` is a valid out-pointer.
@@ -522,7 +523,7 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
-        Ok(support_flags & capability != 0)
+        Ok(support_flags)
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -932,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn cacheable_api_memoizes_support_query() {
+    fn cacheable_api_memoizes_support_flags_across_capabilities() {
         // The only test that drives the cacheable (process-wide) support cache, so
         // the `OnceLock` initializer runs deterministically here.
         let _guard = QUERY_LOCK.lock().unwrap();
@@ -941,10 +942,9 @@ mod tests {
         let api =
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
 
-        let first = api.supports_deny_paths().unwrap();
-        let second = api.supports_deny_paths().unwrap();
-        assert_eq!(first, second);
-        // The result is memoized for the process: the query runs at most once.
+        assert!(api.supports_deny_paths().unwrap());
+        assert!(!api.supports_enumerate_paths().unwrap());
+        assert!(!api.supports_network_ingress().unwrap());
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
     }
 }

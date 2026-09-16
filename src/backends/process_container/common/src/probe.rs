@@ -137,11 +137,8 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) -> ProbeOutput {
     use crate::base_container_runner::BaseContainerRunner;
 
-    let base_container_usable = BaseContainerRunner::is_usable_for_request(request);
+    let capabilities = BaseContainerRunner::capabilities_for_request(request);
     let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
-    let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
-    let supports_enumerate_paths =
-        BaseContainerRunner::supports_enumerate_paths_for_request(request);
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
         native_capture_available: BaseContainerRunner::is_native_capture_available(),
@@ -151,8 +148,8 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
-        base_container_supports_deny_paths: BaseContainerRunner::supports_native_denied_paths(),
-        base_container_supports_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
+        base_container_supports_deny_paths: capabilities.supports_deny_paths,
+        base_container_supports_enumerate_paths: capabilities.supports_enumerate_paths,
         base_container_supports_ingress_host_loopback_allow:
             BaseContainerRunner::supports_ingress_host_loopback_allow(),
         isolation_session_available: false,
@@ -160,30 +157,16 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
 
-    run_probe_with_capabilities(
-        request,
-        probes,
-        base_container_usable,
-        uses_native_capture,
-        supports_deny_paths,
-        supports_enumerate_paths,
-    )
+    run_probe_with_capabilities(request, probes, capabilities, uses_native_capture)
 }
 
 fn run_probe_with_capabilities(
     request: &ExecutionRequest,
     probes: ProbeFacts,
-    base_container_usable: bool,
+    capabilities: fallback_detector::BaseContainerRequestCapabilities,
     uses_native_capture: bool,
-    supports_deny_paths: bool,
-    supports_enumerate_paths: bool,
 ) -> ProbeOutput {
-    match detect_request_tier(
-        request,
-        base_container_usable,
-        supports_deny_paths,
-        supports_enumerate_paths,
-    ) {
+    match detect_request_tier(request, capabilities) {
         Ok(decision)
             if request.policy.capture_denials.is_some()
                 && (decision.tier != fallback_detector::IsolationTier::BaseContainer
@@ -217,16 +200,12 @@ fn run_probe_with_capabilities(
 
 fn detect_request_tier(
     request: &ExecutionRequest,
-    base_container_usable: bool,
-    supports_deny_paths: bool,
-    supports_enumerate_paths: bool,
+    capabilities: fallback_detector::BaseContainerRequestCapabilities,
 ) -> Result<fallback_detector::TierDecision, FallbackError> {
     fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
-        base_container_usable,
-        base_container_usable,
-        supports_deny_paths,
-        supports_enumerate_paths,
+        capabilities.usable,
+        capabilities,
     )
 }
 
@@ -241,11 +220,7 @@ fn format_fallback_error(e: &FallbackError) -> String {
         FallbackError::SystemRootUnresolved { reason } => {
             format!("Could not resolve Windows system directory: {reason}")
         }
-        FallbackError::EnumeratePathsUnsupported => {
-            "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
-             enumeration-only access requires native ProcessContainer support"
-                .to_string()
-        }
+        FallbackError::EnumeratePathsUnsupported => e.to_string(),
     }
 }
 
@@ -303,6 +278,18 @@ mod tests {
             isolation_session_available: false,
             hyperlight_available: false,
             ui_capabilities: all_ui_capabilities(),
+        }
+    }
+
+    fn request_capabilities(
+        usable: bool,
+        supports_deny_paths: bool,
+        supports_enumerate_paths: bool,
+    ) -> fallback_detector::BaseContainerRequestCapabilities {
+        fallback_detector::BaseContainerRequestCapabilities {
+            usable,
+            supports_deny_paths,
+            supports_enumerate_paths,
         }
     }
 
@@ -401,7 +388,12 @@ mod tests {
         let request = ExecutionRequest::default();
         let probes = test_probe_facts(false, false);
 
-        let selected = run_probe_with_capabilities(&request, probes, true, false, true, true);
+        let selected = run_probe_with_capabilities(
+            &request,
+            probes,
+            request_capabilities(true, true, true),
+            false,
+        );
 
         assert_eq!(selected.tier, Some("base-container"));
         assert!(selected.error.is_none());
@@ -419,10 +411,8 @@ mod tests {
         let output = run_probe_with_capabilities(
             &request,
             test_probe_facts(false, true),
+            request_capabilities(false, false, true),
             false,
-            false,
-            false,
-            true,
         );
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
@@ -440,10 +430,8 @@ mod tests {
         let output = run_probe_with_capabilities(
             &request_with_policy(policy),
             test_probe_facts(false, false),
+            request_capabilities(false, false, true),
             false,
-            false,
-            false,
-            true,
         );
 
         assert!(output.tier.is_none());
@@ -465,10 +453,8 @@ mod tests {
         let output = run_probe_with_capabilities(
             &request_with_policy(policy),
             test_probe_facts(false, false),
-            true,
+            request_capabilities(true, true, true),
             false,
-            true,
-            true,
         );
 
         assert!(output.tier.is_none());
@@ -489,9 +475,7 @@ mod tests {
         let output = run_probe_with_capabilities(
             &request_with_policy(policy),
             test_probe_facts(true, false),
-            true,
-            true,
-            true,
+            request_capabilities(true, true, true),
             true,
         );
 
@@ -625,7 +609,7 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".to_string()];
 
-        let decision = detect_request_tier(&request, true, true, true)
+        let decision = detect_request_tier(&request, request_capabilities(true, true, true))
             .expect("BaseContainer should be selected");
 
         assert_eq!(decision.tier, IsolationTier::BaseContainer);
@@ -636,7 +620,7 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
 
-        let error = detect_request_tier(&request, false, false, false)
+        let error = detect_request_tier(&request, request_capabilities(false, false, false))
             .expect_err("enumeratePaths must not fall through to AppContainer");
 
         assert!(matches!(error, FallbackError::EnumeratePathsUnsupported));
@@ -647,7 +631,7 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
 
-        let error = detect_request_tier(&request, true, true, false)
+        let error = detect_request_tier(&request, request_capabilities(true, true, false))
             .expect_err("enumeratePaths requires its specific native capability");
 
         assert!(matches!(error, FallbackError::EnumeratePathsUnsupported));

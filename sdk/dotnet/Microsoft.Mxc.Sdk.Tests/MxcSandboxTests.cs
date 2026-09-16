@@ -481,6 +481,17 @@ public class MxcSandboxTests
         Assert.Equal(expected, MxcSandbox.ParseBackendCapability(wireName));
     }
 
+    [Fact]
+    public void BackendCapability_PreservesReleasedNumericValues()
+    {
+        Assert.Equal(0, (int)BackendCapability.Unknown);
+        Assert.Equal(1, (int)BackendCapability.CaptureDenials);
+        Assert.Equal(2, (int)BackendCapability.ProxyEnforcement);
+        Assert.Equal(3, (int)BackendCapability.FilesystemDeniedPaths);
+        Assert.Equal(4, (int)BackendCapability.IngressHostLoopbackAllow);
+        Assert.Equal(5, (int)BackendCapability.FilesystemEnumeratePaths);
+    }
+
     [Theory]
     [InlineData("unknown")]
     [InlineData("processContainer")]

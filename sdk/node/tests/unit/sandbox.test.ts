@@ -187,6 +187,43 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject ProcessContainer enumeration policy before schema 0.9', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.8.0-alpha',
+            processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+          }),
+          { message: /requires schema version 0\.9\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject ProcessContainer enumeration policy for non-ProcessContainer targets', () => {
+      const policy: SandboxPolicy = {
+        version: '0.9.0-alpha',
+        processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+      };
+      for (const [platform, containment] of [
+        ['linux', 'process'],
+        ['darwin', 'process'],
+        ['win32', 'wslc'],
+      ] as const) {
+        mockPlatform(platform);
+        try {
+          assert.throws(
+            () => createConfigFromPolicy(policy, containment),
+            { message: /supported only by the Windows ProcessContainer backend/ },
+          );
+        } finally {
+          restore();
+        }
+      }
+    });
+
     it('should reject an unregistered version within the supported range', () => {
       mockWindows();
       try {
@@ -621,6 +658,29 @@ describe('buildSandboxPayload', () => {
             'microvm',
           ),
           { message: /to be all deny or all allow/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject ProcessContainer enumeration policy for microvm', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'print(42)',
+            {
+              version: '0.9.0-alpha',
+              processContainer: {
+                filesystem: { enumeratePaths: ['C:\\tools'] },
+              },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          { message: /does not support processContainer\.filesystem\.enumeratePaths/ },
         );
       } finally {
         restore();

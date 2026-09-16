@@ -1153,10 +1153,6 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     for (paths, list_name) in [
         (&policy.readwrite_paths, "readwritePaths"),
         (&policy.readonly_paths, "readonlyPaths"),
-        (
-            &policy.enumerate_paths,
-            "processContainer.filesystem.enumeratePaths",
-        ),
         (&policy.denied_paths, "deniedPaths"),
     ] {
         for path in paths {
@@ -11479,6 +11475,36 @@ mod tests {
 
         assert!(req.policy.readonly_paths.is_empty());
         assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn same_path_in_readwrite_and_enumerate_becomes_enumerate() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readwritePaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.readwrite_paths.is_empty());
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (enumerate)"));
+    }
+
+    #[test]
+    fn same_path_in_enumerate_and_denied_becomes_denied() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"deniedPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.enumerate_paths.is_empty());
+        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (denied)"));
     }
 
     #[test]

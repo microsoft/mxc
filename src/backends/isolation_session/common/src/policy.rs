@@ -221,6 +221,21 @@ mod tests {
     }
 
     #[test]
+    fn provision_policy_rejects_enumerate_paths() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                enumerate_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
     fn provision_policy_rejects_readwrite_and_readonly_together() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {

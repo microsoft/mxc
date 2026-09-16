@@ -40,7 +40,7 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::base_container_helpers::{
     build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
-    unrestricted_host_loopback_allowed, PsecContract,
+    unrestricted_host_loopback_allowed, PsecContract, ResolvedPsecContract,
 };
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -261,9 +261,35 @@ const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
      and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
      build does not support that policy, and enumeration-only access cannot fall back to SBOX \
      or AppContainer enforcement";
+const PSEC_INGRESS_UNSUPPORTED_MSG: &str =
+    "network.ingress.hostLoopback='allow' requires Process Security Environment contract version \
+     1.1 with ingress support";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
+
+trait PsecCapabilityProbe {
+    fn supports_version_1_1(&self) -> Result<bool, String>;
+    fn supports_enumerate_paths(&self) -> Result<bool, String>;
+    fn supports_network_ingress(&self) -> Result<bool, String>;
+}
+
+impl PsecCapabilityProbe for SecurityEnvironmentApi {
+    fn supports_version_1_1(&self) -> Result<bool, String> {
+        self.supports_version(1, 1)
+            .map_err(|error| error.to_string())
+    }
+
+    fn supports_enumerate_paths(&self) -> Result<bool, String> {
+        self.supports_enumerate_paths()
+            .map_err(|error| error.to_string())
+    }
+
+    fn supports_network_ingress(&self) -> Result<bool, String> {
+        self.supports_network_ingress()
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Debug)]
 struct CaptureCleanupError {
@@ -467,7 +493,10 @@ impl BaseContainerRunner {
 
     #[cfg(test)]
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        build_psec_spec(request)
+        build_psec_spec(
+            request,
+            ResolvedPsecContract::with_all_contract_capabilities(request),
+        )
     }
 
     #[cfg(test)]
@@ -612,7 +641,7 @@ impl BaseContainerRunner {
                 schema_version: "0.8.0-alpha".to_string(),
                 ..Default::default()
             };
-            let specification = build_psec_spec(&request);
+            let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
             SecurityEnvironmentApi::load()
                 .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
                 .and_then(|environment| {
@@ -655,7 +684,7 @@ impl BaseContainerRunner {
             schema_version: "0.8.0-alpha".to_string(),
             ..Default::default()
         };
-        let specification = build_psec_spec(&request);
+        let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
         SecurityEnvironmentApi::load()
             .and_then(|security_environment_api| {
                 CaptureSession::begin(
@@ -794,12 +823,12 @@ impl BaseContainerRunner {
         )
     }
 
-    fn resolve_psec_contract(request: &ExecutionRequest) -> Result<PsecContract, ScriptResponse> {
+    fn resolve_psec_contract(
+        request: &ExecutionRequest,
+    ) -> Result<ResolvedPsecContract, ScriptResponse> {
         let contract = PsecContract::for_request(request);
-        // PSEC 1.0 preserves the default ingress posture through capability mapping.
-        // Enumeration-only access and unrestricted host-loopback access require PSEC 1.1.
         if contract == PsecContract::V1_0 {
-            return Ok(contract);
+            return Ok(ResolvedPsecContract::baseline());
         }
 
         let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
@@ -808,25 +837,42 @@ impl BaseContainerRunner {
                 "failed to load Process Security Environment support APIs: {error}"
             ))
         })?;
-        let version_supported = api.supports_version(1, 1).map_err(|error| ScriptResponse {
-            failure_phase: FailurePhase::BackendUnavailable,
-            ..ScriptResponse::error(&format!(
-                "failed to query Process Security Environment contract support: {error}"
-            ))
-        })?;
-        if !version_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(
-                    "the request requires Process Security Environment contract version 1.1, \
-                     which this OS build does not support",
-                )
-            });
+        Self::resolve_psec_contract_with_probe(request, &api)
+    }
+
+    fn resolve_psec_contract_with_probe(
+        request: &ExecutionRequest,
+        probe: &dyn PsecCapabilityProbe,
+    ) -> Result<ResolvedPsecContract, ScriptResponse> {
+        let contract = PsecContract::for_request(request);
+        if contract == PsecContract::V1_0 {
+            return Ok(ResolvedPsecContract::baseline());
         }
 
         let requires_enumerate_paths = !request.policy.enumerate_paths.is_empty();
+        let requires_unrestricted_host_loopback =
+            unrestricted_host_loopback_allowed(&request.policy);
+        let version_supported = probe
+            .supports_version_1_1()
+            .map_err(|error| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&format!(
+                    "failed to query Process Security Environment contract support: {error}"
+                ))
+            })?;
+        if !version_supported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(if requires_enumerate_paths {
+                    PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
+                } else {
+                    PSEC_INGRESS_UNSUPPORTED_MSG
+                })
+            });
+        }
+
         let enumerate_paths_supported = if requires_enumerate_paths {
-            api
+            probe
                 .supports_enumerate_paths()
                 .map_err(|error| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
@@ -844,29 +890,25 @@ impl BaseContainerRunner {
             });
         }
 
-        let requires_unrestricted_host_loopback =
-            unrestricted_host_loopback_allowed(&request.policy);
-        let network_ingress_supported = if requires_unrestricted_host_loopback {
-            api.supports_network_ingress()
+        let network_ingress_supported =
+            probe
+                .supports_network_ingress()
                 .map_err(|error| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
                     ..ScriptResponse::error(&format!(
                         "failed to query Process Security Environment ingress support: {error}"
                     ))
-                })?
-        } else {
-            true
-        };
+                })?;
         if requires_unrestricted_host_loopback && !network_ingress_supported {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(
-                    "network.ingress.hostLoopback='allow' requires Process Security Environment \
-                     contract version 1.1 with ingress support",
-                )
+                ..ScriptResponse::error(PSEC_INGRESS_UNSUPPORTED_MSG)
             });
         }
-        Ok(contract)
+        Ok(ResolvedPsecContract {
+            contract,
+            supports_network_ingress: network_ingress_supported,
+        })
     }
 
     fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
@@ -1137,10 +1179,15 @@ impl BaseContainerRunner {
         crate::fallback_detector::base_container_supports_deny_paths()
     }
 
-    pub(crate) fn supports_enumerate_paths_for_request(request: &ExecutionRequest) -> bool {
-        request.policy.enumerate_paths.is_empty()
-            || (Self::is_process_security_environment_usable()
-                && Self::query_psec_enumerate_support().unwrap_or(false))
+    pub(crate) fn capabilities_for_request(
+        request: &ExecutionRequest,
+    ) -> crate::fallback_detector::BaseContainerRequestCapabilities {
+        crate::fallback_detector::BaseContainerRequestCapabilities {
+            usable: Self::is_usable_for_request(request),
+            supports_deny_paths: Self::supports_deny_paths_for_request(request),
+            supports_enumerate_paths: Self::is_process_security_environment_usable()
+                && Self::query_psec_enumerate_support().unwrap_or(false),
+        }
     }
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
@@ -1397,9 +1444,9 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec = psec_contract.map(|contract| {
-            let psec_spec = build_psec_spec(&request);
-            let contract_version = contract.version();
+        let process_security_environment_spec = psec_contract.map(|resolution| {
+            let psec_spec = build_psec_spec(&request, resolution);
+            let contract_version = resolution.contract.version();
             let _ = writeln!(
                 logger,
                 "process security environment spec built (PSEC {}.{}, {} bytes)",
@@ -3400,6 +3447,49 @@ mod tests {
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
+    struct FakePsecCapabilityProbe {
+        version_1_1: Result<bool, &'static str>,
+        enumerate_paths: Result<bool, &'static str>,
+        network_ingress: Result<bool, &'static str>,
+    }
+
+    impl PsecCapabilityProbe for FakePsecCapabilityProbe {
+        fn supports_version_1_1(&self) -> Result<bool, String> {
+            self.version_1_1.map_err(str::to_string)
+        }
+
+        fn supports_enumerate_paths(&self) -> Result<bool, String> {
+            self.enumerate_paths.map_err(str::to_string)
+        }
+
+        fn supports_network_ingress(&self) -> Result<bool, String> {
+            self.network_ingress.map_err(str::to_string)
+        }
+    }
+
+    fn enumerate_request() -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
+        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Deny,
+        });
+        request
+    }
+
+    fn host_loopback_request() -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+        request
+    }
+
+    fn response_error(response: ScriptResponse) -> String {
+        response.error_message
+    }
+
     #[test]
     fn guarded_capture_rejects_a_child_that_was_never_suspended() {
         assert!(guarded_capture_started_too_late(0, true));
@@ -4465,6 +4555,138 @@ mod tests {
     }
 
     #[test]
+    fn psec_resolver_rejects_unsupported_version_with_enumeration_diagnostic() {
+        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &enumerate_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(false),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(response_error(error), PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG);
+    }
+
+    #[test]
+    fn psec_resolver_rejects_unsupported_enumeration_capability() {
+        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &enumerate_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Ok(false),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(response_error(error), PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG);
+    }
+
+    #[test]
+    fn psec_enumeration_without_ingress_support_omits_ingress_table() {
+        let request = enumerate_request();
+        let resolution = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &request,
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(false),
+            },
+        )
+        .unwrap();
+
+        let bytes = build_psec_spec(&request, resolution);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(spec.version().minor(), 1);
+        assert!(spec.network_policy().unwrap().ingress().is_none());
+    }
+
+    #[test]
+    fn psec_resolver_preserves_host_loopback_diagnostic_when_version_is_unsupported() {
+        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &host_loopback_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(false),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(response_error(error), PSEC_INGRESS_UNSUPPORTED_MSG);
+    }
+
+    #[test]
+    fn psec_resolver_rejects_host_loopback_without_ingress_capability() {
+        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &host_loopback_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(false),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(response_error(error), PSEC_INGRESS_UNSUPPORTED_MSG);
+    }
+
+    #[test]
+    fn psec_resolver_surfaces_capability_query_errors() {
+        let version_error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &enumerate_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Err("version query failed"),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap_err();
+        assert!(response_error(version_error).contains("version query failed"));
+
+        let enumeration_error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &enumerate_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Err("enumeration query failed"),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap_err();
+        assert!(response_error(enumeration_error).contains("enumeration query failed"));
+
+        let ingress_error = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &enumerate_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Ok(true),
+                network_ingress: Err("ingress query failed"),
+            },
+        )
+        .unwrap_err();
+        assert!(response_error(ingress_error).contains("ingress query failed"));
+    }
+
+    #[test]
+    fn psec_resolver_returns_full_capability_success() {
+        let resolution = BaseContainerRunner::resolve_psec_contract_with_probe(
+            &host_loopback_request(),
+            &FakePsecCapabilityProbe {
+                version_1_1: Ok(true),
+                enumerate_paths: Ok(true),
+                network_ingress: Ok(true),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolution.contract, PsecContract::V1_1);
+        assert!(resolution.supports_network_ingress);
+    }
+
+    #[test]
     fn psec_1_0_uses_capability_for_ingress_default_allow() {
         let mut request = ExecutionRequest::default();
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
@@ -4473,7 +4695,7 @@ mod tests {
         });
         request.policy.allowed_proxy_peer = Some("S-1-15-2-1".into());
 
-        let bytes = build_psec_spec(&request);
+        let bytes = build_psec_spec(&request, ResolvedPsecContract::baseline());
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().expect("network policy");
 

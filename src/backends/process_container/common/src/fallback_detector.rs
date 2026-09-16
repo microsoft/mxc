@@ -163,6 +163,14 @@ pub struct TierDecision {
     pub reasons: Vec<DegradationReason>,
 }
 
+/// Request-specific BaseContainer capabilities used for tier selection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BaseContainerRequestCapabilities {
+    pub(crate) usable: bool,
+    pub(crate) supports_deny_paths: bool,
+    pub(crate) supports_enumerate_paths: bool,
+}
+
 impl TierDecision {
     /// Whether enforcement was degraded relative to the preferred tier — the
     /// condition under which `mxc.EnforcementDegraded` fires. A clean Tier 1
@@ -283,9 +291,11 @@ pub fn detect(
     detect_with_base_container_capabilities(
         policy,
         prefer_base_container,
-        is_base_container_usable(),
-        base_container_supports_deny_paths(),
-        supports_enumerate_paths,
+        BaseContainerRequestCapabilities {
+            usable: is_base_container_usable(),
+            supports_deny_paths: base_container_supports_deny_paths(),
+            supports_enumerate_paths,
+        },
     )
 }
 
@@ -295,9 +305,7 @@ pub fn detect(
 pub(crate) fn detect_with_base_container_capabilities(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
-    base_container_usable: bool,
-    base_container_supports_deny_paths: bool,
-    base_container_supports_enumerate_paths: bool,
+    capabilities: BaseContainerRequestCapabilities,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
     let enumerate = !policy.enumerate_paths.is_empty();
@@ -307,9 +315,7 @@ pub(crate) fn detect_with_base_container_capabilities(
         || denied;
 
     if enumerate
-        && !(prefer_base_container
-            && base_container_usable
-            && base_container_supports_enumerate_paths)
+        && !(prefer_base_container && capabilities.usable && capabilities.supports_enumerate_paths)
     {
         return Err(FallbackError::EnumeratePathsUnsupported);
     }
@@ -331,11 +337,11 @@ pub(crate) fn detect_with_base_container_capabilities(
     let mut reasons: Vec<DegradationReason> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && base_container_usable {
+    if prefer_base_container && capabilities.usable {
         // Keep deny on Tier 1 only with native deny-path support from the
         // selected PSEC or SBOX contract. T1 applies no host DACL, so
         // otherwise fall through to a DACL-enforcing tier.
-        if !denied || base_container_supports_deny_paths {
+        if !denied || capabilities.supports_deny_paths {
             return Ok(TierDecision {
                 tier: IsolationTier::BaseContainer,
                 needs_dacl_augmentation: false,
