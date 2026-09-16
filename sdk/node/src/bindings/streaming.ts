@@ -14,39 +14,15 @@ import {
   parseStringArray,
   type AbiErrorDetail,
 } from './native-error.js';
+import type {
+  SandboxProcessBinding,
+  SandboxProcessWaitResult,
+  SandboxReadableBinding,
+  SandboxWritableBinding,
+} from './streaming-types.js';
 
 type Pointer = unknown;
 type TakeReadResult = { stream: Pointer; closer: Pointer | null } | null;
-
-export interface SandboxProcessWaitResult {
-  exitCode: number;
-  timedOut: boolean;
-}
-
-export interface SandboxReadableBinding {
-  read(buffer: Buffer): Promise<number>;
-  close(): void;
-  free(): void;
-}
-
-export interface SandboxWritableBinding {
-  write(buffer: Buffer): Promise<number>;
-  flush(): Promise<void>;
-  free(): void;
-}
-
-export interface SandboxProcessBinding {
-  readonly id: number;
-  readonly warnings: readonly string[];
-  takeStdin(): SandboxWritableBinding | null;
-  takeStdout(): SandboxReadableBinding | null;
-  takeStderr(): SandboxReadableBinding | null;
-  tryWait(): SandboxProcessWaitResult & { running: boolean };
-  wait(): SandboxProcessWaitResult;
-  outputMetadata(): unknown | undefined;
-  kill(): void;
-  free(): void;
-}
 
 type SpawnFunction = KoffiFunc<(request: string, handle: Pointer[], error: AbiErrorDetail) => number>;
 type ReadFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, cap: number, outRead: number[]) => number>;
