@@ -40,7 +40,7 @@ pub enum BackendCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
-    /// Canonical [`wxc_common::wire::Containment`] wire name.
+    /// Canonical [`ContainmentBackend::wire_name`] value.
     pub backend: String,
     /// Highest-isolation tier the host supports for this backend (a canonical
     /// `IsolationTier::as_str()` name); `None`, and omitted from JSON, for
@@ -269,32 +269,33 @@ fn select_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::wire::Containment;
+    use wxc_common::models::ContainmentBackend;
 
-    fn wire_name(containment: &Containment) -> String {
-        serde_json::to_string(containment)
-            .expect("Containment serializes")
-            .trim_matches('"')
-            .to_string()
+    const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
+        (ContainmentBackend::ProcessContainer, "processcontainer"),
+        (ContainmentBackend::Wslc, "wslc"),
+        (ContainmentBackend::Lxc, "lxc"),
+        (ContainmentBackend::Vm, "vm"),
+        (ContainmentBackend::MicroVm, "microvm"),
+        (ContainmentBackend::Hyperlight, "hyperlight"),
+        (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
+        (ContainmentBackend::IsolationSession, "isolation_session"),
+        (ContainmentBackend::Seatbelt, "seatbelt"),
+        (ContainmentBackend::Bubblewrap, "bubblewrap"),
+    ];
+
+    fn all_containment_names() -> Vec<String> {
+        CANONICAL_BACKEND_NAMES
+            .iter()
+            .map(|(_, name)| (*name).to_string())
+            .collect()
     }
 
-    fn all_wire_names() -> Vec<String> {
-        [
-            Containment::Process,
-            Containment::ProcessContainer,
-            Containment::Vm,
-            Containment::WindowsSandbox,
-            Containment::Lxc,
-            Containment::Microvm,
-            Containment::Hyperlight,
-            Containment::Wslc,
-            Containment::Seatbelt,
-            Containment::IsolationSession,
-            Containment::Bubblewrap,
-        ]
-        .iter()
-        .map(wire_name)
-        .collect()
+    #[test]
+    fn backend_wire_names_match_the_canonical_table() {
+        for (backend, expected) in CANONICAL_BACKEND_NAMES {
+            assert_eq!(backend.wire_name(), *expected, "{backend:?}");
+        }
     }
 
     const CANONICAL_TIERS: [&str; 3] = ["base-container", "appcontainer-bfs", "appcontainer-dacl"];
@@ -396,44 +397,13 @@ mod tests {
     }
 
     #[test]
-    fn every_reported_backend_is_a_real_wire_name() {
-        let known = all_wire_names();
+    fn every_reported_backend_uses_a_canonical_name() {
+        let known = all_containment_names();
         for entry in available_backends() {
             assert!(
                 known.contains(&entry.backend),
-                "reported backend {:?} is not a Containment wire name",
+                "reported backend {:?} is not a canonical backend name",
                 entry.backend
-            );
-        }
-    }
-
-    /// Every backend the probe can emit, across all platforms/features — derived
-    /// from `ContainmentBackend` (the same source as the `push` calls) so the
-    /// emitted names can't be typo'd, and checked against the `wire::Containment`
-    /// serde names so the two enums can't drift.
-    const EMITTABLE_BACKENDS: [ContainmentBackend; 8] = [
-        ContainmentBackend::Seatbelt,
-        ContainmentBackend::Bubblewrap,
-        ContainmentBackend::Lxc,
-        ContainmentBackend::ProcessContainer,
-        ContainmentBackend::WindowsSandbox,
-        ContainmentBackend::Wslc,
-        ContainmentBackend::IsolationSession,
-        ContainmentBackend::Hyperlight,
-    ];
-
-    /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)
-    /// by checking every emittable backend unconditionally, so a mismatch for a
-    /// backend this host or feature doesn't exercise (e.g. `wslc`) still can't
-    /// drift between `ContainmentBackend::wire_name` and `wire::Containment`.
-    #[test]
-    fn all_emittable_backend_names_are_real_wire_names() {
-        let known = all_wire_names();
-        for backend in EMITTABLE_BACKENDS {
-            assert!(
-                known.contains(&backend.wire_name().to_string()),
-                "emittable backend {backend:?} wire name {:?} is not a Containment wire name",
-                backend.wire_name()
             );
         }
     }

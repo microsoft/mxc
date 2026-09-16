@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::OneShotRequest;
+pub(crate) use mxc_config_contract::dev::OneShotRequest;
 
 pub(crate) fn assert_valid(json: &str) {
     crate::exact_test_support::assert_valid::<OneShotRequest>(json);
