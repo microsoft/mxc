@@ -578,7 +578,11 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy);
+        const processConfig = buildProcessBaseContainerConfig(config, policy);
+        if (policy.processContainer !== undefined) {
+            processConfig.containment = 'processcontainer';
+        }
+        return processConfig;
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
