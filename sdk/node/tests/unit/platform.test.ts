@@ -158,6 +158,30 @@ describe('getPlatformSupport host-services projection', () => {
     });
   });
 
+  it('projects Bubblewrap network support from native capabilities', { skip: os.platform() !== 'linux' }, () => {
+    _setPlatformSupportSnapshotReader(() => ({
+      platformSupportJson: '{"isSupported":true,"availableMethods":["bubblewrap"]}',
+      availableBackendsJson:
+        '[{"backend":"bubblewrap","capabilities":["proxyEnforcement"]}]',
+    }));
+    assert.deepStrictEqual(getPlatformSupport().bubblewrapNetwork, {
+      proxyEnforcement: 'supported',
+      warnings: [],
+    });
+  });
+
+  it('preserves native Bubblewrap capability warnings', { skip: os.platform() !== 'linux' }, () => {
+    _setPlatformSupportSnapshotReader(() => ({
+      platformSupportJson: '{"isSupported":true,"availableMethods":["bubblewrap"]}',
+      availableBackendsJson:
+        '[{"backend":"bubblewrap","warnings":["slirp4netns is unavailable"]}]',
+    }));
+    assert.deepStrictEqual(getPlatformSupport().bubblewrapNetwork, {
+      proxyEnforcement: 'unsupported',
+      warnings: ['slirp4netns is unavailable'],
+    });
+  });
+
   it('reconstructs Linux unavailability details when both backends are absent', { skip: os.platform() !== 'linux' }, () => {
     _setPlatformSupportSnapshotReader(() => ({
       platformSupportJson: JSON.stringify({
