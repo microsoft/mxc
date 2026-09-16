@@ -621,6 +621,12 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Start from the backend's default environment and layer supplied variables
+   * over it instead of replacing the environment (default false).
+   */
+  inheritDefaultEnv?: boolean;
+
+  /**
    * Optional cancellation signal for live-process APIs.
    */
   signal?: AbortSignal;
