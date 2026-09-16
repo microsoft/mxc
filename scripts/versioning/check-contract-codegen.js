@@ -290,7 +290,28 @@ function collectDispatchRoots(value, references = new Set()) {
 }
 
 function contractsWithTypeScriptOracles(registry) {
-  return registry.filter((contract) => contract.typescriptPath);
+  const byVersion = new Map(
+    registry.map((contract) => [contract.version, contract])
+  );
+  return [...expectedRootsByVersion.keys()].map((version) => {
+    const contract = byVersion.get(version);
+    if (!contract) {
+      fail(`renderable exact contract ${version} is absent from the registry`);
+    }
+    if (
+      typeof contract.schemaPath !== "string" ||
+      contract.schemaPath.length === 0
+    ) {
+      fail(`renderable exact contract ${version} has no schema path`);
+    }
+    if (
+      typeof contract.typescriptPath !== "string" ||
+      contract.typescriptPath.length === 0
+    ) {
+      fail(`renderable exact contract ${version} has no TypeScript oracle path`);
+    }
+    return contract;
+  });
 }
 
 function expectedRequestRoots(version) {
@@ -522,6 +543,7 @@ function main() {
 module.exports = {
   assertDirectionalNetworkOnly,
   contractsWithTypeScriptOracles,
+  expectedRequestRoots,
   formatFailure,
   stableSchemaVersion,
   validateDispatchRoots,

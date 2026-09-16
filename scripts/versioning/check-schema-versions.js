@@ -2,20 +2,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Validates the SCHEMA version constants — the Rust parser, the SDK, and the
-// schema filenames must all agree with the canonical source of truth at
-// schemas/schema-version.json. This tracks the config wire format and is
-// deliberately separate from the PRODUCT version (Cargo / npm package), which
-// is checked by scripts/check-version-sync.js.
+// Validates the SCHEMA version constants — the exact Rust contract registry,
+// the SDKs, and the schema filenames must all agree with the canonical source
+// of truth at schemas/schema-version.json. This tracks the config wire format
+// and is deliberately separate from the PRODUCT version (Cargo / npm package),
+// which is checked by scripts/check-version-sync.js.
 //
 // Run from anywhere (paths are resolved relative to the repo root):
 //
 //   node scripts/versioning/check-schema-versions.js
 
+const { execFileSync } = require("child_process");
 const { readFileSync, existsSync } = require("fs");
 const { join } = require("path");
+const { expectedRequestRoots } = require("./check-contract-codegen.js");
 
 const repoRoot = join(__dirname, "..", "..");
+const cargoRoot = join(repoRoot, "src");
 const errors = [];
 
 function read(...parts) {
@@ -33,14 +36,7 @@ const {
   stateAwareWindowsSandbox,
   stateAwareWslc,
   stableLatest,
-  devSchemaFile,
 } = schemaVer;
-
-// major.minor of a semver-ish "X.Y.Z[-pre]" string.
-function majorMinor(v) {
-  const m = /^(\d+)\.(\d+)\./.exec(v);
-  return m ? `${m[1]}.${m[2]}` : null;
-}
 
 // Assert a regex captures exactly `expected` in `text`.
 function expectConst(file, text, label, regex, expected) {
@@ -56,31 +52,95 @@ function expectConst(file, text, label, regex, expected) {
   }
 }
 
-// -- Rust parser (src/core/wxc_common/src/config_parser.rs) --
-const parser = read("src", "core", "wxc_common", "src", "config_parser.rs");
-expectConst(
-  "config_parser.rs",
-  parser,
-  "CURRENT_SCHEMA_VERSION",
-  /const CURRENT_SCHEMA_VERSION:\s*&str\s*=\s*"([^"]+)"/,
-  maxSupported
-);
-// SUPPORTED_VERSION is a semver range like ">=0.6, <=0.8"; its bounds must
-// match the canonical min/maxSupported major.minor.
-const supMatch = /const SUPPORTED_VERSION:\s*&str\s*=\s*">=([^,]+),\s*<=([^"]+)"/.exec(
-  parser
-);
-if (!supMatch) {
-  errors.push("config_parser.rs: could not find SUPPORTED_VERSION range");
-} else {
-  if (supMatch[1].trim() !== majorMinor(min)) {
+// -- Exact Rust contract registry (mxc_config_contract) --
+let registry = [];
+try {
+  const output = execFileSync(
+    "cargo",
+    ["run", "-q", "-p", "mxc_schema_gen", "--", "versions", "--json"],
+    {
+      cwd: cargoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  registry = JSON.parse(output);
+} catch (error) {
+  const stderr = error?.stderr?.toString().trim();
+  errors.push(
+    "Could not load exact Rust contract registry through mxc_schema_gen" +
+      (stderr ? `: ${stderr}` : "")
+  );
+}
+
+if (!Array.isArray(registry) || registry.length === 0) {
+  errors.push("Exact Rust contract registry is empty or invalid");
+  registry = [];
+}
+
+const registryByVersion = new Map();
+for (const contract of registry) {
+  if (
+    typeof contract?.version !== "string" ||
+    typeof contract?.status !== "string" ||
+    typeof contract?.schemaPath !== "string"
+  ) {
+    errors.push("Exact Rust contract registry contains an invalid descriptor");
+    continue;
+  }
+  if (registryByVersion.has(contract.version)) {
+    errors.push(`Exact Rust contract registry contains duplicate version "${contract.version}"`);
+    continue;
+  }
+  registryByVersion.set(contract.version, contract);
+  if (!existsSync(join(repoRoot, contract.schemaPath))) {
     errors.push(
-      `config_parser.rs: SUPPORTED_VERSION lower bound ">=${supMatch[1].trim()}" but canonical min is ${min} (${majorMinor(min)})`
+      `Registered schema for "${contract.version}" does not exist: ${contract.schemaPath}`
     );
   }
-  if (supMatch[2].trim() !== majorMinor(maxSupported)) {
+}
+
+if (registry[0]?.version !== min) {
+  errors.push(
+    `Exact Rust contract registry minimum is "${registry[0]?.version}" but canonical min is "${min}"`
+  );
+}
+if (registry.at(-1)?.version !== maxSupported) {
+  errors.push(
+    `Exact Rust contract registry maximum is "${registry.at(-1)?.version}" but canonical maxSupported is "${maxSupported}"`
+  );
+}
+const publishedVersions = registry
+  .filter(contract => contract?.status === "published")
+  .map(contract => contract.version);
+if (publishedVersions.at(-1) !== stableLatest) {
+  errors.push(
+    `Exact Rust contract registry latest published version is "${publishedVersions.at(-1)}" but canonical stableLatest is "${stableLatest}"`
+  );
+}
+for (const [label, version, requiredRoot] of [
+  ["stateAware", stateAware, "isolation_session_provision"],
+  [
+    "stateAwareWindowsSandbox",
+    stateAwareWindowsSandbox,
+    "windows_sandbox_provision",
+  ],
+  ["stateAwareWslc", stateAwareWslc, "wslc_provision"],
+]) {
+  if (!registryByVersion.has(version)) {
+    errors.push(`Canonical ${label} version "${version}" is absent from the exact Rust registry`);
+    continue;
+  }
+  try {
+    const roots = expectedRequestRoots(version);
+    if (!roots.has(requiredRoot)) {
+      errors.push(
+        `Canonical ${label} version "${version}" does not support ${requiredRoot}`
+      );
+    }
+  } catch (error) {
     errors.push(
-      `config_parser.rs: SUPPORTED_VERSION upper bound "<=${supMatch[2].trim()}" but canonical maxSupported is ${maxSupported} (${majorMinor(maxSupported)})`
+      `Canonical ${label} version "${version}" has no exact request-root matrix: ${error.message}`
     );
   }
 }
@@ -147,7 +207,7 @@ for (const [label, expected] of [
   );
 }
 
-// -- Schema files exist for the declared stable + dev versions --
+// -- Canonical stable + development descriptors have the expected status --
 const stablePath = join(
   "schemas",
   "stable",
@@ -156,9 +216,17 @@ const stablePath = join(
 if (!existsSync(join(repoRoot, stablePath))) {
   errors.push(`Missing stable schema file for stableLatest "${stableLatest}": ${stablePath}`);
 }
-const devPath = join("schemas", "dev", `mxc-config.schema.${devSchemaFile}.json`);
+const devPath = join("schemas", "dev", `mxc-config.schema.${maxSupported}.json`);
 if (!existsSync(join(repoRoot, devPath))) {
-  errors.push(`Missing dev schema file for devSchemaFile "${devSchemaFile}": ${devPath}`);
+  errors.push(`Missing exact development schema for maxSupported "${maxSupported}": ${devPath}`);
+}
+if (registryByVersion.get(stableLatest)?.status !== "published") {
+  errors.push(`Canonical stableLatest "${stableLatest}" is not published in the exact registry`);
+}
+if (registryByVersion.get(maxSupported)?.status !== "development") {
+  errors.push(
+    `Canonical maxSupported "${maxSupported}" is not the development contract in the exact registry`
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -89,7 +89,6 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
 │   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.10.0-dev.json    (rolling differential oracle)
     └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
 ```
 
@@ -97,23 +96,16 @@ Retired stable schema files are **kept as immutable historical artifacts** — t
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development artifacts coexist during migration:
-
-- `mxc-config.schema.0.10.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It is retained as an SDK/codegen migration oracle,
-  not a production parser.
-- `mxc-config.schema.0.10.0-alpha.json` is generated from the exact
+The development artifact is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
   state-aware roots, including recursively closed experimental structures, and
   is the authoritative contract for declared `0.10.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
-contract registered for the declared version. The test-only rolling parser and
-executable equivalence harness have been removed. The rolling schema and
-TypeScript model remain temporarily as SDK/codegen migration oracles. Corpus
-validation selects the exact registered schema from each document's `version`.
+contract registered for the declared version. Corpus validation selects the
+exact registered schema from each document's `version`.
 
-Both files are generated development artifacts rather than released schemas.
+Only the v0.10 file under `schemas/dev/` is a generated development artifact.
 Published v0.9 is represented by its exact Rust contract and immutable stable
 schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
 so they can gain regression coverage as implementations evolve. See
@@ -146,13 +138,25 @@ same backend meaning need not survive. WSLC uses runtime-owned
 default. Top-level telemetry and network/UI presence flags remain in common
 normalization. Source-aware errors remain at exact structural deserialization.
 
-Independent test-only rolling observations retain legacy payload extraction for
-differential coverage, including intentional exact-stricter rejections such as
-`appId: null`. They are not production request types or dispatch inputs.
-Recording backends cover binding, configuration delivery, validation order,
-dry-run behavior, and both exec topologies without requiring live sandboxes.
-That representation-only migration changed no registered JSON contract or
-generated schema/type artifact.
+Exact fixtures cover structural acceptance and rejection, including
+`appId: null`. Recording backends cover binding, configuration delivery,
+validation order, dry-run behavior, and both exec topologies without requiring
+live sandboxes.
+
+Exact adapters normalize registered JSON contracts into the private
+`ConfigInput` representation and then into `ExecutionRequest`.
+`ExecutionRequest.source_contract` records the originating registered contract
+for diagnostics and telemetry only. Direct typed SDK requests clear that
+attribution after exact validation because they did not originate as external
+configuration JSON.
+
+Runtime behavior is selected from explicit normalized semantics rather than by
+comparing contract-version strings. In particular,
+`NetworkEnforcementCompatibility::LegacyCompatible` preserves the accepted
+v0.6/v0.7 network behavior for both JSON and direct typed SDK inputs, while
+`Strict` applies to v0.8 and later inputs. Direct typed SDK construction clears
+only source-contract attribution; it retains the compatibility selected by the
+exact version adapter.
 
 ### IsolationSession directional networking
 
@@ -175,10 +179,10 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The stable v0.9 schema, TypeScript oracle, accepted/rejected fixture corpus, and
-adapter/runtime observations are frozen at publication. The mutable v0.10
-contract retains the ungraduated development backends, and the test-only
-rolling reference remains available for characterization.
+The stable v0.9 schema and TypeScript oracle are regenerated from the
+published Rust model and compared in CI. Exact fixture and adapter/runtime
+tests remain editable so regression coverage can grow without changing the
+published JSON contract.
 
 ### Trust boundary vs schema defaults
 
@@ -277,16 +281,13 @@ Add the field to the applicable closed request type under
 `src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
 that admit it.
 
-**In `wire.rs` (the rolling differential oracle and shared normalized
-representation):**
+**In the exact adapter and internal config input:**
 ```rust
-pub struct MxcConfig {
+pub(crate) struct ConfigInput {
     // ... stable fields ...
-    pub experimental: Option<Experimental>,
+    pub(crate) experimental: Option<Experimental>,
 }
 
-// The `experimental` block is intentionally permissive (no deny_unknown_fields)
-// so in-flux feature shapes stay forward-compatible.
 pub struct Experimental {
     pub compartments: Option<Compartments>,
     pub gpu_isolation: Option<GpuIsolation>,
@@ -294,17 +295,16 @@ pub struct Experimental {
 }
 ```
 
-While the differential oracle remains, edit both the rolling `wire.rs` model
-and the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
+Edit the authoritative closed mutable contract under
+`src/core/mxc_config_contract/src/dev/`, then adapt the exact field into
+`ConfigInput`. Regenerate the exact schema:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.10.0-dev.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 ```
 
-Also regenerate their TypeScript oracles with the corresponding
-`mxc_schema_gen types` commands. Do not hand-edit generated artifacts.
+Also regenerate the exact TypeScript oracle with the corresponding
+`mxc_schema_gen types --version` command. Do not hand-edit generated artifacts.
 
 **In `models.rs`:**
 ```rust
@@ -321,9 +321,9 @@ pub struct ExecutionRequest {
 ```
 
 **In the version-specific adapter and `config_parser.rs`:** map the exact
-contract field into the shared wire representation, then map the wire
+contract field into the shared config input, then map the nested DTO
 `Experimental` field to the domain `ExperimentalConfig` inside
-`convert_wire_config`.
+`convert_config_input`.
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
@@ -343,37 +343,20 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 ```
 
 **Promotion process:** When an experimental feature is ready to ship:
-1. Move the field from the wire `Experimental` struct to top-level `MxcConfig`
-   (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`), then
-   regenerate the schema with `mxc_schema_gen`
+1. Carry the field from the mutable development contract into the next exact
+   stable contract at the same permanent JSON location, then regenerate its
+   exact schema and TypeScript artifacts with `mxc_schema_gen`
 2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Map the now-top-level wire field in `convert_wire_config`; add
-   `deny_unknown_fields` to the wire struct so the promoted stable surface is
-   closed
+3. Add the stable contract adapter mapping while retaining the existing
+   `convert_config_input` domain normalization
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
-6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"<feature> has moved to the stable section"`.
-   This error should persist for at least one release cycle so users have
-   time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
-7. If the feature is a containment backend with a per-backend config
-   section, update the single-backend-section enforcement when it graduates
-   from experimental to top-level:
+6. Preserve every published contract unchanged; older contracts continue to
+   reject the field structurally.
 
-   - In `wxc_common::config_parser`, rename the matching entry in
-     `present_backend_sections` (and update `validate_single_backend_section`)
-     from `experimental.<name>` to `<name>`.
-
-   The single-backend-section rule is a cross-field constraint enforced by the
-   parser (the trust boundary), **not** by the JSON schema — the generated
-   schema intentionally omits the old top-level `allOf` `if/then` clauses. So
-   there is no schema edit for this step; the parser change is sufficient.
-
-   The rule itself is unchanged: a backend section requires `containment` to be
-   set, and the value must be either the concrete backend name or any abstract
-   intent that resolves to it on at least one platform (for example,
-   `processContainer` accepts both `processcontainer` and `process`).
+Backend-section validation does not move during promotion: an experimental
+backend's exact-contract section already occupies its permanent top-level
+location. Existing containment/section consistency rules continue unchanged.
 
 ## Data Flow
 
@@ -414,10 +397,10 @@ across trust-boundary parsing, common normalization, and backend execution:
   backend-specific closed request roots. These are the production JSON
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.
-- **Normalized wire model** (`wxc_common::wire::MxcConfig`) — the common
-  representation produced by version-specific adapters and consumed by shared
-  semantic normalization. It also remains the source of the rolling schema and
-  TypeScript differential oracles, but is not a production parse target.
+- **Internal config input** (`wxc_common::config_input::ConfigInput`) — the
+  private common representation produced by version-specific adapters and
+  consumed by shared semantic normalization. It is not a JSON parse or schema
+  generation target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
   validated, defaults-applied, invariant-rich model the backends consume:
   abstract containment resolved to a concrete backend, `process.commandLine`
@@ -425,7 +408,7 @@ across trust-boundary parsing, common normalization, and backend execution:
   no longer optional.
 
 The exact contract rejects structural errors first. Version-specific adapters
-then produce the normalized wire representation, and `config_parser` applies
+then produce the internal config input, and `config_parser` applies
 shared semantic validation and maps it to the runtime model.
 
 ### Why two layers (pros)

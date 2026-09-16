@@ -7,6 +7,8 @@ mod annotations;
 mod common;
 #[path = "v0_9_0_alpha/enums.rs"]
 mod enums;
+#[path = "support/exact.rs"]
+mod exact_test_support;
 #[path = "v0_9_0_alpha/experimental.rs"]
 mod experimental;
 #[path = "v0_9_0_alpha/fixtures.rs"]

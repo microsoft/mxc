@@ -3,19 +3,19 @@
 
 //! Controlled input to state-aware common-field normalization.
 
+use crate::config_input::ConfigInput;
 use crate::error::WxcError;
 use crate::state_aware_operation::StateAwareOperation;
-use crate::wire;
 
 /// Only the operation owns routing and backend configuration.
 pub(crate) struct StateAwareInput {
-    common: wire::MxcConfig,
+    common: ConfigInput,
     operation: StateAwareOperation,
 }
 
 impl StateAwareInput {
     pub(crate) fn new(
-        common: wire::MxcConfig,
+        common: ConfigInput,
         operation: StateAwareOperation,
     ) -> Result<Self, WxcError> {
         let mut contradictory = Vec::new();
@@ -58,7 +58,7 @@ impl StateAwareInput {
         Ok(Self { common, operation })
     }
 
-    pub(crate) fn into_parts(self) -> (wire::MxcConfig, StateAwareOperation) {
+    pub(crate) fn into_parts(self) -> (ConfigInput, StateAwareOperation) {
         (self.common, self.operation)
     }
 }
