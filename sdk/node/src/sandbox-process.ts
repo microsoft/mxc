@@ -140,7 +140,8 @@ class WritePipe extends Writable {
 }
 
 /**
- * Live pipe-based sandbox process spawned by `spawnSandboxProcess()`.
+ * Live pipe-based sandbox process returned by `spawnSandbox()` and
+ * `spawnSandboxFromConfig()`.
  *
  * If you take `stdout` or `stderr`, keep draining them while the sandbox runs.
  * Untaken output streams are drained internally during `wait()` so a child that
