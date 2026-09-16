@@ -15,7 +15,8 @@ import { LegacyContainmentAliases } from '../types.js';
 
 export interface RequestSpecOptions {
   workingDirectory?: string;
-  environment?: { [key: string]: string | undefined };
+  env?: { [key: string]: string | undefined };
+  inheritDefaultEnv?: boolean;
   experimental?: boolean;
 }
 
@@ -65,7 +66,8 @@ export interface RequestSpec {
   containment: RequestContainment;
   containerName?: string;
   workingDirectory?: string;
-  environment: Record<string, string>;
+  environment?: Record<string, string>;
+  inheritDefaultEnv: boolean;
   experimental: boolean;
 }
 
@@ -214,11 +216,28 @@ function parseEnvironmentEntry(entry: string): [string, string] {
 function projectEnvironment(
   config: ContainerConfig,
   options: RequestSpecOptions,
-): Record<string, string> {
+  inheritDefaultEnv: boolean,
+): Record<string, string> | undefined {
+  const hasConfigEnvironment = config.process?.env !== undefined;
+  const hasOptionEnvironment = options.env !== undefined;
+  if (!hasConfigEnvironment && !hasOptionEnvironment && !inheritDefaultEnv) {
+    return undefined;
+  }
+
   const configEntries = (config.process?.env ?? []).map(parseEnvironmentEntry);
-  const optionEntries = Object.entries(options.environment ?? {})
+  const optionEntries = Object.entries(options.env ?? {})
     .filter((entry): entry is [string, string] => entry[1] !== undefined);
   return Object.fromEntries([...configEntries, ...optionEntries]);
+}
+
+function resolveInheritDefaultEnv(
+  config: ContainerConfig,
+  options: RequestSpecOptions,
+): boolean {
+  if (options.inheritDefaultEnv !== undefined) {
+    return options.inheritDefaultEnv;
+  }
+  return config.process?.inheritDefaultEnv === true;
 }
 
 function projectContainment(
@@ -278,6 +297,7 @@ export function prepareRequestSpec(
   };
 
   const processContainer = config.processContainer ?? config.appContainer;
+  const inheritDefaultEnv = resolveInheritDefaultEnv(config, options);
 
   return {
     policy,
@@ -285,7 +305,8 @@ export function prepareRequestSpec(
     containment: projectContainment(config, processContainer),
     containerName: config.containerId,
     workingDirectory: options.workingDirectory ?? config.process.cwd,
-    environment: projectEnvironment(config, options),
+    environment: projectEnvironment(config, options, inheritDefaultEnv),
+    inheritDefaultEnv,
     experimental: options.experimental ?? false,
   };
 }
