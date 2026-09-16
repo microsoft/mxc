@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-DeniedSymlinkAlias",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo CWD_DENIED_ALIAS_COMMAND_RAN",
+    "cwd": "/tmp/mxc_bwrap_cwd/real/secret"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/tmp/mxc_bwrap_cwd/real"],
+    "deniedPaths": ["/tmp/mxc_bwrap_cwd/alias/secret"]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-Denied",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo CWD_DENIED_COMMAND_RAN",
+    "cwd": "/tmp/mxc_bwrap_cwd/denied/secret"
+  },
+  "filesystem": {
+    "readwritePaths": ["/tmp/mxc_bwrap_cwd/denied"],
+    "deniedPaths": ["/tmp/mxc_bwrap_cwd/denied/secret"]
+  }
+}
