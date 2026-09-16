@@ -18,6 +18,7 @@ const request: RequestSpec = {
   command: 'echo hello',
   containment: { type: 'process' },
   environment: {},
+  inheritDefaultEnv: false,
   experimental: false,
 };
 
