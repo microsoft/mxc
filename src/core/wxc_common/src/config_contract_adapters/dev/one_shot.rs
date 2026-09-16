@@ -93,6 +93,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities,
         capture_denials,
         ui,
+        filesystem,
         network,
     } = value;
     wire::ProcessContainer {
@@ -106,7 +107,19 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
+        filesystem: filesystem
+            .into_option()
+            .map(convert_process_container_filesystem),
         network: network.into_option().map(convert_process_container_network),
+    }
+}
+
+fn convert_process_container_filesystem(
+    value: contract::ProcessContainerFilesystem,
+) -> wire::ProcessContainerFilesystem {
+    let contract::ProcessContainerFilesystem { enumerate_paths } = value;
+    wire::ProcessContainerFilesystem {
+        enumerate_paths: enumerate_paths.into_option(),
     }
 }
 

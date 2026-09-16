@@ -1026,6 +1026,7 @@ fn validate_schema_version(version: &str) -> Result<(), WxcError> {
 fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
     validate_paths(&policy.readonly_paths)?;
     validate_paths(&policy.readwrite_paths)?;
+    validate_paths(&policy.enumerate_paths)?;
     validate_paths(&policy.denied_paths)?;
     Ok(())
 }
@@ -1073,6 +1074,7 @@ fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
 fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger) {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
+        && policy.enumerate_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
         return;
@@ -1081,6 +1083,8 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     // 1. Same-path (string) conflict: drop a path from a list if it also appears
     //    in a more restrictive list.
     let denied: std::collections::HashSet<String> = policy.denied_paths.iter().cloned().collect();
+    let enumerate: std::collections::HashSet<String> =
+        policy.enumerate_paths.iter().cloned().collect();
     let readonly: std::collections::HashSet<String> =
         policy.readonly_paths.iter().cloned().collect();
 
@@ -1089,6 +1093,14 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else if enumerate.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'filesystem.readwritePaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
+                 applying most-restrictive intent (enumerate)",
                 config_deserialize::escape_diagnostic_text(p)
             ));
             false
@@ -1107,6 +1119,27 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
         if denied.contains(p) {
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readonlyPaths' and 'deniedPaths'; \
+                 applying most-restrictive intent (denied)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else if enumerate.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'filesystem.readonlyPaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
+                 applying most-restrictive intent (enumerate)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else {
+            true
+        }
+    });
+    policy.enumerate_paths.retain(|p| {
+        if denied.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'processContainer.filesystem.enumeratePaths' and \
+                 'filesystem.deniedPaths'; \
                  applying most-restrictive intent (denied)",
                 config_deserialize::escape_diagnostic_text(p)
             ));
@@ -1568,6 +1601,12 @@ fn convert_wire_config(
             policy.base_process_ui.system_settings =
                 raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
             policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
+        }
+
+        if let Some(filesystem) = ac.filesystem {
+            if let Some(paths) = filesystem.enumerate_paths {
+                policy.enumerate_paths = paths;
+            }
         }
 
         process_container_network = ac.network;
@@ -4717,7 +4756,7 @@ mod tests {
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
         );
-        let expected_inventory = (355, 331, 14);
+        let expected_inventory = (367, 343, 14);
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
             expected_inventory,
@@ -11413,6 +11452,71 @@ mod tests {
             "path should be removed from readwritePaths (readonly wins)"
         );
         assert_eq!(req.policy.readonly_paths, vec!["C:\\workspace"]);
+    }
+
+    #[test]
+    fn dev_contract_maps_enumerate_paths() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn same_path_in_readonly_and_enumerate_becomes_enumerate() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.readonly_paths.is_empty());
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn same_path_in_readwrite_and_enumerate_becomes_enumerate() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readwritePaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.readwrite_paths.is_empty());
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (enumerate)"));
+    }
+
+    #[test]
+    fn same_path_in_enumerate_and_denied_becomes_denied() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"deniedPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.enumerate_paths.is_empty());
+        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (denied)"));
+    }
+
+    #[test]
+    fn enumerate_path_conflict_diagnostic_escapes_control_characters() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools\nforged"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools\nforged"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(!logger.get_buffer().contains("C:\\tools\nforged"));
+        assert!(logger.get_buffer().contains("C:\\tools\\nforged"));
     }
 
     #[test]

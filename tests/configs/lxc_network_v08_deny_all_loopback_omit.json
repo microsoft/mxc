@@ -1,0 +1,15 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-V08-DenyAll-Omit",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"nc -l -p 9099 >/dev/null 2>&1 & sleep 1; echo hi | nc -w 2 127.0.0.1 9099 >/dev/null 2>&1 && echo MXC_LOOPBACK_OK || echo MXC_LOOPBACK_DEAD; nc -z -w 5 140.82.114.6 443 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}

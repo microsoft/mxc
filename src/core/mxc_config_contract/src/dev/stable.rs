@@ -296,9 +296,22 @@ pub struct ProcessContainer {
     /// Optional ProcessContainer-specific user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific filesystem policy.
+    #[serde(default)]
+    pub filesystem: OptionalField<ProcessContainerFilesystem>,
     /// Optional ProcessContainer-specific network settings.
     #[serde(default)]
     pub network: OptionalField<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific filesystem policy.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerFilesystem {
+    /// Optional paths that may be queried or enumerated without granting file-content reads.
+    #[serde(default)]
+    pub enumerate_paths: OptionalField<Vec<String>>,
 }
 
 /// ProcessContainer-specific network settings.

@@ -359,6 +359,7 @@ public static class MxcSandbox
             Capabilities = new List<string>(containment.Capabilities),
             CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
             Ui = containment.Ui,
+            Filesystem = containment.Filesystem,
             Network = containment.Network,
         };
     }
@@ -413,6 +414,7 @@ public static class MxcSandbox
         {
             "captureDenials" => BackendCapability.CaptureDenials,
             "filesystemDeniedPaths" => BackendCapability.FilesystemDeniedPaths,
+            "filesystemEnumeratePaths" => BackendCapability.FilesystemEnumeratePaths,
             "ingressHostLoopbackAllow" => BackendCapability.IngressHostLoopbackAllow,
             "proxyEnforcement" => BackendCapability.ProxyEnforcement,
             _ => BackendCapability.Unknown,

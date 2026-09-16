@@ -1724,6 +1724,57 @@ mod tests {
     }
 
     #[test]
+    fn build_request_maps_enumerate_paths_for_v0_9() {
+        let policy = SandboxPolicy {
+            version: "0.9.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
+            filesystem: Some(crate::configs::ProcessContainerFilesystem {
+                enumerate_paths: vec!["C:\\tools".to_string()],
+            }),
+            ..Default::default()
+        });
+
+        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
+            .expect("0.9 enumeratePaths should build");
+
+        assert_eq!(request.inner.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn build_request_rejects_enumerate_paths_before_v0_9() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let policy = SandboxPolicy {
+                version: version.to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
+                filesystem: Some(crate::configs::ProcessContainerFilesystem {
+                    enumerate_paths: vec!["C:\\tools".to_string()],
+                }),
+                ..Default::default()
+            });
+
+            let error = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
+                .expect_err("older contracts must not silently drop enumeratePaths");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires schema version 0.9.0-alpha"),
+                "{version}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn set_env_formats_pairs_as_key_value_in_order() {
         // The structured `(key, value)` setter mirrors the SDK env channel
         // (`injectEnvIntoConfig`): each pair becomes a `KEY=VALUE` wire entry, in

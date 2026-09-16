@@ -187,6 +187,15 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
         ));
     }
     let process_container = selected_process_container(containment);
+    if process_container
+        .as_ref()
+        .and_then(|process_container| process_container.filesystem.as_ref())
+        .is_some_and(|filesystem| !filesystem.enumerate_paths.is_empty())
+    {
+        return Err(error(
+            "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha",
+        ));
+    }
     let enforcement = legacy_enforcement(policy, containment, process_container.is_some());
     let network = match network_format {
         NetworkFormat::Legacy => contract::OptionalField::present(contract::Network {

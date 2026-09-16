@@ -107,6 +107,11 @@ fn rejects_unknown_nested_fields() {
                 r#""filesystem": {"unknownField": true}"#,
             ),
             (
+                "filesystem.enumeratePaths",
+                version_and_process.as_str(),
+                r#""filesystem": {"enumeratePaths": []}"#,
+            ),
+            (
                 "fallback",
                 version_and_process.as_str(),
                 r#""fallback": {"unknownField": true}"#,
@@ -130,6 +135,11 @@ fn rejects_unknown_nested_fields() {
                 "processContainer.ui",
                 version_and_process.as_str(),
                 r#""processContainer": {"ui": {"unknownField": true}}"#,
+            ),
+            (
+                "processContainer.filesystem",
+                version_and_process.as_str(),
+                r#""processContainer": {"filesystem": {"unknownField": true}}"#,
             ),
             (
                 "processContainer.captureDenials",

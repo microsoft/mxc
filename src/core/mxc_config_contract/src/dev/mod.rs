@@ -245,8 +245,9 @@ pub use request::{parse_request, validate_one_shot_request, Request, RequestPars
 pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, Lifecycle, Lxc, Process,
-    ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork, ProcessContainerUi,
-    ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Telemetry, Ui, UiClipboard,
+    ProcessContainer, ProcessContainerCapability, ProcessContainerFilesystem,
+    ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig,
+    Seatbelt, Telemetry, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

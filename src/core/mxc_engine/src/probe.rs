@@ -24,6 +24,8 @@ pub enum BackendCapability {
     CaptureDenials,
     /// Native `filesystem.deniedPaths` enforcement at the reported tier.
     FilesystemDeniedPaths,
+    /// Native `processContainer.filesystem.enumeratePaths` enforcement at the reported tier.
+    FilesystemEnumeratePaths,
     /// `network.ingress.hostLoopback = "allow"` at the reported tier.
     IngressHostLoopbackAllow,
     /// Bubblewrap proxy-only egress in a private network namespace.
@@ -99,6 +101,7 @@ pub fn available_backends() -> Vec<AvailableBackend> {
                     guarded_capture::is_available(),
                 ),
                 filesystem_denied_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+                filesystem_enumerate_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_enumerate_paths(),
                 ingress_host_loopback_allow: appcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
             },
         )
@@ -163,6 +166,7 @@ fn bubblewrap_backend(proxy_enforcement: Result<(), String>) -> AvailableBackend
 struct ProcessContainerCapabilities {
     capture_denials: bool,
     filesystem_denied_paths: bool,
+    filesystem_enumerate_paths: bool,
     ingress_host_loopback_allow: bool,
 }
 
@@ -185,6 +189,9 @@ fn windows_backends(
     if tier == appcontainer_common::fallback_detector::IsolationTier::BaseContainer {
         if support.filesystem_denied_paths {
             capabilities.push(BackendCapability::FilesystemDeniedPaths);
+        }
+        if support.filesystem_enumerate_paths {
+            capabilities.push(BackendCapability::FilesystemEnumeratePaths);
         }
         if support.ingress_host_loopback_allow {
             capabilities.push(BackendCapability::IngressHostLoopbackAllow);
@@ -377,6 +384,11 @@ mod tests {
             r#""filesystemDeniedPaths""#
         );
         assert_eq!(
+            serde_json::to_string(&BackendCapability::FilesystemEnumeratePaths)
+                .expect("serializes"),
+            r#""filesystemEnumeratePaths""#
+        );
+        assert_eq!(
             serde_json::to_string(&BackendCapability::IngressHostLoopbackAllow)
                 .expect("serializes"),
             r#""ingressHostLoopbackAllow""#
@@ -511,6 +523,7 @@ mod tests {
             IsolationTier::BaseContainer,
             ProcessContainerCapabilities {
                 filesystem_denied_paths: true,
+                filesystem_enumerate_paths: true,
                 ingress_host_loopback_allow: true,
                 ..Default::default()
             },
@@ -524,6 +537,7 @@ mod tests {
             process_container.capabilities,
             vec![
                 BackendCapability::FilesystemDeniedPaths,
+                BackendCapability::FilesystemEnumeratePaths,
                 BackendCapability::IngressHostLoopbackAllow,
             ]
         );
@@ -542,6 +556,7 @@ mod tests {
                 tier,
                 ProcessContainerCapabilities {
                     filesystem_denied_paths: true,
+                    filesystem_enumerate_paths: true,
                     ingress_host_loopback_allow: true,
                     ..Default::default()
                 },

@@ -500,6 +500,14 @@ mod tests {
     }
 
     #[test]
+    fn adding_an_enumerate_path_changes_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.policy.enumerate_paths.push("C:\\tools".to_string());
+        assert_ne!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
     fn changing_the_network_policy_changes_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
