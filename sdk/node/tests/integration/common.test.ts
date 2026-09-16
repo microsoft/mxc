@@ -65,11 +65,13 @@ for (const schemaVersion of platformVersions) {
       assertDryRunResult(result.stdout, result.code, schemaVersion.raw);
     });
 
-    it('should dry-run via spawnSandboxAsync', async () => {
-      const result = await sdk.spawnSandboxAsync(
-        'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-async-${schemaVersion}`,
+    it('should reject executor-only dry-run via spawnSandboxAsync', async () => {
+      await assert.rejects(
+        sdk.spawnSandboxAsync(
+          'cmd.exe /c echo test', policy, { dryRun: true }, undefined, `dryrun-async-${schemaVersion}`,
+        ),
+        /does not support executor-only option 'dryRun'/,
       );
-      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
 
     it('should dry-run via spawnSandboxFromConfig', async () => {
