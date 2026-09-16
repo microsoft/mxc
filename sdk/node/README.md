@@ -331,8 +331,8 @@ createConfigFromPolicy(policy, containment?, containerName?) => ContainerConfig
 buildSandboxPayload(script, policy, workingDirectory?, containerName?, containment?) => ContainerConfig
 
 spawnSandboxAsync(script, policy, options?, workingDirectory?, containerName?) => Promise<{ stdout, stderr, exitCode }>
-spawnSandbox(script, policy, options?, workingDirectory?, containerName?, environment?) => MxcSandboxProcess
-spawnSandboxFromConfig(config, options?, workingDirectory?, environment?) => MxcSandboxProcess
+spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) => MxcSandboxProcess
+spawnSandboxFromConfig(config, options?, workingDirectory?, env?) => MxcSandboxProcess
 
 provisionSandbox(containment, config, options?) => Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?) => Promise<StartResult>
