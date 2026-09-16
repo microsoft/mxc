@@ -798,6 +798,7 @@ describe('createConfigFromPolicy', () => {
           },
         },
       });
+      assert.strictEqual(config.containment, 'processcontainer');
       assert.deepStrictEqual(
         config.processContainer!.filesystem!.enumeratePaths,
         ['C:\\tools'],
@@ -1017,6 +1018,7 @@ describe('createConfigFromPolicy', () => {
           },
         });
 
+        assert.strictEqual(config.containment, 'processcontainer');
         assert.deepStrictEqual(config.network, {
           egress: { default: 'deny' },
           ingress: { default: 'allow', hostLoopback: 'deny' },
