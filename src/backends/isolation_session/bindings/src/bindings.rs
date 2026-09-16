@@ -129,6 +129,175 @@ pub struct IIsoSessionError_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IIsoSessionErrorPreview2,
+    IIsoSessionErrorPreview2_Vtbl,
+    0xd01fc5cc_fdfc_513a_9045_235932a03212
+);
+impl windows_core::RuntimeType for IIsoSessionErrorPreview2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionErrorPreview2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionErrorPreview2";
+}
+pub trait IIsoSessionErrorPreview2_Impl: windows_core::IUnknownImpl {
+    fn Diagnostics(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn FailingStage(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn UnderlyingError(&self) -> windows_core::Result<windows_core::HRESULT>;
+}
+impl IIsoSessionErrorPreview2_Vtbl {
+    pub const fn new<Identity: IIsoSessionErrorPreview2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn Diagnostics<
+            Identity: IIsoSessionErrorPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionErrorPreview2_Impl::Diagnostics(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn FailingStage<
+            Identity: IIsoSessionErrorPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionErrorPreview2_Impl::FailingStage(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn UnderlyingError<
+            Identity: IIsoSessionErrorPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut windows_core::HRESULT,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionErrorPreview2_Impl::UnderlyingError(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<
+                Identity,
+                IIsoSessionErrorPreview2,
+                OFFSET,
+            >(),
+            Diagnostics: Diagnostics::<Identity, OFFSET>,
+            FailingStage: FailingStage::<Identity, OFFSET>,
+            UnderlyingError: UnderlyingError::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionErrorPreview2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionErrorPreview2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Diagnostics: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub FailingStage: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub UnderlyingError: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut windows_core::HRESULT,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionErrorPreview3,
+    IIsoSessionErrorPreview3_Vtbl,
+    0xa81bc040_b534_5786_986e_9530bd12e588
+);
+impl windows_core::RuntimeType for IIsoSessionErrorPreview3 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionErrorPreview3 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionErrorPreview3";
+}
+pub trait IIsoSessionErrorPreview3_Impl: windows_core::IUnknownImpl {
+    fn Format(&self) -> windows_core::Result<windows_core::HSTRING>;
+}
+impl IIsoSessionErrorPreview3_Vtbl {
+    pub const fn new<Identity: IIsoSessionErrorPreview3_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn Format<
+            Identity: IIsoSessionErrorPreview3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionErrorPreview3_Impl::Format(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<
+                Identity,
+                IIsoSessionErrorPreview3,
+                OFFSET,
+            >(),
+            Format: Format::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionErrorPreview3 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionErrorPreview3_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Format: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IIsoSessionOps,
     IIsoSessionOps_Vtbl,
     0xabe3e450_1dd6_5c8f_88d1_f5522b785b96
@@ -567,6 +736,138 @@ pub struct IIsoSessionOpsPreview3_Vtbl {
         unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
     pub IsAppScopedRegistrationSupported:
         unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionOpsPreview4,
+    IIsoSessionOpsPreview4_Vtbl,
+    0x4d27018c_d1b8_5cdb_9e41_97635fbb59fd
+);
+impl windows_core::RuntimeType for IIsoSessionOpsPreview4 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOpsPreview4 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionOpsPreview4";
+}
+pub trait IIsoSessionOpsPreview4_Impl: windows_core::IUnknownImpl {
+    fn IsDeducedEnterpriseAgentUserSupported(&self) -> windows_core::Result<bool>;
+    fn AddUserAsync3(
+        &self,
+        optAppId: &windows_core::HSTRING,
+        parentWindowId: &windows::UI::WindowId,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>>;
+    fn StartSessionAsync2(
+        &self,
+        agentUserName: &windows_core::HSTRING,
+        parentWindowId: &windows::UI::WindowId,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionResult>>;
+}
+impl IIsoSessionOpsPreview4_Vtbl {
+    pub const fn new<Identity: IIsoSessionOpsPreview4_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn IsDeducedEnterpriseAgentUserSupported<
+            Identity: IIsoSessionOpsPreview4_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut bool,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview4_Impl::IsDeducedEnterpriseAgentUserSupported(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn AddUserAsync3<
+            Identity: IIsoSessionOpsPreview4_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            optappid: *mut core::ffi::c_void,
+            parentwindowid: windows::UI::WindowId,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview4_Impl::AddUserAsync3(
+                    this,
+                    core::mem::transmute(&optappid),
+                    core::mem::transmute(&parentwindowid),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn StartSessionAsync2<
+            Identity: IIsoSessionOpsPreview4_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            agentusername: *mut core::ffi::c_void,
+            parentwindowid: windows::UI::WindowId,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview4_Impl::StartSessionAsync2(
+                    this,
+                    core::mem::transmute(&agentusername),
+                    core::mem::transmute(&parentwindowid),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOpsPreview4, OFFSET>(
+            ),
+            IsDeducedEnterpriseAgentUserSupported: IsDeducedEnterpriseAgentUserSupported::<
+                Identity,
+                OFFSET,
+            >,
+            AddUserAsync3: AddUserAsync3::<Identity, OFFSET>,
+            StartSessionAsync2: StartSessionAsync2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOpsPreview4 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOpsPreview4_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsDeducedEnterpriseAgentUserSupported:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub AddUserAsync3: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        windows::UI::WindowId,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub StartSessionAsync2: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        windows::UI::WindowId,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IIsoSessionProcess,
@@ -1535,6 +1836,50 @@ impl IsoSessionError {
             .map(|| core::mem::transmute(result__))
         }
     }
+    pub fn Diagnostics(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionErrorPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Diagnostics)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn FailingStage(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionErrorPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).FailingStage)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn UnderlyingError(&self) -> windows_core::Result<windows_core::HRESULT> {
+        let this = &windows_core::Interface::cast::<IIsoSessionErrorPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).UnderlyingError)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Format(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = &windows_core::Interface::cast::<IIsoSessionErrorPreview3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Format)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
 }
 impl windows_core::RuntimeType for IsoSessionError {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -1557,6 +1902,7 @@ impl IsoSessionFeature {
     pub const LocalAgentUser: Self = Self(1i32);
     pub const EnterpriseAgentUser: Self = Self(2i32);
     pub const AppScopedRegistration: Self = Self(3i32);
+    pub const DeducedEnterpriseAgentUser: Self = Self(4i32);
 }
 impl windows_core::TypeKind for IsoSessionFeature {
     type TypeKind = windows_core::CopyType;
@@ -1751,6 +2097,51 @@ impl IsoSessionOps {
                 &mut result__,
             )
             .map(|| result__)
+        }
+    }
+    pub fn IsDeducedEnterpriseAgentUserSupported(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview4>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsDeducedEnterpriseAgentUserSupported)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn AddUserAsync3(
+        &self,
+        optappid: &windows_core::HSTRING,
+        parentwindowid: windows::UI::WindowId,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview4>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).AddUserAsync3)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(optappid),
+                parentwindowid,
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn StartSessionAsync2(
+        &self,
+        agentusername: &windows_core::HSTRING,
+        parentwindowid: windows::UI::WindowId,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview4>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).StartSessionAsync2)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(agentusername),
+                parentwindowid,
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
         }
     }
 }
