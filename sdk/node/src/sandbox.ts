@@ -17,6 +17,7 @@ import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareRequestSpec } from './bindings/request.js';
 import { runBindingRequestAsync } from './bindings/run-worker.js';
+import type { BindingRunResult } from './bindings/run.js';
 
 const MIN_VERSION = '0.6.0-alpha';
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -464,14 +465,12 @@ export function createConfigFromPolicy(
         };
     }
 
-    // Presence matters for backends that cannot enforce UI policy.
-    if (policy.ui !== undefined) {
-        config.ui = {
-            disable: !(policy.ui.allowWindows ?? false),
-            clipboard: policy.ui.clipboard ?? "none",
-            injection: policy.ui.allowInputInjection ?? false,
-        };
-    }
+    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
+    config.ui = {
+        disable: !(policy.ui?.allowWindows ?? false),
+        clipboard: policy.ui?.clipboard ?? "none",
+        injection: policy.ui?.allowInputInjection ?? false,
+    };
 
     if (directionalNetwork) {
         if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
@@ -714,6 +713,31 @@ function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | u
   if (options.logDir !== undefined) return 'logDir';
   if (options.usePty === true) return 'usePty';
   return undefined;
+}
+
+function appendDiagnosticLine(output: string, line: string): string {
+  const prefix = output.length === 0 || output.endsWith('\n') ? output : `${output}\n`;
+  return `${prefix}${line}\n`;
+}
+
+// Preserve diagnostics that the executor CLI previously emitted on stderr.
+function bufferedStderr(result: BindingRunResult): string {
+  let stderr = result.stderr;
+  for (const warning of result.warnings) {
+    stderr = appendDiagnosticLine(stderr, warning);
+  }
+
+  if (
+    result.outputMetadata !== null
+    && typeof result.outputMetadata === 'object'
+    && !Array.isArray(result.outputMetadata)
+  ) {
+    const captureDenials = (result.outputMetadata as Record<string, unknown>).captureDenials;
+    if (captureDenials !== undefined) {
+      stderr = appendDiagnosticLine(stderr, JSON.stringify(captureDenials));
+    }
+  }
+  return stderr;
 }
 
 /**
@@ -965,9 +989,14 @@ export async function spawnSandboxAsync(
     experimental: options.experimental,
   });
   const result = await runBindingRequestAsync(request);
+  if (result.timedOut) {
+    throw new MxcError('backend_error', 'sandbox execution timed out', {
+      timedOut: true,
+    });
+  }
   return {
     stdout: result.stdout,
-    stderr: result.stderr,
+    stderr: bufferedStderr(result),
     exitCode: result.exitCode,
   };
 }
