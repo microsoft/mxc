@@ -1202,7 +1202,7 @@ function buildRawBackendConfig(
   var scenarioPolicy: any = scenario ? scenario.policy : {};
   var timeoutMs = timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0;
   var config: any = {
-    version: '0.9.0-alpha',
+    version: '0.10.0-alpha',
     containment: containment,
     process: {
       commandLine: script,
@@ -1212,16 +1212,16 @@ function buildRawBackendConfig(
   if (scenarioPolicy.network) {
     if (scenarioPolicy.network.allowedHosts || scenarioPolicy.network.blockedHosts) {
       throw new Error(
-        'Schema 0.9 raw-backend configs require CIDR-based directional rules; '
+        'Schema 0.10 raw-backend configs require CIDR-based directional rules; '
         + 'hostname allow/block lists cannot be translated safely.',
       );
     }
     if (containment === 'hyperlight' && scenarioPolicy.network.enabled) {
       throw new Error(
-        'Hyperlight has no representable schema 0.9 enabled-network posture.',
+        'Hyperlight has no representable schema 0.10 enabled-network posture.',
       );
     }
-    // Hyperlight has no valid v0.9 network section. Omission keeps the
+    // Hyperlight has no valid v0.10 network section. Omission keeps the
     // default-deny posture, which the backend maps to no networking.
     if (containment === 'microvm') {
       var action = scenarioPolicy.network.enabled ? 'allow' : 'deny';

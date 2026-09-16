@@ -35,7 +35,7 @@ impl StateAwareProvision {
 /// A lifecycle operation with exactly the routing and configuration it needs.
 ///
 /// Execution process settings, policy, and telemetry belong to the common
-/// `ExecutionRequest`, not this payload. Empty experimental wrappers do not
+/// `ExecutionRequest`, not this payload. Empty backend phase sections do not
 /// manufacture backend configurations for non-provision operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateAwareOperation {

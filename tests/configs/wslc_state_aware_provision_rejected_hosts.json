@@ -9,11 +9,9 @@
         },
         "ingress": { "default": "allow", "hostLoopback": "allow" }
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+        "image": "alpine:latest"
         }
     }
 }

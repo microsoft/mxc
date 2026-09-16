@@ -8,9 +8,7 @@
   "network": {
     "egress": { "default": "deny" }
   },
-  "experimental": {
-    "wslc": {
-      "image": "python:3.12-alpine"
-    }
+  "wslc": {
+    "image": "python:3.12-alpine"
   }
 }

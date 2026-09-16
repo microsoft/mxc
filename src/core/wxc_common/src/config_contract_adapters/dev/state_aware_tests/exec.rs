@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::common::{adapt, assert_clean_common, assert_common_matches_legacy};
+use super::common::{adapt, assert_clean_common};
 use crate::state_aware_operation::StateAwareOperation;
 use crate::wire;
 
@@ -16,14 +16,13 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
     ] {
         for extra in [
             "",
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","network":{}"#,
             r#","_comment":null"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":false},"network":{"egress":{"default":"deny"},"ingress":{"default":"deny"}},"runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{id}","process":{{"commandLine":"echo hello","cwd":"/work","env":["FIRST=one","SECOND=two"],"timeout":60}}{extra}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"exec","sandboxId":"{id}","process":{{"commandLine":"echo hello","cwd":"/work","env":["FIRST=one","SECOND=two"],"timeout":60}}{extra}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(
@@ -33,7 +32,6 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
                 }
             );
             assert_clean_common(&common);
-            assert_common_matches_legacy(&source, &common);
             let process = common.process.unwrap();
             assert_eq!(process.command_line.as_deref(), Some("echo hello"));
             assert_eq!(process.cwd.as_deref(), Some("/work"));
@@ -65,7 +63,7 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
 #[test]
 fn minimal_exec_keeps_omitted_process_fields_absent() {
     let (common, operation) = adapt(
-        r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"id","process":{"commandLine":"echo"}}"#,
+        r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"id","process":{"commandLine":"echo"}}"#,
     );
     assert!(matches!(operation, StateAwareOperation::Exec { .. }));
     let process = common.process.unwrap();

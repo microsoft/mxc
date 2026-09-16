@@ -273,9 +273,9 @@ reaches the detached daemon via the inherited `WXC_WSB_FORCE_RECLAIM` env var.
 
 These fields remain parseable but do not control either live execution path:
 
-- `experimental.windows_sandbox.idleTimeoutMs`
-- `experimental.windows_sandbox.idleTimeout`
-- `experimental.windows_sandbox.daemonPipeName`
+- `windowsSandbox.idleTimeoutMs`
+- `windowsSandbox.idleTimeout`
+- `windowsSandbox.daemonPipeName`
 
 State-aware lifecycle has no idle watchdog.
 

@@ -15,9 +15,8 @@ export const platformSkip: string | false = !getPlatformSupport().isSupported
 /**
  * Spawn-options preset for unit tests that drive the real binary-resolver
  * code path but stub the actual `child_process.spawn`. `experimental: true`
- * exposes the state-aware functions; `executablePath: process.execPath`
- * gives the resolver an always-on-disk path so it can succeed without the
- * fake spawn ever using it.
+ * admits Windows Sandbox; `executablePath: process.execPath` gives the resolver
+ * an always-on-disk path so it can succeed without the fake spawn ever using it.
  */
 export function testOptions(extra?: Partial<SandboxSpawnOptions>): SandboxSpawnOptions {
   return { experimental: true, executablePath: process.execPath, ...extra };

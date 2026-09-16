@@ -35,6 +35,5 @@
   "command": "echo network",
   "containment": {
     "type": "process"
-  },
-  "experimental": false
+  }
 }
