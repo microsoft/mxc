@@ -951,6 +951,7 @@ impl BaseContainerRunner {
 
         request.policy.capture_denials.is_some()
             && native_capture_usable
+            && !request.policy.network_proxy.is_enabled()
             && Self::psec_policy_compatible(
                 request,
                 request.policy.denied_paths.is_empty()
@@ -4752,30 +4753,34 @@ mod tests {
     #[test]
     fn capture_proxy_uses_guarded_contract() {
         let _guard = crate::test_env::CaptureCapabilityGuard::set(true, true);
-        let mut request = ExecutionRequest::default();
-        request.policy.capture_denials = Some(Default::default());
-        request.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
-        };
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: true,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
+        for runtime_proxy_specified in [false, true] {
+            let mut request = ExecutionRequest::default();
+            request.policy.capture_denials = Some(Default::default());
+            request.policy.runtime_network_proxy_specified = runtime_proxy_specified;
+            request.policy.network_proxy = ProxyConfig {
+                address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                builtin_test_server: false,
+            };
+            let support = Arc::new(FakeCaptureSupport {
+                api_error: None,
+                deny_error: None,
+                deny_supported: true,
+                api_calls: AtomicUsize::new(0),
+                learning_mode_api_calls: AtomicUsize::new(0),
+                deny_calls: AtomicUsize::new(0),
+            });
+            let runner =
+                BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
 
-        assert!(
-            !runner.uses_process_security_environment(&request),
-            "capture must not select PSEC when another requested policy is incompatible"
-        );
-        assert!(
-            !BaseContainerRunner::uses_native_capture_for_request(&request),
-            "dispatcher capability selection must reject policy-incompatible PSEC capture"
-        );
+            assert!(
+                !runner.uses_process_security_environment(&request),
+                "capture must not select PSEC for runtime_proxy_specified={runtime_proxy_specified}"
+            );
+            assert!(
+                !BaseContainerRunner::uses_native_capture_for_request(&request),
+                "dispatcher capability selection must reject proxy capture for runtime_proxy_specified={runtime_proxy_specified}"
+            );
+        }
     }
 
     #[test]
