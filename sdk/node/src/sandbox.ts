@@ -429,12 +429,14 @@ export function createConfigFromPolicy(
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
 
-    // UI mapping (cross-platform)
-    config.ui = {
-        disable: !(policy.ui?.allowWindows ?? false),
-        clipboard: policy.ui?.clipboard ?? "none",
-        injection: policy.ui?.allowInputInjection ?? false,
-    };
+    // Presence matters for backends that cannot enforce UI policy.
+    if (policy.ui !== undefined) {
+        config.ui = {
+            disable: !(policy.ui.allowWindows ?? false),
+            clipboard: policy.ui.clipboard ?? "none",
+            injection: policy.ui.allowInputInjection ?? false,
+        };
+    }
 
     if (directionalNetwork) {
         if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
