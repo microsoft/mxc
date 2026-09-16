@@ -15,7 +15,6 @@ fn accepts_empty_optional_objects() {
         r#""processContainer": {"ui": {}}"#,
         r#""processContainer": {"filesystem": {}}"#,
         r#""seatbelt": {}"#,
-        r#""experimental": {}"#,
     ] {
         let json = format!(
             r#"{{
@@ -323,16 +322,6 @@ fn rejects_null_optional_fields() {
                 r#""processContainer": {"ui": {"ime": null}}"#,
             ),
             (
-                "experimental.test",
-                version_and_process.as_str(),
-                r#""experimental": {"test": null}"#,
-            ),
-            (
-                "experimental.test.message",
-                version_and_process.as_str(),
-                r#""experimental": {"test": {"message": null}}"#,
-            ),
-            (
                 "telemetry",
                 version_and_process.as_str(),
                 r#""telemetry": null"#,
@@ -341,76 +330,6 @@ fn rejects_null_optional_fields() {
                 "telemetry.enabled",
                 version_and_process.as_str(),
                 r#""telemetry": {"enabled": null}"#,
-            ),
-            (
-                "experimental.windows_sandbox",
-                version_and_process.as_str(),
-                r#""experimental": {"windows_sandbox": null}"#,
-            ),
-            (
-                "experimental.windows_sandbox.idleTimeoutMs",
-                version_and_process.as_str(),
-                r#""experimental": {"windows_sandbox": {"idleTimeoutMs": null}}"#,
-            ),
-            (
-                "experimental.windows_sandbox.idleTimeout",
-                version_and_process.as_str(),
-                r#""experimental": {"windows_sandbox": {"idleTimeout": null}}"#,
-            ),
-            (
-                "experimental.windows_sandbox.daemonPipeName",
-                version_and_process.as_str(),
-                r#""experimental": {"windows_sandbox": {"daemonPipeName": null}}"#,
-            ),
-            (
-                "experimental.wslc",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": null}"#,
-            ),
-            (
-                "experimental.wslc.targetOs",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"targetOs": null}}"#,
-            ),
-            (
-                "experimental.wslc.image",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"image": null}}"#,
-            ),
-            (
-                "experimental.wslc.imageTarPath",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"imageTarPath": null}}"#,
-            ),
-            (
-                "experimental.wslc.cpuCount",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"cpuCount": null}}"#,
-            ),
-            (
-                "experimental.wslc.memoryMb",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"memoryMb": null}}"#,
-            ),
-            (
-                "experimental.wslc.gpu",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"gpu": null}}"#,
-            ),
-            (
-                "experimental.wslc.storagePath",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"storagePath": null}}"#,
-            ),
-            (
-                "experimental.wslc.portMappings",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"portMappings": null}}"#,
-            ),
-            (
-                "experimental.wslc.portMappings[].protocol",
-                version_and_process.as_str(),
-                r#""experimental": {"wslc": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": null}]}}"#,
             ),
         ],
         "null optional field",

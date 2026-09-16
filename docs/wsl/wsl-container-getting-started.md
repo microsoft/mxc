@@ -128,7 +128,7 @@ cost once per image, not once per run.
 
 > **Storage path consistency:** the cache lives under the WSLC
 > `storage_path` (default `%TEMP%\mxc-wslc-sessions`). If your runtime
-> configs override `experimental.wslc.storagePath`, pass the same
+> configs override `wslc.storagePath`, pass the same
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
 > pulled.
@@ -182,7 +182,7 @@ fields before spawning:
 import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
 
 const policy = {
-  version: '0.9.0-alpha',
+  version: '0.10.0-alpha',
   network: {
     egress: { default: 'allow' as const },
     ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
@@ -191,9 +191,9 @@ const policy = {
 
 const config = createConfigFromPolicy(policy, 'wslc');
 config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
-config.experimental!.wslc!.image = 'python:3.12-alpine';
-config.experimental!.wslc!.cpuCount = 2;
-config.experimental!.wslc!.memoryMb = 1024;
+config.wslc!.image = 'python:3.12-alpine';
+config.wslc!.cpuCount = 2;
+config.wslc!.memoryMb = 1024;
 
 // PTY mode (interactive terminal):
 const ptyProcess = spawnSandboxFromConfig(config, { experimental: true });
@@ -223,7 +223,7 @@ use mxc_sdk::{
 };
 
 let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
+    version: "0.10.0-alpha".to_string(),
     filesystem: None,
     network: None,
     ui: None,
@@ -250,7 +250,7 @@ let mut sandbox = spawn_sandbox(request)?;
 let stdout = sandbox.take_stdout().expect("stdout");
 ```
 
-`WslcSection` mirrors the `experimental.wslc` block below;
+`WslcSection` mirrors the `wslc` block below;
 `WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
 through the same parser the executor uses, so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at
@@ -272,7 +272,7 @@ Notes and limits:
 
 ### JSON config
 
-WSLC-specific settings go under `experimental.wslc` in the JSON config:
+WSLC-specific settings go under `wslc` in the JSON config:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -296,7 +296,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "alpine:latest" } }
+"wslc": { "image": "alpine:latest" }
 ```
 
 **2. Pre-pulled from a custom registry (no auth):**
@@ -306,7 +306,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" } }
+"wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" }
 ```
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
@@ -314,11 +314,9 @@ Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
 **3. Import from a local tar file (no pre-pull needed):**
 
 ```json
-"experimental": {
-  "wslc": {
-    "image": "my-image:latest",
-    "imageTarPath": "C:\\path\\to\\image.tar"
-  }
+"wslc": {
+  "image": "my-image:latest",
+  "imageTarPath": "C:\\path\\to\\image.tar"
 }
 ```
 
@@ -328,7 +326,7 @@ no separate `--setup-wslc` step is required.
 
 ### Network configuration
 
-| Exact v0.9 policy | WSLC behavior |
+| Exact v0.10 policy | WSLC behavior |
 |---|---|
 | Egress, ingress, and host-loopback defaults all `allow` | Bridged networking without independent directional filtering |
 | All three defaults `deny` (also the omitted defaults) | No networking (isolated) |
@@ -337,7 +335,7 @@ no separate `--setup-wslc` step is required.
 > **No per-host filtering primitive exists.** The container lacks
 > `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
 > unenforced. The removed legacy `allowOutbound` authoring and wire host-list
-> vocabulary must not be used for v0.9. Published-version compatibility is
+> vocabulary must not be used for v0.10. Published-version compatibility is
 > separate from these new directional declarations.
 
 ### Network proxy (cooperative, unprivileged)
@@ -371,7 +369,7 @@ address the container can reach:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
   "network": {
@@ -379,12 +377,12 @@ address the container can reach:
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "runtimeConfig": { "networkProxy": "http://proxy.example:8080" },
-  "experimental": { "wslc": { "image": "alpine:latest" } }
+  "wslc": { "image": "alpine:latest" }
 }
 ```
 
 The removed `network.proxy` object and its `localhost`/`builtinTestServer`
-forms are rejected by exact v0.9. One-shot proxy use requires the unrestricted
+forms are rejected by exact v0.10. One-shot proxy use requires the unrestricted
 bridged posture shown above; a proxy cannot make isolated networking reach an
 external listener. State-aware exec instead supplies only `runtimeConfig` and
 inherits its provisioned network posture.
@@ -405,7 +403,7 @@ blockedHosts with defaultPolicy='allow') is not supported. ...
 ```
 
 Use a runtime proxy with unrestricted bridged networking for cooperative host
-filtering at the proxy layer. Without filtering rules, v0.9 accepts isolated
+filtering at the proxy layer. Without filtering rules, v0.10 accepts isolated
 deny/deny/deny or unrestricted allow/allow/allow across egress, ingress, and
 host-loopback. Mixed directions are rejected because no independent restriction
 primitive exists.
@@ -413,7 +411,7 @@ primitive exists.
 ### Legacy enforcement and inbound fields (published contracts only)
 
 The following compatibility rules apply to legacy published contracts, not
-v0.9, which structurally rejects `enforcementMode` and `allowLocalNetwork`.
+v0.10, which structurally rejects `enforcementMode` and `allowLocalNetwork`.
 `network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
 reason as per-host filtering: both ask for per-rule firewall enforcement inside a
 container that has no `CAP_NET_ADMIN` to apply it with. The default
@@ -427,7 +425,7 @@ rather than refused merely for being present.
 inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
 container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
 inbound-listen grant — only explicit host→container forwards via
-`experimental.wslc` `portMappings` have any inbound effect, so accepting the
+`wslc` `portMappings` have any inbound effect, so accepting the
 flag would silently promise reachability the backend never delivers. Expose
 specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
 default, is a no-op and is accepted.)
@@ -439,7 +437,7 @@ default, is a no-op and is accepted.)
   custom HTTP clients, statically-linked binaries that ignore the env) are
   **not** contained. WSLC cannot provide a hard network floor — the container
   has no `CAP_NET_ADMIN` and MXC has no VM-level enforcement hook. For strict
-  network isolation in v0.9, use the deny/deny/deny posture instead.
+  network isolation in v0.10, use the deny/deny/deny posture instead.
 - **Consumer-provided proxy.** MXC does not start a proxy for WSLC; you supply
   a reachable URL via `runtimeConfig.networkProxy`. Host filtering is the
   proxy's responsibility; directional rules cannot be combined to create a
@@ -490,7 +488,7 @@ explicit `provision` / `deprovision` phases rather than by per-run flags.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
+| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
@@ -499,7 +497,7 @@ explicit `provision` / `deprovision` phases rather than by per-run flags.
 
 - [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
 - [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
-- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — Cooperative HTTP proxy (`network.proxy.url`)
+- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — Cooperative HTTP proxy (`runtimeConfig.networkProxy`)
 - [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
 - [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
 - [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar

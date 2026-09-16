@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Checks that the former Hyperlight hostname policies fail v0.9 migration.
+    Checks that the former Hyperlight hostname policies fail exact parsing.
 .DESCRIPTION
     Uses --dry-run and expects exact parsing to reject network.allowedHosts.
     No Hyperlight guest, proxy, DNS lookup, or sandbox workload is started.
@@ -24,9 +24,9 @@ $ErrorActionPreference = 'Stop'
 foreach ($name in @('hyperlight_networking.json', 'hyperlight_networking_blocked.json')) {
     $path = Join-Path $ConfigDir $name
     $config = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-    if ($config.version -ne '0.9.0-alpha' -or $config.containment -ne 'hyperlight' -or
+    if ($config.version -ne '0.10.0-alpha' -or $config.containment -ne 'hyperlight' -or
         @($config.network.allowedHosts).Count -ne 1 -or $config.network.allowedHosts[0] -ne 'example.com') {
-        throw "$name no longer contains the exact v0.9 hostname migration case"
+        throw "$name no longer contains the exact v0.10 hostname migration case"
     }
 
     $info = [System.Diagnostics.ProcessStartInfo]::new()

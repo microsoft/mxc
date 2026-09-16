@@ -112,7 +112,7 @@ try
     }
 
     // State-aware lifecycle: provision -> start -> exec -> stop -> deprovision.
-    // Requires the IsolationSession backend (Windows-only, experimental, with
+    // Requires the IsolationSession backend (Windows-only, with
     // its OS-side service), so this reports the MXC error on hosts without it.
     Console.WriteLine();
     Console.WriteLine("State-aware lifecycle:");

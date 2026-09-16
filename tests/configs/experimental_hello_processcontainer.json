@@ -1,14 +1,12 @@
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containerId": "CLI-Experimental-Hello",
   "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo experimental hello test"
   },
-  "experimental": {
-    "test": {
-      "message": "Test feature from process container experimental!"
-    }
+  "test": {
+    "message": "Test feature from process container experimental!"
   },
   "ui": {
     "disable": false

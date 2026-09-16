@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::OneShotRequest;
+use mxc_config_contract::published::v0_9_0_alpha::OneShotRequest;
 
 pub(crate) fn assert_valid(json: &str) {
     serde_json::from_str::<OneShotRequest>(json).unwrap();

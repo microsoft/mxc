@@ -1954,8 +1954,8 @@ mod tests {
             "phase":"exec",
             "sandboxId":"wsb:abcd1234",
             "process":{"commandLine":"echo hello"},
-            "experimental":{},
-            "experimental":{}
+            "telemetry":{},
+            "telemetry":{}
         }"#;
         let mut logger = test_logger();
         let error = wxc_common::config_parser::load_mxc_request_from_json(state_aware, &mut logger)
@@ -1966,14 +1966,14 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(&error_envelope_string(error)).unwrap();
         assert_eq!(envelope["error"]["code"], "malformed_request");
-        assert!(error.message.contains("duplicate field `experimental`"));
+        assert!(error.message.contains("duplicate field `telemetry`"));
         assert!(logger.get_buffer().is_empty());
 
         let one_shot = r#"{
             "version":"0.9.0-alpha",
             "process":{"commandLine":"echo hello"},
-            "experimental":{},
-            "experimental":{}
+            "telemetry":{},
+            "telemetry":{}
         }"#;
         let mut logger = test_logger();
         let error = wxc_common::config_parser::load_mxc_request_from_json(one_shot, &mut logger)
@@ -1982,9 +1982,7 @@ mod tests {
             request_error_route(&error),
             RequestErrorRoute::Diagnostic
         ));
-        assert!(logger
-            .get_buffer()
-            .contains("duplicate field `experimental`"));
+        assert!(logger.get_buffer().contains("duplicate field `telemetry`"));
     }
 
     fn resolve_with_cli(
@@ -2448,7 +2446,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;
