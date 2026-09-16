@@ -50,6 +50,12 @@ workflow-call-only `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
 `Build.MacOS.Job.yml`, which build and upload the per-target artifacts in
 parallel, then to the lint / versioning / SDK jobs.
 
+`Package.Lock.Check.Job.yml` is the dependency-free npm lockfile policy gate.
+Every GitHub job that runs npm must depend on it, so no lockfile is consumed
+before its registry URLs and SHA-512 integrity values are validated. The shared
+1ES build uses the equivalent `Validate_Package_Locks` prerequisite stage, and
+other npm-consuming entry points must run the same checker before `npm ci`.
+
 Native Linux/macOS build jobs explicitly run the common/contract tests and the
 engine, FFI, and Rust SDK state-aware suites; testing an executor package does
 not run its dependencies' tests. Linux includes common unit and documentation
