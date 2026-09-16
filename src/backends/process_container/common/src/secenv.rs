@@ -3,7 +3,8 @@
 
 //! Windows runtime FFI for the `processmodel.dll` **process security-environment**
 //! exports — the 2-phase sandbox launch model that produces the
-//! `HPROCESS_SECURITY_ENVIRONMENT` handle that [`crate::LearningModeApi::start_trace`]
+//! `HPROCESS_SECURITY_ENVIRONMENT` handle that
+//! [`learning_mode_windows::LearningModeApi::start_trace`]
 //! keys the Learning Mode trace on.
 //!
 //! `StartLearningModeTrace` is keyed on a security-environment handle (the broker
@@ -49,7 +50,7 @@ use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::string_util;
 
-use crate::LearningModeError;
+use learning_mode_windows::LearningModeError;
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
@@ -499,6 +500,16 @@ impl SecurityEnvironmentApi {
             .map(|support_flags| support_flags & capability != 0)
     }
 
+    #[cfg(test)]
+    fn query_support_cached(
+        &self,
+        capability: u64,
+        cache: &OnceLock<Result<u64, LearningModeError>>,
+    ) -> Result<bool, LearningModeError> {
+        self.support_flags_cached(cache)
+            .map(|support_flags| support_flags & capability != 0)
+    }
+
     /// Return the immutable support flags advertised by the official PSEC API.
     ///
     /// The real API is process-wide and immutable, so both successful flags and
@@ -506,10 +517,17 @@ impl SecurityEnvironmentApi {
     fn support_flags(&self) -> Result<u64, LearningModeError> {
         if self.cacheable {
             static CACHE: OnceLock<Result<u64, LearningModeError>> = OnceLock::new();
-            CACHE.get_or_init(|| self.query_support_flags()).clone()
+            self.support_flags_cached(&CACHE)
         } else {
             self.query_support_flags()
         }
+    }
+
+    fn support_flags_cached(
+        &self,
+        cache: &OnceLock<Result<u64, LearningModeError>>,
+    ) -> Result<u64, LearningModeError> {
+        cache.get_or_init(|| self.query_support_flags()).clone()
     }
 
     fn query_support_flags(&self) -> Result<u64, LearningModeError> {
@@ -934,17 +952,24 @@ mod tests {
 
     #[test]
     fn cacheable_api_memoizes_support_flags_across_capabilities() {
-        // The only test that drives the cacheable (process-wide) support cache, so
-        // the `OnceLock` initializer runs deterministically here.
-        let _guard = QUERY_LOCK.lock().unwrap();
+        let _guard = QUERY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         let api =
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
+        let cache = OnceLock::new();
 
-        assert!(api.supports_deny_paths().unwrap());
-        assert!(!api.supports_enumerate_paths().unwrap());
-        assert!(!api.supports_network_ingress().unwrap());
+        assert!(api
+            .query_support_cached(PSE_SUPPORT_FS_DENY, &cache)
+            .unwrap());
+        assert!(!api
+            .query_support_cached(PSE_SUPPORT_FS_ENUMERATE, &cache)
+            .unwrap());
+        assert!(!api
+            .query_support_cached(PSE_SUPPORT_NETWORK_INGRESS, &cache)
+            .unwrap());
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
     }
 }

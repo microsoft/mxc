@@ -27,7 +27,11 @@ jobs:
   dependency-feed-check:
     uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
 
+  package-lock-check:
+    uses: ./.github/workflows/Package.Lock.Check.Job.yml
+
   versioning-checks:
+    needs: package-lock-check
     uses: ./.github/workflows/Versioning.Checks.Job.yml
 
   lint:
@@ -47,15 +51,16 @@ jobs:
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
   sdk-unit-tests:
+    needs: package-lock-check
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml
 
   sdk-dotnet-tests:
     uses: ./.github/workflows/SDK.Dotnet.Test.Job.yml
 
   package-npm-sdk:
-    needs: [windows, linux, macos]
+    needs: [package-lock-check, windows, linux, macos]
     uses: ./.github/workflows/Package.NpmSdk.Job.yml
 
   sdk-integration-tests:
-    needs: package-npm-sdk
+    needs: [package-lock-check, package-npm-sdk]
     uses: ./.github/workflows/SDK.Integration.Test.Job.yml

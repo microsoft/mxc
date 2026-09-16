@@ -17,10 +17,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use learning_mode_core::DenialAnalyzer;
-use learning_mode_windows::{
-    CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
-    SecurityEnvironmentApi, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
-};
+use learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
     ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -57,8 +54,13 @@ use crate::launch_diagnostics::{
     diagnose_missing_required_env, diagnose_process_exit, is_environment_not_supported,
     validate_required_child_env,
 };
+use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
+use crate::secenv::{
+    ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+};
 use sandbox_spec::base_container_layout::IntegrityLevel;
 use wxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
@@ -4552,6 +4554,11 @@ mod tests {
         assert!(spec.capabilities().is_none());
         assert_eq!(ingress.default_action(), psec_layout::FilterAction::deny);
         assert_eq!(ingress.host_loopback(), psec_layout::FilterAction::allow);
+        assert_eq!(
+            spec.network_policy()
+                .and_then(|network| network.allowed_appcontainer_peer()),
+            Some(crate::base_container_helpers::LOOPBACK_NETWORK_PEER)
+        );
     }
 
     #[test]
@@ -5123,10 +5130,11 @@ mod tests {
     }
 
     #[test]
-    fn capture_proxy_uses_guarded_contract() {
+    fn capture_runtime_proxy_uses_native_contract() {
         let _guard = crate::test_env::CaptureCapabilityGuard::set(true, true);
         let mut request = ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
+        request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
@@ -5141,14 +5149,10 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
 
-        assert!(
-            !runner.uses_process_security_environment(&request),
-            "capture must not select PSEC when another requested policy is incompatible"
-        );
-        assert!(
-            !BaseContainerRunner::uses_native_capture_for_request(&request),
-            "dispatcher capability selection must reject policy-incompatible PSEC capture"
-        );
+        assert!(runner.uses_process_security_environment(&request));
+        assert!(BaseContainerRunner::uses_native_capture_for_request(
+            &request
+        ));
     }
 
     #[test]

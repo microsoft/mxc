@@ -179,6 +179,40 @@ cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only 
 npm install && npm run build
 ```
 
+### Updating npm dependencies
+
+Dependency upgrades produced by commands such as `npm install`, `npm update`,
+and `npm audit fix` may change one of these lockfiles:
+
+- `sdk/node/package-lock.json`
+- `sdk/node/tests/integration/package-lock.json`
+- `scripts/versioning/package-lock.json`
+- `tests/playground/package-lock.json`
+
+Microsoft developers resolve npm packages through an internal 1ES feed. That
+feed can write internal `ms-feed-*` tarball URLs and SHA-1 integrity values into
+a lockfile. Because this is a public repository, committed lockfiles must
+instead use `https://registry.npmjs.org` URLs that external contributors can
+access and SHA-512 integrity values.
+
+After an npm command changes a lockfile through the internal feed, normalize it
+from the repository root using PowerShell 7.3 or later:
+
+```powershell
+pwsh -File .\scripts\normalize-npm-package-lock.ps1 `
+    .\sdk\node\package-lock.json
+```
+
+Run the script once for each changed lockfile. It downloads affected tarballs
+through the internal feed, verifies their existing integrity value, computes
+SHA-512, and restores the public npm registry URL. It makes no changes when a
+lockfile already contains public URLs. CI checks every tracked
+`package-lock.json`. Resolved dependencies must either be repository-relative
+`file:`/path references or HTTPS artifacts from `registry.npmjs.org`; npmjs
+artifacts must have a valid SHA-512 integrity value. Installed package records
+must declare their source; workspace source and bundled-package records are
+handled explicitly.
+
 ### Linting and formatting
 
 Before submitting a PR, run the linters and formatters that already exist in the repo:

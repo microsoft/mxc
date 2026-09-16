@@ -29,9 +29,9 @@ use std::path::Path;
 
 use windows::Win32::Foundation::HANDLE;
 
-use crate::ffi::{LearningModeApi, LearningModeTraceHandle};
+use learning_mode_windows::{LearningModeApi, LearningModeError, LearningModeTraceHandle};
+
 use crate::secenv::{ProcessSecurityEnvironment, SecurityEnvironmentApi};
-use crate::LearningModeError;
 
 /// An in-flight Learning Mode capture: a live security environment with a trace already
 /// started against it.
@@ -52,7 +52,7 @@ impl CaptureSession {
     /// Create a security environment from `sandbox_specification` and start a Learning
     /// Mode trace against it. Call **before** launching the child.
     ///
-    /// `flags` is normally [`crate::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
+    /// `flags` is normally [`crate::secenv::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
     /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
@@ -84,7 +84,7 @@ impl CaptureSession {
     }
 
     /// The `HPROCESS_SECURITY_ENVIRONMENT` handle to pass to
-    /// [`crate::SecurityEnvironmentStartupInfo`].
+    /// [`crate::secenv::SecurityEnvironmentStartupInfo`].
     ///
     /// # Panics
     /// Panics only on an internal invariant violation — the environment is present for
@@ -241,7 +241,7 @@ mod tests {
             fake_secenv_api(),
             fake_learning_mode_api(),
             b"PSEC-fake-spec",
-            crate::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+            crate::secenv::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
         )
     }
 
