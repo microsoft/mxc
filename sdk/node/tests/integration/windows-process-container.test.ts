@@ -16,7 +16,6 @@ import {
   createTempDir,
   withToolPaths,
   startTestProxy,
-  debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
 } from './test-helpers.js';
@@ -50,7 +49,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'",
       { version: schemaVersion.raw, ui: { allowWindows: true } },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-2-${schemaVersion}`,
     );
@@ -63,7 +62,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
-      debugSpawnOptions,
+      {},
       undefined,
       `test-3-${schemaVersion}`,
     );
@@ -84,7 +83,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} ${scriptFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-4-${schemaVersion}`,
     );
@@ -104,7 +103,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `cmd.exe /c type ${inputFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-5-${schemaVersion}`,
     );
@@ -116,7 +115,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       'cmd.exe /c echo version ok',
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-ver-${schemaVersion}`,
     );

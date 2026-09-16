@@ -129,6 +129,16 @@ describe('native binding request', () => {
       }),
       /require containment 'processcontainer'/,
     );
+
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hello' },
+        appContainer: { learningMode: true },
+      }),
+      /require containment 'processcontainer'/,
+    );
   });
 
   it('normalizes legacy containment aliases privately', () => {

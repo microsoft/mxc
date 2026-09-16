@@ -117,7 +117,8 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
     return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
   }
-  const containment = resolveContainmentName(config);
+  const processContainer = config.processContainer ?? config.appContainer;
+  const containment = resolveContainmentName(config, processContainer);
   if (
     containment !== 'process'
     && containment !== 'processcontainer'
@@ -135,8 +136,8 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   }
   if (
     containment === 'process'
-    && config.processContainer !== undefined
-    && hasExplicitProcessContainerSettings(config.processContainer)
+    && processContainer !== undefined
+    && hasExplicitProcessContainerSettings(processContainer)
   ) {
     return "ProcessContainer-specific settings require containment 'processcontainer'";
   }
