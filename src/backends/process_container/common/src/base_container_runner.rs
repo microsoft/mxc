@@ -4772,8 +4772,7 @@ mod tests {
             learning_mode_api_calls: AtomicUsize::new(0),
             deny_calls: AtomicUsize::new(0),
         });
-        let runner =
-            BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
+        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
 
         assert!(runner.uses_process_security_environment(&request));
         assert!(BaseContainerRunner::uses_native_capture_for_request(
