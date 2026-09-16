@@ -249,7 +249,7 @@ describe('native binding request', () => {
       portMappings: [{ windowsPort: 8080, containerPort: 80 }],
     });
 
-    it('does not synthesize unsupported UI policy for WSLC', () => {
+    it('preserves default-deny UI policy for WSLC', () => {
       const config = buildSandboxPayload(
         'echo hello',
         { version: '0.9.0-alpha' },
@@ -259,7 +259,11 @@ describe('native binding request', () => {
       );
       const request = prepareRequestSpec(config, { experimental: true });
 
-      assert.strictEqual(request.policy.ui, undefined);
+      assert.deepStrictEqual(request.policy.ui, {
+        allowWindows: false,
+        clipboard: 'none',
+        allowInputInjection: false,
+      });
       assert.strictEqual(request.containment.type, 'wslc');
     });
   });

@@ -755,7 +755,9 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
-    assert.strictEqual(config.ui, undefined);
+    assert.strictEqual(config.ui!.disable, true);
+    assert.strictEqual(config.ui!.clipboard, 'none');
+    assert.strictEqual(config.ui!.injection, false);
     assert.strictEqual(config.process!.timeout, 0);
     assert.strictEqual(config.process!.commandLine, '');
     assert.strictEqual(config.lifecycle!.destroyOnExit, true);
