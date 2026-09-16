@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#[path = "v0_9_0_alpha/annotations.rs"]
+pub(crate) const CONTRACT_VERSION: &str = "0.9.0-alpha";
+
+#[path = "support/annotations.rs"]
 mod annotations;
 #[path = "v0_9_0_alpha/common.rs"]
 mod common;
@@ -15,7 +17,7 @@ mod experimental;
 mod fixtures;
 #[path = "v0_9_0_alpha/network.rs"]
 mod network;
-#[path = "v0_9_0_alpha/one_shot.rs"]
+#[path = "support/one_shot.rs"]
 mod one_shot;
 #[path = "v0_9_0_alpha/optional_fields.rs"]
 mod optional_fields;

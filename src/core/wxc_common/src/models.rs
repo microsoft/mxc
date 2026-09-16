@@ -91,8 +91,9 @@ impl From<crate::wire::Containment> for ContainmentBackend {
     /// The abstract intents resolve per host: `process` → the OS-native process
     /// sandbox, `vm` → the host's VM-class backend. Concrete backends map
     /// verbatim. Deprecated spellings (`appcontainer`, `macos_sandbox`) are
-    /// accepted via `#[serde(alias)]` on the wire enum and arrive here already
-    /// mapped to the canonical variant.
+    /// normalized before this conversion, either by exact-contract
+    /// deserialization or by explicit internal string classification through
+    /// `wire::Containment::parse_wire_name`.
     fn from(c: crate::wire::Containment) -> Self {
         use crate::wire::Containment as W;
         match c {

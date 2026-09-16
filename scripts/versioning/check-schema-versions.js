@@ -15,7 +15,7 @@
 const { execFileSync } = require("child_process");
 const { readFileSync, existsSync } = require("fs");
 const { join } = require("path");
-const { expectedRequestRoots } = require("./check-contract-codegen.js");
+const { requestRootsForContract } = require("./check-contract-codegen.js");
 
 const repoRoot = join(__dirname, "..", "..");
 const cargoRoot = join(repoRoot, "src");
@@ -132,7 +132,7 @@ for (const [label, version, requiredRoot] of [
     continue;
   }
   try {
-    const roots = expectedRequestRoots(version);
+    const roots = requestRootsForContract(registryByVersion.get(version));
     if (!roots.has(requiredRoot)) {
       errors.push(
         `Canonical ${label} version "${version}" does not support ${requiredRoot}`
@@ -227,6 +227,17 @@ if (registryByVersion.get(maxSupported)?.status !== "development") {
   errors.push(
     `Canonical maxSupported "${maxSupported}" is not the development contract in the exact registry`
   );
+}
+for (const [label, version] of [
+  ["stableLatest", stableLatest],
+  ["maxSupported", maxSupported],
+]) {
+  const contract = registryByVersion.get(version);
+  if (contract?.generatesArtifacts !== true) {
+    errors.push(
+      `Canonical ${label} "${version}" is not marked for exact artifact generation`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
