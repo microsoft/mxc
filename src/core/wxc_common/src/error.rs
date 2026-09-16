@@ -58,8 +58,8 @@ pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
 #[cfg(target_os = "windows")]
 pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
     "filesystem.deniedPaths cannot be enforced by the BaseContainer backend on this \
-     OS build: it does not advertise the native deny-paths capability \
-     (SANDBOX_CAP_FS_DENY via Experimental_QuerySandboxSupport). Run on a build with \
+     OS build: it does not advertise PSE_SUPPORT_FS_DENY through \
+     QueryProcessSecurityEnvironmentSupport. Run on a build with \
      BaseContainer deny support, or use the ProcessContainer dispatcher so it can select \
      the AppContainer + DACL fallback (which enforces deniedPaths via DENY ACEs).";
 

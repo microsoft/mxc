@@ -506,9 +506,7 @@ function Get-HostCapabilities {
         # accounts for separately.
         CanBlockInputInjection         = $canInject
         # deniedPaths is enforced on T3 via DENY ACEs, and on BaseContainer when
-        # either contract reports native deny support — PSEC's
-        # PSE_SUPPORT_FS_DENY bit or a usable SBOX contract's
-        # SANDBOX_CAP_DENY_PATHS bit (lights up when the feature ships).
+        # PSEC reports the PSE_SUPPORT_FS_DENY bit.
         # Detected at runtime so denied tests auto-enable then.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
     }
@@ -535,8 +533,8 @@ function Test-SelectedTier {
 
 # Pass when the log shows that UI restrictions were applied, using the tier's
 # telemetry. T3 (AppContainer + DACL) creates the job object on the OUTSIDE and
-# logs "UI Job Object assigned". BaseContainer applies the job/UI limits INSIDE
-# via Experimental_CreateProcessInSandbox and instead logs a
+# logs "UI Job Object assigned". BaseContainer applies the job/UI limits inside
+# the process security environment and instead logs a
 # "[ui subsystem] ... uilimits blocked" line.
 function Test-UiRestrictionsApplied {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
@@ -801,12 +799,12 @@ function Phase-DeniedRelease {
     Section 'Phase 3: release build, deniedPaths only (safe lane)'
     Clear-StateFiles
 
-    # deniedPaths is enforced on T3 (DENY ACEs) and on BaseContainer only once
-    # the SANDBOX_CAP_DENY_PATHS bit lights up. Where unsupported, the runner
+    # deniedPaths is enforced on T3 (DENY ACEs) and on BaseContainer only when
+    # PSEC advertises PSE_SUPPORT_FS_DENY. Where unsupported, the runner
     # rejects deniedPaths at launch, so skip rather than assert a transient
     # limitation (the phase auto-enables when the capability appears).
     if (-not $Script:Caps.SupportsDeniedPaths) {
-        Record-Result -Phase 'P3' -Name 'deniedPaths run' -Status 'skip' -Detail "deniedPaths not supported on tier=$($Script:ExpectedTier) (no SANDBOX_CAP_DENY_PATHS)"
+        Record-Result -Phase 'P3' -Name 'deniedPaths run' -Status 'skip' -Detail "deniedPaths not supported on tier=$($Script:ExpectedTier) (no PSE_SUPPORT_FS_DENY)"
         return
     }
 
@@ -1080,12 +1078,12 @@ function Phase-T1DenyForced {
         return
     }
     # The deny test is only meaningful once BaseContainer can enforce
-    # deniedPaths. Before SANDBOX_CAP_DENY_PATHS lights up the runner rejects
+    # deniedPaths. Before PSE_SUPPORT_FS_DENY is available the runner rejects
     # deniedPaths outright, which would otherwise make this phase "pass"
     # vacuously (the run aborts, so the child never echoes the secret). Skip
     # until the capability is present; it then asserts real deny enforcement.
     if (-not $Script:Caps.SupportsDeniedPaths) {
-        Record-Result -Phase 'P4c' -Name 'BaseContainer deny-ACE enforcement' -Status 'skip' -Detail 'BaseContainer does not yet support deniedPaths (no SANDBOX_CAP_DENY_PATHS)'
+        Record-Result -Phase 'P4c' -Name 'BaseContainer deny-ACE enforcement' -Status 'skip' -Detail 'BaseContainer does not support deniedPaths (no PSE_SUPPORT_FS_DENY)'
         return
     }
 

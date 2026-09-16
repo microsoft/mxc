@@ -17,7 +17,7 @@
 //! user-mode instruction runs, so there is no race window. The
 //! parent-applied attribute path (this module) is the documented
 //! equivalent of the OS-internal `AIC_AGENTIC_LAUNCH_WIN32K_SYSTEM_CALL_DISABLED`
-//! flag used by the BaseContainer SandboxSpec path.
+//! flag used by the BaseContainer PSEC path.
 
 /// `PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON`
 /// from `winnt.h`. When set on the mitigation `DWORD64`, the child cannot

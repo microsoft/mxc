@@ -1,154 +1,107 @@
 # Process Container: Adding OS Features
 
-This guide covers adding new OS-level features that flow
-through MXC's process container pipeline. It is specific
-to the Windows process container backend.
+This guide covers adding new OS-level features that flow through MXC's Windows
+process container pipeline.
 
 Exact v0.9 networking uses directional egress/ingress,
-`runtimeConfig.networkProxy`, and ProcessContainer proxy-peer identity.
-Legacy networking fields remain available only under their published
-contracts. Backend selection continues to depend on host capability and
-requested policy, not on a version-selected weaker implementation.
+`runtimeConfig.networkProxy`, and ProcessContainer proxy-peer identity. Legacy
+networking fields remain available under their published contracts. Backend
+selection depends on host capability and requested policy, not schema version.
 
-For which policy aspects this backend can enforce on each Windows 11 release
-(23H2 / 24H2 / 25H2 / 25H2+), see
-[Windows OS-version policy support](./os-version-support.md).
+For which policy aspects this backend can enforce on each Windows 11 release,
+see [Windows OS-version policy support](./os-version-support.md).
 
 ## Prerequisites
 
-1. Read the
-[Sandbox Policy spec](../sandbox-policy/0.7.0/policy.md) to
-understand how SandboxPolicy maps to ContainerConfig.
-2. Read
-[authoring-a-new-feature.md](../authoring-a-new-feature.md),
-especially Step 1 (feature spec) and Step 2 (OS changes).
-3. We recommend submitting a feature spec via the MXC repo so
-reviewers understand the end-to-end flow.
+1. Read the [Sandbox Policy spec](../sandbox-policy/0.7.0/policy.md) to
+   understand how `SandboxPolicy` maps to `ContainerConfig`.
+2. Read [authoring-a-new-feature.md](../authoring-a-new-feature.md), especially
+   Step 1 (feature spec) and Step 2 (OS changes).
+3. Submit a feature spec so reviewers understand the end-to-end flow.
 
 ## Architecture recap
 
-For the BaseProcessContainer backend, the flow is:
+For the BaseContainer tier, the flow is:
 
-```
+```text
 SandboxPolicy
-  → SDK: createConfigFromPolicy() → ContainerConfig JSON
-    → wxc-exec: parses ContainerConfig
-      → BaseContainerRunner: builds FlatBuffer SandboxSpec
-        → CreateProcessInSandbox (processmodel.dll)
-          → OS applies restrictions (Job Objects, mitigations, etc.)
+  -> SDK: createConfigFromPolicy() -> ContainerConfig JSON
+    -> wxc-exec: parses ContainerConfig
+      -> BaseContainerRunner: builds a PSEC FlatBuffer
+        -> CreateProcessSecurityEnvironment (processmodel.dll)
+          -> CreateProcessW with PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT
+            -> OS applies restrictions
 ```
 
-Your OS change lives at the bottom of this stack. The
-FlatBuffer `SandboxSpec` is the contract between MXC and the
-OS. If you add a new field to `SandboxSpec`, you must also
-update MXC so the data flows down from the ContainerConfig
-into the FlatBuffer blob passed to
-`CreateProcessInSandbox`.
+The PSEC FlatBuffer is the contract between MXC and the OS process security
+environment. New features must flow from the versioned config contract into the
+runtime model and then into that FlatBuffer.
 
 ## Step-by-step
 
-### 1. Update the OS FlatBuffer schema
+### 1. Update the OS PSEC schema and implementation
 
-> **Note:** Steps 1–3 below modify the internal Microsoft Windows OS source
-> tree and the `processmodel` component, and are only actionable for
-> contributors with access to that source. External contributors typically
-> consume the OS-side schema via `external/windows-sdk/BaseContainerSpecification.fbs`
-> (see Step 4) once a new field has shipped in the public Windows SDK.
+The source-of-truth schema and processmodel implementation live in the internal
+Windows OS source tree. Add the new contract field, regenerate the OS bindings,
+and implement the corresponding enforcement.
 
-The source-of-truth schema lives inside the Microsoft Windows OS source tree
-(path not publicly disclosed). It defines the `SandboxSpec` table:
+### 2. Update MXC's PSEC schema copy
 
-```flatbuffers
-table SandboxSpec {
-    // ... existing fields ...
+Once the OS change is available on the target build, update:
 
-    // Your new field (example):
-    your_new_restriction:bool = false;
-}
+```text
+external/windows-sdk/ProcessSecurityEnvironment.fbs
 ```
 
-### 2. Build processmodel
+Then regenerate the Rust bindings in:
 
-Build the `processmodel` component in the Microsoft Windows OS source tree to
-pick up the schema change.
-
-This regenerates the OS-side FlatBuffer bindings and makes
-the new field available to `CreateProcessInSandbox`.
-
-### 3. Implement OS enforcement
-
-In the processmodel code, update `ParseSandboxTechSpec` (or
-equivalent) to read your new field from the FlatBuffer and
-apply the OS enforcement (e.g., set a Job Object restriction,
-apply a process mitigation, configure a firewall rule).
-
-### 4. Update MXC's FlatBuffer copy
-
-Once your OS change has shipped (or is available on your dev
-build), copy the updated `.fbs` file to MXC:
-
-```
-external/windows-sdk/BaseContainerSpecification.fbs
+```text
+src/core/generated/process_security_environment_specification/
 ```
 
-Then regenerate the Rust bindings. See
-[src/core/generated/base_container_specification/README.md](
-../../src/core/generated/base_container_specification/README.md)
-for the exact steps.
+### 3. Flow the policy through MXC
 
-If the OS change hasn't shipped yet and the `.fbs` is not in
-the Windows SDK, copy it directly from the Microsoft Windows OS source tree
-into `external/windows-sdk/BaseContainerSpecification.fbs`.
+Update the exact development config contract, normalized wire model, runtime
+model, and parser mapping. Follow
+[authoring-a-new-feature.md](../authoring-a-new-feature.md) and regenerate the
+development schemas and generated SDK wire types rather than editing generated
+artifacts by hand.
 
-### 5. Update BaseContainerRunner in MXC
+### 4. Build the PSEC specification
 
-In `src/backends/process_container/common/src/base_container_runner.rs`, update
-`build_sandbox_spec` to include your new data:
+Update the helpers under
+`src/backends/process_container/common/src/base_container_helpers.rs` to encode
+the runtime policy into the PSEC FlatBuffer. Update
+`BaseContainerRunner::is_usable_for_request()` so the BaseContainer tier is
+selected only when the runtime OS probe reports every capability required to
+enforce the request.
 
-```rust
-fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
-    // ... existing code ...
+If PSEC cannot represent the request, selection must continue to an
+AppContainer tier that can fully enforce it. Never silently omit a requested
+restriction.
 
-    let spec = SandboxSpec::create(
-        &mut builder,
-        &SandboxSpecArgs {
-            // ... existing fields ...
-            your_new_restriction: request.policy.your_field,
-        },
-    );
+### 5. Test end-to-end
 
-    // ...
-}
-```
+Use a Windows build containing the processmodel change.
 
-The `request.policy` fields come from the Config JSON, which
-comes from the SDK's `createConfigFromPolicy()`. Make sure the
-Config schema and SDK mapping are also updated (see [authoring-a-new-feature.md](../authoring-a-new-feature.md)).
-
-### 6. Test end-to-end
-
-You need a build of Windows with your processmodel changes.
-
-1. **Config-level test:** Create a test config JSON with your
-new field set. Run `wxc-exec config.json` directly. Verify
-the OS enforcement works.
-
-2. **SDK-level test:** Set the corresponding SandboxPolicy
-policy field and call `spawnSandbox()`. Verify
-the full pipeline: policy → Config → FlatBuffer → OS.
-
-3. **Verify default-deny:** Omit the field from Config.
-Verify the most-restrictive default is applied.
+1. Add focused parsing and PSEC-construction tests.
+2. Run `wxc-exec` with a config that enables the new field and verify the OS
+   enforcement.
+3. Exercise the corresponding SDK policy and verify the complete
+   policy-to-OS flow.
+4. Verify omission applies the intended secure default.
+5. Verify an unsupported host selects a compatible AppContainer tier or returns
+   an actionable error without weakening policy.
 
 ## Summary of files to touch
 
 | Layer | Repo | File |
 |-------|------|------|
-| OS schema | Microsoft Windows OS source (internal) | `SandboxSpec.fbs` |
-| OS enforcement | Microsoft Windows OS source (internal) | `processmodel` component |
-| MXC FlatBuffer copy | mxc | `external/windows-sdk/BaseContainerSpecification.fbs` |
-| MXC generated bindings | mxc | `src/core/generated/base_container_specification/` (regenerated) |
-| MXC executor | mxc | `src/backends/process_container/common/src/base_container_runner.rs` |
+| OS schema and enforcement | Microsoft Windows OS source (internal) | processmodel PSEC contract and implementation |
+| MXC FlatBuffer copy | mxc | `external/windows-sdk/ProcessSecurityEnvironment.fbs` |
+| MXC generated bindings | mxc | `src/core/generated/process_security_environment_specification/` |
+| MXC specification builder | mxc | `src/backends/process_container/common/src/base_container_helpers.rs` |
+| MXC executor and capability selection | mxc | `src/backends/process_container/common/src/base_container_runner.rs` |
 | MXC Config schema | mxc | `schemas/dev/mxc-config.schema.*.json` |
 | MXC SDK mapping | mxc | `sdk/node/src/sandbox.ts` |
 | MXC SDK types | mxc | `sdk/node/src/types.ts` |

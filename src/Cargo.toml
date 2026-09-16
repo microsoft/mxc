@@ -18,7 +18,6 @@ members = [
     "backends/windows_sandbox/lifecycle",
     "backends/wslc/common",
     "backends/wslc/daemon",
-    "core/generated/base_container_specification",
     "core/generated/process_security_environment_specification",
     "core/learning_mode_core",
     "core/lxc",
@@ -91,7 +90,6 @@ nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "
 process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
 plm = { path = "host/plm" }
 quick-xml = "0.41"
-sandbox_spec = { path = "core/generated/base_container_specification" }
 seatbelt_common = { path = "backends/seatbelt/common" }
 same-file = "1"
 serde = { version = "1", features = ["derive"] }

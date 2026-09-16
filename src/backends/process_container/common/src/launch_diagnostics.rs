@@ -129,8 +129,7 @@ pub fn diagnose_missing_required_env(
     missing_required_env_diagnostic(supplied)
 }
 
-/// Diagnose a failed `CreateProcess` / `Experimental_CreateProcessInSandbox`
-/// call. Inspects the Win32 error code and the command line to identify known
+/// Diagnose a failed process launch. Inspects the Win32 error code and the command line to identify known
 /// failure conditions.
 ///
 /// Always returns a `LaunchDiagnostic` -- if no specific heuristic matches,
@@ -168,26 +167,8 @@ pub fn diagnose_create_process_failure(
     LaunchDiagnostic {
         kind: "create_process_failed",
         message: format!(
-            "CreateProcessInSandbox failed with error code {win32_error} (0x{win32_error:08X})."
+            "CreateProcessW failed with error code {win32_error} (0x{win32_error:08X})."
         ),
-    }
-}
-
-/// Returns `true` when the Win32 error is `ERROR_NOT_SUPPORTED` (0x32) and
-/// the caller passed a non-null environment block. Downlevel OS builds that
-/// predate environment-parameter support in `Experimental_CreateProcessInSandbox`
-/// surface this error; the caller should retry without the environment block.
-pub fn is_environment_not_supported(win32_error: u32, has_environment: bool) -> bool {
-    win32_error == ERROR_NOT_SUPPORTED.0 && has_environment
-}
-
-/// Produce a [`LaunchDiagnostic`] for the environment-not-supported case.
-pub fn diagnose_environment_not_supported() -> LaunchDiagnostic {
-    LaunchDiagnostic {
-        kind: "environment_not_supported_downlevel",
-        message: "WARNING: The `environment` parameter is not supported on this OS build. \
-                  Retrying without explicit environment variables."
-            .to_string(),
     }
 }
 
@@ -220,8 +201,8 @@ const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
 // flow through `u32`, which matches the existing public surface of
 // this module (`diagnose_create_process_failure` takes `u32`).
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_ENVVAR_NOT_FOUND,
-    ERROR_NOT_SUPPORTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED,
+    ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_ENVVAR_NOT_FOUND, E_NOTIMPL,
+    STATUS_DLL_INIT_FAILED,
 };
 
 // -- Internal heuristics -----------------------------------------------------
@@ -280,8 +261,8 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     let key_status = check_velocity_keys();
 
     let message = if key_status.is_empty() {
-        "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-         The BaseContainer feature is not enabled on this OS build. \
+        "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
+         The process security environment feature is not enabled on this OS build. \
          It may be possible to enable it through the Windows experimental \
          features settings, or run on a host that supports the BaseContainer \
          backend (MXC falls back to AppContainer automatically on builds \
@@ -290,8 +271,8 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     } else {
         let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
         if disabled.is_empty() {
-            "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-             The BaseContainer feature is not enabled on this OS build; it may \
+            "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
+             The process security environment feature is not enabled on this OS build; it may \
              require additional enablement. MXC falls back to AppContainer \
              automatically on builds without BaseContainer support."
                 .to_string()
@@ -299,8 +280,8 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
             let disabled_list: Vec<String> =
                 disabled.iter().map(|(id, _)| id.to_string()).collect();
             format!(
-                "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-                 The BaseContainer feature is not enabled on this OS build \
+                "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
+                 The process security environment feature is not enabled on this OS build \
                  (disabled feature flags: {}). It may be possible to enable it \
                  through the Windows experimental features settings, or run on a \
                  host that supports the BaseContainer backend (MXC falls back to \
@@ -535,7 +516,7 @@ mod tests {
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag
             .message
-            .contains("BaseContainer feature is not enabled"));
+            .contains("process security environment feature is not enabled"));
     }
 
     #[test]

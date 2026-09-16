@@ -89,8 +89,8 @@ WinHTTP with `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` (like curl.exe) respect this 
 Tools that use their own DNS resolution (.NET HttpClient, PowerShell) do not.
 
 **BaseContainer (v0.5.0):** The proxy URL is passed in the FlatBuffer spec to
-`CreateProcessInSandbox`. The OS-level `appinfosvc` configures WinHTTP proxy for the
-container. System-level WinHTTP sessions (Windows telemetry) use the proxy. App-created
+the PSEC specification. The OS-level `appinfosvc` configures WinHTTP proxy for the
+container. System-level WinHTTP sessions use the proxy. App-created
 WinHTTP sessions may or may not pick it up depending on how they're initialized.
 
 ### Admin Requirements

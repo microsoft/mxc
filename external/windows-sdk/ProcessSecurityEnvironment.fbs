@@ -4,8 +4,7 @@
 // FlatBuffers schema for the BaseContainer sandbox specification used in the
 // CreateProcessSecurityEnvironment Windows API.
 //
-// This is the CPSE wire format. The legacy CPIS path continues to use
-// SandboxSpec.fbs and its "SBOX" file identifier.
+// This is the CPSE wire format consumed by CreateProcessSecurityEnvironment.
 //
 // ---- FlatBuffers Schema Evolution Rules ----
 //
