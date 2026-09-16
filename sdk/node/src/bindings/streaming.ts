@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Owns native sandbox and stream handles and adapts them to MxcSandboxProcess.
+// Binds the native streaming ABI, then wraps its sandbox and stream handles in
+// the lifetime-safe interfaces consumed by MxcSandboxProcess.
 
 import koffi, { type KoffiFunc } from 'koffi';
-import { loadMxcFfi } from '../native-library.js';
+import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import {
   AbiErrorDetailType,
@@ -13,23 +14,46 @@ import {
   parseStringArray,
   type AbiErrorDetail,
 } from './native-error.js';
-import {
-  _createMxcSandboxProcess,
-  type MxcSandboxProcess,
-  type SandboxProcessBinding,
-  type SandboxProcessWaitResult,
-  type SandboxReadableBinding,
-  type SandboxWritableBinding,
-} from '../sandbox-process.js';
 
 type Pointer = unknown;
 type TakeReadResult = { stream: Pointer; closer: Pointer | null } | null;
+
+export interface SandboxProcessWaitResult {
+  exitCode: number;
+  timedOut: boolean;
+}
+
+export interface SandboxReadableBinding {
+  read(buffer: Buffer): Promise<number>;
+  close(): void;
+  free(): void;
+}
+
+export interface SandboxWritableBinding {
+  write(buffer: Buffer): Promise<number>;
+  flush(): Promise<void>;
+  free(): void;
+}
+
+export interface SandboxProcessBinding {
+  readonly id: number;
+  readonly warnings: readonly string[];
+  takeStdin(): SandboxWritableBinding | null;
+  takeStdout(): SandboxReadableBinding | null;
+  takeStderr(): SandboxReadableBinding | null;
+  tryWait(): SandboxProcessWaitResult & { running: boolean };
+  wait(): SandboxProcessWaitResult;
+  outputMetadata(): unknown | undefined;
+  kill(): void;
+  free(): void;
+}
 
 type SpawnFunction = KoffiFunc<(request: string, handle: Pointer[], error: AbiErrorDetail) => number>;
 type ReadFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, cap: number, outRead: number[]) => number>;
 type WriteFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, len: number, outWritten: number[]) => number>;
 type FlushFunction = KoffiFunc<(stream: Pointer) => number>;
 
+// Small operation set consumed by the handle-lifetime adapters below.
 interface StreamingApi {
   spawn: SpawnFunction;
   freeError(error: AbiErrorDetail): void;
@@ -53,16 +77,15 @@ interface StreamingApi {
 }
 
 let sharedApi: StreamingApi | undefined;
-let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
-  | undefined;
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
 const AbiReadStream = koffi.opaque('MxcNodeReadStream');
 const AbiWriteStream = koffi.opaque('MxcNodeWriteStream');
 const AbiStreamCloser = koffi.opaque('MxcNodeStreamCloser');
 
-function bindStreamingFunctions() {
-  const { handle } = loadMxcFfi();
-  // Sandbox lifecycle and result accessors.
+type NativeLibraryHandle = MxcNativeLibrary['handle'];
+
+// Sandbox creation, status, metadata, and terminal lifecycle.
+function bindSandboxFunctions(handle: NativeLibraryHandle) {
   const spawn = handle.func('mxc_spawn_request', 'int32_t', [
     'const char *',
     koffi.out(koffi.pointer(AbiSandbox, 2)),
@@ -89,14 +112,31 @@ function bindStreamingFunctions() {
     koffi.pointer(AbiSandbox),
     koffi.out(koffi.pointer('char', 2)),
   ]) as (sandbox: Pointer, out: Pointer[]) => number;
+  const freeSandbox = handle.func(
+    'mxc_sandbox_free',
+    'void',
+    [koffi.pointer(AbiSandbox)],
+  ) as (sandbox: Pointer) => void;
 
-  // Output closers interrupt pending reads before transferred handles are freed.
+  return {
+    spawn,
+    tryWait,
+    wait,
+    id,
+    kill,
+    warningsJson,
+    outputJson,
+    freeSandbox,
+  };
+}
+
+// Pipe acquisition, asynchronous I/O, interruption, and disposal.
+function bindStreamFunctions(handle: NativeLibraryHandle) {
   const takeStdin = handle.func('mxc_sandbox_take_stdin', koffi.pointer(AbiWriteStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const takeStdout = handle.func('mxc_sandbox_take_stdout', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const takeStderr = handle.func('mxc_sandbox_take_stderr', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const stdoutCloser = handle.func('mxc_sandbox_stdout_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
   const stderrCloser = handle.func('mxc_sandbox_stderr_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  // Stream I/O uses Koffi's async call surface so it does not block Node.
   const read = handle.func('mxc_stream_read', 'int32_t', [
     koffi.pointer(AbiReadStream),
     'uint8_t *',
@@ -111,78 +151,162 @@ function bindStreamingFunctions() {
   ]) as WriteFunction;
   const flush = handle.func('mxc_stream_flush', 'int32_t', [koffi.pointer(AbiWriteStream)]) as FlushFunction;
   const closeCloser = handle.func('mxc_stream_closer_close', 'int32_t', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => number;
-  // Every pointer returned by the ABI has a matching explicit free function.
-  const errorFree = handle.func('mxc_error_detail_free', 'void', [koffi.pointer(AbiErrorDetailType)]) as (error: AbiErrorDetail) => void;
-  const stringFree = handle.func('mxc_string_free', 'void', ['char *']) as (value: Pointer) => void;
-  const freeSandbox = handle.func('mxc_sandbox_free', 'void', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => void;
   const freeRead = handle.func('mxc_read_stream_free', 'void', [koffi.pointer(AbiReadStream)]) as (stream: Pointer) => void;
   const freeWrite = handle.func('mxc_write_stream_free', 'void', [koffi.pointer(AbiWriteStream)]) as (stream: Pointer) => void;
   const freeCloser = handle.func('mxc_stream_closer_free', 'void', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => void;
+
   return {
-    spawn, tryWait, wait, id, kill, warningsJson, outputJson, takeStdin, takeStdout,
-    takeStderr, stdoutCloser, stderrCloser, read, write, flush, closeCloser, errorFree,
-    stringFree, freeSandbox, freeRead, freeWrite, freeCloser,
+    takeStdin,
+    takeStdout,
+    takeStderr,
+    stdoutCloser,
+    stderrCloser,
+    read,
+    write,
+    flush,
+    closeCloser,
+    freeRead,
+    freeWrite,
+    freeCloser,
   };
 }
+
+// Deallocators for values whose ownership crosses the native boundary.
+function bindOwnedValueFunctions(handle: NativeLibraryHandle) {
+  const errorFree = handle.func(
+    'mxc_error_detail_free',
+    'void',
+    [koffi.pointer(AbiErrorDetailType)],
+  ) as (error: AbiErrorDetail) => void;
+  const stringFree = handle.func(
+    'mxc_string_free',
+    'void',
+    ['char *'],
+  ) as (value: Pointer) => void;
+
+  return { errorFree, stringFree };
+}
+
+function bindStreamingFunctions() {
+  const { handle } = loadMxcFfi();
+  return {
+    ...bindSandboxFunctions(handle),
+    ...bindStreamFunctions(handle),
+    ...bindOwnedValueFunctions(handle),
+  };
+}
+
+type BoundStreamingFunctions = ReturnType<typeof bindStreamingFunctions>;
+
+function throwIfFailed(status: number, message: string): void {
+  if (status !== 0) {
+    throw nativeStatusError(status, {}, message);
+  }
+}
+
+function readOwnedJson(
+  native: BoundStreamingFunctions,
+  call: (out: Pointer[]) => number,
+  message: string,
+): string | undefined {
+  const out = [null] as Pointer[];
+  throwIfFailed(call(out), message);
+  try {
+    return decodeString(out[0]);
+  } finally {
+    if (out[0] !== null) {
+      native.stringFree(out[0]);
+    }
+  }
+}
+
+function takeReadable(
+  sandbox: Pointer,
+  take: (sandbox: Pointer) => Pointer | null,
+  takeCloser: (sandbox: Pointer) => Pointer | null,
+): TakeReadResult {
+  const stream = take(sandbox);
+  if (stream === null) {
+    return null;
+  }
+  return { stream, closer: takeCloser(sandbox) };
+}
+
+function readTryWait(
+  native: BoundStreamingFunctions,
+  sandbox: Pointer,
+): SandboxProcessWaitResult & { running: boolean } {
+  const exitCode = [0];
+  const running = [0];
+  const timedOut = [0];
+  throwIfFailed(
+    native.tryWait(sandbox, exitCode, running, timedOut),
+    'querying sandbox status failed',
+  );
+  return {
+    exitCode: exitCode[0]!,
+    running: running[0] !== 0,
+    timedOut: timedOut[0] !== 0,
+  };
+}
+
+function readWait(
+  native: BoundStreamingFunctions,
+  sandbox: Pointer,
+): SandboxProcessWaitResult {
+  const exitCode = [0];
+  const timedOut = [0];
+  throwIfFailed(
+    native.wait(sandbox, exitCode, timedOut),
+    'waiting on sandbox failed',
+  );
+  return {
+    exitCode: exitCode[0]!,
+    timedOut: timedOut[0] !== 0,
+  };
+}
+
 function createStreamingApi(): StreamingApi {
   const native = bindStreamingFunctions();
-  const readJson = (call: (out: Pointer[]) => number, message: string): string | undefined => {
-    const out = [null] as Pointer[];
-    const status = call(out);
-    if (status !== 0) throw nativeStatusError(status, {}, message);
-    try {
-      return decodeString(out[0]);
-    } finally {
-      if (out[0] !== null) native.stringFree(out[0]);
-    }
-  };
 
   return {
     spawn: native.spawn,
     freeError: native.errorFree,
     takeStdin: native.takeStdin,
-    takeStdout: (sandbox) => {
-      const stream = native.takeStdout(sandbox);
-      return stream === null ? null : { stream, closer: native.stdoutCloser(sandbox) };
-    },
-    takeStderr: (sandbox) => {
-      const stream = native.takeStderr(sandbox);
-      return stream === null ? null : { stream, closer: native.stderrCloser(sandbox) };
-    },
+    takeStdout: (sandbox) =>
+      takeReadable(sandbox, native.takeStdout, native.stdoutCloser),
+    takeStderr: (sandbox) =>
+      takeReadable(sandbox, native.takeStderr, native.stderrCloser),
     id: native.id,
     warnings: (sandbox) => parseStringArray(
-      readJson((out) => native.warningsJson(sandbox, out), 'retrieving sandbox warnings failed'),
+      readOwnedJson(
+        native,
+        (out) => native.warningsJson(sandbox, out),
+        'retrieving sandbox warnings failed',
+      ),
     ),
     outputMetadata: (sandbox) => {
-      const json = readJson((out) => native.outputJson(sandbox, out), 'retrieving sandbox output metadata failed');
+      const json = readOwnedJson(
+        native,
+        (out) => native.outputJson(sandbox, out),
+        'retrieving sandbox output metadata failed',
+      );
       return json === undefined ? undefined : JSON.parse(json);
     },
-    tryWait: (sandbox) => {
-      const exitCode = [0];
-      const running = [0];
-      const timedOut = [0];
-      const status = native.tryWait(sandbox, exitCode, running, timedOut);
-      if (status !== 0) throw nativeStatusError(status, {}, 'querying sandbox status failed');
-      return { exitCode: exitCode[0]!, running: running[0] !== 0, timedOut: timedOut[0] !== 0 };
-    },
-    wait: (sandbox) => {
-      const exitCode = [0];
-      const timedOut = [0];
-      const status = native.wait(sandbox, exitCode, timedOut);
-      if (status !== 0) throw nativeStatusError(status, {}, 'waiting on sandbox failed');
-      return { exitCode: exitCode[0]!, timedOut: timedOut[0] !== 0 };
-    },
+    tryWait: (sandbox) => readTryWait(native, sandbox),
+    wait: (sandbox) => readWait(native, sandbox),
     kill: (sandbox) => {
-      const status = native.kill(sandbox);
-      if (status !== 0) throw nativeStatusError(status, {}, 'killing sandbox failed');
+      throwIfFailed(native.kill(sandbox), 'killing sandbox failed');
     },
     freeSandbox: native.freeSandbox,
     read: native.read,
     write: native.write,
     flush: native.flush,
     closeCloser: (closer) => {
-      const status = native.closeCloser(closer);
-      if (status !== 0) throw nativeStatusError(status, {}, 'closing sandbox output stream failed');
+      throwIfFailed(
+        native.closeCloser(closer),
+        'closing sandbox output stream failed',
+      );
     },
     freeRead: native.freeRead,
     freeWrite: native.freeWrite,
@@ -364,7 +488,13 @@ class StreamingProcessBinding implements SandboxProcessBinding {
   }
 }
 
-function spawnRealBinding(request: RequestSpec, timeoutMs?: number): MxcSandboxProcess {
+/**
+ * Spawn the low-level handle adapter. The Node stream/process facade is added
+ * by the next layer so this binding module remains independently buildable.
+ */
+export function spawnStreamingProcessBinding(
+  request: RequestSpec,
+): SandboxProcessBinding {
   const api = getStreamingApi();
   const outHandle = [null] as Pointer[];
   const error = {} as AbiErrorDetail;
@@ -375,25 +505,16 @@ function spawnRealBinding(request: RequestSpec, timeoutMs?: number): MxcSandboxP
     if (status !== 0 || outHandle[0] === null) {
       throw nativeStatusError(status || 12, error, 'spawning sandbox failed');
     }
-    const binding = new StreamingProcessBinding(api, outHandle[0], api.id(outHandle[0]), api.warnings(outHandle[0]));
-    return _createMxcSandboxProcess(binding, timeoutMs);
+    return new StreamingProcessBinding(
+      api,
+      outHandle[0],
+      api.id(outHandle[0]),
+      api.warnings(outHandle[0]),
+    );
   } catch (errorValue) {
     if (outHandle[0] !== null) api.freeSandbox(outHandle[0]);
     throw errorValue;
   } finally {
     if (spawned) api.freeError(error);
   }
-}
-
-export function _setBindingSandboxProcessFactory(
-  factory?: (request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess,
-): void {
-  sandboxProcessFactory = factory;
-}
-
-export function spawnBindingSandboxProcess(
-  request: RequestSpec,
-  timeoutMs?: number,
-): MxcSandboxProcess {
-  return (sandboxProcessFactory ?? spawnRealBinding)(request, timeoutMs);
 }
