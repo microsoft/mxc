@@ -136,7 +136,7 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
     return 'lifecycle.destroyOnExit=false is not supported by one-shot in-process execution';
   }
   if (
-    containment === 'process'
+    containment !== 'processcontainer'
     && processContainer !== undefined
     && hasExplicitProcessContainerSettings(processContainer)
   ) {

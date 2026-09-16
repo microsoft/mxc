@@ -151,6 +151,18 @@ describe('native binding request', () => {
       }),
       /require containment 'processcontainer'/,
     );
+
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'seatbelt',
+        process: { commandLine: 'echo hello' },
+        processContainer: {
+          network: { allowedProxyPeer: 'Contoso.Proxy_123' },
+        },
+      }),
+      /require containment 'processcontainer'/,
+    );
   });
 
   it('normalizes legacy containment aliases privately', () => {
