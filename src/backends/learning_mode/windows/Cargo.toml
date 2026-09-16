@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 thiserror = { workspace = true }
 learning_mode_core = { workspace = true }

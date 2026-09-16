@@ -38,9 +38,9 @@ expect_rejected "allowedHosts under defaultPolicy=block is refused" \
 
 # --- Network: the inbound half of hostLoopback is not expressible -----------
 
-expect_rejected "a hostLoopback that diverges from ingress.default is refused" \
+expect_rejected "hostLoopback=allow under ingress.default=deny is refused" \
     "seatbelt_reject_hostloopback_mismatch.json" \
-    "cannot enforce a network.ingress.hostLoopback" "$S"
+    "cannot enforce network.ingress.hostLoopback" "$S"
 
 # --- Proxy ------------------------------------------------------------------
 

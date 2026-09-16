@@ -57,7 +57,7 @@ function Phase-T1DenyForced {
     if (-not $Script:Caps.SupportsDeniedPaths) {
         # Enforcement cannot be tested, but the documented refusal can: the
         # PSEC path rejects deniedPaths outright rather than running unenforced
-        # (base_container_runner.rs:2285).
+        # (PSEC_DENIED_PATHS_UNSUPPORTED_MSG in base_container_runner.rs).
         $rejDir = Join-Path $ScratchRoot 'deniedT1-unsupported'
         New-Item -ItemType Directory -Force -Path $rejDir | Out-Null
         $rejCfg = New-Config -Name 'denied-unsupported' `

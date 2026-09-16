@@ -13,7 +13,7 @@
 //! feature-enabled Windows build to confirm the runtime FFI resolves against the real API.
 //!
 //! ```text
-//! cargo run -p learning_mode_windows --example lm_probe
+//! cargo run -p appcontainer_common --example lm_probe
 //! ```
 
 fn main() {
@@ -30,17 +30,17 @@ fn run_probe() -> i32 {
         Err(e) => println!("LearningModeApi::load = ERR ({e})"),
     }
 
-    let secenv_available = learning_mode_windows::is_security_environment_api_available();
+    let secenv_available = appcontainer_common::is_security_environment_api_available();
     println!("is_security_environment_api_available = {secenv_available}");
 
-    let report = learning_mode_windows::probe_security_environment_exports();
+    let report = appcontainer_common::probe_security_environment_exports();
     println!("  create export = {:?}", report.create);
     println!("  query support = {:?}", report.query_support);
     println!("  close  export = {:?}", report.close);
 
-    match learning_mode_windows::SecurityEnvironmentApi::load() {
-        Ok(api) => println!("SecurityEnvironmentApi::load = OK  ({api:?})"),
-        Err(e) => println!("SecurityEnvironmentApi::load = ERR ({e})"),
+    match appcontainer_common::ProcessSecurityEnvironmentApi::load() {
+        Ok(api) => println!("ProcessSecurityEnvironmentApi::load = OK  ({api:?})"),
+        Err(e) => println!("ProcessSecurityEnvironmentApi::load = ERR ({e})"),
     }
 
     if learning_mode_available && secenv_available {

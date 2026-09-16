@@ -4717,7 +4717,7 @@ mod tests {
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
         );
-        let expected_inventory = (349, 325, 14);
+        let expected_inventory = (351, 327, 14);
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
             expected_inventory,

@@ -56,6 +56,31 @@ run_net seatbelt_net_egress_deny.json
 expect_marker "egress.default=deny blocks outbound" "EXTERNAL_BLOCKED"
 expect_marker "egress.default=deny blocks host loopback" "LOOPBACK_BLOCKED"
 
+# `bind()` under a denied egress default comes from `ingress.default`, not from
+# the egress arm: `(allow network-inbound (local ip))` grants bind as well as
+# listen, and the profile emits no `(allow network-bind ...)` rule at all here.
+# Reading the emitted profile alone suggests the opposite -- the only
+# `network-bind` grant sits in the egress-allow arm -- so without this cell a
+# reader concludes bind is unreachable whenever egress is denied, and "fixes"
+# it by widening the deny posture.
+run_net seatbelt_net_egress_deny_ingress_allow.json
+expect_marker "egress.default=deny still blocks outbound under ingress allow" "EXTERNAL_BLOCKED"
+expect_marker "ingress.default=allow permits bind() under a denied egress default" "BIND_OK"
+expect_marker "ingress.default=allow permits listen() under a denied egress default" "LISTEN_OK"
+expect_marker "hostLoopback=allow reaches host loopback under a denied egress default" "LOOPBACK_OK"
+
+# The mechanism, not just the effect: bind must come from the inbound rule. A
+# future change that re-grants bind from the egress side would keep BIND_OK
+# green while silently widening what a denied egress default permits.
+run_config "$(render seatbelt_net_egress_deny_ingress_allow.json PORT "$PORT")" --debug
+grep -qF "(allow network-inbound (local ip))" <<<"$OUT" ||
+    fail "ingress.default=allow emits the inbound rule" "$OUT"
+# Anchored on the standalone rule: the `readwritePaths` grant also names
+# `network-bind`, but only as a path-filtered AF_UNIX op.
+grep -qF "(allow network-bind (local ip))" <<<"$OUT" &&
+    fail "a denied egress default must not emit a standalone network-bind grant" "$OUT"
+pass "bind under a denied egress default comes from network-inbound, not network-bind"
+
 # The trap.
 run_net seatbelt_net_egress_allow_trap.json
 expect_marker "egress.default=allow reaches the internet" "EXTERNAL_OK"
@@ -82,5 +107,22 @@ DENY_LINE=$(grep -n "deny network-outbound.*localhost" <<<"$OUT" | head -1 | cut
 [ -n "$DENY_LINE" ] || fail "the trap emits a localhost deny rule" "$OUT"
 [ "$DENY_LINE" -gt "$ALLOW_LINE" ] || fail "the localhost deny must follow the broad allow (last match wins)" "$OUT"
 pass "the generated profile denies localhost after the broad outbound allow"
+
+# `ingress.default: allow` with `hostLoopback: deny` — a listener with the
+# container-to-host direction closed (host-to-container stays open; Seatbelt
+# cannot scope the inbound grant by peer). The backend permits only this
+# divergent pair; the inverse (`hostLoopback: allow` under `default: deny`)
+# promises inbound host loopback that the profile cannot carry and is still
+# refused.
+#
+# HOSTLOOPBACK_BLOCKED is the assertion that matters. Reaching a listener the
+# other way, through `hostLoopback: allow`, would leave this REACHED — every
+# host-local port open to a client that ignores HTTP_PROXY, which is what
+# dissolves a runtime proxy's egress confinement.
+run_net seatbelt_net_ingress_allow_loopback_deny.json
+expect_marker "ingress.default=allow permits listen() with hostLoopback=deny" "LISTEN_OK"
+expect_marker "hostLoopback=deny still closes host loopback under ingress.default=allow" \
+    "HOSTLOOPBACK_BLOCKED"
+expect_marker "ingress.default=allow leaves the egress deny intact" "EXTERNAL_BLOCKED"
 
 summary "Seatbelt directional network"
