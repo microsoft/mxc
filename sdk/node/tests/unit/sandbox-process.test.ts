@@ -117,7 +117,8 @@ describe('native streaming spawn APIs', () => {
     assert.deepStrictEqual(seen?.containment, { type: 'process' });
     assert.strictEqual(seen?.containerName, 'sample');
     assert.strictEqual(seen?.workingDirectory, 'C:\\work');
-    assert.deepStrictEqual(seen?.environment, {});
+    assert.strictEqual(seen?.environment, undefined);
+    assert.strictEqual(seen?.inheritDefaultEnv, false);
     assert.strictEqual(seen?.experimental, true);
     proc.dispose();
   });
@@ -132,14 +133,28 @@ describe('native streaming spawn APIs', () => {
     const proc = spawnSandboxFromConfig({
       version: '0.9.0-alpha',
       containment: 'wslc',
-      process: { commandLine: 'echo configured' },
-    }, { experimental: true }, 'C:\\work', { FROM_CALLER: 'yes' });
+      process: {
+        commandLine: 'echo configured',
+        env: ['FROM_CONFIG=value', 'OVERRIDE=old'],
+      },
+    }, {
+      experimental: true,
+      inheritDefaultEnv: true,
+    }, 'C:\\work', {
+      FROM_CALLER: 'yes',
+      OVERRIDE: 'new',
+    });
 
     assert.strictEqual(proc.id, 43);
     assert.strictEqual(seen?.command, 'echo configured');
     assert.strictEqual(seen?.containment.type, 'wslc');
     assert.strictEqual(seen?.workingDirectory, 'C:\\work');
-    assert.deepStrictEqual(seen?.environment, { FROM_CALLER: 'yes' });
+    assert.deepStrictEqual(seen?.environment, {
+      FROM_CONFIG: 'value',
+      FROM_CALLER: 'yes',
+      OVERRIDE: 'new',
+    });
+    assert.strictEqual(seen?.inheritDefaultEnv, true);
     proc.dispose();
   });
 
