@@ -872,7 +872,7 @@ function spawnConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions,
   workingDirectory?: string,
-  environment?: { [key: string]: string | undefined },
+  env?: { [key: string]: string | undefined },
 ): MxcSandboxProcess {
   const unsupportedOption = unsupportedInProcessRunOption(options);
   if (unsupportedOption !== undefined) {
@@ -885,7 +885,8 @@ function spawnConfig(
   const proc = spawnBindingSandboxProcess(
     prepareRequestSpec(config, {
       workingDirectory,
-      environment,
+      env,
+      inheritDefaultEnv: options.inheritDefaultEnv,
       experimental: options.experimental,
     }),
     config.process?.timeout,
@@ -906,13 +907,13 @@ export function spawnSandbox(
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
-  environment?: { [key: string]: string | undefined },
+  env?: { [key: string]: string | undefined },
 ): MxcSandboxProcess {
   return spawnConfig(
     buildSandboxPayload(script, policy, workingDirectory, containerName),
     options,
     workingDirectory,
-    environment,
+    env,
   );
 }
 
@@ -926,9 +927,9 @@ export function spawnSandboxFromConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
-  environment?: { [key: string]: string | undefined },
+  env?: { [key: string]: string | undefined },
 ): MxcSandboxProcess {
-  return spawnConfig(config, options, workingDirectory, environment);
+  return spawnConfig(config, options, workingDirectory, env);
 }
 
 /**
