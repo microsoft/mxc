@@ -501,8 +501,8 @@ export type SandboxPolicy = {
   runtimeConfig?: RuntimeConfig;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
-  /** ProcessContainer-specific one-shot settings. */
-  processContainer?: ProcessContainerConfig;
+  /** ProcessContainer-specific policy fields honored by policy conversion. */
+  processContainer?: Pick<ProcessContainerConfig, 'filesystem' | 'network'>;
   /** UI access restrictions. All flags default to denied. */
   ui?: {
       /** Whether the sandbox may create visible windows. (default: false) */
