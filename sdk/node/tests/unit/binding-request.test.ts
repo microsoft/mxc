@@ -27,7 +27,7 @@ describe('native binding request', () => {
       telemetry: { enabled: false },
     }, {
       workingDirectory: 'C:\\work',
-      environment: { OVERRIDE: 'new', OMIT: undefined },
+      env: { OVERRIDE: 'new', OMIT: undefined },
       experimental: true,
     });
 
@@ -58,8 +58,43 @@ describe('native binding request', () => {
       containerName: 'sample',
       workingDirectory: 'C:\\work',
       environment: { FROM_CONFIG: 'value', OVERRIDE: 'new' },
+      inheritDefaultEnv: false,
       experimental: true,
     });
+  });
+
+  it('preserves environment inheritance and explicit overrides', () => {
+    const baseConfig: ContainerConfig = {
+      version: '0.9.0-alpha',
+      process: { commandLine: 'echo hello' },
+    };
+
+    const defaultRequest = prepareRequestSpec(baseConfig);
+    assert.strictEqual(defaultRequest.environment, undefined);
+    assert.strictEqual(defaultRequest.inheritDefaultEnv, false);
+
+    const inheritedRequest = prepareRequestSpec({
+      ...baseConfig,
+      process: { commandLine: 'echo hello', inheritDefaultEnv: true },
+    });
+    assert.deepStrictEqual(inheritedRequest.environment, {});
+    assert.strictEqual(inheritedRequest.inheritDefaultEnv, true);
+
+    const inheritanceDisabled = prepareRequestSpec({
+      ...baseConfig,
+      process: { commandLine: 'echo hello', inheritDefaultEnv: true },
+    }, {
+      inheritDefaultEnv: false,
+    });
+    assert.strictEqual(inheritanceDisabled.environment, undefined);
+    assert.strictEqual(inheritanceDisabled.inheritDefaultEnv, false);
+
+    const inheritanceEnabled = prepareRequestSpec(baseConfig, {
+      env: {},
+      inheritDefaultEnv: true,
+    });
+    assert.deepStrictEqual(inheritanceEnabled.environment, {});
+    assert.strictEqual(inheritanceEnabled.inheritDefaultEnv, true);
   });
 
   it('preserves explicit block policy and empty collections', () => {
