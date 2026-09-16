@@ -189,7 +189,7 @@ fn build_psec_network_policy(
         None
     };
     if let Some(ingress_policy) = ingress_policy {
-        network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
+        network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
         let mut ingress = PsecIngressPolicy::default();
         ingress.default_action = psec_filter_action(ingress_policy.default);
         ingress.host_loopback = psec_filter_action(ingress_policy.host_loopback);

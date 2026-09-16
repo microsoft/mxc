@@ -350,10 +350,10 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(emitted_path);
 }
 
-/// A runtime proxy cannot be represented by native PSEC capture. The launch
-/// must select guarded capture instead of passing the proxy policy to
-/// CreateProcessSecurityEnvironment, which rejects it with E_INVALIDARG.
-fn processcontainer_proxy_capture_uses_guarded_fallback() {
+/// PSEC capture must preserve the runtime proxy's unrestricted loopback peer;
+/// omitting that sentinel makes CreateProcessSecurityEnvironment reject the
+/// otherwise valid policy with E_INVALIDARG.
+fn processcontainer_proxy_capture_uses_native_capture() {
     let config = serde_json::json!({
         "version": "0.9.0-alpha",
         "process": {
@@ -374,7 +374,7 @@ fn processcontainer_proxy_capture_uses_guarded_fallback() {
     });
 
     let result = run_wxc_config_value(
-        "processcontainer_proxy_capture_uses_guarded_fallback",
+        "processcontainer_proxy_capture_uses_native_capture",
         &config,
         &["--debug"],
     );
@@ -382,14 +382,14 @@ fn processcontainer_proxy_capture_uses_guarded_fallback() {
 
     if combined.contains("captureDenials requires either") {
         println!(
-            "SKIPPED: processcontainer_proxy_capture_uses_guarded_fallback requires the guarded \
-             capture provider"
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires native capture \
+             APIs"
         );
         return;
     }
     if result.is_missing_process_prerequisite() {
         println!(
-            "SKIPPED: processcontainer_proxy_capture_uses_guarded_fallback requires local sandbox \
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires local sandbox \
              runtime prerequisites not available here"
         );
         return;
@@ -398,7 +398,7 @@ fn processcontainer_proxy_capture_uses_guarded_fallback() {
     assert_success(&result);
     assert!(
         combined.contains("proxy-capture-launched"),
-        "the guarded proxy-capture child did not launch\n--- combined output ---\n{combined}"
+        "the native proxy-capture child did not launch\n--- combined output ---\n{combined}"
     );
 }
 
@@ -533,12 +533,12 @@ fn test_processcontainer_capture_denials_output_file() {
 }
 
 #[test]
-#[ignore] // Live guarded capture needs plm.exe, WPR privileges, and a compatible ProcessContainer host
-fn test_processcontainer_proxy_capture_uses_guarded_fallback() {
+#[ignore] // Live capture needs the brokered learning-mode API + PSEC 1.1 on a compatible host
+fn test_processcontainer_proxy_capture_uses_native_capture() {
     if !cached_has_wxc_exe() {
         return;
     }
-    with_test_lock(processcontainer_proxy_capture_uses_guarded_fallback);
+    with_test_lock(processcontainer_proxy_capture_uses_native_capture);
 }
 
 #[test]

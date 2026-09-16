@@ -951,7 +951,6 @@ impl BaseContainerRunner {
 
         request.policy.capture_denials.is_some()
             && native_capture_usable
-            && !request.policy.network_proxy.is_enabled()
             && Self::psec_policy_compatible(
                 request,
                 request.policy.denied_paths.is_empty()
@@ -4328,6 +4327,11 @@ mod tests {
         assert!(spec.capabilities().is_none());
         assert_eq!(ingress.default_action(), psec_layout::FilterAction::deny);
         assert_eq!(ingress.host_loopback(), psec_layout::FilterAction::allow);
+        assert_eq!(
+            spec.network_policy()
+                .and_then(|network| network.allowed_appcontainer_peer()),
+            Some(crate::base_container_helpers::LOOPBACK_NETWORK_PEER)
+        );
     }
 
     #[test]
@@ -4751,36 +4755,30 @@ mod tests {
     }
 
     #[test]
-    fn capture_proxy_uses_guarded_contract() {
+    fn capture_runtime_proxy_uses_native_contract() {
         let _guard = crate::test_env::CaptureCapabilityGuard::set(true, true);
-        for runtime_proxy_specified in [false, true] {
-            let mut request = ExecutionRequest::default();
-            request.policy.capture_denials = Some(Default::default());
-            request.policy.runtime_network_proxy_specified = runtime_proxy_specified;
-            request.policy.network_proxy = ProxyConfig {
-                address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                builtin_test_server: false,
-            };
-            let support = Arc::new(FakeCaptureSupport {
-                api_error: None,
-                deny_error: None,
-                deny_supported: true,
-                api_calls: AtomicUsize::new(0),
-                learning_mode_api_calls: AtomicUsize::new(0),
-                deny_calls: AtomicUsize::new(0),
-            });
-            let runner =
-                BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: None,
+            deny_supported: true,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner =
+            BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
 
-            assert!(
-                !runner.uses_process_security_environment(&request),
-                "capture must not select PSEC for runtime_proxy_specified={runtime_proxy_specified}"
-            );
-            assert!(
-                !BaseContainerRunner::uses_native_capture_for_request(&request),
-                "dispatcher capability selection must reject proxy capture for runtime_proxy_specified={runtime_proxy_specified}"
-            );
-        }
+        assert!(runner.uses_process_security_environment(&request));
+        assert!(BaseContainerRunner::uses_native_capture_for_request(
+            &request
+        ));
     }
 
     #[test]
