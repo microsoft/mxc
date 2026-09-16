@@ -39,7 +39,7 @@ let both test suites confirm the change is what you meant.
 ## Not config files
 
 These are **binding request** documents (`{ policy, command, containment, … }`),
-not `MxcConfig` documents. They are deliberately outside `tests/configs/` and
+not exact configuration documents. They are deliberately outside `tests/configs/` and
 `tests/examples/`, which `scripts/versioning/validate-configs.js` validates
-against the `MxcConfig` dev schema; these would fail that schema because they
+against an exact development schema; these would fail because they
 describe a different contract.

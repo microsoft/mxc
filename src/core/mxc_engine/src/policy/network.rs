@@ -227,48 +227,33 @@ pub(crate) enum NetworkFormat {
     Directional,
 }
 
-/// Selects one wire format before backend-specific fields are applied.
+use mxc_config_contract::ContractVersion;
+
+/// Selects one exact-contract network format before backend-specific fields are applied.
 pub(super) fn select_network_format(
-    version: &str,
+    version: ContractVersion,
     network: Option<&NetworkSection>,
     has_process_container_network: bool,
 ) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
     let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
-    if matches!(version, "0.9.0-alpha" | "0.10.0-alpha") {
+    if matches!(
+        version,
+        ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+    ) {
         if has_legacy || network.is_some_and(|network| network.legacy_fields_specified) {
             return Err(wxc_common::mxc_error::MxcError::malformed_request(format!(
-                "schema {version} no longer accepts legacy network authoring \
+                "schema {} no longer accepts legacy network authoring \
                  (defaultPolicy, enforcementMode, allowOutbound, allowLocalNetwork, \
                  allowedHosts, blockedHosts, proxy); \
                  use network.egress, network.ingress, and runtimeConfig.networkProxy, \
-                 or select published version 0.8.0-alpha to retain legacy policy semantics"
+                 or select published version 0.8.0-alpha to retain legacy policy semantics",
+                version.as_str()
             )));
         }
         return Ok(NetworkFormat::Directional);
     }
-
-    select_compatible_network_format(version, network, has_process_container_network)
-}
-
-/// Retained rolling-parser characterization oracle, never used by production builders.
-#[cfg(test)]
-pub(super) fn select_rolling_network_format(
-    version: &str,
-    network: Option<&NetworkSection>,
-    has_process_container_network: bool,
-) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
-    select_compatible_network_format(version, network, has_process_container_network)
-}
-
-fn select_compatible_network_format(
-    version: &str,
-    network: Option<&NetworkSection>,
-    has_process_container_network: bool,
-) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
-    let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
     let has_directional = has_process_container_network
         || network.is_some_and(NetworkSection::has_directional_fields);
-    let supports_directional = wxc_common::directional_network_support(version);
 
     if has_legacy && has_directional {
         return Err(wxc_common::mxc_error::MxcError::malformed_request(
@@ -276,7 +261,12 @@ fn select_compatible_network_format(
         ));
     }
 
-    if has_directional && supports_directional == Some(false) {
+    if has_directional
+        && matches!(
+            version,
+            ContractVersion::V0_6_0Alpha | ContractVersion::V0_7_0Alpha
+        )
+    {
         return Err(wxc_common::mxc_error::MxcError::malformed_request(
             "network egress/ingress/runtimeConfig and processContainer.network require schema version 0.8 or later",
         ));
@@ -399,24 +389,12 @@ pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
     }
 }
 
-/// True when the network section carries any host allow/deny rules.
-#[cfg(test)]
-pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
-    let non_empty = |key: &str| {
-        network
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        proxy_to_wire, select_network_format, NetworkAction, NetworkEgressSection, NetworkFormat,
-        NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection, ProxySpec,
-        RuntimeConfigSection,
+        proxy_to_wire, select_network_format, ContractVersion, NetworkAction, NetworkEgressSection,
+        NetworkFormat, NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection,
+        ProxySpec, RuntimeConfigSection,
     };
 
     #[test]
@@ -439,7 +417,8 @@ mod tests {
             r#""proxy":{"url":"http://localhost:8080"}"#,
         ] {
             let network: NetworkSection = serde_json::from_str(&format!("{{{field}}}")).unwrap();
-            let error = select_network_format("0.9.0-alpha", Some(&network), false).unwrap_err();
+            let error = select_network_format(ContractVersion::V0_9_0Alpha, Some(&network), false)
+                .unwrap_err();
             assert!(
                 error
                     .message
@@ -454,17 +433,23 @@ mod tests {
             );
             assert!(!error.message.contains("network.runtimeConfig"), "{field}");
             assert_eq!(
-                select_network_format("0.8.0-alpha", Some(&network), false).unwrap(),
+                select_network_format(ContractVersion::V0_8_0Alpha, Some(&network), false,)
+                    .unwrap(),
                 NetworkFormat::Legacy,
                 "published authoring remains unchanged: {field}"
             );
         }
         assert_eq!(
-            select_network_format("0.9.0-alpha", None, false).unwrap(),
+            select_network_format(ContractVersion::V0_9_0Alpha, None, false).unwrap(),
             NetworkFormat::Directional
         );
         assert_eq!(
-            select_network_format("0.9.0-alpha", Some(&NetworkSection::default()), false).unwrap(),
+            select_network_format(
+                ContractVersion::V0_9_0Alpha,
+                Some(&NetworkSection::default()),
+                false,
+            )
+            .unwrap(),
             NetworkFormat::Directional
         );
     }
@@ -536,10 +521,12 @@ mod tests {
         let network: NetworkSection = serde_json::from_str(source).unwrap();
         assert!(network.legacy_fields_specified);
         assert_eq!(
-            select_network_format("0.8.0-alpha", Some(&network), false).unwrap(),
+            select_network_format(ContractVersion::V0_8_0Alpha, Some(&network), false).unwrap(),
             NetworkFormat::Directional
         );
-        assert!(select_network_format("0.9.0-alpha", Some(&network), false).is_err());
+        assert!(
+            select_network_format(ContractVersion::V0_9_0Alpha, Some(&network), false).is_err()
+        );
 
         for source in [
             "[false,false,[],[],null]",
@@ -549,11 +536,11 @@ mod tests {
             let network: NetworkSection = serde_json::from_str(source).unwrap();
             assert!(network.legacy_fields_specified, "{source}");
             assert!(
-                select_network_format("0.8.0-alpha", Some(&network), false).is_ok(),
+                select_network_format(ContractVersion::V0_8_0Alpha, Some(&network), false).is_ok(),
                 "{source}"
             );
             assert!(
-                select_network_format("0.9.0-alpha", Some(&network), false).is_err(),
+                select_network_format(ContractVersion::V0_9_0Alpha, Some(&network), false).is_err(),
                 "{source}"
             );
         }
@@ -562,12 +549,12 @@ mod tests {
     #[test]
     fn format_selection_defaults_to_legacy_without_directional_intent() {
         assert_eq!(
-            select_network_format("0.8.0-alpha", None, false)
+            select_network_format(ContractVersion::V0_8_0Alpha, None, false)
                 .expect("an absent network policy should retain legacy authoring defaults"),
             NetworkFormat::Legacy
         );
         assert_eq!(
-            select_network_format("0.7.0-alpha", None, false)
+            select_network_format(ContractVersion::V0_7_0Alpha, None, false)
                 .expect("schema 0.7 should select legacy defaults"),
             NetworkFormat::Legacy
         );
@@ -576,7 +563,7 @@ mod tests {
     #[test]
     fn directional_fields_require_schema_0_8() {
         let error = select_network_format(
-            "0.7.0-alpha",
+            ContractVersion::V0_7_0Alpha,
             Some(&NetworkSection {
                 egress: Some(Default::default()),
                 ..Default::default()
@@ -591,7 +578,7 @@ mod tests {
     #[test]
     fn empty_runtime_config_does_not_conflict_with_legacy_fields() {
         let format = select_network_format(
-            "0.8.0-alpha",
+            ContractVersion::V0_8_0Alpha,
             Some(&NetworkSection {
                 allow_outbound: true,
                 runtime_config: Some(RuntimeConfigSection::default()),
@@ -602,21 +589,6 @@ mod tests {
         .expect("an empty runtime config does not select directional networking");
 
         assert_eq!(format, NetworkFormat::Legacy);
-    }
-
-    #[test]
-    fn malformed_version_is_deferred_to_the_schema_parser() {
-        let format = select_network_format(
-            "0.8x",
-            Some(&NetworkSection {
-                egress: Some(NetworkEgressSection::default()),
-                ..Default::default()
-            }),
-            false,
-        )
-        .expect("network selection should not replace malformed-version diagnostics");
-
-        assert_eq!(format, NetworkFormat::Directional);
     }
 
     #[test]

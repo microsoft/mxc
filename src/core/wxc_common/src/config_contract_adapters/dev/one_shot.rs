@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -278,11 +277,13 @@ fn convert_development_fields(
     })
 }
 
-pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
+pub(super) fn into_config_input(
+    request: contract::OneShotRequest,
+) -> crate::config_input::ConfigInput {
     let contract::OneShotRequest {
         schema,
         comment,
-        version,
+        version: _,
         container_id,
         containment,
         lifecycle,
@@ -300,10 +301,11 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         windows_sandbox,
         wslc,
     } = request;
-    wire::MxcConfig {
+    crate::config_input::ConfigInput {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
+        source_contract: mxc_config_contract::ContractVersion::V0_10_0Alpha,
+        network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         sandbox_id: None,
         container_id: container_id.into_option(),

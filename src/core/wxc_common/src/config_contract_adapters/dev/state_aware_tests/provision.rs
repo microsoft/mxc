@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 use super::common::{adapt, assert_clean_common};
-use crate::models::WslcProvisionConfig;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -173,24 +172,6 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
 }
 
 #[test]
-fn wslc_wire_conversion_has_independent_expected_fields() {
-    for (image, image_tar_path) in [
-        (None, None),
-        (Some(""), None),
-        (None, Some("archive.tar")),
-        (Some("image"), Some("archive.tar")),
-    ] {
-        let wire = wire::WslcProvisionPhase {
-            image: image.map(str::to_owned),
-            image_tar_path: image_tar_path.map(str::to_owned),
-        };
-        let runtime = WslcProvisionConfig::from(wire);
-        assert_eq!(runtime.image.as_deref(), image);
-        assert_eq!(runtime.image_tar_path.as_deref(), image_tar_path);
-    }
-}
-
-#[test]
 fn provision_common_fields_are_independent_of_backend_payload() {
     for backend in ["isolation_session", "windows_sandbox", "wslc"] {
         for fields in [
@@ -202,7 +183,10 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             let json = source(backend, fields);
             let (common, operation) = adapt(&json);
             assert_clean_common(&common);
-            assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
+            assert_eq!(
+                common.source_contract,
+                mxc_config_contract::ContractVersion::V0_10_0Alpha
+            );
             assert_eq!(operation.phase().as_str(), "provision");
             assert!(operation.sandbox_id().is_none());
             if backend == "windows_sandbox" {

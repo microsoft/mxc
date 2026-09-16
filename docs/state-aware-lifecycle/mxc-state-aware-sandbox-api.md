@@ -1121,7 +1121,7 @@ duplicate/unknown fields, rejected nulls, and recursively unknown
 `experimental` fields. Structural failures surface as `malformed_request`
 before backend binding or policy validation. Exact adapters convert backend
 payloads directly to runtime configurations, while common fields reuse
-`wire::MxcConfig` conversion in `config_parser.rs`. The rolling whole-request
+`config_input::ConfigInput` conversion in `config_parser.rs`. The internal common
 parser and executable equivalence harness have been removed.
 
 When the native CLI supplies trailing command arguments, the loader first
@@ -1176,11 +1176,7 @@ structurally representable fields. They enforce semantic values, cross-field
 invariants, backend identity, and policy capabilities; those representable
 refusals surface as `policy_validation`.
 
-Rolling structural checks and independent legacy payload extraction survive
-only in test support, using a separate legacy observation type. They share
-common conversion but do not force legacy-only inputs into production operations.
-
-Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
+Normalization populates the cross-cutting input fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
 `script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
@@ -1413,7 +1409,7 @@ pub enum ExecOutcome {
 ```
 
 Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
-`wxc_common::models`, populated by the same `convert_wire_config` parser path that
+`wxc_common::models`, populated by the same `convert_config_input` parser path that
 serves one-shot calls), plus `sandbox_id` for non-provision phases and an optional
 backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
 flow through `request.policy` (a `ContainerPolicy`); per-exec process info flows
@@ -1851,8 +1847,8 @@ capability mismatches automatically (§9.4).
 
 The state-aware wire format expects permanent top-level backend sections for
 backends that declare per-phase configs. Add the new shape to the exact development
-contract and its direct runtime adapter. Keep the retained rolling wire oracle
-aligned while it remains in use, and regenerate both development artifact sets.
+contract and its direct runtime adapter. Regenerate the exact v0.10 schema and
+TypeScript oracle.
 Preserve configuration presence through normalization and binding; leave
 defaults and semantic checks in the backend.
 
