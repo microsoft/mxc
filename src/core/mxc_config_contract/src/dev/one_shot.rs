@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::OneShotExperimental;
+use super::experimental::{OneShotWindowsSandbox, OneShotWslc, TestFeature};
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
@@ -11,7 +11,7 @@ use super::stable::{
 use crate::dev::Version;
 
 string_enum! {
-    /// Containment selections available in `0.9.0-alpha`.
+    /// Containment selections available in `0.10.0-alpha`.
     #[derive(Debug)]
     pub enum Containment, schema_name = "OneShotContainment" {
         // Stable-candidate values.
@@ -42,7 +42,7 @@ string_enum! {
     }
 }
 
-/// A complete one-shot `0.9.0-alpha` configuration request.
+/// A complete one-shot `0.10.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
@@ -95,7 +95,13 @@ pub struct Request {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional experimental settings.
+    /// Optional placeholder development feature.
     #[serde(default)]
-    pub experimental: OptionalField<OneShotExperimental>,
+    pub test: OptionalField<TestFeature>,
+    /// Optional one-shot Windows Sandbox compatibility settings.
+    #[serde(default)]
+    pub windows_sandbox: OptionalField<OneShotWindowsSandbox>,
+    /// Optional one-shot WSLC backend settings.
+    #[serde(default)]
+    pub wslc: OptionalField<OneShotWslc>,
 }

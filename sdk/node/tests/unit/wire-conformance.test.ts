@@ -219,7 +219,9 @@ type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'contain
 //    deprecated serde alias the schema folds away (so it is absent from the
 //    generated root). A NEW root divergence fails the build.
 type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
-type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConfig>, 'appContainer'>>;
+type _RootKeys = AssertTrue<
+  Equivalent<OnlyInPublic<ContainerConfig, WireMxcConfig>, 'appContainer' | 'wslc'>
+>;
 
 // --- reverse key conformance: wire-only fields (review finding F1, gpt-5.5) --
 // Catch a NEW optional wire field the SDK forgot to expose. Each list is the
@@ -264,7 +266,7 @@ type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, Wire
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback'
+    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'fallback' | 'experimental'
   >
 >;
 

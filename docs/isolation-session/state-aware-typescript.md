@@ -96,10 +96,7 @@ import {
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
-  SandboxSpawnOptions,
 } from '@microsoft/mxc-sdk';
-
-const opts: SandboxSpawnOptions = { experimental: true };
 
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -111,15 +108,17 @@ const { sandboxId } = await provisionSandbox(
       ingress: { default: 'allow', hostLoopback: 'allow' },
     },
   },
-  opts,
 );
 
-await startSandbox(sandboxId, {}, opts);
-const r = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hi' } }, opts);
+await startSandbox(sandboxId);
+const r = await execInSandboxAsync(
+  sandboxId,
+  { process: { commandLine: 'echo hi' } },
+);
 console.log(r.stdout); // "hi"
 
-await stopSandbox(sandboxId, undefined, opts);
-await deprovisionSandbox(sandboxId, undefined, opts);
+await stopSandbox(sandboxId);
+await deprovisionSandbox(sandboxId);
 ```
 
 ## Test helpers

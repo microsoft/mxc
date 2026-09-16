@@ -40,13 +40,13 @@ mod tests {
     #[test]
     fn one_shot_request_adapts_to_one_shot() {
         let request = contract::parse_request(
-            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
         )
         .unwrap();
         let AdaptedWireRequest::OneShot(common) = adapt_request(request).unwrap() else {
             panic!("expected one-shot request");
         };
-        assert_eq!(common.version.as_deref(), Some("0.9.0-alpha"));
+        assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
         let process = common.process.unwrap();
         assert_eq!(process.command_line.as_deref(), Some("echo hello"));
         assert!(process.cwd.is_none());

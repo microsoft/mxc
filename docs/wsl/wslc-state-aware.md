@@ -51,7 +51,7 @@ against different sandboxes are serialized — correct, just not concurrent. See
 | Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
 Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
-`experimental.wslc.provision`. Engine-side checked binding preserves an absent
+`wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend
 chooses its default. The separate rolling `wire::WslcProvisionPhase` survives
@@ -86,7 +86,7 @@ discriminate via the exit code + whether stdout parses as an envelope.
 WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
 `Bridged`); there is no per-host filtering or independent ingress/host-loopback
 restriction primitive. Proxy configuration supplies environment variables, not
-a firewall. Exact v0.9 supports two coherent postures:
+a firewall. Exact v0.10 supports two coherent postures:
 
 | Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |
 | --- | --- | --- | --- |
@@ -105,13 +105,13 @@ acknowledges that WSLC cannot independently restrict those directions.
 | `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
 | Directional `network` posture | deny/deny/deny → isolated; allow/allow/allow → bridged | rejected | rejected; inherit provision posture |
 | `network.egress.allow` / `deny` rules | rejected | rejected | rejected |
-| Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
+| Legacy `network` fields | structurally rejected in v0.10 | structurally rejected | structurally rejected |
 | `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 | `ui` | rejected | rejected | rejected |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-The exact `0.9.0-alpha` request root is selected before backend dispatch.
+The exact `0.10.0-alpha` request root is selected before backend dispatch.
 Fields absent from that phase's closed root fail structurally with
 `malformed_request`: provision excludes `ui`, start / stop / deprovision admit
 no filesystem, network, UI, or process policy, and exec excludes filesystem and
@@ -134,7 +134,7 @@ loopback listener is not made guest-reachable by spelling its host address
 `localhost`.
 
 The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
-published contracts is not a v0.9 compatibility fallback. The new v0.9
+published contracts is not a v0.10 compatibility fallback. The new v0.10
 directional requirements do not change those published contracts.
 
 ## Error mapping

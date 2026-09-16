@@ -7,8 +7,9 @@ use super::state_aware::{probe_phase, Phase, PhaseProbeError};
 use super::state_aware::{
     DeprovisionRequest, ExecRequest, ProvisionRequest, StartRequest, StopRequest,
 };
+use super::NetworkAction;
 
-/// A validated request for the mutable `0.9.0-alpha` development contract.
+/// A validated request for the mutable `0.10.0-alpha` development contract.
 #[derive(Debug)]
 pub enum Request {
     /// A one-shot execution request with no lifecycle phase.
@@ -88,16 +89,42 @@ fn parse_one_shot(json: &str) -> Result<Request, RequestParseError> {
 /// # Errors
 ///
 /// Returns [`RequestParseError::InvalidCombination`] when the selected
-/// containment requires fields that the request omitted.
+/// containment violates an exact-contract cross-field invariant. These checks
+/// run before normalization; runtime backend capability validation occurs
+/// later on the resulting execution request.
 pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), RequestParseError> {
-    if matches!(
-        request.containment.as_ref(),
-        Some(OneShotContainment::IsolationSession)
-    ) && request.network.as_ref().is_none()
-    {
+    match request.containment.as_ref() {
+        Some(OneShotContainment::IsolationSession) => {
+            validate_isolation_session_one_shot_network(request)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_isolation_session_one_shot_network(
+    request: &OneShotRequest,
+) -> Result<(), RequestParseError> {
+    let has_canonical_network = request.network.as_ref().is_some_and(|network| {
+        network.egress.as_ref().is_some_and(|egress| {
+            matches!(egress.default.as_ref(), Some(NetworkAction::Allow))
+                && egress.allow.as_ref().is_none()
+                && egress.deny.as_ref().is_none()
+        }) && network.ingress.as_ref().is_some_and(|ingress| {
+            matches!(ingress.default.as_ref(), Some(NetworkAction::Allow))
+                && matches!(ingress.host_loopback.as_ref(), Some(NetworkAction::Allow))
+        })
+    });
+    let has_runtime_proxy = request
+        .runtime_config
+        .as_ref()
+        .is_some_and(|runtime| runtime.network_proxy.as_ref().is_some());
+
+    if !has_canonical_network || has_runtime_proxy {
         return Err(RequestParseError::InvalidCombination {
             contract: "one-shot",
-            message: "IsolationSession requires an explicit network policy",
+            message: "IsolationSession requires an explicit network policy with \
+                network.egress.default=allow, network.ingress.default=allow, and \
+                network.ingress.hostLoopback=allow, without rules or runtimeConfig.networkProxy",
         });
     }
     Ok(())
@@ -108,7 +135,7 @@ pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), Request
 /// An absent `phase` selects the one-shot contract. A present phase selects its
 /// corresponding state-aware contract, with provision requests additionally
 /// selected by their required `containment` declaration. The selected concrete
-/// request still requires the exact `0.9.0-alpha` version marker.
+/// request still requires the exact `0.10.0-alpha` version marker.
 ///
 /// # Errors
 ///

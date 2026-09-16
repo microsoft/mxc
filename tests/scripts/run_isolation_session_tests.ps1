@@ -35,13 +35,13 @@
       - isolation_session_streaming_smoke.json --output appears with delays
         rather than a burst at exit; verifies Commit 1 streaming.
         Run from cmd.exe directly (not redirected) so wxc-exec sees a TTY:
-            wxc-exec.exe --experimental isolation_session_streaming_smoke.json
+            wxc-exec.exe isolation_session_streaming_smoke.json
       - isolation_session_powershell_interactive.json --launches
         powershell.exe in the isolation session; type commands at the prompt
         (e.g. `Get-Date`, `whoami`, `exit 7`) and verify input forwarding +
         ConPTY rendering + exit-code propagation. Requires a real cmd.exe
         console (interactive on the VM desktop):
-            wxc-exec.exe --experimental isolation_session_powershell_interactive.json
+            wxc-exec.exe isolation_session_powershell_interactive.json
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes target-specific then default
@@ -249,7 +249,7 @@ function Run-IsolationSessionTest {
         # stdout. Without --debug, one-shot keeps Logger in Mode::Buffer
         # and never flushes the buffer, so the agent name is lost and
         # leaks cannot be correlated to a specific test.
-        $output = & $WxcExec --debug --experimental @configArgs 2>&1 | Out-String
+        $output = & $WxcExec --debug @configArgs 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevPref
     } catch {
@@ -336,7 +336,7 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
 # that the IsolationSession one-shot surface does not define is rejected.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("unknown field ``isolation_session``")))
+    -OutputContains @("isolationSession.configurationId", "unknown field ``configurationId``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -358,7 +358,7 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" 
 # contract boundary, before the command can run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("unknown field ``isolation_session``")))
+    -OutputContains @("isolationSession.unrecognizedSetting", "unknown field ``unrecognizedSetting``")))
 
 # One-shot network rejection: the isolation session container's network is
 # unrestricted and cannot be filtered or denied. A directional deny policy is
@@ -507,7 +507,7 @@ Write-AgentScript -Label 'C' -IterCount 30
 # Logger buffer is silently dropped on one-shot exit).
 function Start-ConcurrentWxc {
     param([string]$Exec, [string]$ConfigPath, [string]$StdoutFile, [string]$StderrFile)
-    $cmdLine = "/c $Exec --debug --experimental $ConfigPath 1>$StdoutFile 2>$StderrFile"
+    $cmdLine = "/c $Exec --debug $ConfigPath 1>$StdoutFile 2>$StderrFile"
     Start-Process -FilePath cmd.exe -ArgumentList $cmdLine -WindowStyle Hidden -PassThru
 }
 

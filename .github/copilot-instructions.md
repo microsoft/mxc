@@ -67,7 +67,10 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 
 - Production parsing dispatches through exact closed contracts. Rolling wire parsing is only a differential-development oracle.
 - Preserve optional-field presence through parsing and binding. Apply defaults and semantic validation in the backend.
-- New experimental fields require `--experimental` authorization and updates to both the rolling wire model and the exact development contract.
+- New features use their intended permanent JSON location in the exact
+  development contract. JSON placement, publication eligibility, and runtime
+  experimental authorization are separate; while the rolling oracle remains,
+  update both it and the exact development contract.
 - Never edit `schemas/stable/`; released schemas are immutable.
 - Never hand-edit generated development schemas or generated TypeScript wire types.
 - `schemas/schema-version.json` is the canonical source for compatibility constants.

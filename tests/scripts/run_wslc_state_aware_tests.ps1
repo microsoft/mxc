@@ -161,7 +161,7 @@ function Invoke-StateAware {
     } elseif ($Request) {
         if (-not $Request.ContainsKey('version')) {
             $Request = $Request.Clone()
-            $Request['version'] = '0.9.0-alpha'
+            $Request['version'] = '0.10.0-alpha'
         }
         $json = $Request | ConvertTo-Json -Compress -Depth 12
     } else {
@@ -240,7 +240,7 @@ function Invoke-StateAwareStreaming {
     } elseif ($Request) {
         if (-not $Request.ContainsKey('version')) {
             $Request = $Request.Clone()
-            $Request['version'] = '0.9.0-alpha'
+            $Request['version'] = '0.10.0-alpha'
         }
         $json = $Request | ConvertTo-Json -Compress -Depth 12
     } else {
@@ -747,7 +747,7 @@ foreach ($egress in @('deny', 'allow')) {
                         egress = @{ default = $egress }
                         ingress = @{ default = $ingress; hostLoopback = $hostLoopback }
                     }
-                    experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+                    wslc = @{ provision = @{ image = 'alpine:latest' } }
                 }
                 $r = Invoke-StateAware -Request $req -DryRun
                 Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -764,7 +764,7 @@ Run-StateAwareTest "D: provision (bridged with omitted ingress deny defaults rej
         phase = 'provision'
         containment = 'wslc'
         network = @{ egress = @{ default = 'allow' } }
-        experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+        wslc = @{ provision = @{ image = 'alpine:latest' } }
     }
     $r = Invoke-StateAware -Request $req -DryRun
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -784,7 +784,7 @@ Run-StateAwareTest "D: provision (runtime proxy rejected by exact contract)" {
         "error.message identifies the closed runtimeConfig path (got '$msg')"
 } | Out-Null
 
-# No legacy member remains legal on either exact v0.9 network-bearing
+# No legacy member remains legal on either exact v0.10 network-bearing
 # state-aware root, including empty lists and legacy default-valued fields.
 $legacyNetworkFields = [ordered]@{
     defaultPolicy = 'block'
@@ -803,7 +803,7 @@ foreach ($phase in @('provision', 'exec')) {
             }
             if ($phase -eq 'provision') {
                 $req.containment = 'wslc'
-                $req.experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+                $req.wslc = @{ provision = @{ image = 'alpine:latest' } }
             } else {
                 $req.sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
                 $req.process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }

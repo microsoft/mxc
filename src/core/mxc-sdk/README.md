@@ -403,9 +403,9 @@ The handle is modelled on [`std::process::Child`]:
   non-streamed stdio.
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
-**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
-features, and with the request's experimental opt-in — **WSLC** and
-**IsolationSession**.
+**Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind
+their build features — **WSLC** and **IsolationSession**. WSLC additionally
+requires the request's experimental opt-in; IsolationSession does not.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -437,10 +437,9 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 Both take the same request JSON and differ only in where the workload's stdio
 goes.
 
-Every state-aware backend is experimental, so `experimental` is the in-process
-equivalent of the executor's `--experimental` flag: without it the request is
-refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
-API parameter, not a field in the request JSON.
+Windows Sandbox and WSLC require `experimental`; IsolationSession does not.
+The parameter is the in-process equivalent of the executor's `--experimental`
+flag and is not a field in the request JSON.
 
 The example needs this crate's `isolation_session` feature and a host running the
 OS-side service.
@@ -456,7 +455,7 @@ let provisioned = run_state_aware_json(
         "network":{"egress":{"default":"allow"},
           "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
     false, // dry_run
-    true,  // experimental
+    false, // experimental
 )?;
 // The returned `sandboxId` is opaque — carry it forward, never parse it.
 
@@ -464,13 +463,13 @@ let provisioned = run_state_aware_json(
 run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
     false, // dry_run
-    true,  // experimental
+    false, // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = exec_attached(
     r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
-    true, // experimental
+    false, // experimental
 )?;
 let _ = outcome;
 let _ = provisioned;
@@ -511,8 +510,8 @@ default):
 Constructing the listed variants is unaffected.
 
 `Containment::IsolationSession` names the isolation-session backend, served by
-`run` and `spawn_sandbox` with piped stdio. It is experimental, so the request
-must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
+`run` and `spawn_sandbox` with piped stdio. It requires the
+`isolation_session` build feature but no runtime experimental opt-in. Its exec has no host
 process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
 dropping the handle tears the session down synchronously rather than in the
 background. Reach its multi-call lifecycle through
@@ -533,7 +532,7 @@ opt-in on two axes: build this crate with its **`wslc` feature**, and call
 [`SandboxRequest::set_experimental(true)`] on the request (the library-side
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
 memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
-inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
+inside [`Containment::Wslc`], mirroring the SDK's top-level `wslc` block, and
 go through the same production parser as the executor, so a rejected value
 (e.g. a port mapping with a zero or duplicated host port) fails at build time,
 not at spawn.
@@ -546,7 +545,7 @@ use mxc_sdk::{
 
 fn main() -> Result<(), Box<dyn Error>> {
 let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
+    version: "0.10.0-alpha".to_string(),
     filesystem: None, network: None, ui: None, timeout_ms: None,
 };
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };

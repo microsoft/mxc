@@ -50,14 +50,17 @@ import type {
 
 import type {
   IsolationSessionProvision as WireProvisionPhase,
-  WslcProvision as WireWslcProvisionPhase,
   IsolationSessionProvisionRequest,
-  WslcProvisionRequest,
   ExecRequest,
   StartRequest,
   StopRequest,
   DeprovisionRequest,
 } from '../../src/generated/v0_9_0_alpha/wire.js';
+import type {
+  WslcProvision as WireWslcProvisionPhase,
+  WslcProvisionRequest,
+  ExecRequest as V010ExecRequest,
+} from '../../src/generated/v0_10_0_alpha/wire.js';
 
 import type {
   AssertTrue,
@@ -78,7 +81,10 @@ type _ExactWslcNetwork = AssertTrue<
   Equivalent<NonNullable<WslcProvisionConfig['network']>, NonNullable<WslcProvisionRequest['network']>>
 >;
 type _ExactExecRuntime = AssertTrue<
-  Equivalent<NonNullable<WslcExecConfig['runtimeConfig']>, NonNullable<ExecRequest['runtimeConfig']>>
+  Equivalent<
+    NonNullable<WslcExecConfig['runtimeConfig']>,
+    NonNullable<V010ExecRequest['runtimeConfig']>
+  >
 >;
 type _ExactIsoNetwork = AssertTrue<
   Equivalent<
@@ -103,7 +109,7 @@ type _ExactIsoNetwork = AssertTrue<
 //
 // `filesystem` and `telemetry` are lifted top-level wire fields (like `network`):
 // phase configs surface them publicly but they map to the envelope top level,
-// not under `experimental.<backend>.<phase>`. Listing them here keeps the
+// not under `<backendSection>.<phase>`. Listing them here keeps the
 // backend-key set limited to genuinely per-phase wire fields.
 type LiftedPhaseKey = 'version' | 'process' | 'network' | 'runtimeConfig' | 'filesystem' | 'telemetry';
 

@@ -358,8 +358,16 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.9.0-alpha",
-        Network = new NetworkPolicy { AllowOutbound = true },
+        Version = "0.10.0-alpha",
+        Network = new NetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        },
     },
     "python3 -c 'print(42)'")
 {
@@ -387,7 +395,7 @@ with WSLC support or execution returns `UnsupportedContainment`.
 
 #### Isolation session options
 
-`IsolationSessionContainment` selects the experimental IsolationSession backend,
+`IsolationSessionContainment` selects the IsolationSession backend,
 which runs the workload under an isolated agent user account. It carries no
 configuration of its own:
 
@@ -408,7 +416,6 @@ var request = new SandboxRequest(
     },
     "echo hello")
 {
-    Experimental = true,
     Containment = new IsolationSessionContainment(),
 };
 ```
@@ -419,8 +426,7 @@ refuses an absent policy, whose default is a deny it could not enforce. It also
 refuses filesystem paths and any `Ui`: supplying either is an error rather than
 a no-op, so the policy shown under Usage does not carry over to this backend.
 
-IsolationSession is experimental, so `Experimental` is required; the native unit
-must also be built with isolation-session support or execution returns
+The native unit must be built with isolation-session support or execution returns
 `UnsupportedContainment`. It is refused from a single-threaded apartment, so a
 GUI caller must reach it from an MTA thread.
 
@@ -752,8 +758,8 @@ Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
 ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
 IsolationSession and WSLC for run/stream; the state-aware lifecycle supports
-IsolationSession, Windows Sandbox, and WSLC on Windows; all three are
-experimental).
+IsolationSession, Windows Sandbox, and WSLC on Windows. Windows Sandbox and
+WSLC require experimental opt-in; IsolationSession does not).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
@@ -852,7 +858,9 @@ var wslc = new WslcProvisionOptions
 };
 ```
 
-All state-aware backends use the exact development schema `0.9.0-alpha`.
+IsolationSession state-aware calls use published schema `0.9.0-alpha`.
+Windows Sandbox and WSLC state-aware calls use development schema
+`0.10.0-alpha`.
 `Version` may be omitted or explicitly set to that registered value; the SDK
 rejects other values rather than emitting an envelope for an unregistered
 state-aware contract. State-aware exec options expose working directory,
