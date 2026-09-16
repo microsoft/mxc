@@ -352,7 +352,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
+    };
     use wxc_common::mxc_error::MxcErrorCode;
 
     // ====== Wire-format constants ======
@@ -536,8 +539,16 @@ mod tests {
         // unrestricted outbound + inbound, no host rules, no proxy.
         ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -609,7 +620,7 @@ mod tests {
     #[test]
     fn every_id_consuming_hook_accepts_a_well_formed_id() {
         let runner = IsolationSessionRunner::new();
-        let req = request_with_canonical_network();
+        let req = ExecutionRequest::default();
         let id = valid_sandbox_id();
         runner.validate_start(&id, &req, None).unwrap();
         runner.validate_exec(&id, &req, None).unwrap();

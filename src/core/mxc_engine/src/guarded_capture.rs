@@ -88,6 +88,28 @@ fn plm_exe_path() -> Result<std::path::PathBuf, String> {
     Ok(dir.join("plm.exe"))
 }
 
+/// Whether the guarded WPR fallback can be used without starting a capture.
+///
+/// This verifies that the system WPR executable is present and applies the same
+/// guardian co-location and trust checks as launch, then releases the pin
+/// immediately. It intentionally does not attempt to elevate or start WPR
+/// because callers use it from the read-only host probe.
+pub(crate) fn is_available() -> bool {
+    prerequisites_available(plm::wpr_path::verify_wpr_present, || {
+        let path = plm_exe_path()?;
+        plm::trust::verify_and_pin_launch_binary(&path)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn prerequisites_available(
+    verify_wpr: impl FnOnce() -> Result<(), String>,
+    verify_guardian: impl FnOnce() -> Result<(), String>,
+) -> bool {
+    verify_wpr().and_then(|()| verify_guardian()).is_ok()
+}
+
 /// [`GuardedCaptureSession`] backed by a live `plm::elevated::GuardedSession`.
 struct PlmGuardedCaptureSession {
     session: plm::elevated::GuardedSession,
@@ -235,6 +257,31 @@ pub(crate) fn factory_for_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guarded_capture_is_unavailable_without_wpr() {
+        let mut guardian_checked = false;
+
+        let available = prerequisites_available(
+            || Err("wpr.exe is missing".to_string()),
+            || {
+                guardian_checked = true;
+                Ok(())
+            },
+        );
+
+        assert!(!available);
+        assert!(!guardian_checked);
+    }
+
+    #[test]
+    fn guarded_capture_requires_both_prerequisites() {
+        assert!(!prerequisites_available(
+            || Ok(()),
+            || Err("plm.exe is unavailable".to_string())
+        ));
+        assert!(prerequisites_available(|| Ok(()), || Ok(())));
+    }
 
     #[test]
     fn start_rejects_a_nonexistent_plm_path() {

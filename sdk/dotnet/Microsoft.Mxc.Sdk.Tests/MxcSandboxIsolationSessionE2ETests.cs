@@ -27,13 +27,17 @@ public class MxcSandboxIsolationSessionE2ETests
             new SandboxPolicy
             {
                 // The backend cannot restrict the container's network, so it
-                // accepts only an explicit acknowledgment of that and refuses an
-                // absent policy, whose default is a deny it could not enforce.
+                // requires the explicit directional all-allow posture and refuses
+                // an absent policy, whose default is a deny it could not enforce.
                 Version = "0.9.0-alpha",
                 Network = new NetworkPolicy
                 {
-                    AllowOutbound = true,
-                    AllowLocalNetwork = true,
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                    Ingress = new NetworkIngressPolicy
+                    {
+                        Default = NetworkAction.Allow,
+                        HostLoopback = NetworkAction.Allow,
+                    },
                 },
             },
             command)

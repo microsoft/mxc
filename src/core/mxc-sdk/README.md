@@ -169,9 +169,17 @@ for backend in available_backends() {
     let capture_denials = backend
         .capabilities
         .contains(&BackendCapability::CaptureDenials);
+    let native_denied_paths = backend
+        .capabilities
+        .contains(&BackendCapability::FilesystemDeniedPaths);
+    let ingress_host_loopback_allow = backend
+        .capabilities
+        .contains(&BackendCapability::IngressHostLoopbackAllow);
     match backend.tier {
         Some(tier) => println!(
-            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            "{} (tier: {tier}, captureDenials: {capture_denials}, \
+             filesystemDeniedPaths: {native_denied_paths}, \
+             ingressHostLoopbackAllow: {ingress_host_loopback_allow})",
             backend.backend
         ),
         None => println!("{}", backend.backend),
@@ -181,9 +189,13 @@ for backend in available_backends() {
 
 The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
-`capabilities` reports optional features that passed the host probe, including
-the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
-handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+`capabilities` lists optional features supported by that tier.
+`FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`IngressHostLoopbackAllow` covers
+`network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
+or could not be detected. Use `wxc-exec --probe` for detailed machine facts.
+Callers must still handle `ErrorCode::BackendUnavailable` if availability
+changes before launch.
 And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
@@ -368,7 +380,6 @@ use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
 // Provision. Describe the backend's unrestricted network posture explicitly.
-// The canonical legacy spelling remains accepted during the transition.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},

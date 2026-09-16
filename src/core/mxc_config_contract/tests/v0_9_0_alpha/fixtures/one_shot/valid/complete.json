@@ -29,15 +29,11 @@
     "allowDaclMutation": false
   },
   "network": {
-    "defaultPolicy": "allow",
-    "enforcementMode": "capabilities",
-    "blockedHosts": [
-      "blocked.example"
-    ],
-    "allowLocalNetwork": true,
-    "proxy": {
-      "url": "http://proxy.example:8080"
-    }
+    "egress": {"default": "deny"},
+    "ingress": {"default": "allow", "hostLoopback": "allow"}
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   },
   "ui": {
     "disable": false,

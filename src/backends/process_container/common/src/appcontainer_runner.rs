@@ -38,7 +38,9 @@ use crate::guarded_capture::{
     GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
-use crate::launch_diagnostics::{diagnose_create_process_failure, diagnose_missing_required_env};
+use crate::launch_diagnostics::{
+    diagnose_create_process_failure, diagnose_missing_required_env, validate_required_child_env,
+};
 use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
 use wxc_common::audit::{
@@ -1727,6 +1729,7 @@ impl SandboxBackend for AppContainerScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if request
             .policy
@@ -2672,6 +2675,21 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_sparse_verbatim_environment() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Dacl);
+        let request = ExecutionRequest {
+            env: Some(vec!["SystemRoot=C:\\Windows".to_string()]),
+            ..Default::default()
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must reject the environment before launch");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("LOCALAPPDATA"));
     }
 
     /// Records the order of guarded-capture callbacks so orchestration tests can

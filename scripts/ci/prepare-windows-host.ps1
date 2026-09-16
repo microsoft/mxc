@@ -129,6 +129,42 @@ function Assert-HypervisorPlatform {
     Write-Host 'WHP is enabled and hypervisor is present.'
 }
 
+# The matrix schedules by pool name, so this is the only evidence in the log
+# that a pool really booted the release it advertises. Which tier a
+# process-container job selects is a function of that build.
+function Write-HostOsVersion {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $values = @{}
+    foreach ($name in 'ProductName', 'DisplayVersion', 'ReleaseId', 'CurrentBuild', 'UBR', 'EditionID') {
+        try {
+            $values[$name] = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
+        } catch {
+            $values[$name] = $null
+        }
+    }
+
+    # Win32_OperatingSystem is the only reliable product name: the registry's
+    # ProductName still reads "Windows 10" on Windows 11 hosts.
+    $caption = $null
+    try {
+        $caption = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption
+    } catch {
+        Write-Host "Could not query Win32_OperatingSystem ($($_.Exception.Message)); falling back to the registry product name."
+        $caption = $values['ProductName']
+    }
+
+    $release = if ($values['DisplayVersion']) { $values['DisplayVersion'] } else { $values['ReleaseId'] }
+    $build = if ($null -ne $values['UBR']) {
+        "$($values['CurrentBuild']).$($values['UBR'])"
+    } else {
+        $values['CurrentBuild']
+    }
+
+    Write-Host "Host OS: $caption"
+    Write-Host "Host OS release: $release (build $build)"
+    Write-Host "Host OS edition: $($values['EditionID']); architecture: $env:PROCESSOR_ARCHITECTURE"
+}
+
 function Initialize-ProcessContainerHost {
     $hostPrep = Join-Path $BinaryDirectory 'wxc-host-prep.exe'
     if (-not (Test-Path $hostPrep)) {
@@ -591,6 +627,8 @@ if (-not (Test-Path $BinaryDirectory)) {
 $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
 
 Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory"
+
+Write-HostOsVersion
 
 # Run for every backend: this is host inventory, not a backend prerequisite.
 # The winget repair comes first so the packaged-tooling install below can use

@@ -7,8 +7,11 @@
     "env": ["HTTP_PROXY=http://attacker.invalid:1", "http_proxy=http://attacker.invalid:1", "FTP_PROXY=http://attacker.invalid:1", "ftp_proxy=http://attacker.invalid:1", "NO_PROXY=*", "no_proxy=attacker.invalid"]
   },
   "network": {
-    "defaultPolicy": "allow",
-    "proxy": { "url": "http://127.0.0.1:8888" }
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8888"
   },
   "experimental": {
     "wslc": {

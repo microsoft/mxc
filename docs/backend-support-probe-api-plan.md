@@ -79,6 +79,9 @@ This API answers **"what can I use here?"**, not "what is the full capability
 matrix of this machine?". 
 - We return **only** host-available backends. Nothing is reported as `false`.
 - A backend's **absence** means "not currently usable, **for any reason**"
+- Capabilities list selected features supported by the reported tier:
+  `captureDenials`, `filesystemDeniedPaths`, and `ingressHostLoopbackAllow`.
+- A missing capability is unavailable or could not be detected.
 - For per-backend **diagnostics and reasons**, the tool is `wxc-exec --probe`
 - Each capability is **detected once, in Rust**, and the TypeScript SDK projects that result rather than re-checking.
 ## 3. Detection & isolation tiers

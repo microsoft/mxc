@@ -86,9 +86,8 @@ without metadata use `()`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
-The top-level `network` field is required. Prefer the standard directional
-all-allow posture; the canonical legacy allow pair remains accepted during the
-transition.
+The top-level `network` field is required and must use the standard directional
+all-allow posture.
 
 For example:
 
@@ -104,9 +103,9 @@ For example:
 }
 ```
 
-The exact provision contract requires either this complete directional shape
-or the valid legacy network form. Supplying neither, mixing forms, or adding
-rules or proxy settings is a structural `malformed_request` error.
+The exact provision contract requires this complete directional shape. Supplying
+legacy fields, mixing postures, or adding rules or proxy settings is a structural
+`malformed_request` error.
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
@@ -220,13 +219,11 @@ backend has no host-folder-sharing primitive, so there is nothing to honor.
 The container's network is unrestricted (outbound open; a process inside can
 listen on a port reachable from outside via localhost) and MXC has no
 primitive to filter or deny it. **Provision** and one-shot therefore require
-an explicit unrestricted network posture. In v0.9, the preferred form sets
+an explicit unrestricted network posture. In v0.9,
 `network.egress.default`, `network.ingress.default`, and
-`network.ingress.hostLoopback` to `allow`. The canonical legacy form
-(`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy,
-default enforcement) remains valid during the transition as an alternative. An absent or
+`network.ingress.hostLoopback` must all be `allow`. Legacy fields, an absent or
 empty network object, restrictions, mixed postures, rules, or proxy settings
-remain rejected. On **post-provision** phases the posture is fixed: supplied
+are rejected. On **post-provision** phases the posture is fixed: supplied
 network policy is rejected, and absence is inherited.
 
 UI policy is rejected at every phase, on both surfaces, and **no `ui` posture is
@@ -286,9 +283,8 @@ meaning for this backend.
 |---|---|---|---|---|---|---|
 | `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
-| Unrestricted network posture, using directional all-allow or the canonical legacy form | **required** | **required** | rejected | rejected | rejected | rejected |
-| `policy.network` — canonical legacy `allow` spelling (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | accepted during the transition | accepted during the transition | rejected | rejected | rejected | rejected |
-| `policy.network` — any other **supplied** value (host rules, proxy, `defaultPolicy=block`) | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** | **required** | rejected | rejected | rejected | rejected |
+| `policy.network` — legacy fields or any other **supplied** value (host rules, proxy, restrictive or mixed posture) | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.network` — **absent** | rejected | rejected | inherited from provision | inherited | inherited | inherited |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
@@ -361,8 +357,8 @@ Both modes share the same policy matrix above. Every `policy.filesystem`
 field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
 phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
-per the matrix — provision requires an unrestricted network posture in either
-accepted v0.9 form, and post-provision rejects supplied network policy
+per the matrix — provision requires the directional all-allow network posture,
+and post-provision rejects supplied network policy
 (inheriting absence). One-shot enforces
 representable policy through `validate_runner`. State-aware fields excluded from
 an exact phase root fail structurally; `validate_<phase>` handles semantic

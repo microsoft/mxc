@@ -66,11 +66,11 @@ const CASES: &[StateAwareCase] = &[
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "telemetry": {"enabled": false},
+            "network": {
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            },
             "experimental": {
                 "isolation_session": {
                     "provision": {
@@ -93,10 +93,8 @@ const CASES: &[StateAwareCase] = &[
                 "deniedPaths": ["/secrets"]
             },
             "network": {
-                "defaultPolicy": "block",
-                "enforcementMode": "firewall",
-                "allowedHosts": ["packages.example"],
-                "allowLocalNetwork": false
+                "egress": {"default": "deny"},
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
             },
             "telemetry": {"enabled": true},
             "experimental": {
@@ -133,9 +131,7 @@ const CASES: &[StateAwareCase] = &[
                 "env": ["MODE=test"],
                 "timeout": 30000
             },
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"}
-            },
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"},
             "telemetry": {"enabled": false}
         }"#,
         expected: ExpectedRoot::Exec,

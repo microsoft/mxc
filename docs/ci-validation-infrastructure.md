@@ -108,9 +108,9 @@ Current platforms:
 |-------------|--------|----------|------------|--------------------------|
 | `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process-t1, process-t3, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
 | `windows-prerelease-isolation-session` | windows | *(dormant)* | *(dormant)* | same as above |
-| `windows-canary` | windows | *(dormant)* | *(dormant)* | same as above |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | same as above |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | same as above |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, hyperlight, lxc |
@@ -144,6 +144,13 @@ Both ids also get the same host preparation. A T1 host selects BaseContainer for
 most policies but still exercises the AppContainer fallback tiers, and an
 unprepared host fails the launch outright rather than producing a policy result,
 so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
+
+Before running the suite, `process-t1` asserts the host selects the tier the
+entry was scheduled for: the dispatcher reads `wxc-exec --probe` and fails the
+job unless it reports `base-container`. Tier selection follows from the host's
+Windows build, so without the check a pool that quietly fell back to
+AppContainer would run the suite and report green while proving nothing about
+T1.
 
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
@@ -180,13 +187,13 @@ backend **and** has a non-empty pool.
 
 | Plan | Wired to | Contents today |
 |------|----------|----------------|
-| `nightly` | scheduled Mon–Sun | 4 Windows platforms, 4 Linux platforms, 2 MacOS platforms |
+| `nightly` | scheduled Mon–Sun | 5 Windows platforms, 4 Linux platforms, 2 MacOS platforms |
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
 
-Resolved `nightly` today = **19 jobs**: 9 Windows (prerelease × process-t1,
-isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc),
+Resolved `nightly` today = **19 jobs**: 9 Windows (prerelease/25H2/24H2 × process-t1 + wslc;
+prerelease × isolation-session; 23H2 × process-t3 + wslc),
 8 Linux (each of the four distros × bubblewrap + lxc) and 2 macOS
 (macOS 26 and macOS 15 × seatbelt).
 
@@ -219,8 +226,8 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite, tier-gated to `base-container`. Includes the schema 0.8 directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface) and the legacy 0.7 network lane. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). The 0.8 networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
+| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes the schema 0.8 directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface) and the legacy 0.7 network lane. Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). The 0.8 networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -239,8 +246,9 @@ every entry.
 `prepare-windows-host.ps1`:
 
 - `process-t1`, `process-t3` — run `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`. Both ids need it: the suite drives the
-  AppContainer fallback tiers on a T1 host too.
+  `prepare-null-device --no-sacl`. T1 needs them too: the suite deliberately
+  drives the AppContainer fallback tiers, and an unprepared host fails those
+  launches with `WIN32_ERROR(5)` instead of reporting a policy result.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
@@ -260,6 +268,11 @@ one: `Repair-Winget` re-registers the App Installer package when `winget` is on
 `PATH` but cannot run, and `Install-PackagedTooling` then installs `winapp` and
 `openssl`
 ([below](#who-installs-what)).
+
+Every run also opens with the host's Windows caption, release, build, and
+edition. The matrix schedules by pool name, so that banner is the only evidence
+in the log that a pool really booted the release it advertises — and which tier
+a process-container job selects follows from that build.
 
 `prepare-linux-host.sh`:
 

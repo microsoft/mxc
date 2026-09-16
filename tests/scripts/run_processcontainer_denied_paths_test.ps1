@@ -65,7 +65,7 @@ function Phase-T1DenyForced {
             -ReadWrite @((Join-Path $ScratchRoot 'rw')) -Denied @($rejDir)
         $rejLog = Join-Path $ScratchRoot 'logs\denied-unsupported.log'
         $rej = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $rejCfg -LogPath $rejLog -TimeoutSec 30
-        Record-Result -Phase 'P4d' -Name 'deniedPaths is refused, not silently unenforced, without SANDBOX_CAP_DENY_PATHS' `
+        Record-Result -Phase 'P4d' -Name 'deniedPaths is refused, not silently unenforced, without native deny support' `
             -Pass (Test-WasRejected $rej) `
             -Detail "exit=$($rej.ExitCode); stderr=$(Format-Snippet $rej.Stderr)"
         return

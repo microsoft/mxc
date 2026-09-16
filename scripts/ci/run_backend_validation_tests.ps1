@@ -177,6 +177,9 @@ function Invoke-T3WorkloadTests {
 
 Redirect-TempToRunnerTemp
 
+# The matrix entry names the tier the job exists to exercise, but the host picks
+# the tier at run time. -RequireTier makes the suite abort instead of testing
+# whichever tier it landed on and reporting green for the wrong entry.
 switch ($Backend) {
     'process-t1' {
         $primitives = Invoke-ProcessContainerTests -RequireTier 'base-container'

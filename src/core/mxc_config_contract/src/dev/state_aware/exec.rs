@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::dev::{Network, OptionalField, Process, Telemetry, Version};
+use crate::dev::{Network, OptionalField, Process, RuntimeConfig, Telemetry, Version};
 use serde::Deserialize;
 
 string_marker! {
@@ -39,6 +39,10 @@ pub struct ExecRequest {
     /// Optional per-execution network settings.
     #[serde(default)]
     pub network: OptionalField<Network>,
+
+    /// Optional per-execution runtime values, including the cooperative proxy URL.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
 
     /// Optional telemetry configuration.
     #[serde(default)]
