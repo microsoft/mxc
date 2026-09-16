@@ -247,7 +247,7 @@ describe('macOS Seatbelt Container', {
         sdk.spawnSandboxAsync(
           'sleep 30',
           policy,
-          inProcessSeatbeltOptions,
+          seatbeltSpawnOptions,
           undefined,
           'seatbelt-timeout',
         ),
