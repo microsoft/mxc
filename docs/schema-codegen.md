@@ -54,9 +54,13 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.
 ```
 
 `mxc_schema_gen versions --json` emits registry-driven lifecycle and artifact
-metadata. Published v0.9 and development v0.10 dispatch to their own exact
-models. Older published versions without renderable exact models return an
-explicit error; no version falls back to another model.
+metadata, including whether an exact model is renderable and the fixture
+directory/schema-definition pair for every request root. Versioning gates use
+that metadata for artifact regeneration, root validation, fixture discovery,
+and state-aware backend-version checks rather than maintaining separate
+per-version root tables. Published v0.9 and development v0.10 dispatch to their
+own exact models. Older published versions without renderable exact models
+return an explicit error; no version falls back to another model.
 
 The exact contract crate gates Schemars behind `schema-gen`, so normal builds
 do not carry it. The exact `OptionalField<T>` schema is transparent and
@@ -95,9 +99,9 @@ contract-valid, and no relaxed schema twin is generated.
    `src/core/mxc_config_contract/src/dev/state_aware/provision/`.
 2. Add its subschema and containment discriminator to `provision_dispatch()` in
    `dev/schema.rs`, then include the root in `ROOT_NAMES`.
-3. Add the root-name mapping to `expectedRootsByVersion` in
-   `scripts/versioning/check-contract-codegen.js` and create matching valid and
-   invalid fixture directories under
+3. Add the root's `ContractRequestRoot` entry to the version's `request_roots`
+   metadata in `src/core/mxc_config_contract/src/registry.rs`, and create
+   matching valid and invalid fixture directories under
    `tests/v0_10_0_alpha/fixtures/`.
 4. Regenerate the exact schema and versioned TypeScript oracle.
 5. Wire the request through the exact-contract adapter and state-aware runtime

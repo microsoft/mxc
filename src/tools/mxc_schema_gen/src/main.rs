@@ -48,22 +48,30 @@ fn target(args: &GenerateArgs) -> Result<ContractVersion, String> {
 
 fn exact_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
     let descriptor = descriptor(version);
-    let mut schema = match version {
-        ContractVersion::V0_9_0Alpha => {
-            mxc_config_contract::published::v0_9_0_alpha::published_schema()
-        }
-        ContractVersion::V0_10_0Alpha => mxc_config_contract::dev::development_schema(),
-        ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha
-        | ContractVersion::V0_8_0Alpha => {
-            return Err(format!(
-                "published contract {} has no renderable exact model",
-                version.as_str()
-            ));
-        }
-    };
+    if !descriptor.generates_artifacts() {
+        return Err(format!(
+            "published contract {} has no renderable exact model",
+            version.as_str()
+        ));
+    }
+    let mut schema = renderable_exact_schema(version)?;
     mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
     Ok((schema, descriptor))
+}
+
+fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
+    match version {
+        ContractVersion::V0_9_0Alpha => {
+            Ok(mxc_config_contract::published::v0_9_0_alpha::published_schema())
+        }
+        ContractVersion::V0_10_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
+        ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_8_0Alpha => Err(format!(
+            "contract registry marks {} as renderable, but no exact model is available",
+            version.as_str()
+        )),
+    }
 }
 
 fn schema_content(version: ContractVersion) -> Result<String, String> {
@@ -120,7 +128,12 @@ fn versions_json() -> Value {
                     "status": descriptor.status().as_str(),
                     "schemaId": descriptor.schema_id(),
                     "schemaPath": descriptor.schema_path(),
-                    "typescriptPath": descriptor.typescript_path()
+                    "typescriptPath": descriptor.typescript_path(),
+                    "generatesArtifacts": descriptor.generates_artifacts(),
+                    "requestRoots": descriptor.request_roots().iter().map(|root| json!({
+                        "fixtureDirectory": root.fixture_directory(),
+                        "schemaDefinition": root.schema_definition()
+                    })).collect::<Vec<_>>()
                 })
             })
             .collect(),
@@ -193,6 +206,13 @@ mod tests {
             development["typescriptPath"],
             "sdk/node/src/generated/v0_10_0_alpha/wire.ts"
         );
+        assert_eq!(development["generatesArtifacts"], true);
+        assert!(development["requestRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|root| root["fixtureDirectory"] == "wslc_provision"
+                && root["schemaDefinition"] == "WslcProvisionRequest"));
     }
 
     #[test]
@@ -215,6 +235,17 @@ mod tests {
         let error = exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
         assert!(
             error.contains("published contract 0.8.0-alpha has no renderable exact model"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn inconsistent_renderable_registry_metadata_is_rejected() {
+        let error = renderable_exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
+        assert!(
+            error.contains(
+                "contract registry marks 0.8.0-alpha as renderable, but no exact model is available"
+            ),
             "{error}"
         );
     }

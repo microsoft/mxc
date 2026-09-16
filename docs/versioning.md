@@ -402,6 +402,8 @@ Reusable nested DTOs under `wxc_common::wire` help adapters share representation
 for common fields. They are not a whole-request deserialization boundary and do
 not generate schemas or public SDK types.
 
+### Why the layers stay separate (pros)
+
 ### Benefits
 
 - **Exact version boundaries.** Each registered contract owns its accepted JSON
@@ -442,6 +444,10 @@ point, while `ExecutionRequest` gives backends stable, validated runtime
 semantics. Combining any two would either weaken exact-version closure, duplicate
 normalization across versions, or expose JSON-specific optionality and aliases to
 backends.
+
+The costs are addressable without merging these responsibilities, for example
+with shared adapter helpers and compile-time mapping checks. No planned phase
+reintroduces a rolling whole-request contract.
 
 ## Version Negotiation
 
@@ -590,13 +596,14 @@ mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
    removal in a future minor release; gating buys little and costs review
    complexity in every layer that re-checks containment.
 
-**Observability.** Legacy *value* aliases are mapped to their canonical form by
-serde (`#[serde(alias = "...")]`) while deserializing the selected exact
-contract, so the Rust parser no longer emits a per-value deprecation hint for
-them — serde normalizes the alias at the trust boundary before adapter or
-normalization code runs. Aliases are still accepted; they are simply silent in
-the native parser. The TypeScript SDK validator may still surface a deprecation
-hint via `diagLog` where it inspects the raw config before serialization.
+**Observability.** Each exact contract accepts its version-specific legacy
+value aliases and normalizes them during exact deserialization, before its
+adapter produces `CommonRequestIR`. The private normalization DTOs are not a
+JSON trust boundary. Internal raw-string consumers that need containment only
+for classification, such as command splicing, recognize aliases explicitly
+through `wire::Containment::parse_wire_name`. Alias acceptance is silent in the
+native parser; the TypeScript SDK validator may still surface a deprecation hint
+via `diagLog` while inspecting raw config.
 
 **Removal.** When an alias is removed in a future release, the change goes
 through the same promotion-style migration: a single release that turns the

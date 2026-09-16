@@ -65,7 +65,8 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 
 ## Schema and policy rules
 
-- Production parsing dispatches through exact closed contracts.
+- Production parsing dispatches through exact closed contracts and their
+  version-specific adapters into private `CommonRequestIR` normalization input.
 - Preserve optional-field presence through parsing and binding. Apply defaults and semantic validation in the backend.
 - New features use their intended permanent JSON location in the exact
   development contract. JSON placement, publication eligibility, and runtime

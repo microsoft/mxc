@@ -58,17 +58,17 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
             "phase" => common.phase = Some(wire::Phase::Start),
             "sandboxId" => common.sandbox_id = Some(String::new()),
             "containment" => common.containment = Some(wire::Containment::Wslc),
-            "test" => common.test_feature = Some(serde_json::from_str("{}").unwrap()),
-            "windowsSandbox" => common.windows_sandbox = Some(serde_json::from_str("{}").unwrap()),
+            "test" => common.test_feature = Some(wire::TestFeature::default()),
+            "windowsSandbox" => common.windows_sandbox = Some(wire::WindowsSandbox::default()),
             "containerId" => common.container_id = Some("container".to_string()),
-            "fallback" => common.fallback = Some(serde_json::from_str("{}").unwrap()),
-            "seatbelt" => common.seatbelt = Some(serde_json::from_str("{}").unwrap()),
+            "fallback" => common.fallback = Some(wire::Fallback::default()),
+            "seatbelt" => common.seatbelt = Some(wire::Seatbelt::default()),
             "processContainer" => {
-                common.process_container = Some(serde_json::from_str("{}").unwrap())
+                common.process_container = Some(wire::ProcessContainer::default())
             }
-            "lxc" => common.lxc = Some(serde_json::from_str("{}").unwrap()),
-            "wslc" => common.wslc = Some(serde_json::from_str("{}").unwrap()),
-            "lifecycle" => common.lifecycle = Some(serde_json::from_str("{}").unwrap()),
+            "lxc" => common.lxc = Some(wire::Lxc::default()),
+            "wslc" => common.wslc = Some(wire::Wslc::default()),
+            "lifecycle" => common.lifecycle = Some(wire::Lifecycle::default()),
             _ => unreachable!(),
         }
         assert!(

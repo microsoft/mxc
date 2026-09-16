@@ -1,7 +1,32 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
+use crate::common::OneShotRequest;
+
+fn assert_valid(json: &str) {
+    crate::exact_test_support::assert_versioned_valid::<OneShotRequest>(
+        json,
+        crate::CONTRACT_VERSION,
+    );
+}
+
+fn assert_invalid(json: &str) {
+    crate::exact_test_support::assert_versioned_invalid::<OneShotRequest>(
+        json,
+        crate::CONTRACT_VERSION,
+    );
+}
+
+fn assert_invalid_cases<'a>(
+    cases: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+    failure_kind: &str,
+) {
+    crate::exact_test_support::assert_versioned_invalid_cases::<OneShotRequest>(
+        cases,
+        failure_kind,
+        crate::CONTRACT_VERSION,
+    );
+}
 
 // Root object tests
 #[test]

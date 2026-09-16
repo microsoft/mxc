@@ -40,7 +40,7 @@ pub mod ui_policy;
 pub mod validator;
 
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
-pub mod wire;
+pub(crate) mod wire;
 
 // Adapters that map specific JSON contracts into the internal config input.
 pub(crate) mod config_contract_adapters;

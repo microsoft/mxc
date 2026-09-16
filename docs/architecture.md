@@ -76,9 +76,10 @@ flowchart LR
 ```
 
 Production parsing selects an exact registered contract. Version-specific
-adapters produce `CommonRequestIR`, and shared normalization constructs the
-runtime `ExecutionRequest`. See [Versioning](versioning.md) and
-[Schema code generation](schema-codegen.md).
+adapters produce the private `CommonRequestIR` normalization input, and shared
+normalization constructs the runtime `ExecutionRequest`. No rolling
+whole-request parser or model remains. See
+[Versioning](versioning.md) and [Schema code generation](schema-codegen.md).
 
 State-aware requests follow the same parsing path and produce a typed lifecycle
 operation. See the
