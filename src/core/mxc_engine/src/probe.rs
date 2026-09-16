@@ -12,6 +12,9 @@
 use serde::Serialize;
 use wxc_common::models::ContainmentBackend;
 
+#[cfg(target_os = "windows")]
+use crate::guarded_capture;
+
 /// Optional feature supported by a containment backend on the current host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[non_exhaustive]
@@ -21,6 +24,8 @@ pub enum BackendCapability {
     CaptureDenials,
     /// Native `filesystem.deniedPaths` enforcement at the reported tier.
     FilesystemDeniedPaths,
+    /// Native `processContainer.filesystem.enumeratePaths` enforcement at the reported tier.
+    FilesystemEnumeratePaths,
     /// `network.ingress.hostLoopback = "allow"` at the reported tier.
     IngressHostLoopbackAllow,
     /// Bubblewrap proxy-only egress in a private network namespace.
@@ -91,8 +96,12 @@ pub fn available_backends() -> Vec<AvailableBackend> {
         windows_backends(
             tier,
             ProcessContainerCapabilities {
-                capture_denials: appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                capture_denials: capture_denials_available(
+                    appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                    guarded_capture::is_available(),
+                ),
                 filesystem_denied_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+                filesystem_enumerate_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_enumerate_paths(),
                 ingress_host_loopback_allow: appcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
             },
         )
@@ -157,7 +166,13 @@ fn bubblewrap_backend(proxy_enforcement: Result<(), String>) -> AvailableBackend
 struct ProcessContainerCapabilities {
     capture_denials: bool,
     filesystem_denied_paths: bool,
+    filesystem_enumerate_paths: bool,
     ingress_host_loopback_allow: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn capture_denials_available(native_capture: bool, guarded_capture: bool) -> bool {
+    native_capture || guarded_capture
 }
 
 #[cfg(target_os = "windows")]
@@ -174,6 +189,9 @@ fn windows_backends(
     if tier == appcontainer_common::fallback_detector::IsolationTier::BaseContainer {
         if support.filesystem_denied_paths {
             capabilities.push(BackendCapability::FilesystemDeniedPaths);
+        }
+        if support.filesystem_enumerate_paths {
+            capabilities.push(BackendCapability::FilesystemEnumeratePaths);
         }
         if support.ingress_host_loopback_allow {
             capabilities.push(BackendCapability::IngressHostLoopbackAllow);
@@ -366,6 +384,11 @@ mod tests {
             r#""filesystemDeniedPaths""#
         );
         assert_eq!(
+            serde_json::to_string(&BackendCapability::FilesystemEnumeratePaths)
+                .expect("serializes"),
+            r#""filesystemEnumeratePaths""#
+        );
+        assert_eq!(
             serde_json::to_string(&BackendCapability::IngressHostLoopbackAllow)
                 .expect("serializes"),
             r#""ingressHostLoopbackAllow""#
@@ -454,14 +477,27 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_reports_capture_denials_from_probe_result() {
+    fn capture_denials_is_available_with_either_provider() {
+        for (native, guarded, expected) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            assert_eq!(capture_denials_available(native, guarded), expected);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reports_capture_denials_from_combined_provider_result() {
         use appcontainer_common::fallback_detector::IsolationTier;
 
-        for capture_denials_usable in [false, true] {
+        for capture_denials_available in [false, true] {
             let backends = windows_backends(
                 IsolationTier::BaseContainer,
                 ProcessContainerCapabilities {
-                    capture_denials: capture_denials_usable,
+                    capture_denials: capture_denials_available,
                     ..Default::default()
                 },
             );
@@ -473,7 +509,7 @@ mod tests {
                 process_container
                     .capabilities
                     .contains(&BackendCapability::CaptureDenials),
-                capture_denials_usable
+                capture_denials_available
             );
         }
     }
@@ -487,6 +523,7 @@ mod tests {
             IsolationTier::BaseContainer,
             ProcessContainerCapabilities {
                 filesystem_denied_paths: true,
+                filesystem_enumerate_paths: true,
                 ingress_host_loopback_allow: true,
                 ..Default::default()
             },
@@ -500,6 +537,7 @@ mod tests {
             process_container.capabilities,
             vec![
                 BackendCapability::FilesystemDeniedPaths,
+                BackendCapability::FilesystemEnumeratePaths,
                 BackendCapability::IngressHostLoopbackAllow,
             ]
         );
@@ -518,6 +556,7 @@ mod tests {
                 tier,
                 ProcessContainerCapabilities {
                     filesystem_denied_paths: true,
+                    filesystem_enumerate_paths: true,
                     ingress_host_loopback_allow: true,
                     ..Default::default()
                 },

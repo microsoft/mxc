@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config,
+    convert_telemetry, convert_version,
 };
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -92,6 +93,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities,
         capture_denials,
         ui,
+        filesystem,
         network,
     } = value;
     wire::ProcessContainer {
@@ -105,7 +107,19 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
+        filesystem: filesystem
+            .into_option()
+            .map(convert_process_container_filesystem),
         network: network.into_option().map(convert_process_container_network),
+    }
+}
+
+fn convert_process_container_filesystem(
+    value: contract::ProcessContainerFilesystem,
+) -> wire::ProcessContainerFilesystem {
+    let contract::ProcessContainerFilesystem { enumerate_paths } = value;
+    wire::ProcessContainerFilesystem {
+        enumerate_paths: enumerate_paths.into_option(),
     }
 }
 
@@ -115,13 +129,6 @@ fn convert_process_container_network(
     let contract::ProcessContainerNetwork { allowed_proxy_peer } = value;
     wire::ProcessContainerNetwork {
         allowed_proxy_peer: allowed_proxy_peer.into_option(),
-    }
-}
-
-fn convert_runtime_config(value: contract::RuntimeConfig) -> wire::RuntimeConfig {
-    let contract::RuntimeConfig { network_proxy } = value;
-    wire::RuntimeConfig {
-        network_proxy: network_proxy.into_option(),
     }
 }
 
@@ -164,18 +171,10 @@ fn convert_lxc(value: contract::Lxc) -> wire::Lxc {
     }
 }
 
-fn convert_launch_method(value: contract::LaunchMethod) -> wire::LaunchMethod {
-    match value {
-        contract::LaunchMethod::Exec => wire::LaunchMethod::Exec,
-        contract::LaunchMethod::Open => wire::LaunchMethod::Open,
-    }
-}
-
 fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     let contract::Seatbelt {
         profile_override,
         gui_access,
-        launch_method,
         nested_pty,
         keychain_access,
         extra_mach_lookups,
@@ -183,7 +182,8 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
         gui_access: gui_access.into_option(),
-        launch_method: launch_method.into_option().map(convert_launch_method),
+        // Removed from the 0.9 contract: the inner process is always exec'd.
+        launch_method: None,
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),

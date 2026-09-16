@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+# Purpose: Test that we reject launching process containment sandbox if the env is totally empty (require some vars: LOCALAPPDATA / SystemRoot)
+
 param(
     [string]$WxcExec,
     [string]$WorkDirectory = (Join-Path $env:TEMP "mxc-issue-1130")
@@ -21,24 +23,7 @@ $configJson = @"
     "version": "0.8.0-alpha",
     "containment": "processcontainer",
     "process": {
-        "cwd": $($WorkDirectory | ConvertTo-Json -Compress),
-        "env": $((ConvertTo-Json -InputObject @("SystemRoot=$env:SystemRoot", "TEMP=$WorkDirectory", "TMP=$WorkDirectory") -Compress)),
-        "timeout": 5000
-    },
-    "filesystem": {
-        "readwritePaths": $((ConvertTo-Json -InputObject @($WorkDirectory) -Compress))
-    },
-    "fallback": {
-        "allowDaclMutation": true
-    },
-    "processContainer": {
-        "leastPrivilege": true,
-        "capabilities": []
-    },
-    "ui": {
-        "disable": false,
-        "clipboard": "none",
-        "injection": false
+        "env": $((ConvertTo-Json -InputObject @("SystemRoot=$env:SystemRoot", "TEMP=$WorkDirectory", "TMP=$WorkDirectory") -Compress))
     }
 }
 "@
@@ -51,8 +36,12 @@ $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 
 # Run
 Write-Host "Issue #1130: sparse explicit environment on the legacy SBOX path" -ForegroundColor Cyan
-Write-Host "Expected bug: error 203 and no COMMAND_EXECUTED marker." -ForegroundColor Yellow
-& $WxcExec --config-base64 $base64
+$output = (& $WxcExec --config-base64 $base64 2>&1 | Out-String)
+$output | Write-Host
 
 $exitCode = $LASTEXITCODE
-Complete-RegressionTest -Passed ($exitCode -eq 0) -SuccessMessage "The sparse environment launched successfully." -FailureMessage "The sparse environment launch exited with code $exitCode." -FailureExitCode $exitCode
+$rejectedBeforeLaunch = $exitCode -ne 0 `
+    -and $output.Contains("missing the required variable(s): LOCALAPPDATA") `
+    -and -not $output.Contains("COMMAND_EXECUTED") `
+    -and -not $output.Contains("CreateProcessInSandbox failed")
+Complete-RegressionTest -Passed $rejectedBeforeLaunch -SuccessMessage "The sparse environment was rejected before SBOX launch with an actionable missing-variable error." -FailureMessage "Expected a pre-launch LOCALAPPDATA rejection without executing the command; exit code was $exitCode."

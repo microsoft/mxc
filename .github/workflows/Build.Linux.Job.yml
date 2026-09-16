@@ -33,7 +33,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           target: ${{ matrix.target }}
           components: rustfmt, clippy
@@ -133,11 +133,11 @@ jobs:
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
-      # unix_test_proxy is a separate workspace member, not a dep of lxc.
-      - name: Build unix-test-proxy
+      # These are separate workspace members, not dependencies of lxc.
+      - name: Build Node runtime dependencies
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }}
-             -p unix_test_proxy
+             -p unix_test_proxy -p mxc_ffi
 
       # Exercises the real binary against the real dependencies: launches the
       # slirp4netns supervisor, joins its user namespace, and asserts the
@@ -157,5 +157,6 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
+            src/target/${{ matrix.target }}/release/libmxc_ffi.so
           if-no-files-found: error
           retention-days: 1

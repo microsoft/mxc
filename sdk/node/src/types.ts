@@ -188,6 +188,11 @@ export interface ProcessContainerConfig {
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
+  /** ProcessContainer-specific filesystem settings. */
+  filesystem?: {
+    /** Paths the script can enumerate without reading file contents. */
+    enumeratePaths?: string[];
+  };
   /** ProcessContainer-specific networking settings. */
   network?: {
     /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
@@ -210,9 +215,10 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration
+ * Network access configuration across published versions. The legacy fields
+ * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
  */
-export interface NetworkConfig {
+export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
    * Network enforcement mode:
    * - "capabilities": Use AppContainer capabilities only (no admin required)
@@ -255,6 +261,10 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/** The complete network wire shape for schema 0.9. */
+export interface DirectionalNetworkConfig {
   /** Outbound network policy. */
   egress?: NetworkEgressConfig;
   /** Inbound and host-loopback network policy. */
@@ -313,7 +323,11 @@ export interface NetworkIngressConfig {
 
 /** Runtime values supplied separately from sandbox policy. */
 export interface RuntimeConfig {
-  /** HTTP/S loopback proxy URL. */
+  /**
+   * HTTP/S proxy URL. Host-loopback restrictions are backend-specific.
+   * WSLC accepts a URL reachable from inside the guest, including guest-loopback
+   * URLs such as `http://127.0.0.1:8888`.
+   */
   networkProxy?: string;
 }
 
@@ -478,8 +492,13 @@ export type SandboxPolicy = {
   runtimeConfig?: RuntimeConfig;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
-  /** Schema 0.8 ProcessContainer-specific policy. */
+  /** ProcessContainer-specific policy. Individual fields may require newer schemas. */
   processContainer?: {
+      /** ProcessContainer-specific filesystem settings. */
+      filesystem?: {
+          /** Paths that may be enumerated without granting file-content reads. */
+          enumeratePaths?: string[];
+      };
       /** ProcessContainer-specific networking settings. */
       network?: {
           /** Package family name or AppContainer profile authorized as the loopback proxy peer. */

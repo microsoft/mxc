@@ -35,7 +35,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           target: ${{ matrix.target }}
           components: rustfmt, clippy
@@ -106,6 +106,7 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-wslc-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
+            src/target/${{ matrix.target }}/release/mxc_ffi.dll
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe

@@ -275,7 +275,8 @@ and disposes both output streams; their contents cannot be collected later.
 
 `ProcessContainerContainment` exposes the Rust SDK's backend-specific options:
 least-privilege creation, learning mode, AppContainer capabilities, denial
-capture, BaseProcessContainer UI isolation, and runtime-proxy peer identity.
+capture, BaseProcessContainer UI isolation, enumeration-only filesystem access,
+and runtime-proxy peer identity.
 For example:
 
 ```csharp
@@ -288,12 +289,22 @@ request.Containment = new ProcessContainerContainment
         Isolation = ProcessContainerUiIsolation.Container,
         SystemSettings = ProcessContainerSystemSettings.None,
     },
+    Filesystem = new ProcessContainerFilesystemPolicy
+    {
+        EnumeratePaths = { @"C:\tools" },
+    },
     Network = new ProcessContainerNetworkPolicy
     {
         AllowedProxyPeer = "Contoso.Proxy_123",
     },
 };
 ```
+
+With schema `0.9.0-alpha`,
+`ProcessContainerContainment.Filesystem.EnumeratePaths` requests directory-query
+and listing access without granting file-content reads. This is supported only
+by Windows BaseContainer hosts advertising PSEC 1.1 `fs_enumerate`; unsupported
+hosts fail rather than broadening the policy.
 
 Capability names and backend combinations are validated by the native SDK.
 `LearningMode`, denial capture, and ProcessContainer directional networking
@@ -348,8 +359,12 @@ var request = new SandboxRequest(
         Version = "0.9.0-alpha",
         Network = new NetworkPolicy
         {
-            AllowOutbound = true,
-            AllowLocalNetwork = true,
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
         },
     },
     "echo hello")
@@ -713,11 +728,9 @@ deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 
 IsolationSession requires a `StateAwareNetworkPolicy` describing its actual
-unrestricted posture. Prefer directional allow defaults for egress, ingress,
-and host loopback. The canonical legacy allow pair remains accepted during the
-additive v0.9 transition. Empty, restrictive, mixed, rule-bearing, or
-proxy-bearing policies are rejected. This does not add IsolationSession to the
-public one-shot run/spawn surface.
+unrestricted posture, with directional allow defaults for egress, ingress, and
+host loopback. Legacy fields are rejected. Empty, restrictive, mixed,
+rule-bearing, or proxy-bearing policies are also rejected.
 
 ```csharp
 var provisioned = MxcLifecycle.ProvisionSandbox(
@@ -790,7 +803,12 @@ var wslc = new WslcProvisionOptions
     ImageTarPath = @"C:\images\alpine.tar", // optional local import
     Network = new StateAwareNetworkPolicy
     {
-        DefaultPolicy = StateAwareNetworkDefault.Allow,
+        Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+        Ingress = new NetworkIngressPolicy
+        {
+            Default = NetworkAction.Allow,
+            HostLoopback = NetworkAction.Allow,
+        },
     },
 };
 ```

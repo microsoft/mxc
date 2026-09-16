@@ -65,6 +65,10 @@ extends:
         include:
         - repository: mxc_main
         - repository: mxc_iso_session_feature
+      binskim:
+        # Node.js is an upstream third-party runtime and does not enable CFG.
+        # Keep scanning every MXC-produced executable and DLL in the bundle.
+        analyzeTargetGlob: '+:file|$(Build.SourcesDirectory)\out\iso-test-bundle\**\*.exe;+:file|$(Build.SourcesDirectory)\out\iso-test-bundle\**\*.dll;-:file|$(Build.SourcesDirectory)\out\iso-test-bundle\node\node.exe'
 
     stages:
     - stage: Build_IsolationSession

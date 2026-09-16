@@ -13,7 +13,7 @@ surfaces the resulting denial events is layered on top in later work.
 
 > **Platform support.** Learning-mode capabilities are **Windows-only** and
 > apply to the AppContainer-based backends (classic AppContainer and
-> BaseContainer, which share `backends/appcontainer/common`). On other platforms
+> BaseContainer, which share `backends/process_container/common`). On other platforms
 > the capability strings are ignored.
 
 ## The two capabilities
@@ -155,9 +155,10 @@ ungranted access is handled while it is recorded:
 > option. MXC therefore retains a compatible legacy containment tier and uses
 > guarded WPR instead of weakening or rejecting the requested policy.
 >
-> Native PSEC capture also cannot currently represent `network.proxy` without a
-> separate proxy AppContainer peer identity. Compatible requests use guarded
-> WPR with the legacy tier that can enforce the proxy contract.
+> Native PSEC capture represents `runtimeConfig.networkProxy` with the PSEC
+> proxy endpoint and either the requested proxy AppContainer peer identity or
+> MXC's reserved unrestricted-loopback sentinel. Legacy proxy policies remain
+> on a compatible legacy tier with guarded WPR capture.
 >
 > Native capture uses `filesystem.deniedPaths` only when
 > `QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.

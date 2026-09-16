@@ -5,7 +5,15 @@ The Bubblewrap backend provides **unprivileged Linux sandboxing** using
 Linux user namespaces to create isolated sandbox environments without
 requiring root privileges or a container runtime.
 
-> **Status:** Experimental — requires the `--experimental` CLI flag.
+> **Status:** Stable — the default Linux backend.
+
+> **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
+> requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
+> `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy` are
+> no longer accepted in v0.9. The legacy examples and compatibility discussion
+> below apply to their declared older contracts; they do not authorize those
+> fields in v0.9. The existing private-namespace prerequisites and backend
+> capability checks still apply. See [schema migration](../schema.md).
 
 ## Prerequisites
 
@@ -103,12 +111,12 @@ requiring root privileges or a container runtime.
 
 Run with:
 ```bash
-lxc-exec --experimental --config bubblewrap_hello.json
+lxc-exec --config bubblewrap_hello.json
 ```
 
 Or via base64:
 ```bash
-lxc-exec --experimental --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
+lxc-exec --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
 ```
 
 ## How It Works
@@ -427,9 +435,12 @@ Schema `0.8.0-alpha` adds a directional network shape that replaces the
 `defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
 `egress` and `ingress` section. The two shapes are **mutually exclusive**: a
 config that mixes legacy and directional fields is a parse error, and one that
-uses directional fields on a pre-0.8 schema is refused by the parser with
-`network.egress, network.ingress, runtimeConfig, and processContainer.network
-require schema version 0.8 or later`.
+uses directional fields on a pre-0.8 schema is refused at deserialization —
+the declared version selects a closed contract with no directional fields, so
+the error names the unknown field at `network.egress`. Callers that build an
+`ExecutionRequest` programmatically skip the parser and hit the backend's own
+twin of this check, which reports `Bubblewrap: network.egress/network.ingress
+require schema 0.8.0-alpha or later.`
 
 A config carrying *any* legacy field takes the legacy path described above and
 is byte-identical to what it was before directional support existed. This
@@ -870,8 +881,7 @@ so a Node caller keeps the first answer it received.
 - **`builtinTestServer` is testing-only**: gated behind `--allow-testing-features`
   and never to be used as a real production proxy. It has no auth, no
   body-size limits, and minimal hop-by-hop header handling. Use a real
-  HTTP proxy for production deployments. (Selecting the Bubblewrap backend
-  itself still also requires `--experimental`.)
+  HTTP proxy for production deployments.
 - **HTTPS via CONNECT**: the proxy uses HTTP `CONNECT` tunnels for TLS, so
   certificate validation continues to work end-to-end (the proxy does not
   see plaintext).
@@ -927,7 +937,6 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
 
 ## Limitations
 
-- **Experimental** — requires `--experimental` flag
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
 - **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
   of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)

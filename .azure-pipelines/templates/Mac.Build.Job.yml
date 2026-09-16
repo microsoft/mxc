@@ -65,16 +65,16 @@ jobs:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
           # macOS-only crate set; the rest of the workspace has Windows-only
-          # crates that do not compile on macOS. unix_test_proxy backs
-          # network.proxy.builtinTestServer and ships next to mxc-exec-mac.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy
+          # crates that do not compile on macOS. unix_test_proxy and mxc_ffi
+          # ship next to mxc-exec-mac.
+          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy,mxc_ffi
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy
+          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy -p mxc_ffi
 
     - script: |
         set -euo pipefail
@@ -89,15 +89,15 @@ jobs:
     # certificate (CP-401337-Apple). No local cert or codesign needed.
     #
     # ESRP's Mac signing requires a .zip (or .dmg) input — raw Mach-O
-    # binaries are rejected. We zip before signing and unzip afterward. Both
-    # the executor and the testing-only unix-test-proxy are signed together.
+    # binaries are rejected. We zip before signing and unzip afterward. All
+    # three native runtime files are signed together.
     #
     # Flow: (1) zip → (2) ESRP sign (hardened runtime) → (3) ESRP notarize → (4) unzip
     # Stapling is impossible for standalone Mach-O binaries (Apple limitation);
     # Gatekeeper checks the notarization ticket online instead.
     - script: |
         cd "$(targetTripleDir)"
-        zip mxc-exec-mac.zip mxc-exec-mac unix-test-proxy
+        zip mxc-exec-mac.zip mxc-exec-mac unix-test-proxy libmxc_ffi.dylib
       displayName: 'Zip binaries for ESRP signing'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
@@ -169,6 +169,7 @@ jobs:
         contents: |
           mxc-exec-mac
           unix-test-proxy
+          libmxc_ffi.dylib
         targetFolder: $(outputDirectory)/$(targetTriple)
 
     # Copy the .dSYM bundle into a sibling `symbols/` subdir, mirroring the

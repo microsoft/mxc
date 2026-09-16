@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use mxc_sdk::configs::{
-    CaptureDenials, ProcessContainer, ProcessContainerNetwork, ProcessContainerSystemSettings,
-    ProcessContainerUi, ProcessContainerUiIsolation,
+    CaptureDenials, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
+    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation,
 };
 use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
@@ -138,6 +138,8 @@ enum RequestContainment {
         #[serde(default = "default_process_container_ui")]
         ui: Option<ProcessContainerUiSpec>,
         #[serde(default)]
+        filesystem: Option<ProcessContainerFilesystemSpec>,
+        #[serde(default)]
         network: Option<ProcessContainerNetworkSpec>,
     },
     Wslc {
@@ -210,6 +212,13 @@ struct ProcessContainerNetworkSpec {
     allowed_proxy_peer: Option<String>,
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessContainerFilesystemSpec {
+    #[serde(default)]
+    enumerate_paths: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WslcPortMappingSpec {
@@ -239,6 +248,7 @@ impl RequestContainment {
                 capabilities,
                 capture_denials,
                 ui,
+                filesystem,
                 network,
             } => {
                 let mut process_container = ProcessContainer::default();
@@ -247,6 +257,8 @@ impl RequestContainment {
                 process_container.capabilities = capabilities;
                 process_container.capture_denials = capture_denials;
                 process_container.ui = ui.map(ProcessContainerUiSpec::into_sdk);
+                process_container.filesystem =
+                    filesystem.map(ProcessContainerFilesystemSpec::into_sdk);
                 process_container.network = network.map(ProcessContainerNetworkSpec::into_sdk);
                 Containment::ProcessContainer(process_container)
             }
@@ -274,6 +286,14 @@ impl RequestContainment {
             }
             Self::IsolationSession {} => Containment::IsolationSession,
         }
+    }
+}
+
+impl ProcessContainerFilesystemSpec {
+    fn into_sdk(self) -> ProcessContainerFilesystem {
+        let mut filesystem = ProcessContainerFilesystem::default();
+        filesystem.enumerate_paths = self.enumerate_paths;
+        filesystem
     }
 }
 
@@ -317,7 +337,16 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    if let Some(path) = ignored_paths.first() {
+    // The SDK authoring model recognizes these wire-only legacy names only to
+    // preserve their presence for the version-specific migration diagnostic.
+    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
+    if let Some(path) = ignored_paths.iter().find(|path| {
+        !(accepts_wire_legacy_names
+            && matches!(
+                path.as_str(),
+                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
+            ))
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),
@@ -369,6 +398,36 @@ fn malformed_request(error: serde_json::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_container_filesystem_is_accepted_by_native_contract() {
+        let spec: RequestSpec = serde_json::from_str(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo parity",
+                "containment": {
+                    "type": "processContainer",
+                    "filesystem": {
+                        "enumeratePaths": ["C:\\input"]
+                    }
+                }
+            }"#,
+        )
+        .expect("ProcessContainer filesystem request parses");
+
+        match spec.containment.into_sdk() {
+            Containment::ProcessContainer(process_container) => {
+                assert_eq!(
+                    process_container
+                        .filesystem
+                        .expect("filesystem settings are preserved")
+                        .enumerate_paths,
+                    ["C:\\input"]
+                );
+            }
+            _ => panic!("request selected the wrong containment"),
+        }
+    }
 
     #[test]
     fn managed_full_request_goldens_are_accepted_by_native_contract() {
@@ -660,6 +719,55 @@ mod tests {
             error.message.contains("unknown field `timeoutMS`"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""capabilities""#),
+            ] {
+                let request_json = format!(
+                    r#"{{
+                        "policy": {{
+                            "version": "{version}",
+                            "network": {{ "{field}": {value} }}
+                        }},
+                        "command": "echo hi"
+                    }}"#
+                );
+                let error = build_request_from_json(&request_json)
+                    .expect_err("wire-only network names must remain unknown before v0.9");
+                assert!(
+                    error.message.contains(&format!("policy.network.{field}")),
+                    "unexpected error for {version} {field}: {error}"
+                );
+            }
+        }
+
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha",
+                        "network": {{ "{field}": {value} }}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let error = build_request_from_json(&request_json)
+                .expect_err("v0.9 wire-only network names must reach migration validation");
+            assert!(
+                error
+                    .message
+                    .contains("no longer accepts legacy network authoring"),
+                "unexpected error for v0.9 {field}: {error}"
+            );
+        }
     }
 
     #[test]

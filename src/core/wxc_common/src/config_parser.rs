@@ -290,6 +290,8 @@ pub fn load_one_shot_request_from_contract(
             crate::config_contract_adapters::v0_8::into_wire(*request)
         }
         ExactOneShotContract::Dev(request) => {
+            mxc_config_contract::dev::validate_one_shot_request(&request)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
             crate::config_contract_adapters::dev::one_shot_into_wire(*request)
         }
     };
@@ -364,6 +366,62 @@ fn exact_containment_error(error: mxc_config_contract::dev::ContainmentProbeErro
     ParseError::StateAware(MxcError::malformed_request(message))
 }
 
+fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&'static str> {
+    match (contract, path) {
+        ("IsolationSession provision", Some("network.proxy")) => Some(
+            "IsolationSession requires network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback all set to 'allow'; it does not support proxy \
+             configuration",
+        ),
+        (
+            "IsolationSession provision",
+            Some(
+                "network.defaultPolicy"
+                | "network.enforcementMode"
+                | "network.allowedHosts"
+                | "network.blockedHosts"
+                | "network.allowLocalNetwork",
+            ),
+        ) => Some(
+            "IsolationSession requires network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback all set to 'allow'; it does not support network \
+             filtering",
+        ),
+        ("WSLC provision", Some("network.proxy")) => {
+            Some("move the proxy URL to top-level runtimeConfig.networkProxy on the exec phase")
+        }
+        ("WSLC provision", Some("network.defaultPolicy" | "network.allowLocalNetwork")) => Some(
+            "set network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback consistently to 'allow' or 'deny'",
+        ),
+        ("WSLC provision", Some("network.enforcementMode")) => Some(
+            "remove network.enforcementMode; WSLc selects its all-or-nothing network mechanism",
+        ),
+        ("WSLC provision", Some("network.allowedHosts" | "network.blockedHosts")) => Some(
+            "WSLc does not support hostname or destination filtering; use an all-'allow' or \
+             all-'deny' directional posture",
+        ),
+        (_, Some("network.defaultPolicy")) => {
+            Some("use network.egress.default ('allow' or 'deny')")
+        }
+        (_, Some("network.enforcementMode")) => {
+            Some("use directional network policy; enforcement is selected by the backend")
+        }
+        (_, Some("network.allowedHosts" | "network.blockedHosts")) => Some(
+            "use network.egress.allow/deny CIDR rules; hostnames cannot be losslessly converted",
+        ),
+        (_, Some("network.allowLocalNetwork")) => {
+            Some("use network.ingress.default and network.ingress.hostLoopback")
+        }
+        (_, Some("network.proxy")) => Some("use runtimeConfig.networkProxy with a proxy URL"),
+        ("IsolationSession provision", Some("network")) => Some(
+            "set network.egress.default, network.ingress.default, and \
+             network.ingress.hostLoopback to 'allow'",
+        ),
+        _ => None,
+    }
+}
+
 fn deserialize_development_root<T>(
     json: &str,
     contract: &'static str,
@@ -373,7 +431,10 @@ where
     T: serde::de::DeserializeOwned,
 {
     config_deserialize::from_str(json).map_err(|error| {
-        let message = format!("Invalid {contract} request: {error}");
+        let mut message = format!("Invalid {contract} request: {error}");
+        if let Some(migration) = development_network_migration(contract, error.path()) {
+            message.push_str(&format!("; schema 0.9 migration: {migration}"));
+        }
         if state_aware {
             ParseError::StateAware(MxcError::malformed_request(message))
         } else {
@@ -389,9 +450,13 @@ fn deserialize_development_request(
     use mxc_config_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
 
     match phase {
-        None => deserialize_development_root(json, "one-shot", false)
-            .map(Box::new)
-            .map(Request::OneShot),
+        None => {
+            let request: mxc_config_contract::dev::OneShotRequest =
+                deserialize_development_root(json, "one-shot", false)?;
+            dev::validate_one_shot_request(&request)
+                .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
@@ -739,6 +804,7 @@ fn parse_mxc_request_json(
 #[cfg(test)]
 fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
     validate_directional_network_field_versions(config)?;
+    validate_seatbelt_launch_method_version(config)?;
     validate_telemetry_field_version(config)?;
     validate_inherit_default_env_field_version(config)
 }
@@ -767,6 +833,37 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
 
     if has_directional_network || has_runtime_config || has_process_container_network {
         return Err(directional_network_version_error());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_seatbelt_launch_method_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    let has_launch_method = ["seatbelt", "macos_sandbox"]
+        .into_iter()
+        .filter_map(|key| config.get(key))
+        .filter_map(serde_json::Value::as_object)
+        .any(|seatbelt| seatbelt.contains_key("launchMethod"));
+    if !has_launch_method {
+        return Ok(());
+    }
+    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Ok(version) = semver::Version::parse(version) else {
+        // The ordinary schema-version validator owns malformed-version
+        // diagnostics so this feature gate does not mask the more useful error.
+        return Ok(());
+    };
+    if version.major == 0 && version.minor >= 9 {
+        return Err(WxcError::ConfigParse(
+            "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha; \
+             remove the field (the contained process is always launched with exec)"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -929,6 +1026,7 @@ fn validate_schema_version(version: &str) -> Result<(), WxcError> {
 fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
     validate_paths(&policy.readonly_paths)?;
     validate_paths(&policy.readwrite_paths)?;
+    validate_paths(&policy.enumerate_paths)?;
     validate_paths(&policy.denied_paths)?;
     Ok(())
 }
@@ -976,6 +1074,7 @@ fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
 fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger) {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
+        && policy.enumerate_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
         return;
@@ -984,6 +1083,8 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     // 1. Same-path (string) conflict: drop a path from a list if it also appears
     //    in a more restrictive list.
     let denied: std::collections::HashSet<String> = policy.denied_paths.iter().cloned().collect();
+    let enumerate: std::collections::HashSet<String> =
+        policy.enumerate_paths.iter().cloned().collect();
     let readonly: std::collections::HashSet<String> =
         policy.readonly_paths.iter().cloned().collect();
 
@@ -992,6 +1093,14 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else if enumerate.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'filesystem.readwritePaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
+                 applying most-restrictive intent (enumerate)",
                 config_deserialize::escape_diagnostic_text(p)
             ));
             false
@@ -1010,6 +1119,27 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
         if denied.contains(p) {
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readonlyPaths' and 'deniedPaths'; \
+                 applying most-restrictive intent (denied)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else if enumerate.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'filesystem.readonlyPaths' and \
+                 'processContainer.filesystem.enumeratePaths'; \
+                 applying most-restrictive intent (enumerate)",
+                config_deserialize::escape_diagnostic_text(p)
+            ));
+            false
+        } else {
+            true
+        }
+    });
+    policy.enumerate_paths.retain(|p| {
+        if denied.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'processContainer.filesystem.enumeratePaths' and \
+                 'filesystem.deniedPaths'; \
                  applying most-restrictive intent (denied)",
                 config_deserialize::escape_diagnostic_text(p)
             ));
@@ -1471,6 +1601,12 @@ fn convert_wire_config(
             policy.base_process_ui.system_settings =
                 raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
             policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
+        }
+
+        if let Some(filesystem) = ac.filesystem {
+            if let Some(paths) = filesystem.enumerate_paths {
+                policy.enumerate_paths = paths;
+            }
         }
 
         process_container_network = ac.network;
@@ -2362,14 +2498,13 @@ mod tests {
         InvalidLegacyPayload(String),
     }
 
-    /// Frozen mirror of the runtime IsolationSession provision config as it
-    /// stood before the unrestricted-network contract changed.
+    /// Frozen mirror of the legacy runtime IsolationSession provision config.
     ///
     /// The legacy payload path is the independent *baseline* the exact parser is
     /// characterized against. Pointing it at the live runtime type would let it
     /// silently learn every field added to that type afterwards, so the baseline
-    /// would grow the acknowledgment the exact contract has not yet exposed and
-    /// stop being independent. Freezing the shape here keeps the reference
+    /// would grow with later contract additions and stop being independent.
+    /// Freezing the shape here keeps the reference
     /// describing the old parser, which is its only job.
     #[derive(Debug, Default, serde::Deserialize)]
     #[serde(default, rename_all = "camelCase")]
@@ -2744,6 +2879,7 @@ mod tests {
         PublishedExperimental,
         PublishedStateAware,
         DevelopmentContractTightening,
+        RemovedDevelopmentNetworkField,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2785,6 +2921,9 @@ mod tests {
                 Self::DevelopmentContractTightening => {
                     "The migrated 0.9 contract intentionally rejects a parse-and-ignore one-shot extension or a phase/backend policy that the rolling parser defers to backend validation."
                 }
+                Self::RemovedDevelopmentNetworkField => {
+                    "The exact 0.9 contract removes legacy network fields; the rolling parser remains an independent legacy-input oracle."
+                }
             }
         }
     }
@@ -2792,6 +2931,26 @@ mod tests {
     fn expected_corpus_divergences(
     ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
         let entries = [
+            (
+                "tests/configs/hyperlight_networking.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
+            (
+                "tests/configs/hyperlight_networking_blocked.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
+                    route: ErrorRoute::OneShot,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("network.allowedHosts"),
+                    message_fragment: "unknown field `allowedHosts`",
+                },
+            ),
             (
                 "tests/configs/isolation_session_configid_rejected.json",
                 ExpectedCorpusDivergence {
@@ -2828,8 +2987,8 @@ mod tests {
                     kind: CorpusDivergenceKind::DevelopmentContractTightening,
                     route: ErrorRoute::StateAware,
                     category: ErrorCategory::TypedStructure,
-                    path: Some("network.defaultPolicy"),
-                    message_fragment: "unknown variant `block`, expected `allow`",
+                    path: Some("network.egress.default"),
+                    message_fragment: "expected `allow`",
                 },
             ),
             (
@@ -2860,6 +3019,16 @@ mod tests {
                     category: ErrorCategory::TypedStructure,
                     path: Some("filesystem"),
                     message_fragment: "unknown field `filesystem`",
+                },
+            ),
+            (
+                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
+                ExpectedCorpusDivergence {
+                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
+                    route: ErrorRoute::StateAware,
+                    category: ErrorCategory::TypedStructure,
+                    path: Some("runtimeConfig"),
+                    message_fragment: "unknown field `runtimeConfig`",
                 },
             ),
         ];
@@ -3125,12 +3294,55 @@ mod tests {
 
         let version = object.get("version")?.as_str()?;
         if version == "0.9.0-alpha" {
-            // The one-shot IsolationSession section is a closed contract that
-            // accepts only the unrestricted-network acknowledgment. The rolling
-            // parser stores whatever it finds there and lets the backend decide;
-            // the exact contract refuses any other member outright. Matching on
-            // the section's own path keeps this specific to that surface rather
-            // than exempting one-shot unknown fields generally.
+            if exact.category == ErrorCategory::TypedStructure {
+                if let Some(field) = exact
+                    .path
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix("network."))
+                {
+                    if matches!(
+                        field,
+                        "defaultPolicy"
+                            | "enforcementMode"
+                            | "allowedHosts"
+                            | "blockedHosts"
+                            | "allowLocalNetwork"
+                            | "proxy"
+                    ) && object
+                        .get("network")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|network| network.contains_key(field))
+                        && exact.message.contains(&format!("unknown field `{field}`"))
+                    {
+                        return Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField);
+                    }
+                }
+                let removed_phase_field = object.get("phase").and_then(serde_json::Value::as_str)
+                    == Some("provision")
+                    && match object
+                        .get("containment")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("isolation_session") => {
+                            exact.path.as_deref().is_some_and(|path| {
+                                path == "network" || path.starts_with("network.")
+                            }) && object.contains_key("network")
+                        }
+                        Some("wslc") => {
+                            exact.path.as_deref() == Some("runtimeConfig")
+                                && object.contains_key("runtimeConfig")
+                                && exact.message.contains("unknown field `runtimeConfig`")
+                        }
+                        _ => false,
+                    };
+                if removed_phase_field {
+                    return Some(CorpusDivergenceKind::DevelopmentContractTightening);
+                }
+            }
+            // The one-shot IsolationSession section is closed. The rolling
+            // parser stores unknown members there and lets the backend decide;
+            // the exact contract refuses them outright. Matching on the
+            // section's own path keeps this specific to that surface.
             let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
                 && exact.category == ErrorCategory::TypedStructure
                 && exact
@@ -3449,8 +3661,8 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
                     "telemetry":{"enabled":false},
+                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
                     "experimental":{
                         "isolation_session":{"provision":{"appId":"Contoso.App"}}
                     }
@@ -3463,7 +3675,7 @@ mod tests {
                     "phase":"provision",
                     "containment":"wslc",
                     "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
-                    "network":{"defaultPolicy":"allow"},
+                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
                     "telemetry":{"enabled":true},
                     "experimental":{
                         "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
@@ -3486,7 +3698,7 @@ mod tests {
                     "phase":"exec",
                     "sandboxId":"wslc:abcd1234",
                     "process":{"commandLine":"echo exec","cwd":"/work","env":["C=3"],"timeout":42},
-                    "network":{"proxy":{"url":"http://proxy.example.com:8080"}},
+                    "runtimeConfig":{"networkProxy":"http://proxy.example.com:8080"},
                     "telemetry":{"enabled":false}
                 }"#,
             ),
@@ -3771,7 +3983,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "experimental":{"isolation_session":{"provision":{"appId":null}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -3794,7 +4006,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "experimental":{"isolation_session":{"provision":{"futureField":true}}}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -3981,7 +4193,7 @@ mod tests {
                     "version":"0.9.0-alpha",
                     "phase":"provision",
                     "containment":"isolation_session",
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true},
+                    "_comment":null,
                     "ui":{"disable":true}
                 }"#,
                 direction: DivergenceDirection::ExactStricter,
@@ -4299,6 +4511,55 @@ mod tests {
     }
 
     #[test]
+    fn each_removed_network_field_is_a_precise_exact_stricter_divergence() {
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+            ("allowedHosts", "[]"),
+            ("blockedHosts", "[]"),
+            ("allowLocalNetwork", "false"),
+            ("proxy", r#"{"url":"http://localhost:8080"}"#),
+        ] {
+            for root in [
+                r#""containment":"processcontainer","process":{"commandLine":"echo"}"#,
+                r#""phase":"provision","containment":"wslc""#,
+                r#""phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"}"#,
+            ] {
+                let compatible_proxy_posture =
+                    if field == "proxy" && !root.contains("\"phase\":\"exec\"") {
+                        r#","defaultPolicy":"allow""#
+                    } else {
+                        ""
+                    };
+                let source = format!(
+                    r#"{{"version":"0.9.0-alpha",{root},"network":{{"{field}":{value}{compatible_proxy_posture}}}}}"#
+                );
+                let (rolling, exact) = parse_both(&source);
+                assert!(
+                    matches!(rolling, ParserSnapshot::Accepted(_)),
+                    "{source}: {rolling:?}"
+                );
+                let ParserSnapshot::Rejected(exact) = exact else {
+                    panic!("removed field accepted: {source}");
+                };
+                assert_eq!(
+                    exact.diagnostic.path.as_deref(),
+                    Some(format!("network.{field}").as_str())
+                );
+                assert_eq!(
+                    classify_corpus_exact_stricter(
+                        &serde_json::from_str(&source).unwrap(),
+                        &exact.diagnostic
+                    ),
+                    Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField),
+                    "{source}"
+                );
+                assert!(exact.diagnostic.message.contains("schema 0.9 migration"));
+            }
+        }
+    }
+
+    #[test]
     fn differential_repository_corpus_has_no_unclassified_or_exact_looser_results() {
         let root = repository_root();
         let mut files = Vec::new();
@@ -4337,10 +4598,29 @@ mod tests {
 
             let (rolling, exact) = parse_both(&json);
             let mut public_logger = test_logger();
-            let public = snapshot(
-                load_mxc_request_from_json(&json, &mut public_logger),
-                &public_logger,
-            );
+            let public_result = load_mxc_request_from_json(&json, &mut public_logger);
+            if relative == "tests/configs/wslc_state_aware_exec_proxy.json" {
+                let retains_proxy_only_wslc_context = match &public_result {
+                    Ok(MxcRequest::StateAware(parsed)) => {
+                        let request = parsed.request();
+                        request.containment == ContainmentBackend::Wslc
+                            && !request.policy.network_specified
+                            && !request.policy.network_mode_specified
+                            && request.policy.runtime_network_proxy_specified
+                            && request.policy.network_proxy.is_enabled()
+                            && request.policy.network_egress.is_none()
+                            && request.policy.network_ingress.is_none()
+                    }
+                    _ => false,
+                };
+                if !retains_proxy_only_wslc_context {
+                    blockers.push(format!(
+                        "{relative}: valid proxy-only template must preserve the WSLC ID prefix \
+                         and inherit network mode; it must not become a shared rejection"
+                    ));
+                }
+            }
+            let public = snapshot(public_result, &public_logger);
             if !same_parse_outcome(&public, &exact) {
                 blockers.push(format!(
                     "{relative}: public exact dispatch differs from the exact parser oracle\npublic={public:?}\nexact={exact:?}"
@@ -4476,11 +4756,7 @@ mod tests {
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
         );
-        let expected_inventory = if cfg!(target_os = "linux") {
-            (366, 344, 15)
-        } else {
-            (366, 345, 14)
-        };
+        let expected_inventory = (379, 355, 14);
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
             expected_inventory,
@@ -4770,7 +5046,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "IsolationSession provision",
-            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::IsolationSession),
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -4875,13 +5151,12 @@ mod tests {
                 "phase": "provision",
                 "containment": "isolation_session",
                 "telemetry": {{"enabled": {telemetry_enabled}}},
-                "network": {{
-                    "defaultPolicy": "allow",
-                    "allowLocalNetwork": true
-                }},
+                "network": {{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}},
                 "experimental": {{
                     "isolation_session": {{
-                        "provision": {{"appId": "Contoso.App"}}
+                        "provision": {{
+                            "appId": "Contoso.App"
+                        }}
                     }}
                 }}
             }}"#
@@ -5128,7 +5403,7 @@ mod tests {
             ),
             (
                 "IsolationSession provision",
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
                 true,
             ),
             (
@@ -5233,7 +5508,7 @@ mod tests {
         let error = parse_exact_for_test(json).unwrap_err();
         assert!(matches!(error, ParseError::StateAware(_)));
         let message = error.message();
-        assert!(message.contains("network.defaultPolicy"), "{message}");
+        assert!(message.contains("`network.defaultPolicy`"), "{message}");
         assert!(message.contains("line 5"), "{message}");
 
         let spoofed =
@@ -5241,6 +5516,78 @@ mod tests {
         let error = parse_exact_for_test(spoofed).unwrap_err();
         let message = error.message();
         assert!(message.contains(r"bad\u{202e}name"), "{message}");
+    }
+
+    #[test]
+    fn exact_development_network_migration_guidance_is_contract_aware() {
+        for (json, expected, rejected) in [
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "wslc",
+                    "network": {"proxy": {"url": "http://proxy.example:8080"}}
+                }"#,
+                "top-level runtimeConfig.networkProxy on the exec phase",
+                "use runtimeConfig.networkProxy with a proxy URL",
+            ),
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "isolation_session",
+                    "network": {"allowedHosts": ["example.com"]}
+                }"#,
+                "IsolationSession requires network.egress.default, network.ingress.default, and network.ingress.hostLoopback all set to 'allow'",
+                "CIDR rules",
+            ),
+            (
+                r#"{
+                    "version": "0.9.0-alpha",
+                    "phase": "provision",
+                    "containment": "isolation_session",
+                    "network": {"defaultPolicy": "allow"}
+                }"#,
+                "IsolationSession requires network.egress.default, network.ingress.default, and network.ingress.hostLoopback all set to 'allow'",
+                "('allow' or 'deny')",
+            ),
+        ] {
+            let message = parse_exact_for_test(json).unwrap_err().message();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains(rejected), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_development_production_parser_requires_isolation_session_network() {
+        let missing_network = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let error = parse_exact_for_test(missing_network).unwrap_err();
+        assert!(matches!(error, ParseError::OneShot(_)));
+        assert!(
+            error
+                .message()
+                .contains("IsolationSession requires an explicit network policy"),
+            "{}",
+            error.message()
+        );
+
+        let directional = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "isolation_session",
+            "process": {"commandLine": "echo hello"},
+            "network": {
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            }
+        }"#;
+        assert!(matches!(
+            parse_exact_for_test(directional).unwrap(),
+            MxcRequest::OneShot(_)
+        ));
     }
 
     #[test]
@@ -5313,6 +5660,32 @@ mod tests {
         assert!(
             logger.get_buffer().contains("must not contain a comma"),
             "semantic failure should be logged"
+        );
+    }
+
+    #[test]
+    fn exact_development_contract_bridge_requires_isolation_session_network() {
+        let request = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#"{
+                "version": "0.9.0-alpha",
+                "containment": "isolation_session",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        )
+        .unwrap();
+        let mut logger = test_logger();
+
+        let error = load_one_shot_request_from_contract(
+            ExactOneShotContract::Dev(Box::new(request)),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("IsolationSession requires an explicit network policy"),
+            "unexpected semantic error: {error}"
         );
     }
 
@@ -5507,6 +5880,39 @@ mod tests {
         assert!(probe_phase(r#"{"phase":"nope"}"#).is_err());
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wslc_proxy_template_migration_keeps_backend_context() {
+        let legacy = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "network":{"proxy":{"url":"http://127.0.0.1:8888"}}
+        }"#;
+        assert!(parse_mxc_request_json(legacy, &mut test_logger()).is_ok());
+
+        let unprefixed = r#"{
+            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
+            "process":{"commandLine":"echo proxy"},
+            "runtimeConfig":{"networkProxy":"http://127.0.0.1:8888"}
+        }"#;
+        assert!(parse_mxc_request_json(unprefixed, &mut test_logger()).is_err());
+        let error = parse_exact_for_test(unprefixed).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("ProcessContainer runtimeConfig.networkProxy requires"),
+            "{}",
+            error.message()
+        );
+        println!(
+            "unprefixed WSLC proxy-template rejection: {}",
+            error.message()
+        );
+
+        let prefixed = unprefixed.replace("{{SANDBOX_ID}}", "wslc:{{SANDBOX_ID}}");
+        assert_accepted_models_converge("prefixed WSLC proxy template", &prefixed);
+    }
+
     #[test]
     fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
         let json = r#"{
@@ -5514,7 +5920,7 @@ mod tests {
             "phase": "exec",
             "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
             "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+            "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
         }"#;
         let mut logger = test_logger();
 
@@ -5700,10 +6106,11 @@ mod tests {
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"proxy": {"url": "http://proxy.example:8080"}}
+                "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
             }"#,
         );
-        assert!(proxy_only.request().policy.network_specified);
+        assert!(!proxy_only.request().policy.network_specified);
+        assert!(proxy_only.request().policy.runtime_network_proxy_specified);
         assert!(!proxy_only.request().policy.network_mode_specified);
         assert!(proxy_only.request().policy.network_proxy.is_enabled());
 
@@ -5713,14 +6120,19 @@ mod tests {
                 "phase": "exec",
                 "sandboxId": "wslc:abcd1234",
                 "process": {"commandLine": "echo hi"},
-                "network": {"defaultPolicy": "allow"}
+                "network": {"egress": {"default": "allow"}}
             }"#,
         );
         assert!(mode.request().policy.network_specified);
         assert!(mode.request().policy.network_mode_specified);
         assert_eq!(
-            mode.request().policy.default_network_policy,
-            NetworkPolicy::Allow
+            mode.request()
+                .policy
+                .network_egress
+                .as_ref()
+                .unwrap()
+                .default,
+            crate::models::NetworkAction::Allow
         );
         assert!(!mode.request().policy.network_proxy.is_enabled());
     }
@@ -6249,11 +6661,7 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": true},
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
-            "experimental": {"isolation_session": {"provision": {}}}
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
@@ -6265,9 +6673,7 @@ mod tests {
                 assert_eq!(telem.enabled, Some(true));
                 assert_eq!(
                     p.operation(),
-                    &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-                        crate::models::IsolationSessionProvisionConfig::default(),
-                    ))),
+                    &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(None)),
                 );
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
@@ -7205,7 +7611,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let encoded = base64_encode(
-            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"defaultPolicy":"allow","allowLocalNetwork":true},"experimental":{"seatbelt":{}}}"#,
+            br#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","experimental":{"seatbelt":{}}}"#,
         );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
@@ -9521,10 +9927,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "lifecycle": {"destroyOnExit": false}
         }"#;
         let err = match load_mxc(json) {
@@ -9577,10 +9979,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "experimental": {"seatbelt": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
@@ -9596,10 +9994,6 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            },
             "experimental": {"macos_sandbox": {"guiAccess": true}}
         }"#;
         let err = match load_mxc(json) {
@@ -9616,10 +10010,7 @@ mod tests {
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            }
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert_eq!(p.phase(), Phase::Provision),
@@ -11064,6 +11455,71 @@ mod tests {
     }
 
     #[test]
+    fn dev_contract_maps_enumerate_paths() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn same_path_in_readonly_and_enumerate_becomes_enumerate() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.readonly_paths.is_empty());
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn same_path_in_readwrite_and_enumerate_becomes_enumerate() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readwritePaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.readwrite_paths.is_empty());
+        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (enumerate)"));
+    }
+
+    #[test]
+    fn same_path_in_enumerate_and_denied_becomes_denied() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"deniedPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(req.policy.enumerate_paths.is_empty());
+        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
+        assert!(logger
+            .get_buffer()
+            .contains("applying most-restrictive intent (denied)"));
+    }
+
+    #[test]
+    fn enumerate_path_conflict_diagnostic_escapes_control_characters() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools\nforged"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools\nforged"]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
+
+        assert!(!logger.get_buffer().contains("C:\\tools\nforged"));
+        assert!(logger.get_buffer().contains("C:\\tools\\nforged"));
+    }
+
+    #[test]
     fn same_path_in_readonly_and_denied_becomes_denied() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -11142,6 +11598,59 @@ mod tests {
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(true));
         assert_eq!(telem.requested_sandbox_kind, Some("process"));
+    }
+
+    #[test]
+    fn seatbelt_launch_method_rejected_from_09_across_one_shot_loaders() {
+        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"seatbelt":{"launchMethod":"open"}}"#;
+        let expected = "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha";
+
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error =
+            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+    }
+
+    #[test]
+    fn seatbelt_launch_method_rejected_from_09_under_section_alias() {
+        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"macos_sandbox":{"launchMethod":"exec"}}"#;
+        let mut logger = test_logger();
+
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'seatbelt.launchMethod' was removed"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn seatbelt_launch_method_still_honored_before_09() {
+        // 0.7 and 0.8 are published schemas, so the field keeps working there.
+        for version in ["0.7.0-alpha", "0.8.0-alpha"] {
+            let json = format!(
+                r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"seatbelt":{{"launchMethod":"open"}}}}"#
+            );
+            let mut logger = test_logger();
+
+            let req = load_request_from_json(&json, &mut logger)
+                .unwrap_or_else(|error| panic!("{version} should still accept it: {error:?}"));
+            let cfg = req.seatbelt.expect("seatbelt should be populated");
+            assert!(matches!(
+                cfg.launch_method,
+                crate::models::LaunchMethod::Open
+            ));
+        }
     }
 
     #[test]

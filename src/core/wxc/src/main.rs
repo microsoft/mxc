@@ -24,7 +24,7 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 #[derive(Parser)]
-#[command(name = "wxc-exec", about = "Windows Container Executor")]
+#[command(name = "wxc-exec", version, about = "Windows Container Executor")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -996,7 +996,10 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(&request);
+        let output = appcontainer_common::probe::run_probe(
+            &request,
+            mxc_engine::guarded_capture_available(),
+        );
         // appcontainer_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
@@ -1633,6 +1636,24 @@ mod tests {
         Cli::try_parse_from(argv)
             .unwrap()
             .normalize_named_config_command()
+    }
+
+    #[test]
+    fn cli_version_flags_work_without_config() {
+        for flag in ["--version", "-V"] {
+            let error = match Cli::try_parse_from(["wxc-exec", flag]) {
+                Err(error) => error,
+                Ok(_) => panic!("{flag} should display the version and exit"),
+            };
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(error.exit_code(), 0);
+            assert!(!error.use_stderr());
+            assert_eq!(
+                error.to_string(),
+                format!("wxc-exec {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
     }
 
     fn encoded_policy(json: &str) -> String {

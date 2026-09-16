@@ -26,6 +26,7 @@ import {
   stopSandbox,
 } from '@microsoft/mxc-sdk';
 import {
+  isolationSessionNetwork,
   probeIsolationSessionFeature,
   probeStateAwareRuntime,
   safeDeprovision,
@@ -122,7 +123,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('shares files with the session through the ephemeral workspace', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      { network: isolationSessionNetwork },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
     assert.ok(
@@ -182,7 +187,11 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('exec surfaces a non-zero script exit as ExecResult.exitCode', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      { network: isolationSessionNetwork },
+      { experimental: true },
+    );
     const sandboxId = provisionResult.sandboxId;
 
     try {
@@ -278,7 +287,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionSandbox(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          network: isolationSessionNetwork,
           appId: 'x'.repeat(257),
         },
         { experimental: true },
@@ -314,7 +323,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          network: isolationSessionNetwork,
           ui: { disable: true },
         },
         { experimental: true },
@@ -330,7 +339,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
       () => provisionUntyped(
         'isolation_session',
         {
-          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          network: isolationSessionNetwork,
           ui: {},
         },
         { experimental: true },

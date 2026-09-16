@@ -28,6 +28,15 @@ const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
 const REGISTERED_VERSION_ORDER = new Map(
     REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
 );
+const LEGACY_NETWORK_FIELDS = [
+    'allowOutbound',
+    'defaultPolicy',
+    'enforcementMode',
+    'allowLocalNetwork',
+    'allowedHosts',
+    'blockedHosts',
+    'proxy',
+] as const;
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -127,11 +136,9 @@ function validateTelemetryVersion(policy: SandboxPolicy): void {
 }
 
 function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return network.allowOutbound !== undefined ||
-        network.allowLocalNetwork !== undefined ||
-        network.allowedHosts !== undefined ||
-        network.blockedHosts !== undefined ||
-        network.proxy !== undefined;
+    return LEGACY_NETWORK_FIELDS.some(
+        field => (network as Record<string, unknown>)[field] !== undefined,
+    );
 }
 
 function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
@@ -147,6 +154,20 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
 
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
+    if (policy.version === '0.9.0-alpha' && network !== undefined) {
+        for (const field of LEGACY_NETWORK_FIELDS) {
+            if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
+                throw new Error(
+                    `Schema 0.9.0-alpha no longer supports network.${field}. ` +
+                    'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
+                    'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
+                );
+            }
+        }
+        if (network === null || typeof network !== 'object' || Array.isArray(network)) {
+            throw new Error('network must be an object when supplied.');
+        }
+    }
     const hasLegacy = network !== undefined && hasLegacyNetworkFields(network);
     const hasDirectional = usesDirectionalNetwork(policy);
 
@@ -190,7 +211,7 @@ function buildWslcContainerConfig(
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from
-    // the network.defaultPolicy field — no firewall enforcement needed.
+    // the directional egress posture — no firewall enforcement needed.
 
     return config;
 }
@@ -268,13 +289,16 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
+        filesystem: policy.processContainer?.filesystem?.enumeratePaths?.length
+            ? { enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths] }
+            : undefined,
         network: policy.processContainer?.network?.allowedProxyPeer !== undefined
             ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
             : undefined,
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network && !usesDirectionalNetwork(policy)) {
+    if (config.network && policy.version !== '0.9.0-alpha' && !usesDirectionalNetwork(policy)) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -287,7 +311,7 @@ function buildProcessBaseContainerConfig(
 
 /**
  * Builds the MicroVM (NanVix) portion of a ContainerConfig.
- * MicroVM is Windows-only and does not support network or UI policies.
+ * MicroVM is Windows-only and supports isolated or unrestricted networking.
  */
 function buildMicroVmConfig(
     config: ContainerConfig,
@@ -296,11 +320,35 @@ function buildMicroVmConfig(
     if (os.platform() !== 'win32') {
         throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
-    if (policy.network || usesDirectionalNetwork(policy)) {
+    if (policy.network && hasLegacyNetworkFields(policy.network)) {
         throw new Error(
-            'The microvm backend does not support network configuration. ' +
-            'Remove network, runtimeConfig, and processContainer.network or use a different backend.'
+            'The microvm backend supports only directional network.egress/network.ingress configuration.'
         );
+    }
+    if (policy.runtimeConfig?.networkProxy !== undefined ||
+        policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+        throw new Error('The microvm backend does not support network proxy configuration.');
+    }
+    if (policy.network?.egress?.allow?.length || policy.network?.egress?.deny?.length) {
+        throw new Error(
+            'The microvm backend does not support directional network rules. ' +
+            'Use fully isolated or explicitly unrestricted networking without rules.'
+        );
+    }
+    if (policy.network !== undefined) {
+        const egressDefault = policy.network.egress?.default ?? 'deny';
+        const ingressDefault = policy.network.ingress?.default ?? 'deny';
+        const hostLoopback = policy.network.ingress?.hostLoopback ?? 'deny';
+        if (egressDefault !== ingressDefault || ingressDefault !== hostLoopback) {
+            throw new Error(
+                'The microvm backend requires network.egress.default, network.ingress.default, ' +
+                'and network.ingress.hostLoopback to be all deny or all allow.'
+            );
+        }
+        config.network = {
+            egress: policy.network.egress,
+            ingress: policy.network.ingress,
+        };
     }
     if (policy.filesystem?.readwritePaths?.length ||
         policy.filesystem?.readonlyPaths?.length ||
@@ -310,6 +358,12 @@ function buildMicroVmConfig(
             readonlyPaths: policy.filesystem?.readonlyPaths,
             deniedPaths: policy.filesystem?.deniedPaths,
         };
+    }
+    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
+        throw new Error(
+            'The microvm backend does not support processContainer.filesystem.enumeratePaths. ' +
+            'Remove it or use the Windows ProcessContainer backend.'
+        );
     }
     config.containment = 'microvm';
     return config;
@@ -354,6 +408,7 @@ export function createConfigFromPolicy(
     validateContainmentVersion(policy.version, containment, platform);
     validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
+    const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
 
     const containerId = containerName ?? generateRandomContainerName();
 
@@ -378,11 +433,34 @@ export function createConfigFromPolicy(
         return buildMicroVmConfig(config, policy);
     }
 
+    if (enumeratePaths?.length) {
+        if (policy.version !== '0.9.0-alpha') {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha.'
+            );
+        }
+        const targetsWindowsProcessContainer =
+            platform === 'win32' && (containment === 'process' || containment === 'processcontainer');
+        if (!targetsWindowsProcessContainer) {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths is supported only by the Windows ' +
+                'ProcessContainer backend.'
+            );
+        }
+    }
+
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
         readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
+    if (enumeratePaths?.length) {
+        config.processContainer = {
+            filesystem: {
+                enumeratePaths: [...enumeratePaths],
+            },
+        };
+    }
 
     // UI mapping (cross-platform)
     config.ui = {
@@ -392,10 +470,11 @@ export function createConfigFromPolicy(
     };
 
     if (directionalNetwork) {
-        if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
+        if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
+            policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
             config.network = {
-                egress: policy.network.egress,
-                ingress: policy.network.ingress,
+                egress: policy.network?.egress,
+                ingress: policy.network?.ingress,
             };
         }
         if (policy.runtimeConfig?.networkProxy !== undefined) {
@@ -405,6 +484,7 @@ export function createConfigFromPolicy(
         }
         if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
             config.processContainer = {
+                ...config.processContainer,
                 network: {
                     allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
                 },

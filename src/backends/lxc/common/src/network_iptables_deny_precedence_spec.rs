@@ -1,38 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Black-box specification for deny-precedence and for the fail-closed
-//! response to a block-list entry that resolves to no address.
-//!
-//! Written against the documented contract of the policy rule builder, not
-//! against its body.
-//!
-//! Structural tests (ordering, rule shape, family split) call the test-only
-//! `build_policy_rule_args` shim, which panics rather than returning `Err`.
-//! Tests that must observe the `Result` or the logger buffer call
-//! `build_policy_rules_logged` directly.
-
 use super::*;
-// `super::*` re-exports `Logger` (the parent module uses it in its own
-// signatures) but not `Mode`, which the parent never names directly.
 use wxc_common::logger::Mode;
 
-/// Chain name shared by tests that do not care about its exact value. A
-/// couple of tests use a distinct literal on purpose, to prove the chain
-/// name is threaded through rather than hard-coded.
 const CHAIN: &str = "mxc_test_chain";
 
-// ---------------------------------------------------------------------------
-// Shared helpers.
-// ---------------------------------------------------------------------------
-
-/// Render a rule as `&str` slices, so it can be compared against a literal
-/// without allocating `String`s for the expected side.
 fn as_str_slice(rule: &[String]) -> Vec<&str> {
     rule.iter().map(String::as_str).collect()
 }
 
-/// The destination argument (`-d <value>`) of a rule.
 fn destination_of(rule: &[String]) -> &str {
     let index = rule
         .iter()
@@ -41,7 +18,6 @@ fn destination_of(rule: &[String]) -> &str {
     &rule[index + 1]
 }
 
-/// The jump target argument (`-j <value>`) of a rule.
 fn action_of(rule: &[String]) -> &str {
     let index = rule
         .iter()
@@ -50,31 +26,20 @@ fn action_of(rule: &[String]) -> &str {
     &rule[index + 1]
 }
 
-/// The largest index whose rule targets `DROP`, or `None` if `rules` has no
-/// deny rules.
 fn last_drop_index(rules: &[Vec<String>]) -> Option<usize> {
     rules.iter().rposition(|rule| action_of(rule) == "DROP")
 }
 
-/// The smallest index whose rule targets `ACCEPT`, or `None` if `rules` has
-/// no allow rules.
 fn first_accept_index(rules: &[Vec<String>]) -> Option<usize> {
     rules.iter().position(|rule| action_of(rule) == "ACCEPT")
 }
 
-/// `items`, sorted, so two destination sets can be compared without caring
-/// about the order the implementation happened to produce them in.
 fn sorted<'a>(items: &[&'a str]) -> Vec<&'a str> {
     let mut items = items.to_vec();
     items.sort_unstable();
     items
 }
 
-/// Assert that `rules` contains exactly the given DROP and ACCEPT
-/// destinations, as sets, and that every DROP rule precedes every ACCEPT
-/// rule -- the B1 deny-precedence guarantee. Order within a single action
-/// is not part of the documented contract, so it is deliberately not
-/// checked here.
 fn assert_deny_precedence(
     rules: &[Vec<String>],
     expected_drop_destinations: &[&str],
@@ -113,10 +78,6 @@ fn assert_deny_precedence(
     }
 }
 
-/// Unwrap `result`, panicking with the `Err` payload.
-///
-/// `.unwrap()` would require `Debug` on the `Ok` type, which
-/// `FirewallRuleArgs` is not documented to implement.
 fn expect_ok(result: Result<FirewallRuleArgs, String>, context: &str) -> FirewallRuleArgs {
     match result {
         Ok(args) => args,
@@ -124,25 +85,15 @@ fn expect_ok(result: Result<FirewallRuleArgs, String>, context: &str) -> Firewal
     }
 }
 
-/// Whether `destination` (a bare address or an address/prefix CIDR) parses
-/// as IPv4. Used to state the family-split guarantee as an invariant over
-/// whatever the implementation actually produced, rather than as a
-/// hard-coded list of which literals are which family.
 fn parses_as_ipv4(destination: &str) -> bool {
     let address = destination.split('/').next().unwrap_or(destination);
     address.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
-/// Whether `destination` (a bare address or an address/prefix CIDR) parses
-/// as IPv6. See `parses_as_ipv4` for why this is an invariant, not a table.
 fn parses_as_ipv6(destination: &str) -> bool {
     let address = destination.split('/').next().unwrap_or(destination);
     address.parse::<std::net::Ipv6Addr>().is_ok()
 }
-
-// ---------------------------------------------------------------------------
-// B1 -- deny precedence: blocked-host rules precede allowed-host rules.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_destination_in_both_lists_is_dropped_because_deny_rules_are_emitted_first() {
@@ -156,8 +107,6 @@ fn a_destination_in_both_lists_is_dropped_because_deny_rules_are_emitted_first()
 
     let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
-    // B1: both rules are present -- there is no de-duplication pass -- and
-    // the DROP rule precedes the ACCEPT rule so first-match-wins denies.
     assert_eq!(
         args.ipv4.len(),
         2,
@@ -268,11 +217,6 @@ fn deny_precedence_holds_across_both_families_with_several_entries_in_each_list(
         &["2001:db8::/32", "2001:db8::44"],
     );
 }
-
-// ---------------------------------------------------------------------------
-// B4 -- unresolvable entries: fail closed only for a blocked host under an
-// Allow default; otherwise log a warning and continue.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_unresolvable_blocked_host_errors_under_an_allow_default_and_names_the_host() {
@@ -467,10 +411,6 @@ fn an_unresolvable_entry_does_not_suppress_a_sibling_entrys_rule_or_log_line() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// B2 / B3 -- rule shape and IPv4 / IPv6 family split.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn emitted_rules_have_the_exact_iptables_shape_for_both_allow_and_block_actions() {
     let allowed = "203.0.113.44";
@@ -492,8 +432,6 @@ fn emitted_rules_have_the_exact_iptables_shape_for_both_allow_and_block_actions(
          actual: {:?}",
         args.ipv4
     );
-    // B2: exactly `["-A", chain_name, "-d", destination, "-j", target]` --
-    // no more, no fewer arguments, and in this order.
     assert_eq!(
         as_str_slice(&args.ipv4[0]),
         vec!["-A", chain, "-d", blocked, "-j", "DROP"],
@@ -526,9 +464,6 @@ fn ipv4_and_ipv6_destinations_are_split_into_the_correct_bucket_and_never_cross_
 
     let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
-    // Property, not an enumerated example: every destination placed in the
-    // v4 bucket must itself parse as IPv4, and likewise for v6. This is what
-    // actually catches a leak, unlike checking the four inputs by name.
     for rule in &args.ipv4 {
         let destination = destination_of(rule);
         assert!(
@@ -560,10 +495,6 @@ fn ipv4_and_ipv6_destinations_are_split_into_the_correct_bucket_and_never_cross_
     );
 }
 
-// ---------------------------------------------------------------------------
-// B5 -- programmed-rule logging.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn programmed_rules_are_logged_with_the_exact_iptables_and_ip6tables_prefixes() {
     let allowed_v4 = "203.0.113.44";
@@ -585,9 +516,6 @@ fn programmed_rules_are_logged_with_the_exact_iptables_and_ip6tables_prefixes() 
     assert_eq!(args.ipv6.len(), 1, "actual: {:?}", args.ipv6);
 
     let buffer = logger.get_buffer();
-    // Hard-coded from B5's documented format, not derived from `args`, so
-    // this test still pins the log format even if the rule-content tests
-    // elsewhere were themselves wrong.
     let expected_ipv4_line =
         format!("Programmed iptables rule: -A {chain} -d {allowed_v4} -j ACCEPT");
     let expected_ipv6_line =
@@ -603,10 +531,6 @@ fn programmed_rules_are_logged_with_the_exact_iptables_and_ip6tables_prefixes() 
          actual buffer: {buffer:?}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// B6 -- empty policy.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_empty_policy_produces_an_empty_ok_result_with_no_log_output() {

@@ -500,6 +500,14 @@ mod tests {
     }
 
     #[test]
+    fn adding_an_enumerate_path_changes_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.policy.enumerate_paths.push("C:\\tools".to_string());
+        assert_ne!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
     fn changing_the_network_policy_changes_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
@@ -764,7 +772,7 @@ mod tests {
 
     fn provision_json(backend: &str, extra_fields: &str) -> String {
         let network = if backend == "isolation_session" {
-            r#","network":{"defaultPolicy":"allow","allowLocalNetwork":true}"#
+            r#","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#
         } else {
             ""
         };
@@ -966,7 +974,7 @@ mod tests {
                 "phase":"exec",
                 "sandboxId":"wslc:0123456789abcdef0123456789abcdef",
                 "process":{"commandLine":"echo hello"},
-                "network":{"proxy":{"url":"http://localhost:8080"}}
+                "runtimeConfig":{"networkProxy":"http://localhost:8080"}
             }"#,
         );
         let mut changed = parse_state_aware(
@@ -978,7 +986,7 @@ mod tests {
                     "commandLine":"echo synthetic-command-secret",
                     "env":["API_KEY=synthetic-environment-secret"]
                 },
-                "network":{"proxy":{"url":"http://alice:synthetic-password@localhost:8080"}},
+                "runtimeConfig":{"networkProxy":"http://localhost:8080"},
                 "telemetry":{"enabled":true},
                 "_comment":{"user":{"wamToken":"synthetic-comment-secret"}}
             }"#,
@@ -987,7 +995,7 @@ mod tests {
         assert_eq!(
             state_aware_policy_hash(baseline.request(), "wslc", baseline.operation()),
             state_aware_policy_hash(changed.request(), "wslc", changed.operation()),
-            "command, env, proxy userinfo, telemetry, comments, dry-run and unverified IDs are excluded"
+            "command, env, telemetry, comments, dry-run and unverified IDs are excluded"
         );
     }
 }

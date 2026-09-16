@@ -13,6 +13,7 @@ fn accepts_empty_optional_objects() {
         r#""ui": {}"#,
         r#""processContainer": {}"#,
         r#""processContainer": {"ui": {}}"#,
+        r#""processContainer": {"filesystem": {}}"#,
         r#""seatbelt": {}"#,
         r#""experimental": {}"#,
     ] {
@@ -44,8 +45,8 @@ fn accepts_empty_optional_arrays() {
         r#""filesystem": {"readwritePaths": []}"#,
         r#""filesystem": {"readonlyPaths": []}"#,
         r#""filesystem": {"deniedPaths": []}"#,
-        r#""network": {"allowedHosts": []}"#,
-        r#""network": {"blockedHosts": []}"#,
+        r#""network": {"egress": {"allow": []}}"#,
+        r#""network": {"egress": {"deny": []}}"#,
         r#""processContainer": {"capabilities": []}"#,
         r#""seatbelt": {"extraMachLookups": []}"#,
     ] {
@@ -290,6 +291,16 @@ fn rejects_null_optional_fields() {
                 "processContainer.ui",
                 version_and_process.as_str(),
                 r#""processContainer": {"ui": null}"#,
+            ),
+            (
+                "processContainer.filesystem",
+                version_and_process.as_str(),
+                r#""processContainer": {"filesystem": null}"#,
+            ),
+            (
+                "processContainer.filesystem.enumeratePaths",
+                version_and_process.as_str(),
+                r#""processContainer": {"filesystem": {"enumeratePaths": null}}"#,
             ),
             (
                 "processContainer.ui.isolation",

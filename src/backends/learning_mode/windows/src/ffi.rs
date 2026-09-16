@@ -165,11 +165,12 @@ impl LearningModeApi {
     }
 
     /// Construct an API surface directly from raw export pointers, bypassing the
-    /// DLL load. Test-only: lets sibling modules (e.g. `lifecycle`) inject fakes to
-    /// exercise the capture lifecycle host-independently without going through the
-    /// memoized [`load`](Self::load) path, so fakes never populate the process cache.
-    #[cfg(test)]
-    pub(crate) fn from_raw_parts(
+    /// DLL load. Test-only: lets dependent backend crates inject fakes without
+    /// going through the memoized [`load`](Self::load) path, so fakes never
+    /// populate the process cache.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn from_raw_parts(
         start: PfnStartLearningModeTrace,
         stop: PfnStopLearningModeTrace,
         close: PfnCloseLearningModeTrace,
@@ -232,7 +233,7 @@ impl LearningModeApi {
     /// Stop and deliver the trace, retrying only transient output-delivery
     /// failures. The trace remains live throughout the attempts and is still
     /// owned by the caller when this method returns.
-    pub(crate) fn stop_trace_with_retry(
+    pub fn stop_trace_with_retry(
         &self,
         trace: &LearningModeTraceHandle,
         output_path: Option<&Path>,

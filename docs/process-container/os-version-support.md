@@ -28,7 +28,7 @@ For the enforcement mechanisms themselves see the
 ## Enforcement tiers
 
 The Windows backend selects one of three isolation tiers at runtime
-(`src/backends/appcontainer/common/src/fallback_detector.rs`). Which tiers are
+(`src/backends/process_container/common/src/fallback_detector.rs`). Which tiers are
 available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
@@ -111,13 +111,16 @@ BaseContainer and continue to the AppContainer fallback; older query-less hosts
 retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
 PSEC only when `QueryProcessSecurityEnvironmentSupport` advertises
 `PSE_SUPPORT_FS_DENY`; otherwise MXC continues through the SBOX/AppContainer
-fallback chain.
+fallback chain. `processContainer.filesystem.enumeratePaths` is PSEC-only: it requires contract
+version 1.1 plus `PSE_SUPPORT_FS_ENUMERATE`, and fails rather than falling back
+to a tier that would broaden enumeration-only access.
 
 ## Filesystem policy
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
+| `processContainer.filesystem.enumeratePaths` | ❌ | ❌ | ❌ | ⚠️ PSEC 1.1 only when `PSE_SUPPORT_FS_ENUMERATE` is reported |
 | `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when PSEC reports `PSE_SUPPORT_FS_DENY` or SBOX reports `SANDBOX_CAP_DENY_PATHS`, otherwise rejected at launch and dispatched to T3) |
 | BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
@@ -132,6 +135,13 @@ Notes:
   (`BaseContainerRunner::supports_native_denied_paths()`); when neither contract
   reports deny support, `deniedPaths` is rejected and the run relies on
   default-deny plus explicit grants (or T3 DENY ACEs).
+- `processContainer.filesystem.enumeratePaths` maps to PSEC 1.1 `fs_enumerate`. It permits directory
+  queries and listing under the caller's user access without granting file
+  content reads. SBOX, BFS, and DACL fallback tiers cannot represent this
+  distinction, so MXC rejects the request when the PSEC capability is absent.
+  It is also incompatible with `processContainer.leastPrivilege`, which requires
+  the legacy SBOX path; MXC rejects that combination instead of broadening access
+  through fallback.
 - On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 
@@ -177,7 +187,7 @@ available there to block private-network egress.
 
 UI restrictions map to Job Object `JOB_OBJECT_UILIMIT_*` flags plus the
 `disallowWin32kSystemCalls` process mitigation. They are applied in **both** T1
-and T3 (`src/backends/appcontainer/common/src/job_object.rs`), so they are
+and T3 (`src/backends/process_container/common/src/job_object.rs`), so they are
 available regardless of tier — subject to per-flag build gating. The effective
 mask is always `requested & supported`, so the kernel is never handed a flag it
 would reject; `wxc-exec --probe` reports what a host can enforce.
@@ -200,14 +210,14 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 ## Sources
 
-- Tier selection: `src/backends/appcontainer/common/src/fallback_detector.rs`,
-  `src/backends/appcontainer/common/src/dispatcher.rs`
+- Tier selection: `src/backends/process_container/common/src/fallback_detector.rs`,
+  `src/backends/process_container/common/src/dispatcher.rs`
 - BaseContainer capability probing (`SANDBOX_CAP_*`,
   `Experimental_QuerySandboxSupport`) and FlatBuffer `SandboxSpec` construction:
-  `src/backends/appcontainer/common/src/base_container_runner.rs`
+  `src/backends/process_container/common/src/base_container_runner.rs`
 - UI-limit build gating (`MIN_BUILD_FOR_IME_LIMIT`,
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
-  `src/backends/appcontainer/common/src/job_object.rs`
+  `src/backends/process_container/common/src/job_object.rs`
 - FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)

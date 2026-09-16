@@ -191,6 +191,8 @@ The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
 `capabilities` lists optional features supported by that tier.
 `FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`FilesystemEnumeratePaths` indicates native support for
+`processContainer.filesystem.enumeratePaths` without granting file-content reads.
 `IngressHostLoopbackAllow` covers
 `network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
 or could not be detected. Use `wxc-exec --probe` for detailed machine facts.
@@ -380,7 +382,6 @@ use mxc_sdk::{run_state_aware_json, exec_attached};
 
 fn main() -> Result<(), Box<dyn Error>> {
 // Provision. Describe the backend's unrestricted network posture explicitly.
-// The canonical legacy spelling remains accepted during the transition.
 let provisioned = run_state_aware_json(
     r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},
