@@ -10,8 +10,7 @@
 //
 // Run: cd sdk/tests/integration && npx tsc -p tsconfig.json && node --test dist/microvm-filesystem.test.js
 //
-// All tests use spawnSandboxFromConfig with usePty:false (non-PTY mode).
-// PTY mode is not supported for the MicroVM backend.
+// All tests use the in-process streaming API with separate pipes.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
@@ -19,7 +18,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import { execSync } from 'child_process';
-import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers.js';
 import type { ContainerConfig } from '@microsoft/mxc-sdk';
 
@@ -46,47 +44,24 @@ function pyEscape(p: string): string {
 }
 
 /**
- * Spawn a microvm sandbox using spawnSandboxFromConfig with usePty:false.
+ * Spawn a microvm sandbox using `spawnSandboxFromConfig`.
  * Returns stdout, stderr, and exit code.
  */
 function runMicrovm(
   config: ContainerConfig,
   options: { timeoutMs?: number } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    const timeout = options.timeoutMs ?? 120_000;
-
-    try {
-      const child: ChildProcess = sdk.spawnSandboxFromConfig(config, {
-        experimental: true,
-        debug: true,
-        usePty: false,
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-      const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error(`MicroVM test timed out after ${timeout}ms.\nstdout: ${stdout}\nstderr: ${stderr}`));
-      }, timeout);
-
-      child.on('error', (error: Error) => {
-        clearTimeout(timer);
-        reject(new Error(`Failed to spawn wxc-exec: ${error.message}`));
-      });
-
-      child.on('close', (code: number | null) => {
-        clearTimeout(timer);
-        resolve({ stdout, stderr, exitCode: code ?? -1 });
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
+  const timeout = options.timeoutMs ?? 120_000;
+  if (config.process === undefined) {
+    throw new Error('microVM test config requires a process command');
+  }
+  config.process = { ...config.process, timeout };
+  const sandbox = sdk.spawnSandboxFromConfig(config, { experimental: true });
+  let stdout = '';
+  let stderr = '';
+  sandbox.standardOutput?.on('data', (data: Buffer) => { stdout += data.toString(); });
+  sandbox.standardError?.on('data', (data: Buffer) => { stderr += data.toString(); });
+  return sandbox.waitAsync().then(({ exitCode }) => ({ stdout, stderr, exitCode }));
 }
 
 describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm', {

@@ -19,8 +19,19 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'os';
-import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers.js';
+
+async function collectSandbox(
+  config: Parameters<typeof sdk.spawnSandboxFromConfig>[0],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const sandbox = sdk.spawnSandboxFromConfig(config, { experimental: true });
+  let stdout = '';
+  let stderr = '';
+  sandbox.standardOutput?.on('data', (data: Buffer) => { stdout += data.toString(); });
+  sandbox.standardError?.on('data', (data: Buffer) => { stderr += data.toString(); });
+  const { exitCode } = await sandbox.waitAsync();
+  return { stdout, stderr, exitCode };
+}
 
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
 // Opt-in via MXC_ENABLE_WSLC_TESTS=1 since most CI agents lack the runtime.
@@ -79,19 +90,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       // fresh temp directory would point WSLC at an empty image store and
       // fail with "image not found" — MXC does not pull at runtime.
 
-      const { stdout, stderr, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
-        const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
-        let stdout = '';
-        let stderr = '';
-        child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-        child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-        child.on('error', (error: Error) => {
-          reject(new Error(`Failed to spawn WSLC sandbox process: ${error.message}${stderr ? `\n${stderr}` : ''}`));
-        });
-        child.on('close', (code: number | null) => {
-          resolve({ stdout, stderr, exitCode: code ?? -1 });
-        });
-      });
+      const { stdout, stderr, exitCode } = await collectSandbox(config);
 
       assert.strictEqual(exitCode, 0, `exit=${exitCode}\nstdout=${stdout}\nstderr=${stderr}`);
       assert.ok(stdout.includes('Python 3.12'), `Python 3.12 not found in stdout=${stdout}`);
@@ -147,17 +146,17 @@ srv.handle_request()
       { windowsPort: HOST_PORT, containerPort: CONTAINER_PORT, protocol: 'tcp' },
     ];
 
-    const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+    const child = sdk.spawnSandboxFromConfig(config, { experimental: true });
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-    const closed = new Promise<number | null>((resolve) => {
-      if (child.exitCode !== null) {
-        resolve(child.exitCode);
-      } else {
-        child.on('close', (code: number | null) => resolve(code));
-      }
+    child.standardOutput?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.standardError?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    let completed = false;
+    let completedExitCode: number | undefined;
+    const closed = child.waitAsync().then(({ exitCode }) => {
+      completed = true;
+      completedExitCode = exitCode;
+      return exitCode;
     });
 
     let body = '';
@@ -169,8 +168,8 @@ srv.handle_request()
       // when the container crashed).
       const probeDeadline = Date.now() + 60_000;
       while (Date.now() < probeDeadline) {
-        if (child.exitCode !== null) {
-          throw new Error(`Container exited before probe could succeed (code=${child.exitCode}). stdout=${stdout} stderr=${stderr}`);
+        if (completed) {
+          throw new Error(`Container exited before probe could succeed (code=${completedExitCode}). stdout=${stdout} stderr=${stderr}`);
         }
         try {
           body = await new Promise<string>((resolve, reject) => {
@@ -198,7 +197,7 @@ srv.handle_request()
         new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 20_000)),
       ]);
       if (cleanExit === 'timeout') {
-        child.kill('SIGKILL');
+        child.kill();
         await Promise.race([
           closed,
           new Promise((r) => setTimeout(r, 5_000)),
@@ -229,15 +228,9 @@ srv.handle_request()
       { windowsPort: 39000, containerPort: 9000, protocol: 'udp' as unknown as 'tcp' },
     ];
 
-    const { exitCode, combined } = await new Promise<{ exitCode: number; combined: string }>((resolve, reject) => {
-      const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
-      let combined = '';
-      const onData = (d: Buffer) => { combined += d.toString(); };
-      child.stdout?.on('data', onData);
-      child.stderr?.on('data', onData);
-      child.on('error', reject);
-      child.on('close', (code: number | null) => resolve({ exitCode: code ?? -1, combined }));
-    });
+    const result = await collectSandbox(config);
+    const exitCode = result.exitCode;
+    const combined = result.stdout + result.stderr;
 
     assert.notStrictEqual(exitCode, 0, `expected non-zero exit when UDP is requested; output=${combined}`);
     assert.ok(

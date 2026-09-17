@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 import { spawn, ChildProcess, execSync } from 'child_process';
-import assert from 'node:assert';
 import type { TestContext } from 'node:test';
 import path from 'path';
 import fs from 'fs';
@@ -111,23 +110,6 @@ export function platformName(): string {
   return os.platform() === 'win32' ? 'Windows' : 'Linux';
 }
 
-/**
- * Assert that a dry-run completed successfully (exit 0 + validation-passed banner).
- *
- * Dry-run failure paths aren't asserted here — the dispatcher's tier-fallback
- * chain (BaseContainer → AppContainer+BFS → AppContainer+DACL) finds a viable
- * runner on every supported host, so a failing dry-run from the test harness
- * is a real regression, not an expected outcome.
- */
-export function assertDryRunResult(
-  stdout: string,
-  exitCode: number,
-  version: string,
-): void {
-  assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
-  assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
-}
-
 // Environment / skip helpers
 
 const skipOsDependentTests= process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1';
@@ -156,12 +138,8 @@ export const isLinuxBubblewrap = (() => {
   return false;
 })();
 
-// When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
-// so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
-const debugMode = process.env.MXC_DEBUG === 'true';
 const experimentalMode = os.platform() === 'darwin';
 export const debugSpawnOptions = {
-  ...(debugMode ? { debug: true } : {}),
   ...(experimentalMode ? { experimental: true } : {}),
 };
 
@@ -380,32 +358,18 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
 // an async wrapper around spawnSandboxFromConfig, and tests that need a
 // specific backend build the config directly.
 //
-// Notes (kept in lockstep with spawnSandboxAsync):
-//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
-//    so the OS combines both streams. stderr: '' is structural padding.
-//  - No per-call timeout: node:test enforces test-level timeouts and the
-//    config's process.timeout is enforced by the native runner.
-//  - IPty has no onError event. Synchronous spawn failures are caught below;
-//    post-spawn failures surface as a non-zero exitCode via onExit.
+// stdout and stderr remain separate because the in-process API uses pipes.
 export function spawnFromConfigAsync(
   config: sdkNamespace.ContainerConfig,
   options: sdkNamespace.SandboxSpawnOptions = {},
   workingDirectory?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
-      let output = '';
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
+  const sandbox = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
+  let stdout = '';
+  let stderr = '';
+  sandbox.standardOutput?.on('data', (data: Buffer) => { stdout += data.toString(); });
+  sandbox.standardError?.on('data', (data: Buffer) => { stderr += data.toString(); });
+  return sandbox.waitAsync().then(({ exitCode }) => ({ stdout, stderr, exitCode }));
 }
 
 // Python helpers
