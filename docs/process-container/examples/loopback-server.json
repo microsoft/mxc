@@ -1,4 +1,5 @@
 {
+  "_comment": "This container intentionally exposes a TCP listener on host loopback. ProcessContainer cannot restrict inbound loopback clients by source CIDR or destination port.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerLoopbackServer",
   "containment": "processcontainer",

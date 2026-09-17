@@ -1,4 +1,5 @@
 {
+  "_comment": "Direct cooperative proxying is more flexible than runtimeConfig.networkProxy, but hostLoopback allow permits unsolicited inbound loopback connections because ProcessContainer has no ingress CIDR or port rules.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerCooperativeProxy",
   "containment": "processcontainer",
