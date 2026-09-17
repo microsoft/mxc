@@ -1,0 +1,18 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerLoopbackServer",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 8081); $listener.Start(); Write-Output 'LISTENING=http://127.0.0.1:8081/'; $client = $listener.AcceptTcpClient(); $stream = $client.GetStream(); $buffer = [byte[]]::new(4096); $null = $stream.Read($buffer, 0, $buffer.Length); $response = [Text.Encoding]::ASCII.GetBytes('HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nOK'); $stream.Write($response, 0, $response.Length); $stream.Flush(); $client.Dispose(); $listener.Stop()\"",
+    "timeout": 45000
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "allow"
+    }
+  }
+}

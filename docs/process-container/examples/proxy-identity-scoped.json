@@ -1,0 +1,26 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerIdentityScopedProxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "curl.exe --fail --show-error --silent https://www.example.com/",
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  },
+  "processContainer": {
+    "network": {
+      "allowedProxyPeer": "<installed-package-family-name-or-appcontainer-profile-name>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerUnpackagedHostProxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "curl.exe --fail --show-error --silent https://www.example.com/",
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  }
+}

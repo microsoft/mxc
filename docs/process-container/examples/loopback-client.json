@@ -1,0 +1,33 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerLoopbackClient",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "curl.exe --fail --show-error --silent http://127.0.0.1:8081/",
+    "timeout": 15000
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "127.0.0.1/32"
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 8081
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "allow"
+    }
+  }
+}

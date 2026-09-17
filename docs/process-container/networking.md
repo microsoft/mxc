@@ -93,35 +93,34 @@ bind only the exact loopback address and port supplied to MXC.
 |---|---|---|---|
 | Packaged proxy | Package Family Name | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
 | Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
-| Unpackaged non-AppContainer (development/testing compatibility) | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
+| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
 
 All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
 common WFP endpoint enforcement. The proxy endpoint is the loopback address and port in
 `runtimeConfig.networkProxy`. The packaged row covers both AppContainer and non-AppContainer proxies because their
 client policy and package identity are the same; the enforcement table below separates their additional protections.
 
-`ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
-opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
-non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. This is a weaker
-development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee.
-The shared setting requests both host-loopback directions, while WFP restricts client-container egress to the
-configured proxy endpoint.
-For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
-`IsProcessSecurityEnvironmentVersionSupported` reports contract 1.1 or newer and
-`QueryProcessSecurityEnvironmentSupport` advertises ingress support. Proxy policies omit that native table because
-PSEC rejects it alongside a proxy. Their ingress default still selects `privateNetworkClientServer`, and their
-host-loopback setting selects both the `networkLoopback` capability and the `MXC-Loopback` peer rather than an
-identity-scoped proxy peer. The peer alone is insufficient: without the capability, the environment can be created
-but its client cannot reach the host proxy.
-The public ingress policy remains required, and host-loopback allow retains the PSEC 1.1 host requirement.
-Requests that do not allow host loopback use the
-PSEC 1.0 capability mapping; `hostLoopback: "allow"` is rejected when the PSEC 1.1 ingress contract is unavailable.
-The legacy SBOX path remains eligible only when its capability mapping can preserve the request.
+`allowedProxyPeer` authorizes a package family or AppContainer profile without opening general host-loopback access,
+so identity-scoped paths keep `hostLoopback: "deny"`. An unpackaged non-AppContainer proxy has no accepted peer
+identity and therefore requires `hostLoopback: "allow"`.
 
-**Unresolved ingress limitation:** on Windows build 26691.1002, this proxy mapping permits unprivileged connections
-to the configured proxy and blocks direct loopback bypasses, but host-to-container listener connections still time
-out. The same listener succeeds under a non-proxy PSEC ingress policy. The proxy mapping is therefore not yet a
-complete implementation of the shared bidirectional `hostLoopback: "allow"` contract.
+Proxy mode remains connection-scoped even when `hostLoopback` is `"allow"`: the sandbox can initiate a connection to
+the configured proxy address and port and receive responses on that connection, but the proxy configuration does not
+expose listeners in the sandbox to unsolicited host-loopback connections. Code that intentionally needs general
+loopback client/server connectivity must use a direct-egress policy instead of `runtimeConfig.networkProxy`.
+
+For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC ingress contract.
+Proxy policies use the proxy-specific PSEC representation, including the configured endpoint and either the selected
+peer identity or the unrestricted-loopback peer. Requests fail rather than fall back to a contract that would drop
+these restrictions.
+
+Complete configurations are available in the
+[ProcessContainer schema 0.8 examples](examples/0.8.0-schema.md):
+
+- identity-scoped packaged or AppContainer proxy;
+- identity-less unpackaged host proxy;
+- cooperative proxy environment variables with direct loopback policy; and
+- a sandbox that intentionally exposes a loopback listener.
 
 #### Identity-scoped proxy
 
@@ -130,7 +129,7 @@ Use the canonical [ProcessContainer schema 0.8 configuration](examples/0.8.0-sch
 Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
 the AppContainer profile name for an unpackaged AppContainer proxy.
 
-#### Unpackaged non-AppContainer proxy (development/testing compatibility)
+#### Unpackaged non-AppContainer proxy
 
 An unpackaged non-AppContainer proxy has no package family or AppContainer profile identity:
 
@@ -152,10 +151,9 @@ An unpackaged non-AppContainer proxy has no package family or AppContainer profi
 
 MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
 identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and grants
-the loopback capability; the inbound limitation above still applies. This is the lowest-enforcement deployment option because common WFP endpoint
-scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
-development and debugging. PSEC grants `networkLoopback` to authorize the host-loopback connection without MXC
-installing administrator-owned firewall rules. Independently managed host firewall restrictions can still apply.
+the loopback permission needed to reach it. Common WFP endpoint scoping remains, but Windows cannot verify which host
+process owns that endpoint. This is therefore the lowest-identity deployment option. The runtime proxy configuration
+still does not open unsolicited host-to-container connections.
 
 #### HTTP client guidance
 
@@ -177,8 +175,9 @@ applies WFP endpoint scoping, and grants the private-network capability selected
 
 The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
 the package family or AppContainer profile and grants the private-network capability selected by `ingress.default`.
-When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and requires bidirectional
-host-loopback access. MXC configures the per-container WinHTTP proxy for either path.
+When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and grants the loopback
+permission required for sandbox-initiated proxy connections. MXC configures the per-container WinHTTP proxy for
+either path.
 
 The caller must:
 

@@ -1,0 +1,33 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerCooperativeProxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$env:HTTP_PROXY='http://127.0.0.1:8080'; $env:HTTPS_PROXY='http://127.0.0.1:8080'; curl.exe --fail --show-error --silent https://www.example.com/\"",
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "127.0.0.1/32"
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 8080
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
+}
