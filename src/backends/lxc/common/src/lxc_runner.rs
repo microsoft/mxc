@@ -650,6 +650,11 @@ pub const LXC_CAPABILITIES_MODE_UNSUPPORTED: &str =
      or state the policy in the 0.8 network.egress / network.ingress form, which carries no \
      enforcement mode.";
 
+pub const LXC_RUNTIME_PROXY_UNSUPPORTED: &str =
+    "LXC: runtimeConfig.networkProxy is not supported. It must name a loopback endpoint, which \
+     inside the container's own network namespace is the container rather than the host. On \
+     schema 0.6-0.8, use network.proxy.url with an address routable from inside the container.";
+
 fn asks_for_capabilities_enforcement(request: &ExecutionRequest) -> bool {
     !uses_directional_keys(&request.policy)
         && request.policy.network_mode_specified
@@ -668,6 +673,9 @@ fn lxc_network_policy_support() -> NetworkPolicySupport {
 
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.runtime_network_proxy_specified {
+            return Err(ScriptResponse::error(LXC_RUNTIME_PROXY_UNSUPPORTED));
+        }
         validate_network_policy_support(request, lxc_network_policy_support())?;
         if asks_for_capabilities_enforcement(request) {
             return Err(ScriptResponse::error(LXC_CAPABILITIES_MODE_UNSUPPORTED));
@@ -1198,6 +1206,42 @@ mod tests {
             "expected the two-bit claim to reject an egress-only config; if this now passes, \
              the directional posture is no longer all-or-nothing and lxc_network_policy_support \
              can drop the ingress bits"
+        );
+    }
+
+    #[test]
+    fn the_declared_support_set_withholds_the_runtime_proxy_bit() {
+        assert!(
+            !lxc_network_policy_support().contains(NetworkPolicySupport::RUNTIME_PROXY),
+            "claiming the bit would accept the config and then open the container's own \
+             loopback, where no proxy is listening, so the workload would fail at runtime \
+             instead of at validation"
+        );
+    }
+
+    #[test]
+    fn a_runtime_proxy_request_is_refused_before_any_container_work() {
+        let runner = runner_for_guard_tests();
+        let mut request = egress_only_directional_request();
+        request.policy.runtime_network_proxy_specified = true;
+
+        let response = runner.validate_runner(&request).expect_err(
+            "a loopback proxy is unreachable from the container's network namespace, so the \
+             request must be refused",
+        );
+
+        assert!(
+            response
+                .error_message
+                .contains("runtimeConfig.networkProxy"),
+            "the refusal must name the field the caller wrote, got: {}",
+            response.error_message
+        );
+        assert!(
+            response.error_message.contains("LXC"),
+            "the refusal must name the backend that refused, or the caller cannot tell which \
+             part of the request to change, got: {}",
+            response.error_message
         );
     }
 
