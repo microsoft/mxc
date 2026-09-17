@@ -2401,6 +2401,19 @@ mod tests {
     }
 
     #[test]
+    fn nvx_cli_command_uses_posix_shell_quoting() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
+        let command_override = command_override_from_cli(
+            &cli,
+            CommandLineContext::for_backend(&ContainmentBackend::Nvx),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(command_override, "echo 'safe&whoami'");
+    }
+
+    #[test]
     fn state_aware_command_override_only_applies_to_exec_phase() {
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),

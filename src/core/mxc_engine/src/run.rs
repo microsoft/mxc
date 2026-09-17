@@ -447,6 +447,7 @@ mod tests {
     use super::*;
     use wxc_common::logger::Mode;
     use wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
+    use wxc_common::mxc_error::MxcErrorCode;
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {
@@ -456,6 +457,13 @@ mod tests {
                 windows_sandbox: config,
                 ..Default::default()
             },
+            ..Default::default()
+        }
+    }
+
+    fn nvx_request() -> ExecutionRequest {
+        ExecutionRequest {
+            containment: ContainmentBackend::Nvx,
             ..Default::default()
         }
     }
@@ -496,5 +504,47 @@ mod tests {
         assert!(warning.contains("idleTimeoutMs"));
         assert!(warning.contains("daemonPipeName"));
         assert!(warning.contains("fresh VM"));
+    }
+
+    #[test]
+    fn nvx_backend_returns_typed_unsupported_containment() {
+        let request = nvx_request();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected unsupported_containment"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert_eq!(err.message, "NVX backend not yet available");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use wxc_common::logger::Mode;
+    use wxc_common::mxc_error::MxcErrorCode;
+
+    fn nvx_request() -> ExecutionRequest {
+        ExecutionRequest {
+            containment: ContainmentBackend::Nvx,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nvx_backend_returns_typed_unsupported_containment() {
+        let request = nvx_request();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("expected unsupported_containment"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert_eq!(err.message, "NVX backend not yet available");
     }
 }

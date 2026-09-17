@@ -47,9 +47,7 @@ impl CommandLineContext {
             | ContainmentBackend::Vm
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
-            ContainmentBackend::Nvx => {
-                unreachable!("NVX command-line context is not implemented yet")
-            }
+            ContainmentBackend::Nvx => Self::PosixShell,
         }
     }
 }
@@ -381,6 +379,14 @@ mod tests {
             cmdline_from_argv_for_context(&s(&["echo", "can't"]), CommandLineContext::PosixShell)
                 .unwrap(),
             "echo 'can'\\''t'"
+        );
+    }
+
+    #[test]
+    fn nvx_backend_uses_posix_shell_context() {
+        assert_eq!(
+            CommandLineContext::for_backend(&ContainmentBackend::Nvx),
+            CommandLineContext::PosixShell
         );
     }
 
