@@ -189,7 +189,8 @@ The host environment is never inherited — the sandbox is built with
 
 **From schema 0.9** the child gets a default block of `PATH`
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
-resolved working directory, else `/tmp`), and `TERM` (`xterm-256color`):
+directory the child is started in — `process.cwd`, else `/tmp`), and `TERM`
+(`xterm-256color`):
 
 | `process.env` | `inheritDefaultEnv` | Result |
 | --- | --- | --- |

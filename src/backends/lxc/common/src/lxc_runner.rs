@@ -44,15 +44,26 @@ fn supports_default_env(version: &str) -> bool {
     semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
 }
 
+/// The directory the child is actually started in, if any.
+///
+/// [`LxcContainer::attach_run`] wraps the command in a `cd` for exactly this
+/// value and [`default_env`] points `HOME` at it, so the two cannot name
+/// different directories. A policy grant is deliberately *not* consulted: with
+/// `process.cwd` omitted the child starts at the container root, so treating a
+/// grant as the start directory would put `HOME` somewhere it never went.
+fn start_directory(request: &ExecutionRequest) -> Option<&str> {
+    Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
+}
+
 /// The default environment, from schema 0.9: `PATH`, `HOME`, and `TERM`.
 ///
 /// `HOME` names the directory the child actually runs in, so it is a path the
-/// container has rather than a host path that was never mounted.
+/// container has rather than a host path that was never mounted. With no start
+/// directory it is [`FALLBACK_HOME`], which every image provides writable.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
-    let home = request
-        .resolved_working_directory()
-        .map(|dir| dir.path.to_string())
-        .unwrap_or_else(|| FALLBACK_HOME.to_string());
+    let home = start_directory(request)
+        .unwrap_or(FALLBACK_HOME)
+        .to_string();
 
     vec![
         ("PATH".to_string(), DEFAULT_PATH.to_string()),
@@ -606,7 +617,7 @@ impl LxcScriptRunner {
         // environment, proxy variables and credentials included.
         let result = container.attach_run(
             &request.script_code,
-            &request.working_directory,
+            start_directory(request).unwrap_or_default(),
             &exec_env,
             true,
             timeout,
@@ -1070,11 +1081,44 @@ mod tests {
         }
 
         #[test]
-        fn home_follows_the_resolved_working_directory() {
+        fn home_follows_the_directory_the_child_starts_in() {
             let mut r = request("0.9.0-alpha");
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        /// A policy grant is not a working directory: with `process.cwd`
+        /// omitted the child starts at the container root, so a granted host
+        /// directory -- which may not even be mounted -- must not become its
+        /// `HOME`.
+        #[test]
+        fn a_policy_grant_alone_does_not_become_home() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            r.working_directory = String::new();
+            // A real directory, so the shared resolver's `is_dir` probe would
+            // accept it if `HOME` consulted the policy.
+            r.policy.readwrite_paths = vec![std::env::temp_dir().display().to_string()];
+
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some(FALLBACK_HOME));
+            assert_eq!(start_directory(&r), None);
+        }
+
+        /// `HOME` and the directory handed to `attach_run` come from one
+        /// resolution, so they cannot name different directories.
+        #[test]
+        fn home_and_the_attach_directory_agree() {
+            for cwd in ["", "/workspace"] {
+                let mut r = request("0.9.0-alpha");
+                r.env = None;
+                r.working_directory = cwd.into();
+                assert_eq!(
+                    value(&resolved_env(&r), "HOME"),
+                    Some(start_directory(&r).unwrap_or(FALLBACK_HOME)),
+                    "HOME must name the directory the child starts in (cwd {cwd:?})"
+                );
+            }
         }
     }
 

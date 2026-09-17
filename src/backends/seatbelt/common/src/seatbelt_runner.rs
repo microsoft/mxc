@@ -235,13 +235,23 @@ fn spawn_exec(
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
     // vars are injected here (and caller-supplied proxy vars stripped).
-    apply_clean_environment(&mut command, request, proxy.address());
+    let resolved_cwd = resolved_working_directory_opt(request);
+    apply_clean_environment(
+        &mut command,
+        request,
+        proxy.address(),
+        resolved_cwd.as_deref(),
+    );
 
-    // Working directory. Also export `PWD` so the child's `getcwd()` uses its
+    // Working directory. Resolved once, and handed to `apply_clean_environment`
+    // above so the default `HOME` names the directory the child is actually
+    // started in rather than a separately-derived one.
+    //
+    // Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
     // the sandbox may not let it read — which otherwise leaks
     // "getcwd: ... Operation not permitted" to stderr.
-    let cwd = resolve_working_directory(request);
+    let cwd = resolved_cwd.unwrap_or_else(|| UNRESOLVED_WORKING_DIRECTORY.to_string());
     command.current_dir(&cwd);
     command.env("PWD", &cwd);
 
@@ -340,7 +350,12 @@ fn spawn_open(
     //    itself, and needs an absolute target. Fail here rather than inside a
     //    Terminal window: `open -W` reports its own exit status, not the
     //    helper's.
-    let cwd = match absolute_working_directory(&resolve_working_directory(request)) {
+    let resolved_cwd = resolved_working_directory_opt(request);
+    let cwd = match absolute_working_directory(
+        resolved_cwd
+            .as_deref()
+            .unwrap_or(UNRESOLVED_WORKING_DIRECTORY),
+    ) {
         Ok(cwd) => cwd,
         Err(e) => {
             let _ = fs::remove_file(&profile_path);
@@ -353,12 +368,16 @@ fn spawn_open(
         let _ = fs::remove_file(&profile_path);
         return Err(error_response(reason));
     }
+    // `HOME` follows the directory the helper actually `cd`s into — the same
+    // absolute form — and only when the request resolved one, so an
+    // unresolved cwd keeps the environment's own writable fallback.
+    let home_dir = resolved_cwd.as_ref().map(|_| cwd.clone());
 
     // 3. Build environment exports for the helper script. When a proxy is
     //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
     //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
-    for (key, value) in resolve_environment(request, proxy.address()) {
+    for (key, value) in resolve_environment(request, proxy.address(), home_dir.as_deref()) {
         // Validate key is a safe shell identifier to prevent injection.
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || key.is_empty()
@@ -743,14 +762,21 @@ fn spawn_error(error: &std::io::Error) -> String {
 ///   deny-by-default profile that directory may be unreadable and make
 ///   `getcwd()` fail, leaking a "getcwd: … Operation not permitted" line onto
 ///   the child's stderr.
-fn resolve_working_directory(request: &ExecutionRequest) -> String {
+/// The directory a child is started in when the request resolves none. `HOME`
+/// deliberately does not share it: `/` is not writable.
+const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
+
+/// The directory the child is started in, or `None` when the request resolves
+/// none. Both launch paths resolve through here and hand the same value to the
+/// environment, so the default `HOME` cannot name a directory the child never
+/// entered — re-deriving it separately would also miss the `~` expansion.
+fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
     let expand = |path: &str| {
         crate::profile_builder::expand_tilde(path).unwrap_or_else(|_| path.to_string())
     };
-    match request.resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir()) {
-        Some(resolved) => expand(resolved.path),
-        None => "/".to_string(),
-    }
+    request
+        .resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir())
+        .map(|resolved| expand(resolved.path))
 }
 
 /// Anchor a resolved working directory to the launcher's directory when it is
@@ -844,6 +870,7 @@ fn apply_clean_environment(
     command: &mut Command,
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
+    working_directory: Option<&str>,
 ) {
     command.env_clear();
     // From 0.9 `resolved_env` carries `PATH`, and an explicitly empty
@@ -851,7 +878,7 @@ fn apply_clean_environment(
     if !supports_default_env(&request.schema_version) {
         command.env("PATH", DEFAULT_SANDBOX_PATH);
     }
-    for (key, value) in resolve_environment(request, proxy_address) {
+    for (key, value) in resolve_environment(request, proxy_address, working_directory) {
         command.env(key, value);
     }
 }
@@ -865,12 +892,16 @@ fn apply_clean_environment(
 /// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase forms) are
 /// set to the proxy URL. Shared by the exec and open launch paths
 /// so both enforce the proxy identically.
+///
+/// `working_directory` is the directory the caller will start the child in, so
+/// the default `HOME` names it; see [`resolved_env`].
 fn resolve_environment(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
+    working_directory: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for kv in resolved_env(request) {
+    for kv in resolved_env(request, working_directory) {
         if let Some((key, value)) = kv.split_once('=') {
             if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
                 continue;
@@ -965,7 +996,7 @@ mod tests {
         request.env = Some(vec!["HTTP_PROXY=http://attacker.example:9999".into()]);
         request.inherit_default_env = true;
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
-        let pairs = resolve_environment(&request, Some(&addr));
+        let pairs = resolve_environment(&request, Some(&addr), None);
 
         assert!(pairs
             .iter()
@@ -1275,7 +1306,7 @@ mod tests {
     fn resolve_environment_without_proxy_passes_through() {
         let mut request = base_request();
         request.env = Some(vec!["FOO=bar".into(), "BAZ=qux".into()]);
-        let pairs = resolve_environment(&request, None);
+        let pairs = resolve_environment(&request, None, None);
         assert_eq!(env_value(&pairs, "FOO"), Some("bar"));
         assert_eq!(env_value(&pairs, "BAZ"), Some("qux"));
         // No proxy vars injected.
@@ -1286,7 +1317,7 @@ mod tests {
     fn resolve_environment_injects_proxy_url() {
         let request = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
-        let pairs = resolve_environment(&request, Some(&addr));
+        let pairs = resolve_environment(&request, Some(&addr), None);
         for key in [
             "HTTP_PROXY",
             "HTTPS_PROXY",
@@ -1314,7 +1345,7 @@ mod tests {
             "KEEP=me".into(),
         ]);
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
-        let pairs = resolve_environment(&request, Some(&addr));
+        let pairs = resolve_environment(&request, Some(&addr), None);
         // Legitimate non-proxy var is preserved.
         assert_eq!(env_value(&pairs, "KEEP"), Some("me"));
         // Caller-supplied proxy values are overridden with ours; NO_PROXY dropped.
@@ -1341,7 +1372,7 @@ mod tests {
         // vars whose keys happen to match PROXY_ENV_KEYS.
         let mut request = base_request();
         request.env = Some(vec!["HTTP_PROXY=http://caller.example:8080".into()]);
-        let pairs = resolve_environment(&request, None);
+        let pairs = resolve_environment(&request, None, None);
         assert_eq!(
             env_value(&pairs, "HTTP_PROXY"),
             Some("http://caller.example:8080")
@@ -1434,25 +1465,66 @@ mod tests {
     }
 
     /// The `open` path resolves the directory through the same
-    /// `resolve_working_directory` the exec path uses, including its
+    /// `resolved_working_directory_opt` the exec path uses, including its
     /// policy-grant fallback when the request names no explicit directory.
     #[test]
     fn open_helper_uses_the_same_resolution_as_exec() {
         let mut explicit = base_request();
         explicit.working_directory = "/tmp/explicit".into();
-        assert_eq!(resolve_working_directory(&explicit), "/tmp/explicit");
+        assert_eq!(
+            resolved_working_directory_opt(&explicit).as_deref(),
+            Some("/tmp/explicit")
+        );
 
         let mut policy_fallback = base_request();
         policy_fallback.policy.readwrite_paths = vec!["/tmp".into()];
-        assert_eq!(resolve_working_directory(&policy_fallback), "/tmp");
+        assert_eq!(
+            resolved_working_directory_opt(&policy_fallback).as_deref(),
+            Some("/tmp")
+        );
 
         let script = build_helper_script(
             "",
-            &resolve_working_directory(&policy_fallback),
+            &resolved_working_directory_opt(&policy_fallback).unwrap(),
             "/p.sb",
             "pwd",
         );
         assert!(script.contains("cd '/tmp' ||"), "{script}");
+    }
+
+    /// With nothing to resolve, the child still has to start somewhere, but
+    /// `HOME` must not follow it there: `/` is not writable.
+    #[test]
+    fn an_unresolved_working_directory_does_not_become_home() {
+        let request = base_request();
+        assert_eq!(resolved_working_directory_opt(&request), None);
+        assert_eq!(UNRESOLVED_WORKING_DIRECTORY, "/");
+
+        let pairs = resolve_environment(&request, None, None);
+        assert_eq!(
+            env_value(&pairs, "HOME"),
+            None,
+            "below 0.9 supplies no HOME"
+        );
+
+        let mut modern = base_request();
+        modern.schema_version = "0.9.0-alpha".into();
+        let pairs = resolve_environment(&modern, None, None);
+        assert_eq!(
+            env_value(&pairs, "HOME"),
+            Some(crate::default_env::FALLBACK_HOME)
+        );
+    }
+
+    /// `HOME` follows the directory the runner will actually `chdir` into,
+    /// including the `~` expansion, rather than being re-derived from the
+    /// request.
+    #[test]
+    fn home_follows_the_directory_the_child_starts_in() {
+        let mut request = base_request();
+        request.schema_version = "0.9.0-alpha".into();
+        let pairs = resolve_environment(&request, None, Some("/Users/someone/work"));
+        assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }
 
     /// A relative `process.cwd` means "relative to the launching process" —

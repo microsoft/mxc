@@ -62,6 +62,10 @@ run_config "$(render seatbelt_env_09_verbatim.json)"
 expect_ok "0.9: a supplied env is honored" "FOO=[bar]"
 expect_ok "0.9: a supplied env adds no default HOME" "HOME=[]"
 expect_marker "0.9: a supplied env inherits nothing from the host" "LEAK=[]"
+# A supplied PATH replaces the default block's PATH outright rather than being
+# merged with it, so no fragment of the default survives.
+expect_ok "0.9: a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
+expect_absent "0.9: a supplied PATH is not merged with the default" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin"
 
 run_config "$(render seatbelt_env_09_inherit.json)"
 expect_ok "0.9: inheritDefaultEnv keeps the default PATH" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"

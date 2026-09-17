@@ -60,14 +60,17 @@ DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # it must hold for a request that never mentions the variable.
 export MXC_LEAK_PROBE="LXC_HOST_ENV_LEAKED"
 
-# PATH is only ever asserted present, never absent. `lxc-attach` injects its own
-# baseline PATH into every process it attaches -- and that baseline is
-# byte-for-byte DEFAULT_PATH -- so the container always reports one whether or
-# not MXC supplied it. HOME and TERM are not injected, so they are what
-# witnesses the default block. That `resolved_env` is exactly empty is asserted
-# directly by `an_explicitly_empty_env_stays_empty` /
-# `a_supplied_env_is_used_verbatim` in `lxc_runner.rs`, which reads the env MXC
-# builds instead of the container's.
+# PATH is only ever asserted absent-or-default where the container's own
+# baseline cannot fabricate the answer. `lxc-attach` injects its own baseline
+# PATH into every process it attaches -- and that baseline is byte-for-byte
+# DEFAULT_PATH -- so the container always reports one whether or not MXC
+# supplied it. HOME and TERM are not injected, so they are what witnesses the
+# default block. The one PATH claim that IS provable is replacement: liblxc
+# applies MXC's `--set-var` entries last, via `putenv`, so a supplied PATH must
+# appear verbatim with no trace of the baseline (asserted below). That
+# `resolved_env` is exactly empty is asserted directly by
+# `an_explicitly_empty_env_stays_empty` / `a_supplied_env_is_used_verbatim` in
+# `lxc_runner.rs`, which reads the env MXC builds instead of the container's.
 
 run_config lxc_env_09_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
@@ -89,6 +92,10 @@ run_config lxc_env_09_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
 expect_ok "a supplied env adds no default HOME" "HOME=[]"
 expect_ok "a supplied env adds no default TERM" "TERM=[]"
+# A supplied PATH replaces the `lxc-attach` baseline outright rather than being
+# appended to it, so neither the baseline nor any fragment of it survives.
+expect_ok "a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
+expect_absent "a supplied PATH is not appended to the baseline" "PATH=[$DEFAULT_PATH"
 
 run_config lxc_env_09_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"

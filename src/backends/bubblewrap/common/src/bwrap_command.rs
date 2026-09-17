@@ -580,16 +580,27 @@ fn supports_default_env(version: &str) -> bool {
     semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
 }
 
+/// The directory the child is actually started in, if any.
+///
+/// [`build_args_classified_with_mode`] emits `--chdir` for exactly this value
+/// and [`default_env`] points `HOME` at it, so the two cannot name different
+/// directories. A policy grant is deliberately *not* consulted: bwrap enters
+/// one only when `process.cwd` names it, so treating it as the start directory
+/// would put `HOME` somewhere the child never went.
+fn start_directory(request: &ExecutionRequest) -> Option<&str> {
+    Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
+}
+
 /// The default environment: `PATH`, `HOME`, and `TERM`.
 ///
 /// `HOME` names the directory the child actually runs in, so it is a path the
 /// sandbox can reach rather than the launching user's real home, which the
-/// bind-mount policy would not have made visible.
+/// bind-mount policy would not have made visible. With no start directory it
+/// is [`FALLBACK_HOME`], which `build_args` always mounts as a fresh tmpfs.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
-    let home = request
-        .resolved_working_directory()
-        .map(|dir| dir.path.to_string())
-        .unwrap_or_else(|| FALLBACK_HOME.to_string());
+    let home = start_directory(request)
+        .unwrap_or(FALLBACK_HOME)
+        .to_string();
 
     vec![
         ("PATH".to_string(), DEFAULT_PATH.to_string()),
@@ -765,8 +776,8 @@ pub(crate) fn build_args_classified_with_mode(
     }
 
     // -- Working directory -------------------------------------------------
-    if !request.working_directory.is_empty() {
-        args.extend(["--chdir".into(), request.working_directory.clone()]);
+    if let Some(dir) = start_directory(request) {
+        args.extend(["--chdir".into(), dir.to_string()]);
     }
 
     // -- Environment -------------------------------------------------------
@@ -906,11 +917,54 @@ mod tests {
         }
 
         #[test]
-        fn home_follows_the_resolved_working_directory() {
+        fn home_follows_the_directory_the_child_starts_in() {
             let mut r = request("0.9.0-alpha");
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        /// A policy grant is not a working directory: bwrap emits `--chdir`
+        /// only for `process.cwd`, so a granted directory the child never
+        /// enters must not become its `HOME`.
+        #[test]
+        fn a_policy_grant_alone_does_not_become_home() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            r.working_directory = String::new();
+            // A real directory, so the shared resolver's `is_dir` probe would
+            // accept it if `HOME` consulted the policy.
+            r.policy.readwrite_paths = vec![std::env::temp_dir().display().to_string()];
+
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some(FALLBACK_HOME));
+            let args = build_args(&r, None);
+            assert!(
+                !args.iter().any(|a| a == "--chdir"),
+                "a policy grant must not chdir the child: {args:?}"
+            );
+        }
+
+        /// `HOME` and `--chdir` come from one resolution, so they cannot name
+        /// different directories.
+        #[test]
+        fn home_and_chdir_agree() {
+            for cwd in ["", "/workspace"] {
+                let mut r = request("0.9.0-alpha");
+                r.env = None;
+                r.working_directory = cwd.into();
+                let args = build_args(&r, None);
+
+                let chdir = args
+                    .windows(2)
+                    .find(|w| w[0] == "--chdir")
+                    .map(|w| w[1].clone());
+                let home = value(&resolved_env(&r), "HOME").map(str::to_string);
+                assert_eq!(
+                    home,
+                    Some(chdir.unwrap_or_else(|| FALLBACK_HOME.to_string())),
+                    "HOME must name the directory the child starts in (cwd {cwd:?})"
+                );
+            }
         }
 
         #[test]

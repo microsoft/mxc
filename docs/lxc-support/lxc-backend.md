@@ -96,9 +96,9 @@ environment variables do not leak into the container.
 
 The backend supplies `PATH`
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
-resolved working directory, else `/tmp`), and `TERM` (`xterm-256color`),
-overriding the `lxc-attach` baseline so command resolution is the same on every
-image.
+directory the child is started in, else `/tmp`), and `TERM`
+(`xterm-256color`), overriding the `lxc-attach` baseline so command resolution
+is the same on every image.
 
 | `process.env` | `inheritDefaultEnv` | Result |
 |---------------|---------------------|--------|
@@ -109,6 +109,14 @@ image.
 
 Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
 rejected.
+
+"Overriding" is exact, not additive: under `--clear-env` liblxc seeds its own
+baseline `PATH` and `container=lxc` first, then applies MXC's entries last with
+`putenv`, which replaces a whole value.  A supplied `PATH` therefore supersedes
+the baseline outright rather than being appended to it.  The converse is that
+an empty `process.env` is not a wholly empty environment: liblxc's baseline
+`PATH` and `container=lxc` remain underneath, and what 0.9 guarantees is that
+MXC adds nothing on top of them.
 
 ## Network Policy
 

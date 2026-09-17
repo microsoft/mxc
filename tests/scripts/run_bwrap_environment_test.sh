@@ -88,6 +88,11 @@ run_config bwrap_env_09_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
 expect_ok "a supplied env adds no default HOME" "HOME=[]"
 expect_ok "a supplied env adds no default TERM" "TERM=[]"
+# The one provable PATH claim: a supplied PATH reaches the child verbatim and
+# replaces the default outright, so no fragment of the default survives. (The
+# default block's own PATH cannot be asserted -- see the note above.)
+expect_ok "a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
+expect_absent "a supplied PATH is not merged with the default" "PATH=[$DEFAULT_PATH"
 
 run_config bwrap_env_09_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"

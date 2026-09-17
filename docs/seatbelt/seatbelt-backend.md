@@ -412,8 +412,9 @@ into untrusted code. This is unconditional.
 ### Schema 0.9 and later
 
 The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
-`HOME` (the resolved working directory, else `/tmp`), and `TERM`
-(`xterm-256color`). What you supply decides what happens to it:
+`HOME` (the directory the child is started in, else
+`/tmp`), and `TERM` (`xterm-256color`). What you supply decides what happens to
+it:
 
 | `process.env` | `inheritDefaultEnv` | Result |
 | --- | --- | --- |
