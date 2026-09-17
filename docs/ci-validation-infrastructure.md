@@ -220,7 +220,7 @@ get fixed or wired.
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
-| IsolationSession | ✅ Good | |
+| IsolationSession | ✅ Good | Runs the one-shot suite plus state aware tests (provision/start/exec/stop/deprovision lifecycle). |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Hyperlight | ⛔ Not implemented | No suite on any platform. |
