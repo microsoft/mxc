@@ -57,7 +57,7 @@ cargo test -p wxc_common -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/
+# From sdk/dotnet/ (requires .NET SDK 10+)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 
