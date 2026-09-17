@@ -92,13 +92,28 @@ class FakeWritable implements SandboxWritableBinding {
   }
 }
 
+class DeferredPartialWritable extends FakeWritable {
+  private resolveWrite?: (written: number) => void;
+
+  override write(buffer: Buffer): Promise<number> {
+    this.writes.push(buffer.toString('utf8'));
+    return new Promise((resolve) => {
+      this.resolveWrite = resolve;
+    });
+  }
+
+  release(written: number): void {
+    this.resolveWrite?.(written);
+  }
+}
+
 class FakeBinding implements SandboxProcessBinding {
   warningValues = ['relaxed'];
   warningReads = 0;
   outputMetadataReads = 0;
   readonly stdoutEvents: string[] = [];
   readonly stderrEvents: string[] = [];
-  readonly stdin = new FakeWritable();
+  stdin = new FakeWritable();
   stdout: SandboxReadableBinding = new FakeReadable([Buffer.from('out'), null], this.stdoutEvents);
   stderr: SandboxReadableBinding = new FakeReadable([Buffer.from('err'), null], this.stderrEvents);
   killed = false;
@@ -351,6 +366,27 @@ describe('native streaming spawn APIs', () => {
     await once(proc.standardInput!, 'finish');
 
     assert.deepStrictEqual(binding.stdin.writes, []);
+    proc.dispose();
+  });
+
+  it('does not continue a partial stdin write after destruction', async () => {
+    const binding = new FakeBinding(15, 0);
+    const stdin = new DeferredPartialWritable();
+    binding.stdin = stdin;
+    const proc = _createMxcSandboxProcess(binding);
+    const input = proc.standardInput!;
+    input.on('error', () => {});
+
+    const writeResult = new Promise<Error | undefined>((resolve) => {
+      input.write('hello', (error) => resolve(error ?? undefined));
+    });
+    input.destroy();
+    stdin.release(1);
+
+    const error = await writeResult;
+    assert.match(error?.message ?? '', /stdin closed before the write completed/);
+    assert.deepStrictEqual(stdin.writes, ['hello']);
+    assert.strictEqual(stdin.freed, true);
     proc.dispose();
   });
 

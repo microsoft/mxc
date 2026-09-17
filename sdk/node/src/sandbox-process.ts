@@ -122,6 +122,12 @@ class WritePipe extends Writable {
           callback();
           return;
         }
+        if (this.closing) {
+          this.busy = false;
+          this.finishClose();
+          callback(new Error('sandbox stdin closed before the write completed'));
+          return;
+        }
         write(offset + written);
       }).catch((error) => {
         this.busy = false;
