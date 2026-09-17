@@ -44,15 +44,16 @@
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
-//! | LXC | Linux | [`Containment::Lxc`] |
 //! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |
 //!
-//! LXC currently supports [`run`] only; [`spawn_sandbox`] returns
-//! [`ErrorCode::UnsupportedContainment`] for LXC.
+//! [`Containment::Lxc`] models explicit LXC settings, but the in-process
+//! [`run`] and [`spawn_sandbox`] APIs return
+//! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
+//! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 //!
 //! WSLC and IsolationSession are **experimental**: build with the crate's
 //! `wslc` / `isolation_session` feature, and call

@@ -152,6 +152,9 @@ let request = build_request_with_containment(
 # Ok::<(), mxc_sdk::Error>(())
 ```
 
+This models the LXC request for configuration parity. The in-process `run` and
+`spawn_sandbox` APIs reject it; execute LXC requests with `lxc-exec`.
+
 Filesystem-policy discovery helpers are also available to feed a policy:
 [`available_tools_policy`] (PATH + tool/SDK environment directories),
 [`user_profile_policy`], and [`temporary_files_policy`].
@@ -209,8 +212,7 @@ questions:
 - [`platform_support`] — the Rust port of `getPlatformSupport`. Reports whether
   MXC is supported on this host and the backends **this SDK can actually
   launch** (the subset in [Supported backends](#supported-backends)). Use it to
-  decide whether `run` will work before building a request. LXC is
-  run-to-completion only; `spawn_sandbox` does not support it.
+  decide whether `run` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones this SDK cannot drive
   one-shot — such as Windows Sandbox — each with its effective isolation
@@ -495,7 +497,6 @@ default):
 | Host    | Backend(s)                                      | Selected by                      |
 |---------|-------------------------------------------------|----------------------------------|
 | Linux   | Bubblewrap                                      | `Containment::Process` or `Containment::Bubblewrap` |
-| Linux   | LXC                                             | `Containment::Lxc`               |
 | macOS   | Seatbelt                                        | `Containment::Process` or `Containment::Seatbelt` |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
@@ -517,8 +518,9 @@ Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
 still reachable here through the state-aware lifecycle.
 
-LXC is supported by `run` but not by `spawn_sandbox`, because its backend does
-not expose the streaming `SandboxBackend` interface.
+`Containment::Lxc` models explicit LXC distribution settings, but `run` and
+`spawn_sandbox` reject it because the LXC backend does not expose captured
+pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 
 ### WSLC (experimental)
 

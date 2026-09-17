@@ -345,8 +345,9 @@ request.Containment = new LxcContainment
 };
 ```
 
-LXC currently supports `Run` / `RunAsync`, but not the streaming `Spawn`
-surface.
+The managed SDK can represent LXC settings, but its in-process `Run`,
+`RunAsync`, and `Spawn` surfaces reject LXC because the backend does not expose
+captured pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 
 #### WSL Container options
 

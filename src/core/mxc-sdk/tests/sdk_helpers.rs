@@ -290,8 +290,7 @@ fn platform_support_linux_reports_only_bubblewrap() {
     let support = platform_support();
     // Bubblewrap is the only SDK-launchable Linux backend; `lxc` is a
     // host-capability backend reported by `available_backends()`, not here.
-    // Assert the exact set so re-advertising a non-launchable backend fails
-    // (an inclusive `for` check would pass vacuously and permit `lxc`).
+    // Assert the exact set so re-advertising a non-launchable backend fails.
     assert_eq!(
         support.available_methods,
         vec!["bubblewrap".to_string()],
