@@ -160,8 +160,19 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   if (containment !== 'lxc' && hasSettings(config.lxc)) {
     return "LXC-specific settings require containment 'lxc'";
   }
+  if (containment !== 'wslc' && hasSettings(config.experimental?.wslc)) {
+    return "WSLC-specific settings require containment 'wslc'";
+  }
   if (containment === 'lxc' && config.lxc?.destroyOnExit === false) {
     return 'lxc.destroyOnExit=false is not supported by one-shot in-process execution';
+  }
+  if (
+    containment === 'wslc'
+    && config.experimental?.wslc?.portMappings?.some(
+      mapping => mapping.protocol !== undefined && mapping.protocol !== 'tcp',
+    )
+  ) {
+    return "WSLC port mappings support only protocol 'tcp'";
   }
   return null;
 }
@@ -303,10 +314,14 @@ function projectContainment(
 
 function resolveContainerName(
   config: ContainerConfig,
+  processContainer: ProcessContainerConfig | undefined,
   containmentName: string,
 ): string | undefined {
   if (config.containerId !== undefined) {
     return config.containerId;
+  }
+  if (containmentName === 'processcontainer') {
+    return processContainer?.name;
   }
   if (containmentName === 'lxc') {
     return config.lxc?.containerName;
@@ -352,7 +367,7 @@ export function prepareRequestSpec(
     policy,
     command: config.process.commandLine,
     containment: projectContainment(config, processContainer, containmentName),
-    containerName: resolveContainerName(config, containmentName),
+    containerName: resolveContainerName(config, processContainer, containmentName),
     workingDirectory: options.workingDirectory ?? config.process.cwd,
     environment: projectEnvironment(config, options, inheritDefaultEnv),
     inheritDefaultEnv,
