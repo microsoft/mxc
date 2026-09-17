@@ -104,10 +104,12 @@ client policy and package identity are the same; the enforcement table below sep
 so identity-scoped paths keep `hostLoopback: "deny"`. An unpackaged non-AppContainer proxy has no accepted peer
 identity and therefore requires `hostLoopback: "allow"`.
 
-Proxy mode remains connection-scoped even when `hostLoopback` is `"allow"`: the sandbox can initiate a connection to
+Proxy mode remains connection-scoped even when `hostLoopback` is `"allow"`: the container can initiate a connection to
 the configured proxy address and port and receive responses on that connection, but the proxy configuration does not
-expose listeners in the sandbox to unsolicited host-loopback connections. Code that intentionally needs general
-loopback client/server connectivity must use a direct-egress policy instead of `runtimeConfig.networkProxy`.
+expose listeners in the container to unsolicited host-loopback connections. MXC currently supports one local
+loopback address and port in `runtimeConfig.networkProxy`. Code that needs a public proxy address, multiple proxy
+endpoints, or multiple local loopback ports must use a direct-egress policy instead of
+`runtimeConfig.networkProxy`.
 
 For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC ingress contract.
 Proxy policies use the proxy-specific PSEC representation, including the configured endpoint and either the selected
@@ -120,7 +122,7 @@ Complete configurations are available in the
 - identity-scoped packaged or AppContainer proxy;
 - identity-less unpackaged host proxy;
 - cooperative proxy environment variables with direct loopback policy; and
-- a sandbox that intentionally exposes a loopback listener.
+- a container that intentionally exposes a loopback listener.
 
 #### Identity-scoped proxy
 
@@ -153,7 +155,7 @@ MXC grants the client container `privateNetworkClientServer` through `ingress.de
 identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and grants
 the loopback permission needed to reach it. Common WFP endpoint scoping remains, but Windows cannot verify which host
 process owns that endpoint. This is therefore the lowest-identity deployment option. The runtime proxy configuration
-still does not open unsolicited host-to-container connections.
+still does not open unsolicited host-to-container connections and supports only one local loopback endpoint.
 
 #### HTTP client guidance
 
@@ -176,8 +178,16 @@ applies WFP endpoint scoping, and grants the private-network capability selected
 The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
 the package family or AppContainer profile and grants the private-network capability selected by `ingress.default`.
 When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and grants the loopback
-permission required for sandbox-initiated proxy connections. MXC configures the per-container WinHTTP proxy for
+permission required for container-initiated proxy connections. MXC configures the per-container WinHTTP proxy for
 either path.
+
+If the proxy is public, or if the workload needs multiple proxy endpoints or
+multiple local loopback ports, do not use `runtimeConfig.networkProxy`.
+Instead, list each destination and port in `network.egress.allow` and set
+`network.ingress.hostLoopback` to `"allow"` when the workload must receive
+loopback connections. ProcessContainer has no ingress CIDR or port rules, so
+that setting also permits unsolicited inbound traffic from any reachable
+loopback process.
 
 The caller must:
 
@@ -213,7 +223,7 @@ for unpackaged profile creation.
 
 - **Capabilities:** none; no host or peer loopback exemptions.
 - **Enforcement:** no proxy; external outbound and inbound are dropped.
-  Intra-sandbox loopback is not part of the shared external-network policy.
+  Intra-container loopback is not part of the shared external-network policy.
 
 When no runtime proxy or backend proxy peer is configured, deny-all is the default and model 3 is also the result of
 providing no network policy at all: the explicit form, an omitted network block, and an empty `"network": {}` are
