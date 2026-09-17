@@ -248,11 +248,13 @@ implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
-The `await`-friendly process-isolation API resolves with
-`{ stdout, stderr, exitCode }`. Requests run in-process through `mxc_ffi`, with
-separate stdout and stderr. Executor-only options such as `dryRun`,
-`executablePath`, and testing-only proxy support are rejected; the API never
-falls back to an executor.
+The `await`-friendly API runs the abstract `process` containment intent and
+resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
+process backend for each host and selects Windows ProcessContainer when the
+policy contains ProcessContainer-specific settings. Requests run in-process
+through `mxc_ffi`, with separate stdout and stderr. Executor-only options such
+as `dryRun`, `executablePath`, and testing-only proxy support are rejected; the
+API never falls back to an executor.
 
 ```typescript
 import {

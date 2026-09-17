@@ -155,6 +155,11 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
         policy.processContainer?.network?.allowedProxyPeer !== undefined;
 }
 
+function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
+    return Boolean(policy.processContainer?.filesystem?.enumeratePaths?.length) ||
+        policy.processContainer?.network?.allowedProxyPeer !== undefined;
+}
+
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
     if (policy.version === '0.9.0-alpha' && network !== undefined) {
@@ -579,7 +584,7 @@ export function createConfigFromPolicy(
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
         const processConfig = buildProcessBaseContainerConfig(config, policy);
-        if (policy.processContainer !== undefined) {
+        if (hasProcessContainerPolicy(policy)) {
             processConfig.containment = 'processcontainer';
         }
         return processConfig;
