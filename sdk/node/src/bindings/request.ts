@@ -24,9 +24,9 @@ export interface RequestSpecOptions {
 }
 
 /**
- * Policy projection accepted by the current `mxc_ffi::RequestSpec`.
- * This private shape is derived from the public ContainerConfig at the native
- * transport boundary.
+ * Node's private policy projection inside the shared `mxc_ffi::RequestSpec`.
+ * This is transport data derived from the legacy public `ContainerConfig`,
+ * not a second public sandbox-policy API.
  */
 export interface RequestSpecPolicy {
   version: string;
@@ -83,6 +83,9 @@ export interface RequestSpec {
 function hasExplicitProcessContainerSettings(
   config: ProcessContainerConfig,
 ): boolean {
+  // Legacy Node policy construction emits a default ProcessContainer block
+  // even for abstract `process` intent. Only non-default settings make that
+  // block an explicit backend request that must not be silently discarded.
   const ui = config.ui;
   const hasCustomUi = ui !== undefined && (
     ui.isolation !== 'container'
@@ -104,10 +107,13 @@ function hasExplicitProcessContainerSettings(
     || hasCustomCapabilities;
 }
 
-function resolveContainmentName(
+function resolveNodeContainment(
   config: ContainerConfig,
   processContainer = config.processContainer ?? config.appContainer,
 ): string {
+  // The native engine resolves abstract `process` to the host backend. This
+  // adapter only preserves Node compatibility aliases and the legacy rule that
+  // a direct ProcessContainer block selects ProcessContainer.
   let rawContainment = config.containment;
   if (rawContainment === undefined) {
     rawContainment = 'process';
@@ -137,7 +143,7 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
     return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
   }
   const processContainer = config.processContainer ?? config.appContainer;
-  const containment = resolveContainmentName(config, processContainer);
+  const containment = resolveNodeContainment(config, processContainer);
   if (!SUPPORTED_REQUEST_CONTAINMENTS.has(containment)) {
     return `containment '${containment}' is not supported by the in-process Node SDK`;
   }
@@ -235,6 +241,9 @@ function projectUi(config: ContainerConfig): RequestSpecPolicy['ui'] {
 }
 
 function parseEnvironmentEntry(entry: string): [string, string] {
+  // ContainerConfig predates RequestSpec and stores environment entries as
+  // `NAME=value` strings. Normalize that Node-specific legacy shape into the
+  // shared RequestSpec map at this private binding boundary.
   const separator = entry.indexOf('=');
   if (separator === -1) {
     return [entry, ''];
@@ -360,7 +369,7 @@ export function prepareRequestSpec(
   };
 
   const processContainer = config.processContainer ?? config.appContainer;
-  const containmentName = resolveContainmentName(config, processContainer);
+  const containmentName = resolveNodeContainment(config, processContainer);
   const inheritDefaultEnv = resolveInheritDefaultEnv(config, options);
 
   return {
