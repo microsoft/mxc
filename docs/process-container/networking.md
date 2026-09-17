@@ -158,9 +158,13 @@ Code inside the ProcessContainer should use WinHTTP or an HTTP library that quer
 The OS sets this configuration per BaseContainer, and the WinHTTP stack uses it transparently. The proxy process itself
 does not use the BaseContainer's configuration.
 
-MXC also sets the standard proxy environment variables for libraries that use cooperative proxying. Direct internet
-traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
-the configured loopback proxy address and port and blocks direct public and private destinations.
+MXC also sets the standard `HTTP_PROXY` and `HTTPS_PROXY` environment variables
+for libraries that use cooperative proxying. Applications do not need to set
+those variables themselves when `runtimeConfig.networkProxy` is present.
+Direct internet traffic that bypasses the proxy is blocked. On an enforcing
+BaseContainer path, per-container WFP permits egress only to the configured
+loopback proxy address and port and blocks direct public and private
+destinations.
 
 Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When `allowedProxyPeer` names a package or
 AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An identity-less host
@@ -180,9 +184,10 @@ If the proxy is public, or if the workload needs multiple proxy endpoints or
 multiple local loopback ports, do not use `runtimeConfig.networkProxy`.
 Instead, list each destination and port in `network.egress.allow` and set
 `network.ingress.hostLoopback` to `"allow"` when the workload must receive
-loopback connections. ProcessContainer has no ingress CIDR or port rules, so
-that setting also permits unsolicited inbound traffic from any reachable
-loopback process.
+loopback connections. Egress rules support IP addresses and CIDR ranges, not
+hostnames or DNS-based filtering. ProcessContainer has no ingress CIDR or
+port rules, so that setting also permits unsolicited inbound traffic from any
+reachable loopback process.
 
 The caller must:
 
